@@ -262,10 +262,24 @@ void DiscoveryManager::udpDiscoveryLoop() {
 
             {
                 std::lock_guard<std::mutex> lk(parent_->client_mutex_);
-                parent_->host_ = masterIp;
+                // Do not set host_ here — that would trigger clientLoop direct
+                // reconnect and race UDP discovery on the same master address.
                 parent_->client_fd_ = sock;
                 parent_->has_master_fd_.store(true, std::memory_order_release);
             }
+
+            // Track master for proactive reconnect without enabling direct-reconnect race.
+            {
+                const std::string masterAddr =
+                    masterIp + ":" + std::to_string(masterTcpPort);
+                std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
+                bool found = false;
+                for (const auto& a : parent_->proactive_worker_addresses_) {
+                    if (a == masterAddr) { found = true; break; }
+                }
+                if (!found) parent_->proactive_worker_addresses_.push_back(masterAddr);
+            }
+
             VGRE_LOG_INFO("TCPCluster",
                 "Worker: TCP connection to master established (" + masterIp + ")");
             break;

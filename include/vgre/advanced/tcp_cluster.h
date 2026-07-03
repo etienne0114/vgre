@@ -401,6 +401,7 @@ private:
   uint32_t pending_collective_datatype_ = 0;
   uint64_t pending_collective_count_ = 0;
   bool is_master_ = false;
+  bool explicit_master_connect_ = false;  // true when worker dials a configured master (not UDP-learned)
   int port_ = 7777;
   std::string host_;
   std::thread cluster_thread_;

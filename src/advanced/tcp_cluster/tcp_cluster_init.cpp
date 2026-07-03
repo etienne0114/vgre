@@ -241,6 +241,7 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     // Only attempt when the caller provided a real host address.
     // An empty host means "use LAN UDP broadcast discovery only".
     if (!effectiveHost.empty() && effectiveHost != "0.0.0.0") {
+      explicit_master_connect_ = true;
       int tSec = getConnectTimeoutSec();
       auto sock = connectWithTimeout(effectiveHost, effectivePort, tSec);
       if (sock != vgre::common::VGRE_INVALID_SOCKET) {
