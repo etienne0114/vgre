@@ -118,15 +118,44 @@ export LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"              # Li
 [[ "$(uname -s)" == "Darwin" ]] && \
     export DYLD_LIBRARY_PATH="$INSTALL_DIR/lib:${DYLD_LIBRARY_PATH:-}"      # macOS
 
-WORKER_BIN="$INSTALL_DIR/vgre-worker"
-if [[ ! -x "$WORKER_BIN" ]]; then
-    # Fall back to PATH or local build for development
-    WORKER_BIN="$(command -v vgre-worker 2>/dev/null || true)"
-fi
-if [[ -z "$WORKER_BIN" || ! -x "$WORKER_BIN" ]]; then
-    echo "❌ vgre-worker not found. Run scripts/vgre_sync.sh to build and install first."
+# Resolve the worker binary flexibly: installed locations (both layouts that
+# past installers used), PATH, then the repo build tree for development.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKER_BIN=""
+for cand in \
+    "$INSTALL_DIR/vgre-worker" \
+    "$INSTALL_DIR/bin/vgre-worker" \
+    "$(command -v vgre-worker 2>/dev/null || true)" \
+    "$_SCRIPT_DIR/../build/src/advanced/vgre-worker"; do
+    [[ -n "$cand" && -x "$cand" ]] && WORKER_BIN="$cand" && break
+done
+if [[ -z "$WORKER_BIN" ]]; then
+    echo "❌ vgre-worker not found (looked in $INSTALL_DIR, PATH, and the repo build tree)."
+    echo "   Run install_local.sh (or scripts/vgre_sync.sh) to build and install first."
     exit 1
 fi
+
+# Resolve the dashboard launcher (Linux bundle or macOS .app).
+_resolve_dashboard() {
+    local cand
+    for cand in \
+        "$INSTALL_DIR/vgre-launch.sh" \
+        "$INSTALL_DIR/vgre_dashboard" \
+        "$INSTALL_DIR/vgre_dashboard.app/Contents/MacOS/vgre_dashboard"; do
+        [[ -x "$cand" ]] && echo "$cand" && return 0
+    done
+    return 1
+}
+
+# Portable one-shot ping: -W is seconds on Linux but milliseconds on macOS,
+# where -t (overall timeout, seconds) is the equivalent.
+_ping_ok() {
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        ping -c 1 -t 2 "$1" >/dev/null 2>&1
+    else
+        ping -c 1 -W 2 "$1" >/dev/null 2>&1
+    fi
+}
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 case "$MODE" in
@@ -150,8 +179,10 @@ case "$MODE" in
         echo "  Token: $TOKEN_FILE"
         echo ""
         export VGRE_PORT="$PORT"
-        DASHBOARD_BIN="$INSTALL_DIR/vgre-launch.sh"
-        [[ -x "$DASHBOARD_BIN" ]] || DASHBOARD_BIN="$INSTALL_DIR/vgre_dashboard"
+        DASHBOARD_BIN="$(_resolve_dashboard)" || {
+            echo "❌ Dashboard not found in $INSTALL_DIR. Run install_local.sh first."
+            exit 1
+        }
         exec "$DASHBOARD_BIN"
         ;;
 
@@ -166,7 +197,7 @@ case "$MODE" in
             export VGRE_CLUSTER_MASTER_ADDRESS="$MASTER_IP:$PORT"
             # Verify the master IP is reachable before starting the worker.
             if command -v ping >/dev/null 2>&1; then
-                if ! ping -c 1 -W 2 "$MASTER_IP" >/dev/null 2>&1; then
+                if ! _ping_ok "$MASTER_IP"; then
                     echo "[WARN] Master IP $MASTER_IP is not reachable (ping timed out)."
                     echo "       Check the IP address and firewall rules."
                 fi
@@ -193,8 +224,11 @@ case "$MODE" in
         echo "Worker started (PID $WORKER_PID). Starting master dashboard..."
         sleep 1
         export VGRE_PORT="$PORT"
-        DASHBOARD_BIN="$INSTALL_DIR/vgre-launch.sh"
-        [[ -x "$DASHBOARD_BIN" ]] || DASHBOARD_BIN="$INSTALL_DIR/vgre_dashboard"
+        DASHBOARD_BIN="$(_resolve_dashboard)" || {
+            echo "❌ Dashboard not found in $INSTALL_DIR. Run install_local.sh first."
+            kill $WORKER_PID 2>/dev/null || true
+            exit 1
+        }
         "$DASHBOARD_BIN" &
         MASTER_PID=$!
         trap 'echo "Stopping test..."; kill $WORKER_PID $MASTER_PID 2>/dev/null; exit 0' INT TERM

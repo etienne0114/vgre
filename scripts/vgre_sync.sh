@@ -431,8 +431,11 @@ if [[ "$(uname)" == "Darwin" ]]; then
     # Dashboard launcher symlink
     ln -sf "$INSTALL_DIR/vgre_dashboard.app/Contents/MacOS/vgre_dashboard" "$BIN_DIR/vgre-dashboard"
 else
-    # Linux deployment
-    BUNDLE_DIR="$PROJECT_ROOT/vgre_dashboard/build/linux/x64/release/bundle"
+    # Linux deployment — Flutter's bundle directory is per-arch (x64 / arm64).
+    _BUNDLE_ARCH="x64"
+    case "$(uname -m)" in aarch64|arm64) _BUNDLE_ARCH="arm64" ;; esac
+    BUNDLE_DIR="$PROJECT_ROOT/vgre_dashboard/build/linux/$_BUNDLE_ARCH/release/bundle"
+    [[ -d "$BUNDLE_DIR" ]] || { echo "❌ Flutter bundle not found at $BUNDLE_DIR — run 'flutter build linux --release' first."; exit 1; }
     cp -r "$BUNDLE_DIR"/* "$INSTALL_DIR/"
 
     # Always install the freshly-built Release libraries AFTER copying the Flutter
