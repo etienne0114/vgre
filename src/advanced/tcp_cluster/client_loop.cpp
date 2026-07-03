@@ -27,6 +27,7 @@
 // Only include headers not provided by sockets.h:
 #if !defined(_WIN32)
 #include <netdb.h>        // getaddrinfo / freeaddrinfo for reconnect path
+#include <unistd.h>       // gethostname for node identity
 #endif
 #if defined(__APPLE__)
 #include <sys/sysctl.h>   // sysctlbyname("hw.memsize") for macOS RAM detection
@@ -318,6 +319,36 @@ void TCPClusterManager::clientLoop() {
         cpkt.gpu_compute_minor = 0;
         cpkt.gpu_sm_count      = 0;
       }
+
+      // ── Node identity: OS, architecture, hostname (all platforms) ─────────
+#if defined(_WIN32)
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "Windows");
+#elif defined(__APPLE__)
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "macOS");
+#elif defined(__linux__)
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "Linux");
+#else
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "Unknown");
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+      std::snprintf(cpkt.arch_name, sizeof(cpkt.arch_name), "arm64");
+#elif defined(__x86_64__) || defined(_M_X64)
+      std::snprintf(cpkt.arch_name, sizeof(cpkt.arch_name), "x86_64");
+#else
+      std::snprintf(cpkt.arch_name, sizeof(cpkt.arch_name), "unknown");
+#endif
+#if defined(_WIN32)
+      {
+        char hn[64] = {0};
+        DWORD hnLen = sizeof(hn);
+        if (GetComputerNameA(hn, &hnLen)) std::snprintf(cpkt.hostname, sizeof(cpkt.hostname), "%s", hn);
+      }
+#else
+      {
+        char hn[64] = {0};
+        if (gethostname(hn, sizeof(hn) - 1) == 0) std::snprintf(cpkt.hostname, sizeof(cpkt.hostname), "%s", hn);
+      }
+#endif
 
       VGRE_LOG_INFO("TCPCluster", "Worker: Sending capability packet...");
       send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket),

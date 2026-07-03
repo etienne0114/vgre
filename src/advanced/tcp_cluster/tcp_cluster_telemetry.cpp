@@ -20,6 +20,9 @@ void TCPClusterManager::getConnectedNodes(std::vector<TCPClusterManager::Cluster
     info.last_telemetry = c->last_telemetry; info.active = c->active;
     info.cpu_cores = c->cpu_cores; info.cpu_memory = c->cpu_memory;
     info.has_igpu = c->has_igpu; memcpy(info.igpu_name, c->igpu_name, sizeof(info.igpu_name));
+    memcpy(info.platform_name, c->platform_name, sizeof(info.platform_name));
+    memcpy(info.arch_name, c->arch_name, sizeof(info.arch_name));
+    memcpy(info.node_hostname, c->node_hostname, sizeof(info.node_hostname));
     info.security_established = c->security_established; info.is_authenticating = c->is_authenticating;
     info.worker_idx = static_cast<int>(outNodes.size());
     outNodes.push_back(std::move(info));

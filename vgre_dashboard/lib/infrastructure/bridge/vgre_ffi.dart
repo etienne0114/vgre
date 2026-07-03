@@ -106,6 +106,13 @@ final class VgreClusterNode extends Struct {
   external int available;
   @Array(64)
   external Array<Uint8> igpuName;
+  // v2 node-identity fields (must match vgre_cluster_node_t in vgre_c_api.h).
+  @Array(32)
+  external Array<Uint8> platformName;
+  @Array(16)
+  external Array<Uint8> archName;
+  @Array(64)
+  external Array<Uint8> hostname;
 }
 
 final class VgreSecurityInfo extends Struct {
@@ -509,10 +516,13 @@ class VgreBridge {
           addrBytes.add(node.address[j]);
         }
 
-        final List<int> igpuBytes = [];
-        for (int j = 0; j < 64; j++) {
-          if (node.igpuName[j] == 0) break;
-          igpuBytes.add(node.igpuName[j]);
+        List<int> readField(Array<Uint8> arr, int len) {
+          final b = <int>[];
+          for (int j = 0; j < len; j++) {
+            if (arr[j] == 0) break;
+            b.add(arr[j]);
+          }
+          return b;
         }
 
         nodes.add({
@@ -522,7 +532,10 @@ class VgreBridge {
           'memoryBytes': node.memoryBytes,
           'latencyMs': node.latencyMs,
           'available': node.available != 0,
-          'igpuName': utf8.decode(igpuBytes),
+          'igpuName': utf8.decode(readField(node.igpuName, 64)),
+          'platform': utf8.decode(readField(node.platformName, 32)),
+          'arch': utf8.decode(readField(node.archName, 16)),
+          'hostname': utf8.decode(readField(node.hostname, 64)),
         });
       }
       return nodes;

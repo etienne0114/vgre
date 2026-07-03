@@ -303,7 +303,9 @@ class ClusterTopologyPage extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  node.address,
+                  node.hostname.isNotEmpty
+                      ? "${node.hostname} (${node.address})"
+                      : node.address,
                   style: VgreTheme.bodyStyle.copyWith(
                     fontWeight: FontWeight.bold,
                     color: node.available ? Colors.white : Colors.white60,
@@ -313,6 +315,14 @@ class ClusterTopologyPage extends StatelessWidget {
                   "CPU: ${node.cpuCores} Cores | RAM: ${(node.memoryBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB",
                   style: VgreTheme.bodyStyle.copyWith(fontSize: 12, color: Colors.white60),
                 ),
+                if (node.platform.isNotEmpty)
+                  Text(
+                    node.arch.isNotEmpty
+                        ? "${node.platform} · ${node.arch}"
+                        : node.platform,
+                    style: VgreTheme.bodyStyle
+                        .copyWith(fontSize: 11, color: Colors.white54),
+                  ),
                 if (!node.available) ...[
                   const SizedBox(height: 4),
                   Row(

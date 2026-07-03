@@ -79,6 +79,9 @@ typedef struct {
   double latency_ms;
   int available;
   char igpu_name[64];
+  char platform_name[32];   /* node OS: "Linux"/"macOS"/"Windows" ("" if unknown) */
+  char arch_name[16];       /* node CPU arch: "x86_64"/"arm64" */
+  char hostname[64];        /* node hostname */
 } vgre_cluster_node_t;
 
 #pragma pack(push, 8)
