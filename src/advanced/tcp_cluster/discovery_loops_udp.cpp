@@ -99,6 +99,43 @@ std::string senderToString(const sockaddr_storage& ss) {
     return std::string(buf);
 }
 
+struct ParsedDiscoveryPing {
+    int tcpPort = 7777;
+    bool hasSecMode = false;
+    bool secure = false;
+    std::string advertisedAddr;
+    std::string hmacHex;
+};
+
+ParsedDiscoveryPing parseDiscoveryPingFields(const std::vector<std::string>& fields) {
+    ParsedDiscoveryPing out;
+    if (fields.size() >= 2) {
+        try { out.tcpPort = std::stoi(fields[1]); } catch (...) {}
+    }
+
+    size_t idx = 2;
+    if (fields.size() > idx &&
+        (fields[idx] == "SECURE" || fields[idx] == "PLAIN")) {
+        out.hasSecMode = true;
+        out.secure = (fields[idx] == "SECURE");
+        idx++;
+    }
+
+    if (!fields.empty() && fields.back().size() == 64) {
+        out.hmacHex = fields.back();
+        for (size_t i = idx; i + 1 < fields.size(); ++i) {
+            if (!out.advertisedAddr.empty()) out.advertisedAddr += ':';
+            out.advertisedAddr += fields[i];
+        }
+    } else if (fields.size() > idx) {
+        for (size_t i = idx; i < fields.size(); ++i) {
+            if (!out.advertisedAddr.empty()) out.advertisedAddr += ':';
+            out.advertisedAddr += fields[i];
+        }
+    }
+    return out;
+}
+
 } // anonymous namespace
 
 void DiscoveryManager::udpDiscoveryLoop() {
@@ -155,10 +192,9 @@ void DiscoveryManager::udpDiscoveryLoop() {
             if (senderIp.empty()) continue;
 
             // Parse message fields:
-            //   VGRE_DISCOVERY_PING:<tcp_port>:<sec_mode>[:<adv_addr>][:<hmac_hex>]
-            // Fields beyond <sec_mode> are optional and added in newer versions.
+            //   VGRE_DISCOVERY_PING:<tcp_port>[:SECURE|PLAIN][:<adv_host:port>][:<hmac_hex>]
+            // Legacy (no sec mode): VGRE_DISCOVERY_PING:<port>:<host>:<port>[:<hmac>]
             int masterTcpPort = parent_->port_;
-            std::string advertisedAddr;  // optional master public address
             std::string hmacField;
 
             // Split into tokens on ':'
@@ -173,26 +209,11 @@ void DiscoveryManager::udpDiscoveryLoop() {
                     pos = c + 1;
                 }
             }
-            // fields[0] = "VGRE_DISCOVERY_PING"
-            // fields[1] = tcp_port
-            // fields[2] = sec_mode  (SECURE/PLAIN)
-            // fields[3] = adv_addr or hmac_hex  (64-char hex = HMAC, else addr)
-            // fields[4] = hmac_hex              (when fields[3] is adv_addr)
-            if (fields.size() >= 2) {
-                try { masterTcpPort = std::stoi(fields[1]); } catch (...) {}
-            }
 
-            if (fields.size() >= 4) {
-                // Detect HMAC by its fixed 64-character hex length
-                if (fields.back().size() == 64) {
-                    hmacField = fields.back();
-                    // If there's a field between sec_mode and hmac, it's adv_addr
-                    if (fields.size() >= 5) advertisedAddr = fields[3];
-                } else {
-                    // No HMAC present; last field might be adv_addr
-                    advertisedAddr = fields.back();
-                }
-            }
+            const ParsedDiscoveryPing parsed = parseDiscoveryPingFields(fields);
+            masterTcpPort = parsed.tcpPort;
+            hmacField = parsed.hmacHex;
+            std::string advertisedAddr = parsed.advertisedAddr;
 
             // Prefer LAN sender when master advertises a public IP but we heard
             // the ping on the local subnet (NAT hairpin usually blocks public IP).
@@ -230,9 +251,11 @@ void DiscoveryManager::udpDiscoveryLoop() {
 
             // Sync worker security mode only after the ping is authenticated (or
             // when no token is configured and discovery is intentionally open).
-            if (fields.size() >= 3) {
-                const bool masterSecure = (fields[2] != "PLAIN");
-                parent_->security_enabled_.store(masterSecure, std::memory_order_release);
+            if (parsed.hasSecMode) {
+                parent_->security_enabled_.store(parsed.secure, std::memory_order_release);
+                VGRE_LOG_INFO("TCPCluster",
+                    std::string("Worker: master UDP mode ") +
+                    (parsed.secure ? "SECURE" : "PLAIN"));
             }
 
             std::vector<std::string> connectCandidates;

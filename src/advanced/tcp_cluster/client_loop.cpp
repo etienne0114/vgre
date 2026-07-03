@@ -550,12 +550,11 @@ void TCPClusterManager::clientLoop() {
     // UDP-discovery workers re-sync :SECURE/:PLAIN from the next master ping.
     // Explicit-address workers keep secure mode when a token is configured.
     if (explicit_master_connect_) {
-      const char* tokenFile = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
-      const char* tokenEnv = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
-      security_enabled_.store(
-          (tokenFile && tokenFile[0] != '\0') ||
-              (tokenEnv && tokenEnv[0] != '\0'),
-          std::memory_order_release);
+      if (loadAuthToken()) {
+        security_enabled_.store(true, std::memory_order_release);
+      } else {
+        security_enabled_.store(false, std::memory_order_release);
+      }
     } else {
       security_enabled_.store(false, std::memory_order_release);
     }
