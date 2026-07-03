@@ -132,68 +132,73 @@ void scrubAuthTokenFromEnvironment() {
 }
 } // namespace
 
-VGREResult SecurityManager::enableSecurity(bool enabled) {
-  // Remove the raw token from the environment as early as the security path runs.
+bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
   scrubAuthTokenFromEnvironment();
-  std::string token;
-  { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-  // If auth_token_str_ is not set, try reading from config store (avoids setenv/getenv race)
-  if (token.empty()) {
-    const char* env_token = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
-    if (env_token && env_token[0] != '\0') {
-      token = env_token;
-      { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-      // Zeroize the local copy; the stored auth_token_str_ holds the canonical value.
-      if (!token.empty()) vgre::common::vgre_secure_zero(&token[0], token.size());
-      token.clear();
-    }
+  {
+    std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+    if (!parent_->auth_token_str_.empty()) return true;
   }
-  // Try reading from configured auth token file path if still empty
+
+  std::string token;
+  const char* env_token = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+  if (env_token && env_token[0] != '\0') {
+    token = env_token;
+  }
   if (token.empty()) {
     const char* env_token_file = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
     if (env_token_file && env_token_file[0] != '\0') {
       std::ifstream f(env_token_file);
       if (f) {
-        std::string file_token;
-        std::getline(f, file_token);
-        file_token.erase(std::remove_if(file_token.begin(), file_token.end(), [](unsigned char c) { return std::isspace(c); }), file_token.end());
-        if (!file_token.empty()) {
-          token = file_token;
-          { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-          if (!file_token.empty()) vgre::common::vgre_secure_zero(&file_token[0], file_token.size());
-          if (!token.empty()) vgre::common::vgre_secure_zero(&token[0], token.size());
-          token.clear();
-        }
+        std::getline(f, token);
+        token.erase(std::remove_if(token.begin(), token.end(),
+                                   [](unsigned char c) { return std::isspace(c); }),
+                     token.end());
+      } else {
+        VGRE_LOG_WARN("TCPCluster",
+            "Could not read auth token file: " + std::string(env_token_file));
       }
     }
   }
-  // If still empty, resolve from the sealed secret store when configured
-  // (VGRE_SECRETS_STORE → rotatable, policy-guarded, audited "cluster-auth-token").
   if (token.empty()) {
     std::string s_token;
     if (detail::resolve_auth_token_from_secret_store(s_token)) {
-      token = s_token;
-      { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-      vgre::common::vgre_secure_zero(&s_token[0], s_token.size());
+      token = std::move(s_token);
     }
   }
-  // If still empty, try to get from HardwareTokenManager
   if (token.empty()) {
     std::string hw_token;
-    if (HardwareTokenManager::instance().getAuthToken(hw_token) == VGREResult::SUCCESS && !hw_token.empty()) {
-      token = hw_token;
-      { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
+    if (HardwareTokenManager::instance().getAuthToken(hw_token) == VGREResult::SUCCESS &&
+        !hw_token.empty()) {
+      token = std::move(hw_token);
     }
   }
-  // Production policy: auto-generate a secure token if none is configured.
-  // This guarantees clusters are secure out-of-the-box without requiring
-  // manual token setup.
-  if (enabled && token.empty()) {
+  if (token.empty() && allow_auto_generate) {
     token = CryptoUtils::generateSecureToken(32);
-    { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-    VGRE_LOG_INFO("TCPCluster", "Auto-generated secure auth token (length=" + std::to_string(token.size()) + ")");
+    VGRE_LOG_INFO("TCPCluster",
+        "Auto-generated secure auth token (length=" + std::to_string(token.size()) + ")");
   }
-  if (enabled && token != "VGRE_CLUSTER_DEFAULT_NOAUTH_v1" && token.size() < 16) { VGRE_LOG_WARN("TCPCluster", "Auth token too short - use 16+ characters for production"); }
+
+  if (token.empty()) return false;
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+    parent_->auth_token_str_ = std::move(token);
+  }
+  return true;
+}
+
+VGREResult SecurityManager::enableSecurity(bool enabled) {
+  if (!loadAuthToken(enabled)) {
+    if (enabled) {
+      VGRE_LOG_ERROR("TCPCluster", "Cannot enable security: no auth token available");
+      return VGREResult::ERR_AUTH_FAILED;
+    }
+  }
+  std::string token;
+  { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+  if (enabled && token != "VGRE_CLUSTER_DEFAULT_NOAUTH_v1" && token.size() < 16) {
+    VGRE_LOG_WARN("TCPCluster", "Auth token too short - use 16+ characters for production");
+  }
   parent_->security_enabled_ = enabled;
   VGRE_LOG_INFO("TCPCluster", std::string("Security ") + (enabled ? "enabled" : "disabled"));
   
@@ -291,7 +296,11 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
   logSecurityEvent("HANDSHAKE_START", client.ip_address, "server_mode");
   
   // Get token
-  std::string token = client.effective_auth_token.empty() ? [this]() { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); return parent_->auth_token_str_; }() : client.effective_auth_token;
+  std::string token = client.effective_auth_token.empty() ? [this]() {
+    loadAuthToken(false);
+    std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+    return parent_->auth_token_str_;
+  }() : client.effective_auth_token;
   if (token.empty()) { g_metrics.auth_failures++; g_metrics.handshakes_failed++; recordViolation(client.ip_address, "MISSING_TOKEN"); VGRE_LOG_ERROR("TCPCluster", "Master: No auth token configured"); return VGREResult::ERR_AUTH_FAILED; }
   
   // Generate and send master nonce
@@ -356,8 +365,6 @@ VGREResult SecurityManager::performClientHandshake() {
   vgre_socket_t fd; { std::lock_guard<std::mutex> lock(parent_->client_mutex_); fd = parent_->client_fd_; }
   if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
 
-  std::string token; { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-
   // Plaintext mode (master advertised :PLAIN via UDP or user disabled security).
   if (!parent_->security_enabled_) {
     parent_->client_secure_channel_.reset();
@@ -366,6 +373,22 @@ VGREResult SecurityManager::performClientHandshake() {
     VGRE_LOG_INFO("TCPCluster", "Worker: plaintext cluster mode (no secure handshake)");
     return VGREResult::SUCCESS;
   }
+
+  if (!loadAuthToken(false)) {
+    const char* tokenFile = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+    VGRE_LOG_ERROR("TCPCluster",
+        std::string("Worker: secure cluster requires auth token — set "
+                    "VGRE_TCP_AUTH_TOKEN_FILE") +
+        (tokenFile && tokenFile[0] ? std::string(" (configured: ") + tokenFile + ")" : ""));
+    std::lock_guard<std::mutex> lock(parent_->client_mutex_);
+    vgre::common::vgre_close_socket(parent_->client_fd_);
+    parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
+    parent_->has_master_fd_.store(false, std::memory_order_release);
+    return VGREResult::ERR_AUTH_FAILED;
+  }
+
+  std::string token;
+  { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
 
   if (token.empty()) {
     std::lock_guard<std::mutex> lock(parent_->client_mutex_);

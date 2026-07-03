@@ -208,6 +208,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
             }
 
             // Verify HMAC when an auth token is configured.
+            parent_->loadAuthToken();
             std::string token;
             {
                 std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_);
