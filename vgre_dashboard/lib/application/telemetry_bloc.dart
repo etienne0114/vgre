@@ -392,6 +392,39 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         final logs = bridge.getLogs();
         final clusterData = bridge.getClusterNodes();
 
+        // Live memory allocations + pools from the real MemoryManager
+        // (vgre_get_memory_info_json). Empty lists mean "nothing allocated
+        // right now", never "not wired".
+        List<MemoryAllocation> allocations = const [];
+        List<MemoryPool> memoryPools = const [];
+        try {
+          final memJson = bridge.getMemoryInfoJson();
+          if (memJson != null && memJson.isNotEmpty) {
+            final parsed = jsonDecode(memJson) as Map<String, dynamic>;
+            allocations = ((parsed['allocations'] as List?) ?? [])
+                .map((a) => MemoryAllocation(
+                      ptr: (a['ptr'] ?? '') as String,
+                      size: (a['size'] ?? 0) as int,
+                      isManaged: (a['managed'] ?? false) as bool,
+                      isResident: (a['resident'] ?? false) as bool,
+                      deviceId: (a['device'] ?? 0) as int,
+                    ))
+                .toList();
+            memoryPools = ((parsed['pools'] as List?) ?? [])
+                .map((p) => MemoryPool(
+                      id: (p['id'] ?? 0) as int,
+                      blockSize: (p['blockSize'] ?? 0) as int,
+                      totalAllocated: (p['total'] ?? 0) as int,
+                      peakAllocated: (p['peak'] ?? 0) as int,
+                      activeCount: (p['active'] ?? 0) as int,
+                      freeCount: (p['free'] ?? 0) as int,
+                    ))
+                .toList();
+          }
+        } catch (e) {
+          debugPrint('Memory info parse error: $e');
+        }
+
         SecurityInfo? securityInfo;
         try {
           final s = bridge.getSecurityInfo();
@@ -588,6 +621,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           logs: logs,
           topKernels: topKernels,
           clusterNodes: clusterNodes,
+          allocations: allocations,
+          memoryPools: memoryPools,
           securityInfo: securityInfo,
           profilerEnabled: true,
           backendVersion: versionString,
