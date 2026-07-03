@@ -323,6 +323,43 @@ class ClusterTopologyPage extends StatelessWidget {
                     style: VgreTheme.bodyStyle
                         .copyWith(fontSize: 11, color: Colors.white54),
                   ),
+                // Proof-of-use: a connected node is only "working" when kernels
+                // are in flight or it has actually completed some. Shows the
+                // live in-flight count + the cumulative executed total.
+                if (node.available) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: node.inFlightKernels > 0
+                              ? VgreTheme.neonGreen
+                              : (node.kernelsCompleted > 0
+                                  ? Colors.amber
+                                  : Colors.white30),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        node.inFlightKernels > 0
+                            ? "WORKING · ${node.inFlightKernels} in-flight · ${node.kernelsCompleted} done"
+                            : (node.kernelsCompleted > 0
+                                ? "IDLE · ${node.kernelsCompleted} kernels executed"
+                                : "CONNECTED · no work dispatched yet"),
+                        style: VgreTheme.bodyStyle.copyWith(
+                          fontSize: 10,
+                          color: node.inFlightKernels > 0
+                              ? VgreTheme.neonGreen
+                              : Colors.white54,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
                 if (!node.available) ...[
                   const SizedBox(height: 4),
                   Row(

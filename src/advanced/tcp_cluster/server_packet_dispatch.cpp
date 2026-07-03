@@ -146,6 +146,7 @@ void TCPClusterManager::processServerPackets(
                            std::to_string(resp.kernel_id) + ")");
         if (client->in_flight_kernels > 0)
           client->in_flight_kernels--;
+        client->kernels_completed++;
         dispatch_manager_->storeRemoteResult(resp.kernel_id, resp.result);
       } else if (type == PacketType::DATA_HEADER) {
         if (hdr.payloadSize < sizeof(DataHeaderPacket)) {
@@ -475,6 +476,7 @@ void TCPClusterManager::processServerPackets(
                                 client->rx_buffer.begin() + totalLen);
         if (client->in_flight_kernels > 0)
           client->in_flight_kernels--;
+        client->kernels_completed++;
         dispatch_manager_->storePartitionResult(prpkt.partition_id,
                                                 prpkt.kernel_id, prpkt.result,
                                                 prpkt.execution_time_ms);

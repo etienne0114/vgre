@@ -90,6 +90,8 @@ class ClusterNode extends Equatable {
   final String platform;   // node OS: "Linux"/"macOS"/"Windows" ("" if unknown)
   final String arch;       // node CPU arch: "x86_64"/"arm64"
   final String hostname;   // node hostname
+  final int inFlightKernels;  // kernels dispatched here, not yet returned
+  final int kernelsCompleted; // cumulative kernels this node has executed
 
   // Phase 5: Credits
   final double totalCredits;
@@ -112,6 +114,8 @@ class ClusterNode extends Equatable {
     this.platform = '',
     this.arch = '',
     this.hostname = '',
+    this.inFlightKernels = 0,
+    this.kernelsCompleted = 0,
     this.totalCredits = 0.0,
     this.totalDebits = 0.0,
     this.balance = 0.0,
@@ -131,6 +135,8 @@ class ClusterNode extends Equatable {
         platform,
         arch,
         hostname,
+        inFlightKernels,
+        kernelsCompleted,
         totalCredits,
         totalDebits,
         balance,
