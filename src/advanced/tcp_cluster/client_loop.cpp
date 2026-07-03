@@ -75,11 +75,11 @@ void TCPClusterManager::clientLoop() {
     }
     if (!enabled_) return;
 
-    // ── Security auto-negotiate (once per new connection) ────────
-    // performClientSecureHandshake() peeks for a SECURE_HANDSHAKE from the
-    // master (200ms window) and responds if one arrives, regardless of whether
-    // the worker's own security_enabled_ flag is set. This lets the worker
-    // automatically adapt to master's security mode without prior configuration.
+    // ── Security handshake (once per new connection) ────────
+    // Worker mode follows master's UDP :SECURE/:PLAIN advertisement (or token
+    // default for explicit WAN connects). performClientHandshake() skips the
+    // crypto handshake in plaintext mode and waits for SECURE_HANDSHAKE when
+    // secure mode is active.
     {
       VGRE_LOG_INFO("TCPCluster", "Worker: Starting security handshake...");
       VGREResult sr = performClientSecureHandshake();
@@ -94,7 +94,9 @@ void TCPClusterManager::clientLoop() {
             has_master_fd_.store(false, std::memory_order_release);
           }
         }
-        // Retry on next connection (UDP discovery or explicit reconnect).
+        // Back off before UDP discovery hammers the master (avoids auth rate-limit).
+        next_master_connect_after_ =
+            std::chrono::steady_clock::now() + std::chrono::seconds(3);
         continue;
       } else {
         VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake completed successfully");
@@ -545,6 +547,18 @@ void TCPClusterManager::clientLoop() {
     pending_args_.clear();
     client_secure_channel_.reset();
     client_security_established_ = false;
+    // UDP-discovery workers re-sync :SECURE/:PLAIN from the next master ping.
+    // Explicit-address workers keep secure mode when a token is configured.
+    if (explicit_master_connect_) {
+      const char* tokenFile = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+      const char* tokenEnv = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+      security_enabled_.store(
+          (tokenFile && tokenFile[0] != '\0') ||
+              (tokenEnv && tokenEnv[0] != '\0'),
+          std::memory_order_release);
+    } else {
+      security_enabled_.store(false, std::memory_order_release);
+    }
     receive_state_ = ReceiveState::IDLE;
     pending_kernel_id_ = 0;
     pending_kernel_name_.clear();

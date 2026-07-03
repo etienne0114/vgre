@@ -181,6 +181,7 @@ void DiscoveryManager::udpDiscoveryLoop() {
             if (fields.size() >= 2) {
                 try { masterTcpPort = std::stoi(fields[1]); } catch (...) {}
             }
+
             if (fields.size() >= 4) {
                 // Detect HMAC by its fixed 64-character hex length
                 if (fields.back().size() == 64) {
@@ -226,6 +227,13 @@ void DiscoveryManager::udpDiscoveryLoop() {
                 }
             }
 
+            // Sync worker security mode only after the ping is authenticated (or
+            // when no token is configured and discovery is intentionally open).
+            if (fields.size() >= 3) {
+                const bool masterSecure = (fields[2] != "PLAIN");
+                parent_->security_enabled_.store(masterSecure, std::memory_order_release);
+            }
+
             std::vector<std::string> connectCandidates;
             if (advHost.empty()) {
                 connectCandidates.push_back(senderIp);
@@ -235,6 +243,10 @@ void DiscoveryManager::udpDiscoveryLoop() {
             } else {
                 connectCandidates.push_back(advHost);
                 if (advHost != senderIp) connectCandidates.push_back(senderIp);
+            }
+
+            if (std::chrono::steady_clock::now() < parent_->next_master_connect_after_) {
+                continue;
             }
 
             std::string masterIp;

@@ -183,6 +183,19 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     }
     VGRE_LOG_DEBUG("TCPCluster", "initialize: bind/listen OK");
 
+    // Auto-enable secure cluster when an auth token is configured so workers
+    // receive :SECURE in UDP broadcasts without a manual dashboard toggle.
+    {
+      const char* tokenFile = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+      const char* tokenEnv = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+      if ((tokenFile && tokenFile[0] != '\0') || (tokenEnv && tokenEnv[0] != '\0')) {
+        if (security_manager_->enableSecurity(true) == VGREResult::SUCCESS) {
+          VGRE_LOG_INFO("TCPCluster",
+              "Secure cluster channel auto-enabled (auth token configured)");
+        }
+      }
+    }
+
     const char* advAddr = vgre_get_config("VGRE_CLUSTER_ADVERTISED_ADDRESS");
     if (advAddr && advAddr[0] != '\0') {
       VGRE_LOG_INFO("TCPCluster",
@@ -242,6 +255,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     // An empty host means "use LAN UDP broadcast discovery only".
     if (!effectiveHost.empty() && effectiveHost != "0.0.0.0") {
       explicit_master_connect_ = true;
+      {
+        const char* tokenFile = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+        const char* tokenEnv = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+        if ((tokenFile && tokenFile[0] != '\0') ||
+            (tokenEnv && tokenEnv[0] != '\0')) {
+          security_enabled_.store(true, std::memory_order_release);
+        }
+      }
       int tSec = getConnectTimeoutSec();
       auto sock = connectWithTimeout(effectiveHost, effectivePort, tSec);
       if (sock != vgre::common::VGRE_INVALID_SOCKET) {
