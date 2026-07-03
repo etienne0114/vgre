@@ -1,12 +1,15 @@
 # Test CMakeLists.txt
 # Unit tests and integration tests for VGRE
 
+vgre_test_library_path_env(VGRE_TEST_LIB_ENV)
+
 # ── Pre-test cleanup fixture ─────────────────────────────────────────────────
 # Cleans stale OpenMP (libomp) KMP registration files left by killed processes.
-# These files accumulate in /dev/shm when processes are SIGKILL'd, causing the
-# next test that initializes OpenMP to deadlock during library registration.
+# Linux: /dev/shm; macOS: TMPDIR (libomp registers under the temp dir).
 add_test(NAME KMPCleanup
-    COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
+    COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; \
+        find \"\${TMPDIR:-/tmp}\" -maxdepth 1 -name '__KMP_REGISTERED_LIB_*' -delete 2>/dev/null; \
+        rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
 set_tests_properties(KMPCleanup PROPERTIES FIXTURES_SETUP KMPRegistrationClean)
 
 # ── Unit tests ──────────────────────────────────────────────────────────────
@@ -1069,7 +1072,7 @@ add_executable(test_hip_runtime api/test_hip_runtime.cpp)
 target_link_libraries(test_hip_runtime PRIVATE vgre_cudart)
 add_test(NAME HIPRuntimeLayer COMMAND test_hip_runtime)
 set_tests_properties(HIPRuntimeLayer PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
     TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_sass_detection api/test_sass_detection.cpp)
@@ -1544,21 +1547,21 @@ add_executable(test_trmm_trsv_batched unit/test_trmm_trsv_batched.cpp)
 target_link_libraries(test_trmm_trsv_batched PRIVATE vgre)
 add_test(NAME TrmmTrsvBatched COMMAND test_trmm_trsv_batched)
 set_tests_properties(TrmmTrsvBatched PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
 
 # ── QUEUE-49: Event creation flags + elapsed time ────────────────────────────
 add_executable(test_event_flags unit/test_event_flags.cpp)
 target_link_libraries(test_event_flags PRIVATE vgre)
 add_test(NAME EventFlags COMMAND test_event_flags)
 set_tests_properties(EventFlags PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
 
 # ── Runtime block-threading toggle (vgre_set_block_threads is a real control) ─
 add_executable(test_block_threads_toggle unit/test_block_threads_toggle.cpp)
 target_link_libraries(test_block_threads_toggle PRIVATE vgre)
 add_test(NAME BlockThreadsToggle COMMAND test_block_threads_toggle)
 set_tests_properties(BlockThreadsToggle PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
     TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
 # ── QUEUE-57: cuSOLVER sygvd generalized eigenvalue ──────────────────────────
@@ -1566,7 +1569,7 @@ add_executable(test_cusolver_sygvd api/test_cusolver_sygvd.cpp)
 target_link_libraries(test_cusolver_sygvd PRIVATE vgre_cudart)
 add_test(NAME CusolverSygvd COMMAND test_cusolver_sygvd)
 set_tests_properties(CusolverSygvd PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
 
 # ── Cross-Platform Integration Tests ────────────────────────────────────────
 add_executable(test_cross_platform_tcp_cluster
@@ -1653,7 +1656,7 @@ if(EXISTS "${VGRE_VENV_PYTHON}")
     add_test(NAME PythonCAPIVectorAdd
         COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
     set_tests_properties(PythonCAPIVectorAdd PROPERTIES
-        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
         LABELS "python;e2e"
         SKIP_RETURN_CODE 77
     )
@@ -1664,7 +1667,7 @@ else()
         add_test(NAME PythonCAPIVectorAdd
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
         set_tests_properties(PythonCAPIVectorAdd PROPERTIES
-            ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+            ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
             LABELS "python;e2e"
             SKIP_RETURN_CODE 77
         )
@@ -1677,7 +1680,7 @@ if(EXISTS "${VGRE_VENV_PYTHON}")
     add_test(NAME PythonLmBindings
         COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
     set_tests_properties(PythonLmBindings PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1686,7 +1689,7 @@ elseif(Python3_FOUND)
     add_test(NAME PythonLmBindings
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
     set_tests_properties(PythonLmBindings PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1701,7 +1704,7 @@ endif()
 if(_vgre_nn_py)
     add_test(NAME PythonNn COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn.py)
     set_tests_properties(PythonNn PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1772,7 +1775,7 @@ endif()
 # and hard-to-diagnose SEGFAULTs.
 get_directory_property(vgre_full_test_list TESTS)
 set_tests_properties(${vgre_full_test_list} PROPERTIES
-    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
 )
 
 # HardwareTokenManager validates token encrypt/decrypt/store *correctness*, not
@@ -1783,7 +1786,7 @@ set_tests_properties(${vgre_full_test_list} PROPERTIES
 # Production code is unaffected; only this test process gets the override.
 if("HardwareTokenManager" IN_LIST vgre_full_test_list)
     set_tests_properties(HardwareTokenManager PROPERTIES
-        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_PBKDF2_ITERATIONS=10000")
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_PBKDF2_ITERATIONS=10000")
 endif()
 
 # ── Network/TCP serialization ──────────────────────────────────────────────
@@ -1840,7 +1843,7 @@ if(_vgre_intpy)
              COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(PyTorchIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
                          TIMEOUT 120
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")
@@ -1848,7 +1851,7 @@ if(_vgre_intpy)
              COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_tensorflow.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(TensorFlowIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
                          TIMEOUT 120
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")

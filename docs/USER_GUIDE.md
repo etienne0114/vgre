@@ -132,12 +132,18 @@ vgre-discover             # shows your public IP + worker connection command
 ### 3.2 macOS Manual Installation
 
 ```bash
-brew install cmake llvm libomp openssl git
-brew install --cask flutter
+brew install cmake llvm@18 libomp openssl sqlite ninja
+brew install --cask flutter   # optional — dashboard only
 bash install_local.sh
 ```
 
-> **Apple Silicon (M1/M2/M3):** VGRE builds natively for ARM64. AVX-512 is disabled; performance comes from OpenMP parallelism.
+CMake auto-detects Homebrew `llvm@18` and `libomp` — **do not** pin
+`/opt/homebrew` paths manually. If you configure by hand, remove a stale cache
+first: `rm -f build/CMakeCache.txt`.
+
+> **Apple Silicon (M1–M5):** VGRE builds natively for ARM64. AVX-512 is disabled;
+> performance comes from OpenMP parallelism and Accelerate.framework BLAS.
+> Run tests serially on macOS: `ctest -j1 --timeout 300` (JIT tests are RAM-heavy).
 
 ### 3.3 Windows Manual Installation
 
@@ -768,8 +774,9 @@ sudo apt-get install llvm-18 llvm-18-dev clang-18
 export LLVM_DIR=$(llvm-config-18 --cmakedir)
 
 # macOS
-brew install llvm
-export LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm
+brew install llvm@18 libomp
+# CMake auto-detects toolchain; optional override:
+export LLVM_DIR="$(brew --prefix llvm@18)/lib/cmake/llvm"
 
 # Windows
 winget install LLVM.LLVM
@@ -833,11 +840,17 @@ Get-ChildItem "$env:LOCALAPPDATA\VGRE\lib" -Filter "*.dll" | Select-Object Name
 ### 11.11 OpenMP not working (all kernels run on 1 thread)
 
 ```bash
+# Linux
 ldd ~/.local/share/VGRE/lib/libvgre.so | grep omp
 sudo apt-get install libomp-dev       # Ubuntu/Debian
 sudo dnf install libomp-devel         # Fedora
-brew install libomp                   # macOS
-cmake --build build -j$(nproc)
+
+# macOS — install keg-only libomp + LLVM 18; CMake discovers paths automatically
+brew install llvm@18 libomp
+rm -f build/CMakeCache.txt && cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(sysctl -n hw.ncpu)
+```
+
 ### 11.12 Windows: Socket and Port Bind Failures (ACCESS_VIOLATION 0xC0000005)
 
 When setting up or testing VGRE TCP clusters on Windows, you may encounter Winsock errors or dynamic-link crashes. These are resolved in the runtime through the following configurations:

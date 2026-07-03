@@ -12,6 +12,17 @@
 
 set -e
 
+# Resolve scripts/ even when invoked via ~/.local/bin/vgre-start symlink.
+_vgre_entry="${BASH_SOURCE[0]}"
+while [[ -L "$_vgre_entry" ]]; do
+    _vgre_link=$(readlink "$_vgre_entry")
+    case "$_vgre_link" in
+        /*) _vgre_entry="$_vgre_link" ;;
+        *) _vgre_entry="$(cd "$(dirname "$_vgre_entry")" && pwd)/$_vgre_link" ;;
+    esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$_vgre_entry")" && pwd)"
+
 # ── Auto-source environment file (set by install_local.sh) ───────────────────
 # This makes all VGRE env vars available without the user having to run
 # "source ~/.vgre/env" or "export ..." manually.
@@ -120,13 +131,12 @@ export LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"              # Li
 
 # Resolve the worker binary flexibly: installed locations (both layouts that
 # past installers used), PATH, then the repo build tree for development.
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_BIN=""
 for cand in \
     "$INSTALL_DIR/vgre-worker" \
     "$INSTALL_DIR/bin/vgre-worker" \
     "$(command -v vgre-worker 2>/dev/null || true)" \
-    "$_SCRIPT_DIR/../build/src/advanced/vgre-worker"; do
+    "$SCRIPT_DIR/../build/src/advanced/vgre-worker"; do
     [[ -n "$cand" && -x "$cand" ]] && WORKER_BIN="$cand" && break
 done
 if [[ -z "$WORKER_BIN" ]]; then
@@ -165,7 +175,7 @@ case "$MODE" in
         # Workers on different LANs will receive the correct public address.
         _DISCOVER="$(command -v vgre-discover 2>/dev/null || true)"
         [[ -z "$_DISCOVER" ]] && [[ -x "$INSTALL_DIR/vgre-discover" ]] && _DISCOVER="$INSTALL_DIR/vgre-discover"
-        [[ -z "$_DISCOVER" ]] && [[ -x "$(dirname "$0")/vgre-discover.sh" ]] && _DISCOVER="$(dirname "$0")/vgre-discover.sh"
+        [[ -z "$_DISCOVER" ]] && [[ -x "$SCRIPT_DIR/vgre-discover.sh" ]] && _DISCOVER="$SCRIPT_DIR/vgre-discover.sh"
         if [[ -n "$_DISCOVER" ]]; then
             echo "[...] Detecting public IP for WAN broadcast..."
             # Run in a sub-shell so its 'export' doesn't affect this script's env;

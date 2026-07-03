@@ -84,17 +84,18 @@ VGRE is designed as a cross-platform system, utilizing platform-native bindings 
 
 | Feature | Linux | Windows | macOS |
 |---|---|---|---|
+| **Verification status** | ✅ Full `ctest` green | ⚠️ CI-unverified | ✅ Build + integration verified locally (July 2026) |
 | **Interception** | `LD_PRELOAD` | PATH / DLL Proxy | `DYLD_INSERT_LIBRARIES` |
-| **UVM Memory Trap** | `SIGSEGV` Signal | Vectored Exception (VEH) | `SIGSEGV` Signal |
-| **Thread Affinity** | `sched_setaffinity` | `SetThreadAffinityMask` | macOS Thread Bind |
+| **UVM Memory Trap** | `SIGSEGV` Signal | Vectored Exception (VEH) | `SIGSEGV` / `SIGBUS` Signal |
+| **Thread Affinity** | `sched_setaffinity` | `SetThreadAffinityMask` | Mach thread policy hints |
 | **Cluster Sockets** | POSIX Sockets | Winsock2 | POSIX Sockets |
 | **IPC Channels** | Unix Domain Sockets | Named Pipes | Unix Domain Sockets |
-| **Thermal Sensing** | `/sys/class/thermal` | WMI COM Thread | IOKit SMC Keys |
-| **Secure Keyring** | Linux Keyring (`keyctl`) | Credential Manager | macOS Keychain |
+| **Thermal Sensing** | `/sys/class/thermal` | WMI COM Thread | IOKit SMC keys (TC0P, Tp09, …) |
+| **Secure Keyring** | Linux Keyring (`keyctl`) | Credential Manager | Keychain (`SecItem*`) |
 | **TPM 2.0 Storage** | `libtss2-esys` (auto) | TPM 2.0 (auto) | TPM 2.0 (auto) |
 | **GNOME Keyring** | `libsecret-1` (auto) | N/A | N/A |
 | **RDMA Transport** | `libibverbs` (auto) | N/A | N/A |
-| **Telemetry PMU** | `perf_event_open` | QueryThreadCycleTime | mach_thread_self user-time |
+| **Telemetry PMU** | `perf_event_open` | QueryThreadCycleTime | mach thread user-time (no NVIDIA PMU) |
 
 ---
 
@@ -103,13 +104,13 @@ VGRE is designed as a cross-platform system, utilizing platform-native bindings 
 To verify that VGRE is fully functional and optimized on your local host:
 
 ```bash
-# 1. Build the library (optimized)
+# Linux / macOS — CMake auto-detects LLVM 18 + OpenMP (macOS: Homebrew llvm@18)
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
-cmake --build . -j$(nproc)
+cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
-# 2. Run the complete test suite (full Linux suite passing)
-ctest --output-on-failure -j$(nproc)
+# Test suite (Linux: parallel; macOS: serial for JIT stability)
+ctest --output-on-failure -j$(nproc 2>/dev/null || echo 1)
 ```
 
 For custom configurations, cluster configurations, or framework deployments, please refer to the appropriate manuals in the navigation index.

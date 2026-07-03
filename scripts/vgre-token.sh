@@ -19,6 +19,20 @@
 set -eu
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
+# Resolve the real scripts/ directory even when invoked via ~/.local/bin symlinks.
+_script="$0"
+while [ -L "$_script" ]; do
+    _link=$(readlink "$_script")
+    case "$_link" in
+        /*) _script="$_link" ;;
+        *) _script="$(CDPATH= cd -- "$(dirname "$_script")" && pwd)/$_link" ;;
+    esac
+done
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$_script")" && pwd)"
+
+# shellcheck source=vgre-cli-install.sh
+. "$SCRIPT_DIR/vgre-cli-install.sh"
+
 VGRE_DIR="${VGRE_DIR:-$HOME/.vgre}"
 TOKEN_FILE="$VGRE_DIR/token"
 ENV_FILE="$VGRE_DIR/env"
@@ -88,7 +102,7 @@ _update_env_file() {
 _add_to_shell_profile() {
     SOURCE_LINE="# VGRE environment"
     LOAD_LINE="[ -f \"$ENV_FILE\" ] && . \"$ENV_FILE\""
-    for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+    for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$PROFILE" ]; then
             if ! grep -q "vgre/env" "$PROFILE" 2>/dev/null; then
                 printf '\n%s\n%s\n' "$SOURCE_LINE" "$LOAD_LINE" >> "$PROFILE"
@@ -96,6 +110,7 @@ _add_to_shell_profile() {
             fi
         fi
     done
+    vgre_ensure_cli_path
 }
 
 _gen_token() {
@@ -233,12 +248,22 @@ cmd_revoke() {
     esac
 }
 
+cmd_install() {
+    info "Installing VGRE CLI tools to $(vgre_cli_bin_dir)..."
+    vgre_install_cli_symlinks "$SCRIPT_DIR"
+    vgre_ensure_cli_path
+    ok "CLI symlinks installed: vgre-token, vgre-start, vgre-discover"
+    ok "PATH updated for this session and future terminals"
+    printf "\n${DIM}If a command is still not found, run:  . %s${RESET}\n\n" "$ENV_FILE"
+}
+
 cmd_help() {
     cat <<'HELP'
 
 vgre-token — VGRE Auth Token Manager
 
 Usage:
+  vgre-token install               Install CLI symlinks and add ~/.local/bin to PATH
   vgre-token generate              Generate a new secure 64-hex token
   vgre-token show                  Print the stored token value
   vgre-token fingerprint           Print the SHA-256 fingerprint
@@ -270,6 +295,7 @@ CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
+    install)     cmd_install ;;
     generate)    cmd_generate ;;
     show)        cmd_show ;;
     fingerprint) cmd_fingerprint ;;

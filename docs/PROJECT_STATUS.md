@@ -1,14 +1,27 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-07-02 (audit re-verification: fresh Release rebuild, full suite green)  
+**Last Updated**: 2026-07-03 (macOS ARM64 build-verified; docs aligned)  
 **Build Status (Linux)**: ✅ full `ctest` suite passing (**293 tests, `-j12`**) on x86-64 Linux  
-**Production Readiness**: core emulation is stable and verified on Linux. The
+**Build Status (macOS)**: ✅ native engine builds on Apple Silicon (ARM64); integration/JIT tests pass locally; full serial `ctest` bring-up in progress  
+**Production Readiness**: core emulation is stable and verified on Linux. macOS CPU path is build-verified with dynamic toolchain discovery. The
 single hard external blocker is **GitHub Actions billing** — every CI run since
 2026-06-22 fails at job start ("recent account payments have failed"), so the
-Windows/macOS matrix cannot execute and those platforms remain unverified in
-practice (their jobs are also `workflow_dispatch`-only). Fix billing, re-enable
-the push/PR triggers in `.github/workflows/ci.yml`, and get one green
-windows-2022 + macos-arm64 run before claiming those platforms.
+Windows/macOS matrix cannot execute and Windows remains unverified in
+practice (CI jobs are also `workflow_dispatch`-only / `continue-on-error` on
+macOS until billing is fixed). macOS was **built and tested locally** in July
+2026 (see §1.1). Fix billing, re-enable the push/PR triggers in
+`.github/workflows/ci.yml`, and get one green windows-2022 + macos-arm64 run
+before claiming Windows CI-verified.
+
+> **2026-07-03 macOS bring-up** (in-tree, not yet full CI-green):
+> - `cmake/VGREPlatform.cmake` auto-detects Homebrew `llvm@18`, `libomp`, SDK,
+>   and libc++ rpath — no hardcoded install prefixes.
+> - OpenMP, CTest `DYLD_LIBRARY_PATH`, JIT clang discovery, Keychain `SecItem*`,
+>   `dispatch_semaphore` external semaphores, and IOKit SMC temperature are real
+>   implementations (not stubs).
+> - Verified locally: full `cmake --build`, `examples/vector_addition` (1M elems),
+>   integration/JIT ctest subset green. Run full suite serially:
+>   `VGRE_LOG_LEVEL=ERROR ctest -j1 --timeout 300`.
 
 > **2026-07-02 audit deltas** (see git log for the commits):
 > - HIP/ROCm layer expanded from a 9-function memcpy veneer to the real core
@@ -51,11 +64,33 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ## 1. Core Platform Verification
 
-**Verified on Linux (x86-64) only.** The full `ctest` suite (198 tests) passes
+### 1.1 Linux (x86-64) — canonical
+
+**Verified on Linux (x86-64).** The full `ctest` suite (293 tests) passes
 on Linux, exercised with property-based exploration, ThreadSanitizer race
-analysis, and static-destruction verification. **Windows and macOS are not yet
-verified** — their code paths are compile-guarded but have never been built or
-run in CI (Phase 2, Track 1 brings up the matrix).
+analysis, and static-destruction verification.
+
+### 1.2 macOS (ARM64 / Intel) — build-verified
+
+**Built and exercised locally (July 2026).** The native engine (`libvgre`,
+`libvgre_cudart`, examples, integration tests) compiles with Homebrew
+`llvm@18` auto-selected by CMake. JIT kernel compilation discovers Clang at
+runtime (`VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`).
+Integration/JIT ctests pass; the full serial `ctest` suite (`-j1`) is the
+remaining bring-up gate before claiming macOS CI-green.
+
+**macOS-specific real implementations** (not stubs): UVM via `SIGSEGV`/`SIGBUS`,
+Keychain via `SecItemAdd`/`SecItemCopyMatching`, thermal via IOKit SMC,
+external semaphores via `dispatch_semaphore`, cluster TCP via BSD sockets.
+
+**Documented macOS approximations** (see `missingFeatures.md`): NUMA pinning
+(Mach hints vs Linux affinity), no Metal Performance Shaders backend, no NVIDIA
+PMU/CUPTI counters without physical GPU hardware.
+
+### 1.3 Windows — unverified
+
+**Windows is not yet verified** — code paths are compile-guarded but have not
+been built or run in CI (Phase 2, Track 1 brings up the matrix).
 
 - **Linux core passes**: full regression + integration + platform suite green on x86-64.
 - **Mostly real compute, with documented exceptions**: nearly every path runs real

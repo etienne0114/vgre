@@ -2,7 +2,7 @@
 
 **A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
-> **PROJECT STATUS**: **Linux-verified, not yet production-ready.** The full `ctest` suite passes on **x86-64 Linux**; CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented with zero compiler warnings (warnings-as-errors enabled). A CI matrix (Linux/macOS/Windows) was just added — **Windows/macOS are code-complete but unverified** until that CI is green. Several P0 production gates remain (live metrics, health probes, config validation). See `docs/implementationPlan.md` (Phase 2) for the path to production and `docs/missingFeatures.md` for known simplified paths and hardware boundaries.
+> **PROJECT STATUS**: **Linux production-verified; macOS ARM64 build-verified (July 2026).** The full `ctest` suite passes on **x86-64 Linux**; CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented with real CPU math (no runtime stubs). **macOS** (Apple Silicon + Intel) now builds end-to-end with auto-detected Homebrew `llvm@18`, runs JIT kernels, and passes integration tests locally — full serial `ctest` bring-up is in progress; **Windows** remains code-complete but CI-unverified. Hardware-only boundaries (physical GPU PMU counters, Metal MPS backend, GPUDirect RDMA) are documented in `docs/missingFeatures.md`. See `docs/implementationPlan.md` for remaining externally-blocked tracks.
 
 ## What is VGRE?
 
@@ -32,14 +32,14 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
 **Critical Issues**: 0 known on the verified (Linux) platform  
-**Cross-Platform**: Linux **verified**; Windows/macOS **code-complete but unverified** (no CI yet — see Phase 2, Track 1)
+**Cross-Platform**: Linux **verified** (full `ctest`); macOS **build-verified** (native engine + JIT + integration tests); Windows **code-complete, CI-unverified**
 
 ### Platform Support
 - ✅ **Linux**: Verified — built and full test suite passing on x86-64 (NUMA + Linux Keyring).
-- ⚠️ **Windows**: Code-complete (Credential Manager, shared memory, Winsock paths are written and compile-guarded) but **not yet built or tested in CI**. Treat as experimental until the cross-platform CI matrix (Phase 2, Track 1) is green.
-- ⚠️ **macOS**: Code-complete (Keychain, kqueue paths) but **not yet built or tested in CI**; NUMA affinity is a no-op approximation on macOS. Experimental until CI-verified.
+- ✅ **macOS**: Build-verified on Apple Silicon (ARM64) and Intel — auto-detects Homebrew `llvm@18` + `libomp` at configure time (no hardcoded paths); JIT kernel compilation, UVM, Keychain token storage (`SecItem` API), IOKit SMC temperature, OpenCL iGPU path, and `dispatch_semaphore` external-semaphore sync are implemented. Run `bash install_local.sh` or `bash scripts/vgre_sync.sh`. NUMA affinity uses Mach thread-policy hints (not Linux `sched_setaffinity`). Full serial `ctest` suite bring-up ongoing.
+- ⚠️ **Windows**: Code-complete (Credential Manager, shared memory, Winsock paths) but **not yet built or tested in CI**. Treat as experimental until the cross-platform CI matrix is green.
 
-> The earlier "all functional / validated across all three OSes" claim was aspirational — the build and tests have only ever run on Linux. Bringing up the GitHub Actions matrix (Linux/Windows/macOS) is the top production gate. See `docs/implementationPlan.md` Track 1 and `docs/missingFeatures.md` §3.1.
+> Linux remains the canonical verification platform (full `ctest` green). macOS was brought up in-tree July 2026 with dynamic toolchain discovery (`cmake/VGREPlatform.cmake`). Windows/macOS CI jobs exist in `.github/workflows/ci.yml` but may be gated on billing/`continue-on-error` until green. See `docs/missingFeatures.md` for hardware-only boundaries (Metal MPS, NVIDIA PMU/CUPTI, GPUDirect RDMA).
 
 ### What Works ✅
 - **CUDA Runtime API** (~101+ functions): memory alloc/free (`cudaMalloc`, `cudaFree`, `cudaMallocManaged`, `cudaMallocAsync`, `cudaMallocFromPoolAsync`, `cudaMallocPitch`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaMalloc3D`), stream create/destroy/query/sync/wait-event/add-callback/launch-host-func, events (create/record/query/sync/destroy/elapsed-time), error introspection (`cudaGetErrorName`/`GetErrorString`), symbol copies (`cudaMemcpyToSymbol`/`FromSymbol` sync+async), array allocation (1D/2D/3D via `TextureManager`), pointer introspection (`cudaPointerGetAttributes`), device queries, peer access, kernel launch (`cudaLaunchKernel`, `cudaLaunchCooperativeKernel`, `cudaLaunchKernelExC`), graph APIs (capture, instantiate, launch, clone, destroy, exec update, all 11 node types including kernel, memset, host, child, empty, event-record/wait, mem-alloc/free), texture/surface objects (`cudaCreateTextureObject`, `cudaDestroyTextureObject`, `cudaCreateSurfaceObject`, `cudaDestroySurfaceObject`, legacy `cudaBindTexture`/`cudaBindTextureToArray`/`cudaBindTexture2D`/`cudaBindSurfaceToArray`), external memory/semaphore (`cudaImportExternalMemory`, `cudaDestroyExternalMemory`), stream capture introspection (`cudaStreamIsCapturing`, `cudaStreamGetCaptureInfo_v2`), device/function attributes (`cudaFuncGetAttributes`, `cudaDeviceGetLimit`/`SetLimit`, `cudaDeviceGetCacheConfig`/`SetCacheConfig`), memset 2D/3D/Async variants.
@@ -71,6 +71,11 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 - cuSOLVER: Dense LAPACK-backed potrf/geqrf/gesvd/syevd/getrf/getrs/ormqr/gelsd and sparse cusolverSp CSR-to-dense LAPACK paths
 - cuSPARSE: CSR/COO/CSC SpMV/SpMM, SparseToDense, DenseToSparse, SpSV, SpGEMM, ILU0, IC0
 - cuBLASLt: matmul with heuristic cache, scale pointers, amaxD, and full epilogue set
+
+### Recent Improvements (2026-07-03) 🎉
+- ✅ **macOS bring-up** — Dynamic Homebrew toolchain detection (`cmake/VGREPlatform.cmake`): auto-selects `llvm@18`, `libomp`, SDK, and libc++ rpath; no hardcoded `/opt/homebrew` paths. OpenMP uses `OpenMP::OpenMP_CXX` (fixes Apple Clang `-fopenmp`). Runtime JIT finds Clang via `VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`.
+- ✅ **macOS platform fixes** — `dispatch_semaphore` replaces deprecated `sem_init` for external semaphores; Linux DRM sysfs gated to `__linux__`; Keychain migrated to modern `SecItem*` API; `DYLD_LIBRARY_PATH` in CTest; `test_cuda_on_cpu.py` loads `libvgre.dylib`.
+- ✅ **install_local.sh** — One-command Linux/macOS deploy: deps, build, `~/.vgre/env`, token, CLI symlinks.
 
 ### Recent Improvements (2026-06-07) 🎉
 - ✅ **Zero compiler warnings** — All `-Wall -Wextra` warnings resolved: strict-aliasing `reinterpret_cast` replaced with `std::memcpy`, `warn_unused_result` captures, `static thread_local` in headers converted to `extern thread_local` (real semantic bug: each TU had its own independent `g_current_ctx` copy), `volatile` for optimization-unreachable test code, `snprintf` replacing truncating `strncpy`. Warnings-as-errors (`-Werror`) enabled globally.
@@ -132,13 +137,16 @@ See `docs/missingFeatures.md` for the complete exhaustive list.
 ## Quick Start
 
 ```bash
-# Build — optional features (RDMA, TPM2, libsecret, SIMD) auto-detected
+# Automated (Linux / macOS) — recommended
+bash install_local.sh
+
+# Manual build — optional features (RDMA, TPM2, libsecret, SIMD) auto-detected
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j$(nproc)
+cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
-# Run tests
-ctest --output-on-failure -j$(nproc)
+# Run tests (Linux: parallel; macOS: use -j1 for JIT stability)
+ctest --output-on-failure -j$(nproc 2>/dev/null || echo 1)
 
 # Basic usage
 ./examples/vector_addition

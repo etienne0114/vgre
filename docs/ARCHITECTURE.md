@@ -610,7 +610,7 @@ if (size >= 2 * 1024 * 1024) {
 - **Token Storage**: Keychain (primary), TPM 2.0 (secondary)
 - **Networking**: POSIX sockets with `SO_NOSIGPIPE`; dual-stack IPv6 via `getaddrinfo(AF_UNSPEC)`
 - **Temperature**: IOKit SMC — `TC0P` → `TC0F` (Intel die) → `Tp09` / `Tp0P` / `Tp19` (Apple Silicon)
-- **CPU Frequency**: `sysctl hw.cpufrequency_max` → CPUID leaf 0x16 (Intel) → 3.2 GHz constant (Apple Silicon)
+- **CPU Frequency**: `hw.perflevel0.cpufrequency_max` → `hw.cpufrequency_max` → CPUID leaf 0x16 (Intel); `0` when the OS does not expose frequency (Apple Silicon — adaptive engine calibrates from wall-clock timing instead)
 
 ---
 
