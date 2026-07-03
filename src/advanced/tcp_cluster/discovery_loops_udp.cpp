@@ -263,9 +263,9 @@ void DiscoveryManager::udpDiscoveryLoop() {
                             " failed HMAC — master uses a DIFFERENT auth token than this worker "
                             "(worker SHA256: " +
                             (fp.size() >= 16 ? fp.substr(0, 16) : fp) +
-                            "...). Sync tokens: on master run "
-                            "'vgre-token fingerprint' (must match), then "
-                            "'vgre-token set <TOKEN>' or scp ~/.vgre/token from this node.");
+                            "...). If vgre-token fingerprint already matches on both "
+                            "nodes, restart the master (vgre-start --master) so it "
+                            "reloads the token from ~/.vgre/token.");
                     }
                     continue;
                 }
