@@ -87,6 +87,9 @@ class ClusterNode extends Equatable {
   final double latencyMs;
   final bool available;
   final String igpuName;
+  final String platform;   // node OS: "Linux"/"macOS"/"Windows" ("" if unknown)
+  final String arch;       // node CPU arch: "x86_64"/"arm64"
+  final String hostname;   // node hostname
 
   // Phase 5: Credits
   final double totalCredits;
@@ -106,6 +109,9 @@ class ClusterNode extends Equatable {
     required this.latencyMs,
     required this.available,
     required this.igpuName,
+    this.platform = '',
+    this.arch = '',
+    this.hostname = '',
     this.totalCredits = 0.0,
     this.totalDebits = 0.0,
     this.balance = 0.0,
@@ -122,6 +128,9 @@ class ClusterNode extends Equatable {
         latencyMs,
         available,
         igpuName,
+        platform,
+        arch,
+        hostname,
         totalCredits,
         totalDebits,
         balance,

@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cstddef>
+
 #include "vgre/advanced/hybrid_compute_manager.h"
 #include "vgre/advanced/rdma_transport.h"
 #include "vgre/advanced/resource_ledger.h"
@@ -271,15 +274,23 @@ void TCPClusterManager::processServerPackets(
                             " exceeds bounce capacity — data lost");
         }
       } else if (type == PacketType::CAPABILITY) {
-        if (hdr.payloadSize < sizeof(CapabilityPacket)) {
+        // A legacy worker sends only the v1 prefix (through gpu_sm_count); the
+        // v2 identity fields are optional. Require the v1 prefix; copy whatever
+        // of the v2 fields actually arrived and zero-init the rest.
+        const size_t kV1Size = offsetof(CapabilityPacket, platform_name);
+        if (hdr.payloadSize < kV1Size) {
           client->rx_buffer.clear();
           break;
         }
-        CapabilityPacket cpkt;
-        memcpy(&cpkt, payload, sizeof(CapabilityPacket));
+        CapabilityPacket cpkt{};
+        size_t copyLen = std::min<size_t>(hdr.payloadSize, sizeof(CapabilityPacket));
+        memcpy(&cpkt, payload, copyLen);
         // B3: Force null-termination on all string fields.
         cpkt.igpu_name[sizeof(cpkt.igpu_name) - 1] = '\0';
         cpkt.gpu_name[sizeof(cpkt.gpu_name) - 1] = '\0';
+        cpkt.platform_name[sizeof(cpkt.platform_name) - 1] = '\0';
+        cpkt.arch_name[sizeof(cpkt.arch_name) - 1] = '\0';
+        cpkt.hostname[sizeof(cpkt.hostname) - 1] = '\0';
         client->rx_buffer.erase(client->rx_buffer.begin(),
                                 client->rx_buffer.begin() + totalLen);
         client->cpu_cores = cpkt.cpu_cores;
@@ -287,6 +298,12 @@ void TCPClusterManager::processServerPackets(
         client->has_igpu = cpkt.has_igpu;
         std::snprintf(client->igpu_name, sizeof(client->igpu_name), "%s",
                       cpkt.igpu_name);
+        std::snprintf(client->platform_name, sizeof(client->platform_name), "%s",
+                      cpkt.platform_name);
+        std::snprintf(client->arch_name, sizeof(client->arch_name), "%s",
+                      cpkt.arch_name);
+        std::snprintf(client->node_hostname, sizeof(client->node_hostname), "%s",
+                      cpkt.hostname);
         // Gate: node is now visible in the dashboard with real hardware info.
         client->capability_received = true;
 

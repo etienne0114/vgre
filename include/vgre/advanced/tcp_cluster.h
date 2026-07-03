@@ -163,6 +163,9 @@ public:
     uint64_t cpu_memory = 0;
     bool has_igpu = false;
     char igpu_name[64] = {};
+    char platform_name[32] = {};   // reported OS: "Linux"/"macOS"/"Windows"
+    char arch_name[16] = {};       // reported arch: "x86_64"/"arm64"
+    char node_hostname[64] = {};   // reported hostname
     bool capability_received = false;
     std::string ip_address;
     int port = 0;
@@ -224,6 +227,9 @@ public:
     uint64_t cpu_memory;
     bool has_igpu;
     char igpu_name[64];
+    char platform_name[32];   // reported OS ("" if a legacy worker)
+    char arch_name[16];       // reported CPU arch
+    char node_hostname[64];   // reported hostname
     bool security_established;
     bool is_authenticating;
     int worker_idx;
