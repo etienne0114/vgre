@@ -1,4 +1,5 @@
 #include "vgre/advanced/tcp_cluster/internal/security_manager.h"
+#include "vgre/advanced/tcp_cluster/internal/network_utilities.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/advanced/hardware_token_manager.h"
@@ -198,13 +199,25 @@ VGREResult SecurityManager::enableSecurity(bool enabled) {
   
   // Clear backoff when security changes
   { std::lock_guard<std::mutex> lock(parent_->proactive_backoff_mutex_); parent_->proactive_fail_counts_.clear(); parent_->proactive_backoff_until_.clear(); }
-  // Force reconnect of plaintext connections when enabling security
-  if (enabled && parent_->is_master_) {
+  {
+    std::lock_guard<std::mutex> lk(g_ratelimit.mu);
+    g_ratelimit.fail_count.clear();
+    g_ratelimit.backoff_until.clear();
+  }
+  // Force all workers to reconnect so both sides negotiate the new mode cleanly.
+  if (parent_->is_master_) {
     std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
     for (auto& c : parent_->clients_) {
-      if (c && c->active && !(c->secure_channel && c->secure_channel->isInitialized())) {
-        VGRE_LOG_INFO("TCPCluster", "Disconnecting plaintext node " + c->ip_address + " for security");
-        c->active = false; vgre::common::vgre_close_socket(c->socket_fd); c->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+      if (c && c->socket_fd != vgre::common::VGRE_INVALID_SOCKET &&
+          (c->active || c->is_authenticating)) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Disconnecting " + c->ip_address + " (cluster security mode changed)");
+        c->active = false;
+        c->is_authenticating = false;
+        c->security_established = false;
+        c->secure_channel.reset();
+        vgre::common::vgre_close_socket(c->socket_fd);
+        c->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
       }
     }
     parent_->syncToIPC();
@@ -341,48 +354,61 @@ VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterMan
 
 VGREResult SecurityManager::performClientHandshake() {
   vgre_socket_t fd; { std::lock_guard<std::mutex> lock(parent_->client_mutex_); fd = parent_->client_fd_; }
-  
-  // Auto-detect security
-  if (!parent_->security_enabled_) {
-    if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
-    VGREResult wr = parent_->waitForData(fd, 5000);
-    if (wr == VGREResult::ERR_TIMEOUT) return VGREResult::SUCCESS;
-    if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
-    parent_->security_enabled_ = true;
-  }
-  
+  if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
+
   std::string token; { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+
+  // Plaintext mode (master advertised :PLAIN via UDP or user disabled security).
+  if (!parent_->security_enabled_) {
+    parent_->client_secure_channel_.reset();
+    parent_->client_security_established_ = false;
+    parent_->is_authenticating_ = false;
+    VGRE_LOG_INFO("TCPCluster", "Worker: plaintext cluster mode (no secure handshake)");
+    return VGREResult::SUCCESS;
+  }
+
   if (token.empty()) {
     std::lock_guard<std::mutex> lock(parent_->client_mutex_);
-    vgre::common::vgre_close_socket(parent_->client_fd_); parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET; parent_->has_master_fd_.store(false, std::memory_order_release);
+    vgre::common::vgre_close_socket(parent_->client_fd_);
+    parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET;
+    parent_->has_master_fd_.store(false, std::memory_order_release);
     return VGREResult::ERR_AUTH_FAILED;
   }
-  
-  // Receive handshake
-  std::vector<uint8_t> rx; const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket); rx.reserve(expected);
+
+  // Secure mode: receive master's SECURE_HANDSHAKE (master always speaks first).
+  std::vector<uint8_t> rx;
+  const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
+  rx.reserve(expected);
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(HANDSHAKE_TIMEOUT_SEC);
-  
+
   while (rx.size() < expected) {
-    if (std::chrono::steady_clock::now() > deadline) return VGREResult::ERR_TIMEOUT;
-    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count());
+    if (std::chrono::steady_clock::now() > deadline) {
+      VGRE_LOG_WARN("TCPCluster",
+          "Worker: timed out waiting for SECURE_HANDSHAKE from master");
+      return VGREResult::ERR_TIMEOUT;
+    }
+    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()).count());
     VGREResult wr = parent_->waitForData(fd, remaining_ms);
     if (wr == VGREResult::ERR_TIMEOUT) continue;
     if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
-    
-    uint8_t buf[256]; size_t toRead = std::min(sizeof(buf), expected - rx.size());
+
+    uint8_t buf[256];
+    size_t toRead = std::min(sizeof(buf), expected - rx.size());
     int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
     if (n > 0) { rx.insert(rx.end(), buf, buf + n); }
     else if (n == 0) { return VGREResult::ERR_IO; }
     else { if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) continue; return VGREResult::ERR_IO; }
   }
-  
+
   if (rx.size() < sizeof(VSBPHeader)) return VGREResult::ERR_IO;
   VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
   if (phdr->magic != VSBP_MAGIC ||
       phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
-    // Production policy: do not silently downgrade to plaintext. If security
-    // is enabled and we didn't receive the expected handshake, treat it as a
-    // protocol/order violation.
+    VGRE_LOG_ERROR("TCPCluster",
+        "Worker: expected SECURE_HANDSHAKE, got " +
+        PacketUtils::packetTypeToString(static_cast<PacketType>(phdr->type)) +
+        " (check master 'Secure cluster channel' setting matches worker)");
     return VGREResult::ERR_AUTH_FAILED;
   }
   
