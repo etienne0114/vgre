@@ -48,6 +48,8 @@ MODE=""
 MASTER_IP=""
 MASTER_ADDRESS=""
 SKIP_CONNECT_CHECK=0
+WAN_MODE=0
+LAN_MODE=0
 EXTRA_ARGS=()
 
 # ── Parse Arguments ───────────────────────────────────────────────────────────
@@ -61,15 +63,19 @@ while [[ $# -gt 0 ]]; do
         --port)             PORT="$2"; shift ;;
         --threads)          EXTRA_ARGS+=("--threads" "$2"); shift ;;
         --skip-connect-check) SKIP_CONNECT_CHECK=1 ;;
+        --wan)              WAN_MODE=1 ;;
+        --lan)              LAN_MODE=1 ;;
         --help|-h)
             cat <<'EOF'
 vgre-start -- VGRE Cluster Launcher
 
 Usage:
   vgre-start --master                          Start master + dashboard
-  vgre-start --worker                          Start worker (LAN auto-discover)
+  vgre-start --worker                          Start worker (LAN UDP auto-discover)
+  vgre-start --worker --lan                    Same as --worker (ignore persisted WAN IP)
+  vgre-start --worker --wan                    Use persisted/kvdb public master address
   vgre-start --worker --master-ip <IP>         LAN: connect to specific master IP
-  vgre-start --worker --master-address <H:P>   WAN: hostname/IPv4/IPv6 + port
+  vgre-start --worker --master-address <H:P>   Explicit hostname/IPv4/IPv6 + port
   vgre-start --test                            Local self-test (master+worker)
 
 Options:
@@ -170,6 +176,16 @@ _ping_ok() {
     fi
 }
 
+# RFC1918 + loopback — used to prefer LAN paths over persisted public IPs.
+_is_private_ip() {
+    local ip="$1"
+    [[ "$ip" == "127.0.0.1" || "$ip" == "localhost" || "$ip" == "::1" ]] && return 0
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+    return 1
+}
+
 _resolve_discover_script() {
     local cand
     for cand in \
@@ -184,7 +200,6 @@ _resolve_discover_script() {
 # Cross-LAN: workers with the same token look up the master's public IP via kvdb.io.
 _try_cross_lan_master_discovery() {
     [[ -n "$MASTER_ADDRESS" || -n "$MASTER_IP" ]] && return 0
-    [[ -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]] && return 0
 
     local _discover
     _discover="$(_resolve_discover_script)" || return 0
@@ -200,12 +215,32 @@ _try_cross_lan_master_discovery() {
         return 0
     fi
 
-    echo "[INFO] Cross-LAN: no registered master yet."
-    echo "       On the Linux master run:  vgre-start --master"
-    echo "       (registers public IP automatically; same token required)"
-    echo "       Falling back to LAN UDP broadcast (same subnet only)..."
-    echo ""
-    return 0
+    echo "[INFO] Cross-LAN: no registered master in kvdb."
+    echo "       On the master run:  vgre-discover --register"
+    return 1
+}
+
+# Default worker mode is LAN-first: drop persisted public IPs (NAT hairpin breaks same-network).
+_apply_worker_address_mode() {
+    if [[ -n "$MASTER_ADDRESS" || -n "$MASTER_IP" ]]; then
+        return 0
+    fi
+
+    if [[ $WAN_MODE -eq 1 ]]; then
+        _try_cross_lan_master_discovery || true
+        return 0
+    fi
+
+    # --worker / --lan: ignore WAN address left in ~/.vgre/env by setup or kvdb.
+    if [[ -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]]; then
+        local _cfg_host="${VGRE_CLUSTER_MASTER_ADDRESS%%:*}"
+        if ! _is_private_ip "$_cfg_host"; then
+            echo "[INFO] LAN mode: ignoring persisted WAN address ($VGRE_CLUSTER_MASTER_ADDRESS)."
+            echo "       Same-network workers cannot reach a public IP via most routers."
+            echo "       Use  --wan  or  --master-address <HOST:PORT>  for cross-network."
+            unset VGRE_CLUSTER_MASTER_ADDRESS
+        fi
+    fi
 }
 
 # Fail fast when the master TCP port is unreachable (WAN / explicit address modes).
@@ -283,27 +318,30 @@ case "$MODE" in
         ;;
 
     worker)
-        _try_cross_lan_master_discovery
+        _apply_worker_address_mode
         if [[ -n "$MASTER_ADDRESS" ]]; then
-            # WAN / explicit hostname:port — handled by getaddrinfo in C++ engine
             export VGRE_CLUSTER_MASTER_ADDRESS="$MASTER_ADDRESS"
-            echo "Starting VGRE Worker → master at $MASTER_ADDRESS (WAN)"
+            if _is_private_ip "${MASTER_ADDRESS%%:*}"; then
+                echo "Starting VGRE Worker → master at $MASTER_ADDRESS (LAN)"
+            else
+                echo "Starting VGRE Worker → master at $MASTER_ADDRESS (WAN)"
+            fi
         elif [[ -n "$MASTER_IP" ]]; then
-            # Legacy LAN shorthand: only an IP was given, append port
             export VGRE_CLUSTER_NODES="$MASTER_IP:$PORT"
             export VGRE_CLUSTER_MASTER_ADDRESS="$MASTER_IP:$PORT"
-            # Verify the master IP is reachable before starting the worker.
             if command -v ping >/dev/null 2>&1; then
                 if ! _ping_ok "$MASTER_IP"; then
                     echo "[WARN] Master IP $MASTER_IP is not reachable (ping timed out)."
                     echo "       Check the IP address and firewall rules."
                 fi
             fi
-            echo "Starting VGRE Worker → master at $MASTER_IP:$PORT"
+            echo "Starting VGRE Worker → master at $MASTER_IP:$PORT (LAN)"
         elif [[ -n "${VGRE_CLUSTER_MASTER_ADDRESS:-}" ]]; then
-            echo "Starting VGRE Worker → master at $VGRE_CLUSTER_MASTER_ADDRESS (configured)"
+            echo "Starting VGRE Worker → master at $VGRE_CLUSTER_MASTER_ADDRESS (LAN, configured)"
         else
-            echo "Starting VGRE Worker (auto-discovering master on local subnet)..."
+            echo "Starting VGRE Worker (auto-discovering master on local subnet via UDP)..."
+            # UDP discovery requires no explicit master host in the worker process.
+            unset VGRE_CLUSTER_MASTER_ADDRESS
         fi
         echo "  Port:  $PORT"
         echo "  Token: $TOKEN_FILE"
