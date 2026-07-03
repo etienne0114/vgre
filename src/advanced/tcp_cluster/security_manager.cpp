@@ -132,6 +132,24 @@ void scrubAuthTokenFromEnvironment() {
 }
 } // namespace
 
+namespace {
+
+std::string defaultClusterTokenFilePath() {
+  const char* env = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+  if (env && env[0] != '\0') return std::string(env);
+#if defined(_WIN32)
+  const char* home = vgre_get_config("USERPROFILE");
+  if (!home || !home[0]) home = std::getenv("USERPROFILE");
+#else
+  const char* home = vgre_get_config("HOME");
+  if (!home || !home[0]) home = std::getenv("HOME");
+#endif
+  if (home && home[0] != '\0') return std::string(home) + "/.vgre/token";
+  return {};
+}
+
+} // namespace
+
 bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
   scrubAuthTokenFromEnvironment();
   {
@@ -145,17 +163,16 @@ bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
     token = env_token;
   }
   if (token.empty()) {
-    const char* env_token_file = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
-    if (env_token_file && env_token_file[0] != '\0') {
-      std::ifstream f(env_token_file);
+    const std::string tokenPath = defaultClusterTokenFilePath();
+    if (!tokenPath.empty()) {
+      std::ifstream f(tokenPath);
       if (f) {
         std::getline(f, token);
         token.erase(std::remove_if(token.begin(), token.end(),
                                    [](unsigned char c) { return std::isspace(c); }),
                      token.end());
-      } else {
-        VGRE_LOG_WARN("TCPCluster",
-            "Could not read auth token file: " + std::string(env_token_file));
+      } else if (vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE")) {
+        VGRE_LOG_WARN("TCPCluster", "Could not read auth token file: " + tokenPath);
       }
     }
   }
@@ -184,15 +201,22 @@ bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
     std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
     parent_->auth_token_str_ = std::move(token);
   }
+  const std::string fp = computeTokenHash(parent_->auth_token_str_);
+  VGRE_LOG_INFO("TCPCluster",
+      "Cluster auth token loaded (SHA256: " +
+      (fp.size() >= 16 ? fp.substr(0, 16) : fp) + "...)");
   return true;
 }
 
 VGREResult SecurityManager::enableSecurity(bool enabled) {
-  if (!loadAuthToken(enabled)) {
-    if (enabled) {
-      VGRE_LOG_ERROR("TCPCluster", "Cannot enable security: no auth token available");
-      return VGREResult::ERR_AUTH_FAILED;
-    }
+  if (enabled && !loadAuthToken(false)) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Cannot enable secure cluster: no auth token. Configure "
+        "VGRE_TCP_AUTH_TOKEN_FILE (e.g. ~/.vgre/token) on master and all workers.");
+    return VGREResult::ERR_AUTH_FAILED;
+  }
+  if (!enabled) {
+    loadAuthToken(false);
   }
   std::string token;
   { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
@@ -398,63 +422,98 @@ VGREResult SecurityManager::performClientHandshake() {
     return VGREResult::ERR_AUTH_FAILED;
   }
 
-  // Secure mode: receive master's SECURE_HANDSHAKE (master always speaks first).
+  // Secure mode: read the first VSBP frame from master. Supports TCP-level
+  // auto-negotiation when UDP mode and TCP mode disagree (legacy pings, toggle races).
   std::vector<uint8_t> rx;
-  const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
-  rx.reserve(expected);
+  rx.reserve(sizeof(VSBPHeader) + sizeof(SecureHandshakePacket));
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(HANDSHAKE_TIMEOUT_SEC);
 
-  while (rx.size() < expected) {
-    if (std::chrono::steady_clock::now() > deadline) {
-      VGRE_LOG_WARN("TCPCluster",
-          "Worker: timed out waiting for SECURE_HANDSHAKE from master");
-      return VGREResult::ERR_TIMEOUT;
-    }
-    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now()).count());
-    VGREResult wr = parent_->waitForData(fd, remaining_ms);
-    if (wr == VGREResult::ERR_TIMEOUT) continue;
-    if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
+  auto recvMore = [&](size_t want) -> VGREResult {
+    while (rx.size() < want) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        VGRE_LOG_WARN("TCPCluster",
+            "Worker: timed out waiting for master security handshake");
+        return VGREResult::ERR_TIMEOUT;
+      }
+      int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - std::chrono::steady_clock::now()).count());
+      VGREResult wr = parent_->waitForData(fd, remaining_ms);
+      if (wr == VGREResult::ERR_TIMEOUT) continue;
+      if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
 
-    uint8_t buf[256];
-    size_t toRead = std::min(sizeof(buf), expected - rx.size());
-    int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
-    if (n > 0) { rx.insert(rx.end(), buf, buf + n); }
-    else if (n == 0) { return VGREResult::ERR_IO; }
-    else { if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) continue; return VGREResult::ERR_IO; }
+      uint8_t buf[256];
+      size_t toRead = std::min(sizeof(buf), want - rx.size());
+      int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
+      if (n > 0) { rx.insert(rx.end(), buf, buf + n); }
+      else if (n == 0) { return VGREResult::ERR_IO; }
+      else {
+        if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) continue;
+        return VGREResult::ERR_IO;
+      }
+    }
+    return VGREResult::SUCCESS;
+  };
+
+  if (recvMore(sizeof(VSBPHeader)) != VGREResult::SUCCESS) return VGREResult::ERR_IO;
+
+  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
+  if (phdr->magic != VSBP_MAGIC) return VGREResult::ERR_IO;
+
+  const size_t frameLen = sizeof(VSBPHeader) + phdr->payloadSize;
+  if (recvMore(frameLen) != VGREResult::SUCCESS) return VGREResult::ERR_IO;
+
+  if (phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
+    // Master sent a non-handshake packet first → plaintext TCP despite UDP :SECURE.
+    parent_->security_enabled_.store(false, std::memory_order_release);
+    parent_->client_secure_channel_.reset();
+    parent_->client_security_established_ = false;
+    parent_->is_authenticating_ = false;
+    parent_->client_rx_buffer_.insert(parent_->client_rx_buffer_.end(), rx.begin(), rx.end());
+    VGRE_LOG_WARN("TCPCluster",
+        "Worker: master TCP is plaintext (first packet: " +
+        PacketUtils::packetTypeToString(static_cast<PacketType>(phdr->type)) +
+        ") — continuing without secure handshake");
+    return VGREResult::SUCCESS;
   }
 
-  if (rx.size() < sizeof(VSBPHeader)) return VGREResult::ERR_IO;
-  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (phdr->magic != VSBP_MAGIC ||
-      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
+  if (frameLen < sizeof(VSBPHeader) + sizeof(SecureHandshakePacket)) return VGREResult::ERR_IO;
+
+  SecureHandshakePacket masterHs{};
+  memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
+
+  uint8_t expectedKV[crypto::kSHA256DigestLen];
+  computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", masterHs.nonce, expectedKV);
+  if (!crypto::secure_compare(masterHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) {
+    const std::string fp = computeTokenHash(token);
     VGRE_LOG_ERROR("TCPCluster",
-        "Worker: expected SECURE_HANDSHAKE, got " +
-        PacketUtils::packetTypeToString(static_cast<PacketType>(phdr->type)) +
-        " (check master 'Secure cluster channel' setting matches worker)");
+        "Worker: secure handshake auth failed — token mismatch with master "
+        "(worker SHA256: " + (fp.size() >= 16 ? fp.substr(0, 16) : fp) +
+        "...). Ensure the same ~/.vgre/token is on all nodes.");
     return VGREResult::ERR_AUTH_FAILED;
   }
-  
-  SecureHandshakePacket masterHs{}; if (rx.size() < expected) return VGREResult::ERR_IO;
-  memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
-  
-  // Verify master
-  uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", masterHs.nonce, expectedKV);
-  if (!crypto::secure_compare(masterHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) { return VGREResult::ERR_AUTH_FAILED; }
   parent_->is_authenticating_ = true;
-  
-  // Send ACK
-  SecureHandshakePacket ack{}; SecureChannel::generateNonce(ack.nonce);
+
+  SecureHandshakePacket ack{};
+  SecureChannel::generateNonce(ack.nonce);
   computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", ack.nonce, ack.key_verification);
-  if (parent_->send_packet_direct(fd, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), parent_->client_secure_channel_.get()) != VGREResult::SUCCESS) {
-    parent_->is_authenticating_ = false; return VGREResult::ERR_IO;
+  if (parent_->send_packet_direct(fd, PacketType::SECURE_HANDSHAKE_ACK, &ack,
+                                  sizeof(SecureHandshakePacket),
+                                  parent_->client_secure_channel_.get()) != VGREResult::SUCCESS) {
+    parent_->is_authenticating_ = false;
+    return VGREResult::ERR_IO;
   }
-  
-  // Create secure channel
+
   parent_->client_secure_channel_ = std::make_unique<SecureChannel>();
-  VGREResult r = parent_->client_secure_channel_->initializeFromSecret(token, masterHs.nonce, ack.nonce);
-  if (r != VGREResult::SUCCESS) { parent_->is_authenticating_ = false; return r; }
-  parent_->client_security_established_ = true; parent_->is_authenticating_ = false; return VGREResult::SUCCESS;
+  VGREResult r = parent_->client_secure_channel_->initializeFromSecret(
+      token, masterHs.nonce, ack.nonce);
+  if (r != VGREResult::SUCCESS) {
+    parent_->is_authenticating_ = false;
+    return r;
+  }
+  parent_->client_security_established_ = true;
+  parent_->is_authenticating_ = false;
+  VGRE_LOG_INFO("TCPCluster", "Worker: secure cluster channel established");
+  return VGREResult::SUCCESS;
 }
 
 VGREResult SecurityManager::performPeerClientHandshake(std::shared_ptr<TCPClusterManager::ClientConnection> peer) {
