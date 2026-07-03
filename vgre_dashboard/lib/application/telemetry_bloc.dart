@@ -215,6 +215,28 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
     on<ToggleClusterSecurity>((event, emit) {
       if (!_clusterSecuritySupported) return;
+      // Drive the real backend: vgre_cluster_set_security enables/disables the
+      // per-connection secure channel (HMAC handshake + AEAD). Returns 0 on
+      // success. Reflect the request optimistically; the next telemetry poll
+      // overwrites clusterSecurityActive from the actual securityInfo.
+      final rc = bridge.clusterSetSecurity(event.enabled);
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry.copyWith(clusterSecurityActive: event.enabled),
+            history: s.history,
+            deviceName: s.deviceName,
+            backendVersion: s.backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: s.selectedKernelName,
+            lastUpdated: s.lastUpdated,
+          ),
+        );
+      }
+      if (rc != 0) {
+        debugPrint('vgre_cluster_set_security(${event.enabled}) failed: rc=$rc');
+      }
     });
 
     on<ResetCredits>((event, emit) {
@@ -432,6 +454,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             platform: (m['platform'] ?? '') as String,
             arch: (m['arch'] ?? '') as String,
             hostname: (m['hostname'] ?? '') as String,
+            inFlightKernels: (m['inFlightKernels'] ?? 0) as int,
+            kernelsCompleted: (m['kernelsCompleted'] ?? 0) as int,
             totalCredits: (cred['totalCredits'] ?? 0.0) as double,
             totalDebits: (cred['totalDebits'] ?? 0.0) as double,
             balance: (cred['balance'] ?? 0.0) as double,

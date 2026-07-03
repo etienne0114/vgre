@@ -748,6 +748,8 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
     snprintf(nodes[i].platform_name, sizeof(nodes[i].platform_name), "%s", conn.platform_name);
     snprintf(nodes[i].arch_name, sizeof(nodes[i].arch_name), "%s", conn.arch_name);
     snprintf(nodes[i].hostname, sizeof(nodes[i].hostname), "%s", conn.node_hostname);
+    nodes[i].in_flight_kernels = conn.in_flight_kernels;
+    nodes[i].kernels_completed = conn.kernels_completed;
 
     to_sync.push_back(nodes[i]);
   }

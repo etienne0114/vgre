@@ -113,6 +113,10 @@ final class VgreClusterNode extends Struct {
   external Array<Uint8> archName;
   @Array(64)
   external Array<Uint8> hostname;
+  @Uint32()
+  external int inFlightKernels;
+  @Uint64()
+  external int kernelsCompleted;
 }
 
 final class VgreSecurityInfo extends Struct {
@@ -536,6 +540,8 @@ class VgreBridge {
           'platform': utf8.decode(readField(node.platformName, 32)),
           'arch': utf8.decode(readField(node.archName, 16)),
           'hostname': utf8.decode(readField(node.hostname, 64)),
+          'inFlightKernels': node.inFlightKernels,
+          'kernelsCompleted': node.kernelsCompleted,
         });
       }
       return nodes;

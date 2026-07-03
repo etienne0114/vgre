@@ -82,6 +82,8 @@ typedef struct {
   char platform_name[32];   /* node OS: "Linux"/"macOS"/"Windows" ("" if unknown) */
   char arch_name[16];       /* node CPU arch: "x86_64"/"arm64" */
   char hostname[64];        /* node hostname */
+  uint32_t in_flight_kernels; /* kernels dispatched to this node, not yet returned */
+  uint64_t kernels_completed; /* cumulative kernels this node has executed (proof of use) */
 } vgre_cluster_node_t;
 
 #pragma pack(push, 8)

@@ -28,6 +28,8 @@ void TCPClusterManager::syncToIPC() {
           strncpy(node.platform_name, c->platform_name, sizeof(node.platform_name) - 1);
           strncpy(node.arch_name, c->arch_name, sizeof(node.arch_name) - 1);
           strncpy(node.hostname, c->node_hostname, sizeof(node.hostname) - 1);
+          node.in_flight_kernels = c->in_flight_kernels.load();
+          node.kernels_completed = c->kernels_completed.load();
           ipcNodes.push_back(node);
       }
   }
