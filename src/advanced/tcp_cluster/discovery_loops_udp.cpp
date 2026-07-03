@@ -24,6 +24,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "vgre/common/os_backend.h"
 #if !defined(_WIN32)
@@ -70,6 +71,18 @@ vgre::common::vgre_socket_t connectToMaster(const std::string& ip, int port) {
     }
     freeaddrinfo(res);
     return sock;
+}
+
+// True for RFC1918 / loopback IPv4 literals (used to prefer LAN sender over WAN adv).
+bool isPrivateOrLoopbackIp(const std::string& ip) {
+    if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost") return true;
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
+    if (a == 10) return true;
+    if (a == 172 && b >= 16 && b <= 31) return true;
+    if (a == 192 && b == 168) return true;
+    if (a == 127) return true;
+    return false;
 }
 
 // Parse the sender address from a recvfrom result into a printable string.
@@ -180,21 +193,20 @@ void DiscoveryManager::udpDiscoveryLoop() {
                 }
             }
 
-            // Prefer the master's self-advertised address (public IP/hostname)
-            // over the UDP sender address for NAT/WAN scenarios.
-            std::string masterIp = advertisedAddr.empty() ? senderIp : advertisedAddr;
-            // Strip port from adv_addr if it includes one (e.g. "1.2.3.4:7777")
+            // Prefer LAN sender when master advertises a public IP but we heard
+            // the ping on the local subnet (NAT hairpin usually blocks public IP).
+            std::string advHost;
             if (!advertisedAddr.empty()) {
+                advHost = advertisedAddr;
                 size_t colon = advertisedAddr.rfind(':');
                 if (colon != std::string::npos) {
-                    masterIp = advertisedAddr.substr(0, colon);
+                    advHost = advertisedAddr.substr(0, colon);
                     try { masterTcpPort = std::stoi(advertisedAddr.substr(colon + 1)); }
                     catch (...) {}
                 }
             }
 
             // Verify HMAC when an auth token is configured.
-            // The HMAC covers the message prefix UP TO (not including) the HMAC field.
             std::string token;
             {
                 std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_);
@@ -206,8 +218,6 @@ void DiscoveryManager::udpDiscoveryLoop() {
                         "UDP master ping from " + senderIp + " has no HMAC — ignoring");
                     continue;
                 }
-                // Rebuild the signed prefix (everything before the HMAC field).
-                // Drop the last colon-separated token (the HMAC) to reconstruct it.
                 std::string prefix = msg.substr(0, msg.size() - hmacField.size() - 1);
                 if (!CryptoUtils::verifyHmacHex(token, prefix, hmacField)) {
                     VGRE_LOG_WARN("TCPCluster",
@@ -216,13 +226,33 @@ void DiscoveryManager::udpDiscoveryLoop() {
                 }
             }
 
+            std::vector<std::string> connectCandidates;
+            if (advHost.empty()) {
+                connectCandidates.push_back(senderIp);
+            } else if (isPrivateOrLoopbackIp(senderIp)) {
+                connectCandidates.push_back(senderIp);
+                if (advHost != senderIp) connectCandidates.push_back(advHost);
+            } else {
+                connectCandidates.push_back(advHost);
+                if (advHost != senderIp) connectCandidates.push_back(senderIp);
+            }
+
+            std::string masterIp;
+            vgre::common::vgre_socket_t sock = vgre::common::VGRE_INVALID_SOCKET;
+            for (const auto& candidate : connectCandidates) {
+                masterIp = candidate;
+                sock = connectToMaster(candidate, masterTcpPort);
+                if (sock != vgre::common::VGRE_INVALID_SOCKET) break;
+            }
+
+            const bool usedAdvertised =
+                !advHost.empty() && masterIp == advHost && masterIp != senderIp;
+
             VGRE_LOG_INFO("TCPCluster",
                 "Worker: discovered master at " + masterIp + ":" +
                 std::to_string(masterTcpPort) +
-                (advertisedAddr.empty() ? " (LAN)" : " (advertised/WAN)"));
+                (usedAdvertised ? " (advertised/WAN)" : " (LAN)"));
 
-            // ── Attempt TCP connect ────────────────────────────────────────────
-            vgre::common::vgre_socket_t sock = connectToMaster(masterIp, masterTcpPort);
             if (sock == vgre::common::VGRE_INVALID_SOCKET) {
                 VGRE_LOG_WARN("TCPCluster",
                     "Worker: TCP connect to master at " + masterIp + ":" +

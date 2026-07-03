@@ -90,6 +90,15 @@ _resolve_bucket_for_lookup() {
     _token_bucket_id
 }
 
+_is_private_ip() {
+    local ip="$1"
+    [[ "$ip" == "127.0.0.1" || "$ip" == "localhost" || "$ip" == "::1" ]] && return 0
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+    return 1
+}
+
 _persist_master_address() {
     local addr="$1"
     local env_file="${VGRE_DIR}/env"
@@ -383,7 +392,10 @@ cmd_find() {
     local ip
     ip=$(echo "$addr" | cut -d: -f1)
     echo "${ip}" > "$PUBLIC_IP_FILE"
-    _persist_master_address "$addr"
+    # Persist only LAN addresses; public IPs break same-network workers via NAT hairpin.
+    if _is_private_ip "$ip"; then
+        _persist_master_address "$addr"
+    fi
     export VGRE_CLUSTER_MASTER_ADDRESS="$addr"
     echo "VGRE_CLUSTER_MASTER_ADDRESS=$addr"
 }

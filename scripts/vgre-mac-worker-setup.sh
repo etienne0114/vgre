@@ -19,6 +19,15 @@ ENV_FILE="${VGRE_DIR}/env"
 MASTER_ADDR="${1:-}"
 PORT="${VGRE_PORT:-7777}"
 
+_is_private_ip() {
+    local ip="$1"
+    [[ "$ip" == "127.0.0.1" || "$ip" == "localhost" || "$ip" == "::1" ]] && return 0
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+    return 1
+}
+
 _upsert_env() {
     local key="$1" val="$2"
     mkdir -p "$VGRE_DIR"
@@ -79,7 +88,12 @@ _upsert_env VGRE_PORT "$PORT"
 _upsert_env VGRE_CLUSTER_CONNECT_TIMEOUT_SEC "${VGRE_CLUSTER_CONNECT_TIMEOUT_SEC:-30}"
 _upsert_env VGRE_INSTALL_DIR "${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}"
 _upsert_env VGRE_TCP_AUTH_TOKEN_FILE "${VGRE_TCP_AUTH_TOKEN_FILE:-$VGRE_DIR/token}"
-_upsert_env VGRE_CLUSTER_MASTER_ADDRESS "$MASTER_ADDR"
+if _is_private_ip "${MASTER_ADDR%%:*}"; then
+    _upsert_env VGRE_CLUSTER_MASTER_ADDRESS "$MASTER_ADDR"
+else
+    echo "[INFO] WAN address not saved to ~/.vgre/env (default worker mode is LAN)."
+    echo "       Use: vgre-start --worker --wan --master-address $MASTER_ADDR"
+fi
 echo "[OK] Updated $ENV_FILE"
 
 # shellcheck disable=SC1090
