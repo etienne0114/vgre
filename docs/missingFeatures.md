@@ -1,170 +1,133 @@
-# VGRE — Remaining Work
+# VGRE — Remaining Work & Advanced Roadmap
 
-**Last Updated**: 2026-06-22
+**Last Updated**: 2026-07-18
 
-This document tracks **only what is not yet done**. Everything implementable to the project's
-"real, no-stub" standard *without external hardware/accounts* has been delivered, tested, and
-**removed from this file** — see git history / commit messages for the full set. That delivered set
-now includes, in addition to the earlier enterprise/security/ops stack, the **complete in-tree
-large-model programme**:
+This file tracks **what is not yet done** and the **new competitive frontier** we are
+building toward. Everything implementable to the project's *real, no-stub* standard
+**without external hardware/accounts has already been delivered, tested, and removed from
+this file** (see git history for the full set). The delivered baseline now includes the
+complete in-tree large-model programme — bf16/fp16 + int4/int8 storage, mmap safetensors /
+GGUF (Q4_0/Q4_1/Q8_0/Q4_K/Q6_K) + GPTQ/AWQ, BLAS-backed GEMM (82×) with dequant-in-GEMM,
+autoregressive generation + samplers, a byte-level BPE tokenizer matching HF token-for-token
+(incl. unified `tokenizer.json`), tensor/pipeline parallelism + GSPMD auto-partitioner over
+real RDMA/TCP sockets, CUDA-C→JIT with the full device-intrinsic surface, a CUDA-GDB RSP
+debugger, LoRA fine-tuning, an HNSW vector index (local RAG), the lightweight LLVM-free
+`libvgre_nn` with a real from-scratch TCP all-reduce, and a hardened C-ABI error channel.
+Verified end-to-end on **real GPT-2 (124M)** matching Hugging Face, and on **real multi-process
+distributed training** (data-, tensor-, pipeline-parallel). **Suite: 300/300.**
 
-> bf16/fp16 + int4/int8 weight storage; memory-mapped **safetensors** and **GGUF** loaders;
-> **GGUF Q4_0/Q4_1/Q8_0/Q4_K/Q6_K**, **GPTQ/AWQ** dequant; **BLAS-backed GEMM (82×)** +
-> **dequant-inside-the-GEMM**; autoregressive **generation + samplers**; a from-scratch
-> **byte-level BPE tokenizer** that reproduces the GPT-2 tokenizer exactly; **tensor/pipeline
-> parallelism**, a **GSPMD auto-partitioner**, and collectives **over real RDMA sockets**.
-> Verified end-to-end on **real GPT-2 (124M)** — f32 / bf16 / int8 / int4 — matching Hugging Face
-> token-for-token. (280/280 tests.)
-
-What is left falls into two buckets, both **external**: hardware / accounts / auditors / content
-(§1), and the two large-model items that need a real cluster or a gated multi-GB download (§2).
-
-A **2026-06-22 deep audit of the CUDA-C JIT execution path** found one previously-undocumented
-**in-tree** gap — the device-side intrinsic surface — now closed (§0). It is recorded here for
-provenance even though the work is complete.
-
----
-
-## 0. Device-side CUDA intrinsics in the JIT path — FOUND & FIXED (2026-06-22)
-
-**What was found.** VGRE JIT-compiles a CUDA-C kernel by emitting
-`#include "vgre/compiler/cpu_cuda_env.h"` ahead of the user source and compiling it as host C++
-(`src/compiler/llvm_translation_engine.cpp:1300`). That environment header only declared four
-atomics (`atomicAdd/Sub/Exch/CAS`) and a handful of helpers. A large slice of the **standard
-device-intrinsic surface that real CUDA / ML / DL kernels depend on was missing**, so any kernel
-using it compiled during AST analysis (the analysis stub forward-declared *some* of them) but then
-**failed JIT compilation** with `use of undeclared identifier`. Confirmed empirically by compiling
-probe kernels against the header. Missing set:
-
-| Group | Missing intrinsics (now added) |
-|-------|--------------------------------|
-| Atomics | `atomicMax`, `atomicMin`, `atomicAnd`, `atomicOr`, `atomicXor`, `atomicInc`, `atomicDec` (CUDA wrap-around semantics) |
-| Read-only / fences | `__ldg`, `__threadfence`, `__threadfence_block`, `__threadfence_system` |
-| Block vote | `__syncthreads_count`, `__syncthreads_and`, `__syncthreads_or` (needed new runtime barrier-reduce) |
-| Warp reduce | `__reduce_{add,min,max,and,or,xor}_sync` (sm_80+) |
-| Bit reinterpret | `__int_as_float`, `__float_as_int`, `__uint_as_float`, `__float_as_uint`, `__double_as_longlong`, `__longlong_as_double`, `__double2hiint/loint`, `__hiloint2double` |
-| Integer | `__mul24`, `__umul24`, `__mulhi`, `__umulhi`, `__mul64hi`, `__umul64hi`, `__sad`, `__usad`, `__byte_perm` |
-| Rounded arith | `__fmaf_rn/rz/ru/rd`, `__fadd_rz/ru/rd`, `__fmul_*`, `__frcp_rn`, `__fdiv_rn`, `__fsqrt_rn`, `__frsqrt_rn`, and the `__d*_rn` double forms |
-| Fast math | `__expf`, `__exp2f`, `__exp10f`, `__logf`, `__log2f`, `__log10f`, `__sinf`, `__cosf`, `__tanf`, `__powf`, `__sincosf` |
-| CUDA-named math | `rsqrtf`, `rsqrt`, `rcbrtf`, `norm3df`, `rnorm3df`, `norm4df`, `rnorm4df`, `normf`, `rnormf`, `rhypotf`, `sinpif`, `cospif`, `sincospif` |
-| Built-in vector types | `float1..4`, `double1..4`, `int1..4`, `uint1..4`, `char/uchar/short/ushort/long/ulong N`, `longlong/ulonglong N` + all `make_*` |
-| Misc | `__saturatef`, `__nanosleep`, `__trap` |
-
-**How it was fixed.**
-- New header `include/vgre/compiler/cpu_cuda_intrinsics.h` providing exact CPU implementations of
-  every intrinsic above plus the built-in vector types; included from `cpu_cuda_env.h`. Fast-math
-  names that collide with glibc's (declared-but-unlinkable) internal libm symbols are aliased to the
-  public libm function via guarded function-like macros, so they resolve on glibc, musl, macOS and
-  Windows alike.
-- Atomics (`Max/Min/And/Or/Xor/Inc/Dec`) added to `cpu_cuda_env.h` with correct CUDA semantics
-  (CAS loops; `Inc/Dec` wrap-around).
-- `__syncthreads_count/_and/_or` required true block-wide reduction: added
-  `BlockBarrier::arrive_and_reduce` + `vgre_jit_block_barrier_reduce` runtime hook
-  (`gpu_thread_context.{h,cpp}`), registered as a JIT symbol.
-- `__reduce_*_sync` built as a butterfly over the existing `__shfl_xor_sync`.
-- The AST-analysis stub (`clang_kernel_parser.cpp`) was extended with matching declarations + vector
-  types so the analysis pass and the JIT pass agree.
-- Verified by `tests/integration/test_device_intrinsics.cpp` (atomics, `__ldg`, fences, block-vote,
-  vector-typed `float4` vectorized load, warp reduce) executed end-to-end through the JIT.
-
-**Status: complete.** No remaining device-intrinsic gap is known in the JIT path.
-
-### 0.1 Correctness/robustness bugs found & fixed in the same audit (2026-06-22)
-
-- **AST-stub missing `sharedMem`** — the Clang AST-analysis stub never declared the
-  `sharedMem` pseudo-variable, so any kernel using dynamic shared memory failed AST analysis on
-  a *cold* cache (`use of undeclared identifier 'sharedMem'`). It only appeared green because CI
-  ran with warm KernelIR caches. Declared `extern void* sharedMem;` in the stub.
-- **Warp-buffer under-detection** — the per-block warp exchange buffer was only allocated when the
-  source textually contained `__shfl*`; `__any_sync`/`__all_sync`/`__reduce_*_sync` route through
-  shuffle/ballot internally and silently fell back to a thread's own value. Broadened the scan in
-  both parser paths.
-- **AST temp-file race** — `runClangAstDump` wrote every kernel to a single fixed temp path
-  (`/tmp/vgre_kernel_tmp.cu`); concurrent AST analyses (separate processes/threads) clobbered each
-  other, so clang read a half-written file and aborted. This surfaced as flaky
-  `ClangParser/ClangEnhanced/KernelParserEnhanced` failures under `ctest -j`. Now keyed on
-  pid + source-hash + atomic counter, matching the already-unique JIT codegen temp names.
-  Full suite verified **281/281 green at `ctest -j6` with a fresh cache.**
+The remaining work is now in **three** buckets:
+1. **§1 — New advanced feature roadmap (2026 frontier).** The competitive edge: what makes
+   VGRE *intelligent, modern, and hard to beat* — all buildable in-tree, from scratch,
+   dependency-free, to the same real-no-stub standard.
+2. **§2 — Externally-blocked tracks** (hardware / accounts / auditors / gated downloads).
+3. **§3 — Physical large-model runs** (a real cluster or a license-gated multi-GB download).
 
 ---
 
-## 1. Externally-blocked tracks (need hardware, an account, an auditor, or content)
+## 1. New advanced feature roadmap — the 2026 competitive frontier
+
+These are **not yet in-tree** (audited 2026-07-18: no BitNet/ternary, MoE, Mamba/SSM,
+speculative decoding, MXFP4, or QLoRA anywhere in `src/`, `include/`, `bindings/`). Each is
+chosen to advance the core mission — **run and train large models on CPUs and clusters, with
+no GPU, staying lightweight** — and each is built **from scratch** (no new third-party
+dependency), extending code paths that already exist. Detailed build steps live in
+`implementationPlan.md`; success criteria are at the bottom of that file.
+
+### 1.1 — Ternary / 1-bit inference (BitNet b1.58) — **P0, highest-impact lightweight win**
+
+Modern 1.58-bit LLMs constrain every weight to a ternary value {−1, 0, +1}. This turns the
+dominant matmul into a **multiplication-free** accumulate (add/sub only), which is exactly
+where a CPU is *not* disadvantaged versus a GPU. Microsoft's `bitnet.cpp` reports **2.37×–6.17×
+CPU speedups on x86 and up to 82% lower energy**, and runs a **100B-parameter model on a single
+CPU** at reading speed — the strongest possible statement of "eliminate the GPU barrier."
+
+**In-tree, from scratch:**
+- A ternary weight codec (2-bit packed {−1,0,+1}, per-group fp scale) as a new `Literal`
+  storage kind next to the existing bf16/int4/int8 codecs.
+- A **multiplication-free ternary GEMM** micro-kernel (add/sub accumulate, AVX2/AVX-512 +
+  scalar fallback) beside `intree_gemm_f32.cpp`, plus a **T-MAC-style lookup-table** variant
+  (precomputed activation partial sums indexed by packed ternary bytes) for sub-2-bit throughput.
+- A `BitLinear` layer in the in-tree autograd/model stack, and a GGUF loader path for the
+  `I2_S` / TL1 / TL2 ternary tensor types so real BitNet checkpoints load directly.
+
+### 1.2 — Mixture-of-Experts (MoE) with expert-parallel over the cluster — **P1**
+
+Frontier open models (Mixtral, DeepSeek-V3, Qwen-MoE) are sparse: only a few experts fire per
+token, so the *active* compute is small even when the model is huge — ideal for CPU clusters.
+
+**In-tree, from scratch:** a top-k **router/gate**, sparse expert dispatch/combine, an `MoELayer`
+in the autograd stack, and **expert-parallel** sharding that places experts on different cluster
+nodes and routes tokens over the **already-built** all-reduce / all-to-all collectives. This is
+the piece that lets a cluster of ordinary machines serve a frontier-scale MoE.
+
+### 1.3 — Speculative decoding — **P1, 2–10× faster CPU generation**
+
+Draft several tokens cheaply, then verify them in one batched forward of the full model,
+accepting the longest correct prefix. Reported **2×–10× decode latency reduction** with
+identical output distribution.
+
+**In-tree, from scratch:** self-speculative / n-gram / small-draft-model drafting + **tree
+attention verification** wired into `generation.cpp` and `KVCacheManager` (paged KV already
+exists). Lossless: output is provably identical to greedy/sampled decode.
+
+### 1.4 — State-space models (Mamba-2 / Mamba-3) — **P2, linear-time long context**
+
+SSMs run in **linear** time and **constant** memory per step (no growing KV cache), which is a
+decisive CPU advantage at long context. Mamba-3 (2026) adds a MIMO recurrence that maps cleanly
+onto matrix-matrix kernels we already have.
+
+**In-tree, from scratch:** a **parallel selective-scan** (associative prefix-scan, threaded +
+SIMD) op in the autograd engine with its reverse-mode backward, an SSM/Mamba block in the model
+stack, and a GGUF/safetensors loader path for Mamba checkpoints — extending the engine beyond
+transformers.
+
+### 1.5 — MXFP4 microscaling 4-bit (OCP) — **P2**
+
+The Open Compute microscaling FP4 format (shared 8-bit block scale + 4-bit elements) is becoming
+the interop standard for 4-bit weights *and* activations.
+
+**In-tree, from scratch:** an MXFP4 block codec + dequant-in-GEMM path alongside the existing
+int4/GPTQ/AWQ codecs, so MXFP4 checkpoints load and run without a separate upcast pass.
+
+### 1.6 — QLoRA (quantized-base fine-tuning) — **P3**
+
+Combine the existing **LoRA** adapters with the existing **int4/ternary** quantized base so a
+large model can be **fine-tuned on a laptop**: frozen quantized base + trainable fp adapters,
+de-quant only in the forward matmul. Extends `LoRALinear` + the quant codecs already in-tree.
+
+---
+
+## 2. Externally-blocked tracks (need hardware, an account, an auditor, or content)
 
 The in-tree primitives already exist where applicable; only the externally-gated piece remains.
 
 | § | Track | What's left | Blocker |
 |---|-------|-------------|---------|
-| 1.1 | GPU security framework | SEV-SNP/TDX enclaves, HSM, FIPS-140 cert | confidential-computing **hardware** + an external **auditor** |
-| 1.2 | Cryptography | homomorphic / threshold crypto, Intel QAT offload | research-grade scope / crypto-accelerator **hardware** |
-| 3.1 | Windows deployment | DirectML backend, AD/Kerberos auth, Windows containers, PowerShell module | Windows-specific **APIs/SDKs** (engine already builds+tests on windows-2022) |
-| 3.2 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware — the **CPU JIT path is build-verified** on macOS (July 2026); MPS offload is a separate future track |
-| 4.2 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | needs upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path already runs JAX/TF/PyTorch) |
-| 4.3 | Model serving | TensorRT-LLM / vLLM *compatibility layers*, A/B-canary rollout | those external **runtimes** / a live **fleet** (PagedAttention, continuous batching, generation are built) |
-| 5.3 | Multi-cloud | apply to live AWS/Azure/GCP, cross-cloud networking | cloud **accounts + credentials** (Terraform module is built + validated) |
-| 6.1 | Developer tools | ~~CUDA-GDB-compatible debug stepping~~ **DONE 2026-07-02** | Built in-tree: `src/debug/ptx_interpreter.cpp` (PTX single-step interpreter: per-thread register files + PC, bar.sync-aware lane scheduling, real global/shared/param memory, instruction breakpoints) + `src/debug/gdb_rsp_server.cpp` (stock GDB remote-serial-protocol stub: tdesc with the kernel's own PTX registers, threads-as-lanes, Z0/s/c, memory R/W) + `tools/vgre_ptx_gdbserver` CLI. Verified with a **real unmodified gdb 15 client** end-to-end (break on a store, inspect `ptx_f4`/`rip`, watch memory flip across `stepi`, run to exit) — `DebugGdbClient` (skip-77 without gdb) + always-on `DebugPtxDebugger` (interpreter exactness incl. bar.sync tree reduction + raw RSP protocol with verified checksums). |
-| 6.2 | Documentation & training | enterprise runbooks, video/tutorial content | **content-team** work, not code |
-| 7.1 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
-| 7.2 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; hipBLAS/hipDNN library shims | those **SDKs / hardware** (AMD HIP core runtime — device mgmt, streams, events, memory, module load + JIT kernel launch — is built and tested end-to-end as of 2026-07-02; the ROC library shims above remain) |
-| 10.3 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
-
-**6.1 (CUDA-GDB) — the last purely-software item — was completed 2026-07-02** (see the table row).
-Everything else in this section needs hardware, an account, an auditor, or content.
+| 2.1 | GPU security framework | SEV-SNP/TDX enclaves, HSM, FIPS-140 cert | confidential-computing **hardware** + external **auditor** |
+| 2.2 | Cryptography | homomorphic / threshold crypto, Intel QAT offload | research-grade scope / crypto-accelerator **hardware** |
+| 2.3 | Windows deployment | DirectML backend, AD/Kerberos, Windows containers | Windows-specific **APIs/SDKs** (engine already builds+tests on windows-2022) |
+| 2.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (CPU JIT path is build-verified on macOS) |
+| 2.5 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path runs JAX/TF/PyTorch) |
+| 2.6 | Model serving | TensorRT-LLM / vLLM *compatibility layers* | those external **runtimes** / a live **fleet** |
+| 2.7 | Multi-cloud | apply to live AWS/Azure/GCP | cloud **accounts + credentials** (Terraform module is built) |
+| 2.8 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; ROCm library shims | those **SDKs / hardware** (AMD HIP core runtime is done) |
+| 2.9 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
+| 2.10 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
 
 ---
 
-## 2. Large models — what remains (external only)
+## 3. Physical large-model runs (external only)
 
-The in-tree engineering is complete (see the delivered list above; full milestone detail is in
-git history). The forward pass, all weight formats, throughput, generation, the tokenizer, and the
-distributed sharding/collectives are done and verified on a real pretrained model. Only two things
-remain, and both are **outside the code**:
+The in-tree engineering is complete and verified over real loopback sockets **and across real OS
+processes** (multi-step data-parallel with zero cross-step drift; cross-process tensor
+parallelism). Only two things remain, both outside the code:
 
 | Remaining | Why it isn't in-tree |
 |-----------|----------------------|
-| **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | The transport, NCCL-style + SoftwareRDMA collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are all built and verified over **real loopback sockets**. As of 2026-07-02 the libvgre_nn stack is additionally verified across **real OS processes** over the TCP collective: multi-step (8-iteration) data-parallel AdamW training with zero cross-step drift and trajectory-equivalence to a single-process full-batch run (`PythonNnDistributedMultistep`), and cross-process tensor parallelism — sharded-weight forward reconstruction, row-block gradient correctness, and a sharded SGD+momentum run reassembling the full-model trajectory (`PythonNnTensorParallel`). A true cross-machine run needs **actual networked machines**. |
-| **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | Identical code path to the GPT-2 run already demonstrated end-to-end — it just needs a **license-gated, multi-GB download** (Llama-3 is gated; 8B is 16 GB bf16 / ~4.5 GB int4). |
+| **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | Transport, collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are all built and verified across real OS processes; a true cross-machine run needs **actual networked machines**. |
+| **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | Identical code path to the demonstrated GPT-2 run — it just needs a **license-gated, multi-GB download**. |
 
-**Local-AI additions (2026-07-02, both in-tree, dependency-free, in libvgre_nn):**
-- **LoRA adapters** (`vgre.nn.LoRALinear`): frozen base + trainable low-rank A/B
-  over the C++ autograd — CPU/laptop fine-tuning with r·(in+out) trainable params;
-  merge-to-base, adapter save/load. Verified: analytic-gradient match vs NumPy,
-  frozen-base invariance, 30-step AdamW convergence, merge equivalence
-  (`PythonNnLoraVector`).
-- **HNSW vector index** (`vgre.vector.VectorIndex`, `src/xla/vector_index.cpp`):
-  from-scratch Malkov–Yashunin ANN graph (level sampling, beam search, pruning
-  heuristic), cosine + L2, binary save/load. Verified: recall@10 = 0.996/0.992 vs
-  brute force on 2000×64 (`XlaVectorIndex`). Together with the in-tree LM +
-  tokenizer this completes a fully local embed→index→retrieve→generate RAG stack.
-
-**HF `tokenizer.json` — DONE (2026-07-02).** `BpeTokenizer::loadHf` parses the unified
-single-file format shipped by every modern HF repo (byte-level BPE family: GPT-2/Whisper,
-Llama-3, Qwen2/3, Phi, DeepSeek, Mistral-NeMo): vocab, both merge encodings ("A B" strings and
-["A","B"] pairs), added/special tokens, and the pre-tokenizer — either ByteLevel's built-in GPT-2
-regex or the cl100k/Llama-3 Split-pattern family, executed **codepoint-exactly** against real UCD
-`\p{L}`/`\p{N}` range tables (`unicode_tables.inc`, generated by `tools/gen_unicode_tables.py`).
-Unsupported families (SentencePiece/Metaspace, Unigram) are **refused, not approximated**.
-Exposed as `vgre_bpe_load_hf` / `Tokenizer.load_hf()`. Verified **token-for-token against the
-real Hugging Face `tokenizers` library** on 30 reference cases (real GPT-2 + Qwen2.5-0.5B
-tokenizer files; contractions, CJK/Greek/Cyrillic, Arabic-Indic digits, emoji, CRLF/multi-newline,
-chat-template specials) — references checked in at `tests/data/hf_tokenizer_ref_*.json`,
-regenerable via `tools/gen_hf_tokenizer_reference.py` (`XlaTokenizerHf`, `PythonLmBindings` §6).
-The rewrite also made the two-file GPT-2 path regex-exact (the old byte-approximate splitter
-mis-grouped mid-text `\n\n` runs and non-ASCII digit/symbol boundaries; cross-checked equal to
-the tokenizer.json path on the same corpus).
-
-**Fused flash-attention — already done (stale entry removed 2026-07-02).** It exists at all
-three levels and is tested: the JIT-fused FA2 online-softmax kernel
-(`KernelFusionEngine::genFlashAttentionSource`, verified element-wise vs naive attention in
-`tests/integration/test_flash_attention.cpp`), the O(T)-memory autograd `flash_attention` with
-the FA2 recompute backward (`src/xla/autograd/autograd.cpp`, trained + generation-checked via
-`ModelConfig::flash_attention` in `test_model.cpp`), and the online-softmax
-`KVCacheManager::pagedAttention` inference path.
-
-**No optional in-tree polish items remain.** §6.1 (CUDA-GDB debug stepping) — previously the
-only purely-software track left — was completed 2026-07-02 (PTX single-step interpreter + GDB
-RSP stub + `vgre_ptx_gdbserver`, verified with a real gdb client). **Every remaining item in
-this file is blocked on something outside the code**: hardware, accounts, an auditor, gated
-downloads, or CI billing.
-
-Everything buildable in-tree to the real-no-stub standard is implemented and tested; the remaining
-items are environmental (a cluster, a gated download), not missing engine code.
+Once §1 lands, the same distributed machinery makes these runs *cheaper* on commodity CPUs:
+ternary + MoE + speculative decode shrink both the memory and the compute a physical cluster
+needs, which is the whole point.
