@@ -993,6 +993,13 @@ if(TARGET vgre_nn)
     target_link_libraries(test_cluster_collective PRIVATE vgre_nn Threads::Threads)
     add_test(NAME XlaClusterCollective COMMAND test_cluster_collective)
     set_tests_properties(XlaClusterCollective PROPERTIES TIMEOUT 30)
+
+    # Ternary / BitNet b1.58 multiplication-free GEMM (roadmap T1): kernel
+    # exactness vs the dense dequantized GEMM + quantization sanity.
+    add_executable(test_ternary_gemm xla/test_ternary_gemm.cpp)
+    target_link_libraries(test_ternary_gemm PRIVATE vgre_nn Threads::Threads)
+    add_test(NAME XlaTernaryGemm COMMAND test_ternary_gemm)
+    set_tests_properties(XlaTernaryGemm PROPERTIES TIMEOUT 30)
 endif()
 
 # Perf analytics: roofline model + flamegraph collapsed-stack.
