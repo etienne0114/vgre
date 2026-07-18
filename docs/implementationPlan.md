@@ -1,93 +1,148 @@
-# VGRE Implementation Plan — Remaining Work
+# VGRE Implementation Plan — Advanced Feature Roadmap (2026)
 
-**Last Updated**: 2026-06-22
+**Last Updated**: 2026-07-18
 
-The original Phase-4 enterprise roadmap (50 tracks) **and** the large-model programme (L1–L5) have
-been delivered down to their software-implementable core — every track buildable to the project's
-"real, no-stub" standard without external hardware/accounts is done, tested, and committed (see
-`missingFeatures.md` and git history for the full delivered set). This plan now contains **only the
-remaining work**: a short list of externally-blocked tracks, and the two large-model items that
-need a real cluster or a gated download.
+The original Phase-4 enterprise roadmap (50 tracks) **and** the large-model programme (L1–L5)
+are delivered to their software-implementable core — every track buildable to the *real,
+no-stub* standard without external hardware/accounts is done, tested, and committed (see git
+history and `missingFeatures.md`). This plan now describes the **next competitive frontier**:
+six new capabilities that make VGRE *intelligent, modern, and lightweight*, each built **from
+scratch, dependency-free**, extending code paths that already exist. Priority order follows the
+core mission — **run/train large models on CPUs + clusters with no GPU, staying lightweight.**
 
----
-
-## 0. Device-intrinsic completeness for the CUDA-C JIT path (2026-06-22) — DONE
-
-A deep audit of the CUDA-C → JIT execution path (the path the public `vgre_register_kernel` /
-`launchKernel` API and `test_cuda_on_cpu.py` exercise) found the device-side intrinsic surface in
-`cpu_cuda_env.h` was incomplete: standard atomics beyond `add/sub/exch/cas`, `__ldg`, memory
-fences, block-vote barriers, warp reductions, bit-reinterpret/integer/rounded/fast-math intrinsics,
-the CUDA-named math helpers (`rsqrtf`, `norm3df`, …) and **all built-in `floatN`/`intN`/… vector
-types** were absent. Kernels using them passed AST analysis but failed JIT compilation. This is the
-exact surface that "running arbitrary CUDA / ML / DL kernels" depends on.
-
-**Plan executed (single track, no external dependency):**
-
-1. Add `include/vgre/compiler/cpu_cuda_intrinsics.h` (vector types + all scalar/bit/integer/math
-   intrinsics) and include it from `cpu_cuda_env.h`. Resolve the glibc `__expf`-family symbol clash
-   with guarded function-like macros aliasing the public libm functions.
-2. Add the missing atomics (`Max/Min/And/Or/Xor/Inc/Dec`) with correct CUDA semantics to
-   `cpu_cuda_env.h`.
-3. Add a real block-wide reduction (`BlockBarrier::arrive_and_reduce` +
-   `vgre_jit_block_barrier_reduce`, registered as a JIT symbol) to back
-   `__syncthreads_count/_and/_or`; build `__reduce_*_sync` over `__shfl_xor_sync`.
-4. Mirror every new symbol + vector type into the AST-analysis stub so both passes agree.
-5. Add `tests/integration/test_device_intrinsics.cpp` running these through the JIT end-to-end.
-
-**Status: complete and tested.** See `missingFeatures.md` §0 for the full intrinsic list.
+Design rules (unchanged, non-negotiable):
+- **No stubs / mocks / heuristics / placeholders.** Every method is real and fully functioning.
+- **From scratch, in-tree.** No new third-party runtime dependency; ternary/MoE/SSM/spec-decode
+  kernels are our own SIMD C++.
+- **Verified numerically.** Each op ships with a test comparing against an independent reference
+  (NumPy / a known checkpoint), executed end-to-end.
+- **Lightweight by construction.** New kernels live in `libvgre_nn` (LLVM-free) where they belong
+  so the Python wheel stays small.
 
 ---
 
-## A. Externally-blocked tracks (not code we can write here)
+## Track T1 — Ternary / 1-bit inference (BitNet b1.58) · P0
 
-These need hardware, an account/credential, an auditor, or content work. The in-tree primitives
-already exist where applicable.
+**Why.** Ternary weights {−1,0,+1} make the core matmul multiplication-free (add/sub only),
+the single biggest lever for running huge models on a CPU (2.37×–6.17× x86 speedup, up to 82%
+less energy, 100B on one CPU in the literature). This is the strongest realization of the
+project's mission.
 
-| Track | Remaining | Blocker |
-|-------|-----------|---------|
-| Security framework | SEV-SNP/TDX, HSM, FIPS-140 cert | confidential-computing hardware + auditor |
-| Cryptography | homomorphic/threshold crypto, Intel QAT | research scope / crypto-accelerator hardware |
-| Windows deployment | DirectML, AD/Kerberos, containers, PowerShell | Windows APIs/SDKs (builds+tests on windows-2022) |
-| macOS / Apple Silicon | Metal Performance Shaders backend | Apple Silicon + Metal hardware (builds+tests on macos-arm64) |
-| ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs not in the wheels |
-| Model serving | TensorRT-LLM/vLLM compat layers, A/B-canary | external runtimes / live fleet |
-| Multi-cloud | apply to live AWS/Azure/GCP | cloud accounts + credentials |
-| Multi-vendor | Intel oneAPI (SYCL), Apple Metal | those SDKs/hardware (AMD HIP/ROCm done) |
-| Edge / CDN | physical edge nodes, CDN | external infrastructure |
-| Docs & training | enterprise runbooks, video content | content-team work |
-| Post-Blackwell (Rubin) | Rubin/HBM4 emulation | unreleased hardware, no public ISA |
-
-**One purely-software remaining track:** **CUDA-GDB-compatible debugging** — a GDB
-remote-serial-protocol server backed by a PTX/SASS single-step interpreter (the JIT currently
-compiles to native, so there is no per-instruction interpreter to step). A large self-contained
-build; a candidate for a dedicated future phase.
+**Steps.**
+1. **Ternary codec** (`src/xla/quant/ternary.{h,cpp}`): pack weights as 2-bit {−1,0,+1} with a
+   per-group fp16 scale; encode/decode + a `Literal` storage kind next to bf16/int4/int8.
+2. **Multiplication-free ternary GEMM** (`src/xla/gemm/ternary_gemm.cpp`): activation × ternary
+   accumulate using masked add/sub; AVX2/AVX-512 (`_mm256_sign_epi8`-style) + scalar fallback,
+   threaded via the existing pool. Add a **T-MAC-style LUT** kernel (precompute activation
+   partial sums per packed byte) for sub-2-bit throughput.
+3. **`BitLinear`** in the autograd/model stack (forward uses ternary-GEMM; training path keeps a
+   latent fp master weight with straight-through estimation for the quantizer).
+4. **Loader**: GGUF `I2_S` / TL1 / TL2 ternary tensor types → the ternary `Literal`, so real
+   BitNet-b1.58 checkpoints load directly.
+5. **Tests**: `XlaTernaryGemm` (ternary-GEMM == fp reference within scale tolerance);
+   `PythonBitLinear` (a BitLinear MLP trains + matches a NumPy STE reference); a real
+   BitNet-b1.58 GGUF forward matching the reference logits (skip-77 without the file).
 
 ---
 
-## B. Large models — remaining (external only)
+## Track T2 — Mixture-of-Experts + expert-parallel · P1
 
-The L1–L5 programme is **complete in-tree** (bf16/int4 storage, safetensors + GGUF + GPTQ/AWQ
-loaders, BLAS GEMM + dequant-in-GEMM, generation + samplers + GPT-2 tokenizer, tensor/pipeline
-parallelism + GSPMD + RDMA collectives) and verified end-to-end on **real GPT-2 (124M)** matching
-Hugging Face. The two remaining items are environmental:
+**Why.** Sparse models activate only a few experts per token, so the *active* compute stays small
+even at frontier scale — a natural fit for a cluster of ordinary CPUs, reusing our collectives.
 
-| Remaining | Blocker |
-|-----------|---------|
-| **Physical multi-node run** — Llama-3-70B tensor-parallel across N machines (175B/405B pipeline) | Transport, collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are built and verified over real loopback sockets; a cross-machine run needs **actual networked machines**. |
-| **Frontier-scale checkpoints** — Llama-3-8B/70B/405B, GPT-3 | The identical code path GPT-2 already runs end-to-end; it just needs a **license-gated, multi-GB download** (Llama-3 gated; 8B = 16 GB bf16 / ~4.5 GB int4). |
+**Steps.**
+1. **Router/gate** (`src/xla/model/moe.{h,cpp}`): top-k softmax gating with load-balancing aux
+   loss; differentiable in the autograd engine.
+2. **Sparse dispatch/combine**: gather tokens per expert, run each expert's FFN, scatter-combine
+   weighted by gate scores (no dense masking waste).
+3. **`MoELayer`** integrated into the transformer block (drop-in for the dense FFN).
+4. **Expert-parallel**: place experts on different cluster ranks; route tokens with an
+   **all-to-all** built on the existing TCP/RDMA collective layer; combine with all-reduce.
+5. **Tests**: `PythonMoE` (top-k routing gradient matches NumPy; dense-equivalent when k==E);
+   `PythonMoEExpertParallel` (2-process expert-sharded forward == single-process reference).
 
-**Optional in-tree polish** (not blocking — existing paths already cover these): a dedicated fused
-flash-attention kernel (online-softmax already in `KVCacheManager`; BLAS handles attention matmuls),
-and parsing the unified HF `tokenizer.json` (the exact GPT-2 `vocab.json`+`merges.txt` path is done).
+---
+
+## Track T3 — Speculative decoding · P1
+
+**Why.** 2×–10× faster decode on CPU with **identical** output distribution — pure latency win.
+
+**Steps.**
+1. **Drafting** (`src/xla/generation.cpp`): pluggable drafters — n-gram/prompt-lookup (zero extra
+   model), self-speculative (early-exit layers), and small-draft-model.
+2. **Tree verification**: build a token tree, verify with **one** batched forward of the full
+   model over paged KV (`KVCacheManager` already supports paged attention), accept the longest
+   matching prefix; roll the KV back to the accepted length.
+3. **Sampler-exact acceptance** so greedy and temperature/top-p output is provably unchanged.
+4. **Tests**: `XlaSpeculativeDecode` (speculative output == vanilla greedy token-for-token on the
+   in-tree LM; report mean accepted length / speedup).
+
+---
+
+## Track T4 — State-space models (Mamba-2 / Mamba-3) · P2
+
+**Why.** Linear-time, constant-memory-per-step sequence modeling — a decisive CPU advantage at
+long context (no growing KV cache), and an architecture class beyond transformers.
+
+**Steps.**
+1. **Selective scan** (`src/xla/autograd/scan.cpp`): a **parallel associative prefix-scan**
+   (Blelloch, threaded + SIMD) for the input-dependent SSM recurrence, with its reverse-mode
+   backward (the adjoint scan).
+2. **Mamba block**: input/gate projections, depthwise short conv, selective SSM, output gate —
+   using the MIMO (matrix-matrix) form so it reuses the existing GEMM.
+3. **Loader**: Mamba safetensors/GGUF → the model stack.
+4. **Tests**: `XlaSelectiveScan` (forward + gradient vs a NumPy sequential reference);
+   `PythonMamba` (a small Mamba LM trains and generates).
+
+---
+
+## Track T5 — MXFP4 microscaling 4-bit (OCP) · P2
+
+**Why.** The emerging interoperable 4-bit standard (shared block scale + FP4 elements) for both
+weights and activations.
+
+**Steps.**
+1. **MXFP4 codec** (`src/xla/quant/mxfp4.{h,cpp}`): E2M1 elements + shared E8M0 block scale;
+   encode/decode + `Literal` kind.
+2. **Dequant-in-GEMM** path so MXFP4 weights run without a separate upcast (mirrors the int4
+   path already in `blas_gemm` / `quant_gemm`).
+3. **Tests**: `XlaMxfp4` (round-trip error bound; MXFP4-GEMM == fp reference within tolerance).
+
+---
+
+## Track T6 — QLoRA (quantized-base fine-tuning) · P3
+
+**Why.** Fine-tune a large model on a laptop: frozen **int4/ternary** base + trainable fp LoRA
+adapters; de-quant only inside the forward matmul. Extends the existing `LoRALinear` + quant.
+
+**Steps.**
+1. `QLoRALinear`: quantized frozen base (int4 or ternary) + LoRA A/B; backward flows only into
+   the adapters; de-quant fused into the base matmul.
+2. Adapter save/load + merge-to-(quantized)-base.
+3. **Tests**: `PythonQLoRA` (adapter gradients match NumPy; frozen-base invariance; N-step AdamW
+   convergence on a quantized base).
+
+---
+
+## Externally-blocked & physical-run tracks
+
+Unchanged from `missingFeatures.md` §2–§3: security-enclave hardware, PJRT/MLIR wheels, live
+cloud accounts, vendor SDKs, unreleased hardware, and the physical multi-machine / gated-download
+large-model runs. The in-tree primitives for all of these already exist; only the external piece
+remains. Every §1 track above *reduces* what a physical run needs (less memory, less compute).
 
 ---
 
 ## Success criteria
 
-| | Criterion | Status |
-|--|-----------|--------|
-| **L1** | Real model forward output matches HF reference | ✅ **met** — GPT-2 matches HF (f32 & bf16); Llama-3-8B is the same path behind a gated 16 GB download |
-| **L2** | ≥10× matmul speedup vs the naive loop on a 4096² GEMM | ✅ **met — 82×** |
-| **L3** | int4 weights run a real model at a fraction of fp32 RAM | ✅ **met** — GPT-2 from Q4_0/Q8_0/Q4_K GGUF + GPTQ/AWQ; dequant-in-GEMM keeps weights compressed through compute |
-| **L4** | autoregressive decode with paged KV + a real tokenizer | ✅ **met** — text→text reproduces HF GPT-2 greedy generation token-for-token |
-| **L5** | tensor-parallel correctness matching a single-node reference | ✅ **met in-process / over real RDMA sockets**; a physical N-node run needs real machines |
+| Track | Criterion | Target |
+|-------|-----------|--------|
+| **T1** BitNet | ternary-GEMM matches fp reference; real BitNet-b1.58 GGUF forward matches reference logits | multiplication-free kernel, ≥2× vs int8 on the same matmul |
+| **T2** MoE | top-k routing gradient == NumPy; 2-process expert-parallel forward == single-process | active-compute ∝ k/E; cluster expert sharding verified |
+| **T3** Spec-decode | speculative output == vanilla greedy token-for-token | measured decode speedup > 1.5× on the in-tree LM |
+| **T4** Mamba | selective-scan fwd+grad == sequential NumPy reference | linear-time; a Mamba LM trains + generates |
+| **T5** MXFP4 | MXFP4-GEMM == fp reference within tolerance | weights run with no separate upcast pass |
+| **T6** QLoRA | adapter grads == NumPy; frozen quantized-base invariance | fine-tune on a quantized base, adapters converge |
+
+**Global gate for every track:** builds clean, `libvgre_nn` stays LLVM/BLAS/CUDA-free, the full
+suite stays green, and each capability is exercised end-to-end (not just unit-detected).
