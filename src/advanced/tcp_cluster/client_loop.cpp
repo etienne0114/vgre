@@ -230,20 +230,18 @@ void TCPClusterManager::clientLoop() {
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count());
                 ClockSyncReplyPayload rpl{cs.t1_us, t2, t3};
-                // Send as plaintext (same pattern as SECURE_READY exchange)
-                auto replyPkt = PacketUtils::constructVSBPPacket(
-                    PacketType::CLOCK_SYNC_REPLY, &rpl, sizeof(rpl), 0);
-                auto fd = client_fd_;
-                size_t off = 0;
-                while (off < replyPkt.size()) {
-                  int n = send(fd,
-                               reinterpret_cast<const char *>(replyPkt.data() + off),
-                               static_cast<int>(replyPkt.size() - off), 0);
-                  if (n > 0) { off += n; continue; }
-                  break;
-                }
+                // Send ENCRYPTED through the established secure channel. The
+                // master reads this via its main receive loop, which decrypts
+                // every post-handshake packet (recv_packet with secure_channel).
+                // Sending it plaintext (as SECURE_READY/CLOCK_SYNC are, before
+                // the worker's channel is ready) desynced the master's decrypt
+                // stream — "Invalid secure packet magic" — dropping the worker
+                // with ERR_IO (12) on every connection. This block only runs in
+                // secure mode, so client_secure_channel_ is valid here.
+                send_packet(client_fd_, PacketType::CLOCK_SYNC_REPLY, &rpl,
+                            sizeof(rpl), client_secure_channel_.get());
                 VGRE_LOG_DEBUG("TCPCluster",
-                    "Clock sync reply sent: T1=" + std::to_string(cs.t1_us) +
+                    "Clock sync reply sent (encrypted): T1=" + std::to_string(cs.t1_us) +
                     " T2=" + std::to_string(t2) + " T3=" + std::to_string(t3));
               }
             }
