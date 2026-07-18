@@ -326,17 +326,14 @@ void DiscoveryManager::udpDiscoveryLoop() {
                 parent_->has_master_fd_.store(true, std::memory_order_release);
             }
 
-            // Track master for proactive reconnect without enabling direct-reconnect race.
-            {
-                const std::string masterAddr =
-                    masterIp + ":" + std::to_string(masterTcpPort);
-                std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
-                bool found = false;
-                for (const auto& a : parent_->proactive_worker_addresses_) {
-                    if (a == masterAddr) { found = true; break; }
-                }
-                if (!found) parent_->proactive_worker_addresses_.push_back(masterAddr);
-            }
+            // NOTE: the master is deliberately NOT added to
+            // proactive_worker_addresses_. A UDP-discovered worker's single
+            // master connection is owned by clientLoop (client_fd_), and
+            // reconnection is handled by re-entering UDP discovery. Adding the
+            // master here made the proactive loop open a SECOND connection and
+            // run a competing security handshake, installing a second secure
+            // channel with a different key — desyncing the stream ("Invalid
+            // secure packet magic") and dropping the worker with ERR_IO (12).
 
             VGRE_LOG_INFO("TCPCluster",
                 "Worker: TCP connection to master established (" + masterIp + ")");

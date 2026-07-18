@@ -278,13 +278,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
             std::to_string(tSec) + "s) — falling back to discovery");
       }
 
-      // Register master address for proactive reconnection with exponential
-      // backoff so the worker rejoins automatically after a master restart.
-      std::string masterAddr = effectiveHost + ":" + std::to_string(effectivePort);
-      bool found = false;
-      for (const auto& a : proactive_worker_addresses_)
-        if (a == masterAddr) { found = true; break; }
-      if (!found) proactive_worker_addresses_.push_back(masterAddr);
+      // The master is deliberately NOT registered for proactive reconnection.
+      // clientLoop owns the worker's single master connection AND its reconnect
+      // (see "Worker: reconnected to master" in client_loop.cpp, which retries
+      // on its own). Adding the master to the proactive list made a second loop
+      // dial it concurrently, running a competing security handshake that
+      // installed a second secure channel with a different key — desyncing the
+      // stream ("Invalid secure packet magic") and dropping the worker with
+      // ERR_IO (12). A worker only ever holds one connection to its master.
     }
 
     VGRE_LOG_DEBUG("TCPCluster", "initialize: starting data_processor_thread");

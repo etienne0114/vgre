@@ -320,20 +320,20 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
             }
         }
 
-        std::string worker_addr = std::string(ip) + ":" + std::to_string(worker_port);
-        
-        // Add to proactive connection list if not already there
-        bool exists = false;
-        {
-          std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
-          for(const auto& s : parent_->proactive_worker_addresses_) {
-            if (s == worker_addr) { exists = true; break; }
-          }
-          if (!exists) {
-            VGRE_LOG_INFO("TCPCluster", "Master: Automatically discovered worker at " + worker_addr);
-            parent_->proactive_worker_addresses_.push_back(worker_addr);
-          }
-        }
+        // The master must NOT auto-dial a worker it heard announce. In the
+        // standard model workers connect TO the master (this loop's HMAC check
+        // above still authenticates the announce). Auto-adding the worker to
+        // proactive_worker_addresses_ made the master's proactive loop dial the
+        // worker back — on top of the worker's own inbound connection — creating
+        // BIDIRECTIONAL connections that the dedup dropped and whose handshake
+        // roles collided, so secure mode failed with ERR_IO (12) in a permanent
+        // reconnect storm. Worse, a worker announces every local interface
+        // (LAN + Docker bridges), and each "<iface-ip>:<port>" the master dials
+        // can loop back to the master's OWN listener on a single host. The
+        // master learns worker addresses from the connections they open; it
+        // never needs to dial them. Admins who genuinely want the master to dial
+        // workers still set VGRE_CLUSTER_NODES explicitly.
+        (void)worker_port;
       }
     }
   }
