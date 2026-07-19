@@ -19,6 +19,7 @@ include/vgre/xla/autograd_c_api.h.
 """
 import ctypes
 import json
+import os
 import struct
 from typing import List, Sequence, Tuple
 
@@ -588,20 +589,55 @@ class MoELayer(Module):
     active tokens, not tokens×experts. Expert-parallel over the cluster
     collectives is the follow-up (docs/implementationPlan.md T2).
 
-    Input/output are 2-D [tokens, d_model]."""
+    Input/output are 2-D [tokens, d_model].
+
+    Expert-parallel (expert_parallel=True): experts are sharded across cluster
+    ranks — each rank holds a disjoint block of experts and computes only their
+    contribution; all_reduce sums the per-rank partials into the full output
+    (like row-parallel TP, reusing the differentiable collective). The router is
+    replicated and every expert is seeded by its GLOBAL index, so a sharded run
+    over N ranks produces exactly the same result as a single-process run."""
     def __init__(self, d_model: int, num_experts: int, d_ff: int = 0,
-                 top_k: int = 2):
+                 top_k: int = 2, expert_parallel: bool = False, seed: int = 1234):
         d_ff = d_ff or 4 * d_model
         self.d = d_model
         self.E = num_experts
         self.k = max(1, min(top_k, num_experts))
-        self.Wg = _kaiming(d_model, d_model, num_experts)     # router logits [d,E]
-        self.experts = [Sequential(Linear(d_model, d_ff), ReLU(), Linear(d_ff, d_model))
-                        for _ in range(num_experts)]
+        self.expert_parallel = expert_parallel
+
+        if expert_parallel:
+            # Deterministic init keyed on the GLOBAL expert index so any rank
+            # builds identical weights for a given expert; shard the experts
+            # across ranks (contiguous blocks), holding only the local ones.
+            world = world_size()
+            rank = int(os.environ.get("VGRE_NN_RANK", "0"))
+            per = num_experts // world
+            lo = rank * per
+            hi = num_experts if rank == world - 1 else (rank + 1) * per
+            self.local_ids = list(range(lo, hi)) if world > 1 else list(range(num_experts))
+            rg = np.random.default_rng(seed)
+            self.Wg = tensor((rg.standard_normal((d_model, num_experts))
+                              * (2.0 / d_model) ** 0.5).astype(np.float32),
+                             requires_grad=True)
+            self.experts = [self._make_expert(d_model, d_ff, seed, e)
+                            for e in self.local_ids]
+        else:
+            self.local_ids = list(range(num_experts))
+            self.Wg = _kaiming(d_model, d_model, num_experts)     # router logits [d,E]
+            self.experts = [Sequential(Linear(d_model, d_ff), ReLU(), Linear(d_ff, d_model))
+                            for _ in range(num_experts)]
+
+    @staticmethod
+    def _make_expert(d_model, d_ff, seed, global_e):
+        eg = np.random.default_rng(seed * 100003 + global_e)
+        ex = Sequential(Linear(d_model, d_ff), ReLU(), Linear(d_ff, d_model))
+        ex.layers[0].W.set_((eg.standard_normal((d_model, d_ff)) * (2.0 / d_model) ** 0.5).astype(np.float32))
+        ex.layers[2].W.set_((eg.standard_normal((d_ff, d_model)) * (2.0 / d_ff) ** 0.5).astype(np.float32))
+        return ex
 
     def forward(self, x):
         T = x.shape[0]
-        logits = matmul(x, self.Wg)                           # [T, E]
+        logits = matmul(x, self.Wg)                           # [T, E] (replicated)
         L = logits.numpy()
         # Per-row top-k routing: keep the k largest logits, send the rest to -inf
         # so softmax puts ~0 weight there (only top-k experts contribute).
@@ -610,23 +646,42 @@ class MoELayer(Module):
         np.put_along_axis(mask, topk, 0.0, axis=1)
         gate = softmax(add(logits, tensor(mask)))             # [T, E]
         routed = mask == 0.0                                  # [T,E] bool: token→expert
+        self._aux_logits = logits                             # kept for aux_loss()
+        self._aux_frac = routed.mean(axis=0).astype(np.float32)  # f_e: load per expert
 
-        sel_col = [tensor(np.eye(self.E, dtype=np.float32)[:, e:e + 1].copy())
-                   for e in range(self.E)]
         ones_1d = tensor(np.ones((1, self.d), dtype=np.float32))
         out = None
-        for e in range(self.E):
-            idx = np.nonzero(routed[:, e])[0].tolist()        # tokens routed to e
+        for li, e in enumerate(self.local_ids):               # local (possibly sharded) experts
+            idx = np.nonzero(routed[:, e])[0].tolist()        # tokens routed to expert e
             if not idx:
                 continue
+            sel = np.zeros((self.E, 1), dtype=np.float32); sel[e, 0] = 1.0
             x_e = index_select(x, idx)                        # [n_e, d] — its tokens only
-            y_e = self.experts[e](x_e)                        # expert FFN on the sub-batch
-            g_e = matmul(index_select(gate, idx), sel_col[e]) # [n_e,1] = gate[idx,e]
+            y_e = self.experts[li](x_e)                       # expert FFN on the sub-batch
+            g_e = matmul(index_select(gate, idx), tensor(sel))  # [n_e,1] = gate[idx,e]
             weighted = mul(y_e, matmul(g_e, ones_1d))         # [n_e, d]
             term = index_add(T, weighted, idx)                # scatter back to [T, d]
             out = term if out is None else add(out, term)
-        # No token routed anywhere only if T==0; guard for safety.
-        return out if out is not None else matmul(x, tensor(np.zeros((self.d, self.d), np.float32)))
+        if out is None:                                       # no token hit a local expert
+            out = mul(x, tensor(np.zeros((T, self.d), np.float32)))
+        # Expert-parallel: sum each rank's partial into the full output. At
+        # world_size 1 this is the identity; across ranks it is the real TCP sum.
+        if self.expert_parallel:
+            out = all_reduce(out)
+        return out
+
+    def aux_loss(self):
+        """Switch-Transformer load-balancing loss (∝ Σ_e f_e·P_e): f_e is the
+        fraction of tokens routed to expert e (from the last forward), P_e the
+        mean router probability for e. Minimizing it spreads tokens across
+        experts and prevents router collapse. Add coef·aux_loss() to your loss
+        after a forward pass. Differentiable through the router probabilities."""
+        if getattr(self, "_aux_logits", None) is None:
+            raise RuntimeError("aux_loss() requires a preceding forward()")
+        P = softmax(self._aux_logits)                         # [T,E] unmasked probs
+        Fbc = tensor(np.broadcast_to(self._aux_frac, P.shape).copy())  # [T,E] f_e per col
+        # E · mean_{t,e}(P·f) = Σ_e f_e·(mean_t P[t,e]) — the balance objective.
+        return scale(mean(mul(P, Fbc)), float(self.E))
 
 
 class Dropout(Module):

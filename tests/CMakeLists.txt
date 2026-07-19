@@ -1767,6 +1767,19 @@ if(_vgre_nn_py)
             TIMEOUT 120
             SKIP_RETURN_CODE 77
         )
+
+        # Expert-parallel MoE across 2 real processes: experts sharded by rank,
+        # each rank's partial summed via the TCP all_reduce reconstructs the
+        # single-process output; router-gradient sum and sharded expert gradients
+        # match the single-process run.
+        add_test(NAME PythonNnExpertParallel
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_expert_parallel.py)
+        set_tests_properties(PythonNnExpertParallel PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
     endif()
 endif()
 
