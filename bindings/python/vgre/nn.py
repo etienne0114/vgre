@@ -59,7 +59,8 @@ def _bind() -> None:
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
     _lib.vgre_ag_dropout.argtypes = [V, c.c_float]; _lib.vgre_ag_dropout.restype = V
     _lib.vgre_ag_ternary_quantize.argtypes = [V]; _lib.vgre_ag_ternary_quantize.restype = V
-    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose", "all_reduce"):
+    for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose",
+                 "all_reduce", "exp", "softplus"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
     _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
     _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
@@ -280,6 +281,8 @@ def gelu(x): return _unary("gelu", x)
 def silu(x): return _unary("silu", x)
 def sigmoid(x): return _unary("sigmoid", x)
 def tanh(x): return _unary("tanh", x)
+def exp(x): return _unary("exp", x)
+def softplus(x): return _unary("softplus", x)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -785,23 +788,52 @@ class TransformerBlock(Module):
 
 
 class SSMBlock(Module):
-    """Selective state-space (Mamba-style) mixer: an input-dependent gated linear
-    recurrence over the sequence. The decay a_t = σ(gate·x_t) ∈ (0,1) is
-    selective (data-dependent), b_t = in·x_t is the input, h = scan(a, b), and the
-    output is out(h) gated by SiLU(act·x). Linear-time, constant memory per step —
-    no attention and no growing KV cache, a decisive CPU advantage at long context.
-    Operates on 2-D [T, dim]."""
-    def __init__(self, dim: int):
-        self.gate_proj = Linear(dim, dim)     # selective decay a_t (via sigmoid)
-        self.in_proj = Linear(dim, dim)       # input b_t
+    """Selective state-space (Mamba / S6) mixer with a real d_state-dimensional
+    diagonal SSM. Per channel it keeps a state h ∈ ℝ^N and runs the selective
+    recurrence with input-dependent Δ, B, C:
+
+        Δ_t = softplus(dt·x_t)                 (per-channel step, data-dependent)
+        Ā_t = exp(Δ_t ⊙ A),  A = −exp(A_log)   (stable diagonal decay)
+        h_t[:,n] = Ā_t[:,n] ⊙ h_{t-1}[:,n] + Δ_t ⊙ B_t[n] ⊙ u_t
+        y_t = Σ_n C_t[n] ⊙ h_t[:,n] + D ⊙ u_t
+
+    Linear-time, constant memory per step — no attention, no growing KV cache.
+    Each state channel is one `selective_scan`; the input-dependent B/C give the
+    selectivity that makes Mamba competitive with attention. Operates on [T,dim]."""
+    def __init__(self, dim: int, d_state: int = 8):
+        self.dim = dim
+        self.N = d_state
+        self.in_proj = Linear(dim, dim)                 # u_t (SSM input channels)
+        self.dt_proj = Linear(dim, dim)                 # Δ_t (per-channel step)
+        self.B_proj = Linear(dim, d_state)              # B_t [T,N]
+        self.C_proj = Linear(dim, d_state)              # C_t [T,N]
+        A0 = np.log(np.tile(np.arange(1, d_state + 1, dtype=np.float32), (dim, 1)))
+        self.A_log = tensor(A0.astype(np.float32), requires_grad=True)   # [dim,N]
+        self.Dskip = tensor(np.ones(dim, np.float32), requires_grad=True)
         self.out_proj = Linear(dim, dim)
-        self.act_proj = Linear(dim, dim)      # output gate (SiLU)
 
     def forward(self, x):
-        a = sigmoid(self.gate_proj(x))        # (0,1) stable, input-dependent decay
-        b = self.in_proj(x)
-        h = selective_scan(a, b)              # [T, dim] linear recurrence
-        return mul(self.out_proj(h), silu(self.act_proj(x)))
+        T, dim, N = x.shape[0], self.dim, self.N
+        u = self.in_proj(x)                              # [T,dim]
+        delta = softplus(self.dt_proj(x))               # [T,dim]  Δ>0
+        B = self.B_proj(x)                              # [T,N]
+        C = self.C_proj(x)                              # [T,N]
+        A = scale(exp(self.A_log), -1.0)                # [dim,N] = -exp(A_log)
+        onesT = tensor(np.ones((T, 1), np.float32))
+        ones_d = tensor(np.ones((1, dim), np.float32))
+        y = None
+        for n in range(N):
+            sel = tensor(np.eye(N, dtype=np.float32)[:, n:n + 1].copy())  # [N,1]
+            A_row = matmul(onesT, reshape(matmul(A, sel), (1, dim)))      # [T,dim] A[:,n]
+            B_col = matmul(matmul(B, sel), ones_d)                        # [T,dim] B[:,n]
+            C_col = matmul(matmul(C, sel), ones_d)                        # [T,dim] C[:,n]
+            Abar = exp(mul(delta, A_row))                                 # [T,dim] Ā
+            bbar = mul(mul(delta, B_col), u)                             # [T,dim] Δ·B·u
+            h = selective_scan(Abar, bbar)                              # [T,dim]
+            yn = mul(h, C_col)
+            y = yn if y is None else add(y, yn)
+        y = add(y, mul(u, matmul(onesT, reshape(self.Dskip, (1, dim)))))  # + D·u skip
+        return self.out_proj(y)
 
 
 class MambaBlock(Module):

@@ -66,6 +66,8 @@ Var scale(const Var& a, float s);               // a * scalar
 // weight W. This is the quantization-aware-training primitive for BitLinear.
 Var ternary_quantize(const Var& w);
 Var relu(const Var& x);
+Var exp_(const Var& x);                          // elementwise e^x
+Var softplus(const Var& x);                      // log(1+e^x); d/dx = sigmoid(x)
 Var gelu(const Var& x);                          // exact: 0.5x(1+erf(x/√2))
 Var silu(const Var& x);                          // x * sigmoid(x)
 Var sigmoid(const Var& x);                       // 1/(1+e^-x)

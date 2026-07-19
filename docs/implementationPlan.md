@@ -116,19 +116,21 @@ long context (no growing KV cache), and an architecture class beyond transformer
   h_t = a_t⊙h_{t-1} + b_t with the exact adjoint backward (reverse recurrence
   G_t = g_t + a_{t+1}·G_{t+1}, dL/db_t = G_t, dL/da_t = G_t·h_{t-1}). Exposed as
   `vgre.nn.selective_scan`.
-- **Mamba block** (`vgre.nn.SSMBlock` / `MambaBlock`): input-dependent gated linear recurrence —
-  decay a_t = σ(gate·x) (selective), input b_t, h = scan(a,b), output out(h) ⊙ SiLU(act·x); a
-  pre-norm residual, attention-free sequence mixer.
+- **Full selective Mamba (S6) block** (`vgre.nn.SSMBlock` / `MambaBlock`): a real
+  d_state-dimensional diagonal SSM with input-dependent Δ/B/C —
+  Δ_t = softplus(dt·x), Ā_t = exp(Δ_t⊙A) with A = −exp(A_log), h_t[:,n] = Ā_t[:,n]⊙h_{t-1}[:,n] +
+  Δ_t⊙B_t[n]⊙u_t, y_t = Σ_n C_t[n]⊙h_t[:,n] + D⊙u_t. Built from `exp`/`softplus` (new autograd ops)
+  + `selective_scan` per state channel; a pre-norm residual, attention-free sequence mixer.
 
 Verified (`test_nn.py::test_mamba`): the scan forward matches a NumPy reference exactly and its
-gradients match finite differences (~1e-5); an attention-free 2-block Mamba LM memorizes a
-sequence (loss 3.8 → 0.000) and greedily regenerates it 14/14.
+gradients match finite differences (~1e-5); the full SSM block matches an independent NumPy
+reference of the exact Δ/A/B/C recurrence (3.8e-06); and an attention-free 2-block Mamba LM
+memorizes a sequence (loss 3.4 → 0.000) and greedily regenerates it 14/14.
 
-**Remaining.**
+**Remaining (perf / breadth).**
 1. **Parallel scan**: replace the sequential recurrence with the associative (Blelloch)
    prefix-scan, threaded + SIMD, for throughput on long sequences (the adjoint parallelizes too).
-2. **Full Mamba parameterization**: depthwise short conv + the Δ/A/B/C discretization and the
-   Mamba-3 MIMO (matrix-matrix) state update.
+2. **Depthwise short conv** before the SSM + the **Mamba-3 MIMO** (matrix-matrix) state update.
 3. **Loader**: Mamba safetensors/GGUF → the model stack.
 
 ---
