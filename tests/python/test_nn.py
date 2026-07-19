@@ -428,14 +428,48 @@ def test_speculative_decoding() -> bool:
     prompt = [0, 1, 2, 3, 0, 1]
     n_new = 16
     greedy = nn.greedy_generate(model, prompt, n_new)
+
+    # (a) n-gram drafter: lossless + multi-token-per-forward speedup.
     spec, forwards = nn.speculative_generate(model, prompt, n_new,
                                              nn.ngram_draft_fn(k=4, n=2), k=4)
-    identical = (greedy == spec)
-    yield_per_fwd = n_new / forwards            # >1 ⟹ multiple tokens per forward
-    print(f"[spec] greedy==speculative: {identical}  "
-          f"tokens/forward={yield_per_fwd:.2f} ({n_new} toks in {forwards} forwards)  "
-          f"greedy_forwards={n_new}")
-    return identical and yield_per_fwd > 1.5
+    ngram_ok = (greedy == spec) and (n_new / forwards) > 1.5
+
+    # (b) draft-MODEL drafter: still identical to greedy of the TARGET.
+    spec_m, _ = nn.speculative_generate(model, prompt, n_new,
+                                        nn.model_draft_fn(model, k=4), k=4)
+    model_ok = (greedy == spec_m)
+
+    # (c) sampler-exact speculative sampling is distribution-identical to sampling
+    #     the target directly. Use UNTRAINED target+draft (diffuse, DIFFERENT
+    #     distributions) so q is non-degenerate and the accept/reject +
+    #     residual-resample paths are genuinely exercised; the empirical
+    #     first-token histogram must match the target's analytic q.
+    nn.seed(21); target_u = GPT()
+    nn.seed(84); draft_u = GPT()
+    q = _softmax_np(np.asarray(target_u(prompt).numpy()[-1], np.float64))
+    spread_ok = float(q.max()) < 0.5             # distribution genuinely non-degenerate
+    N = 800
+    counts = np.zeros(V)
+    for i in range(N):
+        toks, _ = nn.speculative_sample(target_u, draft_u, prompt, 1, k=2,
+                                        temperature=1.0, seed=i)
+        counts[toks[0]] += 1
+    tv = 0.5 * float(np.sum(np.abs(counts / N - q)))   # total-variation distance
+    dist_ok = spread_ok and tv < 0.07
+
+    # (d) temperature→0 reduces to greedy of the target exactly.
+    cold, _ = nn.speculative_sample(model, GPT(), prompt, n_new, k=4,
+                                    temperature=1e-6, seed=1)
+    cold_ok = (cold == greedy)
+
+    print(f"[spec] ngram(lossless={greedy==spec}, tok/fwd={n_new/forwards:.2f}) "
+          f"model_draft_lossless={model_ok}  sampler-exact(q_max={q.max():.2f}, TV={tv:.3f})  "
+          f"temp0==greedy={cold_ok}")
+    return ngram_ok and model_ok and dist_ok and cold_ok
+
+
+def _softmax_np(z):
+    z = z - z.max(); e = np.exp(z); return e / e.sum()
 
 
 def test_moe_lm() -> bool:

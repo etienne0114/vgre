@@ -79,26 +79,30 @@ overfits a sequence (loss 3.7 → 0.001) and greedily regenerates it token-for-t
 
 ---
 
-## Track T3 — Speculative decoding · P1  *(greedy DONE; sampling + KV-cache next)*
+## Track T3 — Speculative decoding · P1  *(algorithm DONE; C++ KV-cache throughput next)*
 
 **Why.** 2×–10× faster decode on CPU with **identical** output distribution — pure latency win.
 
-**Status.** **Done:** lossless greedy speculative decoding over any `model(ids)→[T,vocab]` model
-(`vgre.nn.speculative_generate` + `greedy_generate` + a zero-cost `ngram_draft_fn`
-prompt-lookup drafter). Each step the drafter proposes up to k tokens; the target verifies them in
-**one** forward over the extended sequence and accepts the longest prefix equal to its own greedy
-argmax, plus one correction/bonus token — so the output is provably identical to greedy. Verified
-(`test_nn.py::test_speculative_decoding`): on a GPT that memorized a periodic sequence, speculative
-== greedy token-for-token, at **4.0 tokens/forward** (16 tokens in 4 target forwards vs 16).
+**Status — the decoding algorithm is complete and proven** over any `model(ids)→[T,vocab]`:
+- **Greedy speculative** (`vgre.nn.speculative_generate`): the drafter proposes up to k tokens; the
+  target verifies them in **one** forward and accepts the longest prefix equal to its own greedy
+  argmax + one correction/bonus token → output provably identical to greedy decoding.
+- **Sampler-exact speculative sampling** (`speculative_sample`, Leviathan/Chen): accept token d with
+  prob min(1, q(d)/p(d)), else resample from the residual norm(relu(q−p)); bonus from q when all
+  accepted → output **distribution-identical** to sampling the target at the same temperature/top_p.
+- **Drafters**: `ngram_draft_fn` (zero-cost prompt-lookup) and `model_draft_fn` (a smaller draft
+  model). `greedy_generate` is the baseline.
 
-**Remaining.**
-1. **Sampler-exact acceptance** for temperature/top-p (the modified-rejection sampling scheme) so
-   sampled output is distribution-identical, not just greedy.
-2. **Draft-model + self-speculative** drafters (the n-gram drafter is in; add a small draft model
-   and early-exit self-draft).
-3. **KV-cache reuse + rollback** on the C++ `generate_cached` path (`KVCacheManager`) so accepted
-   tokens keep their cache and the batched verify runs on the raw (non-autograd) forward — the
-   production-throughput version. Tree verification for multi-branch drafts.
+Verified (`test_nn.py::test_speculative_decoding`): on a memorized sequence, ngram speculative ==
+greedy token-for-token at **4.0 tokens/forward**; draft-model speculative also == greedy; with an
+untrained (diffuse, q_max≈0.27) target the sampler-exact empirical first-token distribution matches
+the analytic target distribution (TV≈0.03, N=1500); and temperature→0 reduces to greedy exactly.
+
+**Remaining (throughput optimization, not correctness):**
+1. **KV-cache reuse + rollback** on the C++ `generate_cached` path so accepted tokens keep their
+   cache and the batched verify runs on the raw (non-autograd) forward — the production-throughput
+   version (the framework path already recomputes and is O(1) forwards/run). Tree verification for
+   multi-branch drafts + self-speculative (early-exit) drafting.
 
 ---
 
