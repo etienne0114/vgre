@@ -395,6 +395,62 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_moe_lm() -> bool:
+    # End-to-end MoE language model: a GPT whose transformer FFN is a sparse
+    # Mixture-of-Experts (drop-in). It must overfit a short sequence (train loss
+    # collapses) and then greedily generate that exact sequence — proving MoE
+    # composes through embedding → attention → MoE-FFN → head and trains.
+    nn.seed(4)
+    V, T, D, E = 16, 12, 32, 4
+    seq = [(i * 5 + 2) % V for i in range(T + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    class MoEGPT(nn.Module):
+        def __init__(self):
+            self.embed = nn.Embedding(V, D)
+            self.blocks = [nn.TransformerBlock(D, num_heads=4, moe_experts=E, moe_top_k=2)
+                           for _ in range(2)]
+            self.norm = nn.RMSNorm(D)
+            self.head = nn.Linear(D, V, bias=False)
+
+        def forward(self, ids):
+            x = self.embed(ids)
+            for b in self.blocks:
+                x = b(x)
+            return self.head(self.norm(x))
+
+        def aux(self):
+            a = None
+            for b in self.blocks:
+                bl = b.aux_loss()
+                a = bl if a is None else nn.add(a, bl)
+            return a
+
+    model = MoEGPT()
+    opt = nn.AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
+    first = last = None
+    for step in range(200):
+        opt.zero_grad()
+        logits = model(ids)
+        loss = nn.add(nn.softmax_cross_entropy(logits, tgt), nn.scale(model.aux(), 0.001))
+        loss.backward(); opt.step()
+        if step == 0:
+            first = loss.item()
+        last = loss.item()
+
+    # Greedy autoregression from the first token must reproduce the sequence:
+    # feed the growing prefix, take argmax of the last position (predicts the
+    # next token), which should regenerate tgt = seq[1:].
+    cur = [seq[0]]
+    gen = []
+    for _ in range(T):
+        nxt = int(np.argmax(model(cur).numpy()[-1]))
+        gen.append(nxt); cur = cur + [nxt]
+    match = sum(int(a == b) for a, b in zip(gen, tgt))
+    print(f"[moe-lm] train loss {first:.3f} -> {last:.3f}  greedy match {match}/{T}")
+    return last < first * 0.2 and match >= T - 1
+
+
 def test_gather_scatter() -> bool:
     # index_select (gather) forward + scatter-add backward, and index_add (scatter)
     # forward — the primitives that make MoE dispatch compute-sparse.
@@ -475,6 +531,7 @@ def main() -> int:
     ok = True
     ok &= test_gather_scatter()
     ok &= test_moe()
+    ok &= test_moe_lm()
     ok &= test_bitlinear()
     ok &= test_error_reporting()
     ok &= test_tensor_parallel()

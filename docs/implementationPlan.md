@@ -69,9 +69,13 @@ token, and an MoE network trains (loss 1.9 → 0.001).
 - **Load-balancing aux loss** (`MoELayer.aux_loss()`, Switch-style ∝ Σ_e f_e·P_e) — a positive
   differentiable scalar; training with it added still converges (`test_moe`).
 
-**Remaining.**
-1. **`MoELayer`** integrated into the transformer block (drop-in for the dense FFN) + an MoE-LM
-   end-to-end train/generate run.
+**Integration (done):** `TransformerBlock(moe_experts=…, moe_top_k=…, expert_parallel=…)` makes MoE
+a drop-in for the dense FFN (2-D and 3-D inputs), with a per-block `aux_loss()`. Verified end-to-end
+(`test_nn.py::test_moe_lm`): a 2-block GPT with MoE FFNs (embedding → attention → MoE-FFN → head)
+overfits a sequence (loss 3.7 → 0.001) and greedily regenerates it token-for-token (12/12).
+
+**T2 is complete** for the in-tree, single-/multi-process CPU target. (A distributed MoE-LM
+*training* run over expert-parallel across machines is covered by the physical-cluster item in §3.)
 
 ---
 

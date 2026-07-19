@@ -742,17 +742,40 @@ class MultiHeadAttention(Module):
 
 
 class TransformerBlock(Module):
-    """Pre-norm decoder block: x + Attn(RMSNorm(x)), then x + MLP(RMSNorm(x))."""
-    def __init__(self, dim: int, num_heads: int, ff: int = 0, causal: bool = True):
+    """Pre-norm decoder block: x + Attn(RMSNorm(x)), then x + FFN(RMSNorm(x)).
+
+    The FFN is a dense MLP by default, or a sparse Mixture-of-Experts when
+    moe_experts > 0 (a drop-in replacement — only k of moe_experts FFNs run per
+    token). With expert_parallel=True the experts shard across cluster ranks."""
+    def __init__(self, dim: int, num_heads: int, ff: int = 0, causal: bool = True,
+                 moe_experts: int = 0, moe_top_k: int = 2,
+                 expert_parallel: bool = False):
         ff = ff or 4 * dim
         self.n1 = RMSNorm(dim)
         self.attn = MultiHeadAttention(dim, num_heads, causal)
         self.n2 = RMSNorm(dim)
-        self.fc1, self.fc2 = Linear(dim, ff), Linear(ff, dim)
+        if moe_experts > 0:
+            self.moe = MoELayer(dim, moe_experts, ff, moe_top_k,
+                                expert_parallel=expert_parallel)
+        else:
+            self.moe = None
+            self.fc1, self.fc2 = Linear(dim, ff), Linear(ff, dim)
+
+    def _ffn(self, h):
+        if self.moe is None:
+            return self.fc2(gelu(self.fc1(h)))
+        s = h.shape                                  # MoE takes 2-D [tokens, dim]
+        if len(s) == 3:
+            return reshape(self.moe(reshape(h, (s[0] * s[1], s[2]))), s)
+        return self.moe(h)
+
     def forward(self, x):
         x = x + self.attn(self.n1(x))
-        h = self.fc2(gelu(self.fc1(self.n2(x))))
-        return x + h
+        return x + self._ffn(self.n2(x))
+
+    def aux_loss(self):
+        """MoE load-balancing loss for this block (None if the FFN is dense)."""
+        return self.moe.aux_loss() if self.moe is not None else None
 
 
 class MaxPool2d(Module):
