@@ -562,6 +562,50 @@ class ReLU(Module):
     def forward(self, x): return relu(x)
 
 
+class MoELayer(Module):
+    """Mixture-of-Experts with a learned top-k router (Shazeer et al.; Mixtral /
+    DeepSeek-style). Per token, the router picks its top-k experts by logit; the
+    output is the softmax-gate-weighted sum of those experts' FFNs. The routing
+    decision is discrete (chosen on the host), but the gate weights of the
+    selected experts stay differentiable, so the router learns end-to-end.
+
+    Why it matters: only k of E experts contribute per token, so a huge model has
+    small *active* compute — ideal for CPU clusters. This reference layer
+    evaluates all experts and masks; compute-sparse dispatch + expert-parallel
+    over the cluster collectives is the follow-up (docs/implementationPlan.md T2).
+
+    Input/output are 2-D [tokens, d_model]."""
+    def __init__(self, d_model: int, num_experts: int, d_ff: int = 0,
+                 top_k: int = 2):
+        d_ff = d_ff or 4 * d_model
+        self.d = d_model
+        self.E = num_experts
+        self.k = max(1, min(top_k, num_experts))
+        self.Wg = _kaiming(d_model, d_model, num_experts)     # router logits [d,E]
+        self.experts = [Sequential(Linear(d_model, d_ff), ReLU(), Linear(d_ff, d_model))
+                        for _ in range(num_experts)]
+
+    def forward(self, x):
+        logits = matmul(x, self.Wg)                           # [T, E]
+        L = logits.numpy()
+        # Per-row top-k mask: keep the k largest logits, send the rest to -inf so
+        # softmax puts ~0 weight there (only top-k experts contribute).
+        topk = np.argpartition(-L, self.k - 1, axis=1)[:, :self.k]
+        mask = np.full(L.shape, -1e9, dtype=np.float32)
+        np.put_along_axis(mask, topk, 0.0, axis=1)
+        gate = softmax(add(logits, tensor(mask)))             # [T, E]
+
+        ones_1d = tensor(np.ones((1, self.d), dtype=np.float32))
+        out = None
+        for e in range(self.E):
+            sel = np.zeros((self.E, 1), dtype=np.float32); sel[e, 0] = 1.0
+            g_e = matmul(gate, tensor(sel))                   # [T,1] = gate[:,e]
+            g_bc = matmul(g_e, ones_1d)                       # [T,d] broadcast
+            term = mul(self.experts[e](x), g_bc)              # gate-weighted expert
+            out = term if out is None else add(out, term)
+        return out
+
+
 class Dropout(Module):
     def __init__(self, p: float = 0.5):
         self.p = p
