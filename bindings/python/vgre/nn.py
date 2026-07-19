@@ -832,6 +832,87 @@ def ngram_draft_fn(k: int = 4, n: int = 2):
     return draft
 
 
+def model_draft_fn(draft_model, k: int = 4):
+    """A drafter backed by a (smaller/cheaper) draft MODEL: greedily roll out k
+    tokens from draft_model. Use with speculative_generate — the output is still
+    identical to greedy decoding of the TARGET regardless of the draft model's
+    quality; a better draft just gets more tokens accepted per target forward."""
+    def draft(ctx: List[int]) -> List[int]:
+        toks: List[int] = []
+        dc = list(ctx)
+        for _ in range(k):
+            t = int(np.argmax(draft_model(dc).numpy()[-1]))
+            toks.append(t); dc.append(t)
+        return toks
+    return draft
+
+
+def _dist_from_logits(row, temperature: float, top_p: float):
+    z = np.asarray(row, dtype=np.float64) / max(temperature, 1e-6)
+    z -= z.max()
+    p = np.exp(z); p /= p.sum()
+    if top_p < 1.0:                                   # nucleus filter, renormalized
+        order = np.argsort(-p)
+        csum = np.cumsum(p[order])
+        keep = csum <= top_p
+        keep[0] = True                                # always keep the top token
+        mask = np.zeros_like(p); mask[order[keep]] = 1.0
+        p = p * mask; p /= p.sum()
+    return p
+
+
+def speculative_sample(target, draft, prompt: Sequence[int], n_new: int,
+                       k: int = 4, temperature: float = 1.0, top_p: float = 1.0,
+                       seed: int = 0):
+    """Sampler-exact speculative decoding (Leviathan et al. / Chen et al. 2023).
+    The draft model proposes k tokens by sampling its own distribution p; the
+    target verifies them in ONE forward, accepting each token d with probability
+    min(1, q(d)/p(d)) and, on the first rejection, resampling from the residual
+    norm(relu(q − p)); if all k are accepted it samples a bonus from q. The
+    produced tokens are distributed EXACTLY as sampling directly from the target
+    at the same temperature/top_p — no approximation — while using one target
+    forward per accepted run. Returns (tokens, num_target_forwards)."""
+    rng = np.random.default_rng(seed)
+    ctx = list(prompt); start = len(ctx); forwards = 0
+
+    def sample(p):
+        return int(rng.choice(len(p), p=p))
+
+    while len(ctx) - start < n_new:
+        # 1. Draft k tokens autoregressively, recording each draft distribution.
+        d_toks: List[int] = []
+        d_probs = []
+        dc = list(ctx)
+        for _ in range(k):
+            p = _dist_from_logits(draft(dc).numpy()[-1], temperature, top_p)
+            t = sample(p)
+            d_toks.append(t); d_probs.append(p); dc.append(t)
+
+        # 2. Verify all k in ONE target forward over the extended sequence.
+        tl = target(ctx + d_toks).numpy(); forwards += 1
+        n = len(ctx)
+        accepted: List[int] = []
+        all_ok = True
+        for j in range(k):
+            q = _dist_from_logits(tl[n - 1 + j], temperature, top_p)
+            p, d = d_probs[j], d_toks[j]
+            ratio = (q[d] / p[d]) if p[d] > 0 else 1.0
+            if rng.random() < min(1.0, ratio):
+                accepted.append(d)                    # accept the draft token
+            else:
+                resid = np.maximum(q - p, 0.0)        # resample from the residual
+                s = resid.sum()
+                accepted.append(sample(resid / s) if s > 0 else sample(q))
+                all_ok = False
+                break
+        if all_ok:                                    # bonus token from the target
+            accepted.append(sample(_dist_from_logits(tl[n - 1 + k], temperature, top_p)))
+
+        room = n_new - (len(ctx) - start)
+        ctx.extend(accepted[:room])
+    return ctx[start:], forwards
+
+
 def speculative_generate(model, prompt: Sequence[int], n_new: int,
                          draft_fn, k: int = 4):
     """Lossless speculative decoding (greedy). Each step the drafter proposes up
