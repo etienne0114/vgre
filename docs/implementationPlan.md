@@ -58,12 +58,20 @@ tokens×experts) while staying fully differentiable and trainable. Verified
 dispatch matches an independent dense NumPy reference to 2.4e-07, exactly k experts fire per
 token, and an MoE network trains (loss 1.9 → 0.001).
 
+**Also done:**
+- **Expert-parallel** (`MoELayer(expert_parallel=True)`): experts are sharded across ranks
+  (contiguous blocks, seeded by global index); each rank computes its local experts' partial and
+  `all_reduce` sums the partials into the full output — the row-parallel trick over the
+  differentiable collective. Verified across **real OS processes** (`PythonNnExpertParallel`):
+  the 2-rank sharded forward is bit-identical to the single-process run, the replicated router's
+  per-rank partial gradients sum to the full router gradient (1.8e-08), and sharded expert
+  gradients match exactly.
+- **Load-balancing aux loss** (`MoELayer.aux_loss()`, Switch-style ∝ Σ_e f_e·P_e) — a positive
+  differentiable scalar; training with it added still converges (`test_moe`).
+
 **Remaining.**
-1. **Load-balancing aux loss** to prevent router collapse.
-2. **`MoELayer`** integrated into the transformer block (drop-in for the dense FFN).
-3. **Expert-parallel**: place experts on different cluster ranks; route tokens with an
-   **all-to-all** built on the existing TCP/RDMA collective layer; combine with all-reduce
-   (`PythonMoEExpertParallel`: 2-process expert-sharded forward == single-process reference).
+1. **`MoELayer`** integrated into the transformer block (drop-in for the dense FFN) + an MoE-LM
+   end-to-end train/generate run.
 
 ---
 

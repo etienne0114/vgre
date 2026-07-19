@@ -448,8 +448,27 @@ def test_moe() -> bool:
         if s == 0:
             first = loss.item()
         last = loss.item()
-    print(f"[moe] combine_err={combine_err:.1e} active/token={active}  train loss {first:.3f} -> {last:.3f}")
-    return combine_err < 1e-5 and active == {k} and last < first * 0.6
+    # Load-balancing aux loss: a positive differentiable scalar; adding it to the
+    # task loss must still let the network train.
+    _ = moe(x)
+    aux_val = moe.aux_loss().item()
+    net2 = nn.Sequential(nn.MoELayer(d, E, d_ff=16, top_k=k), nn.ReLU(), nn.Linear(d, 3))
+    opt2 = nn.AdamW(net2.parameters(), lr=3e-2)
+    f2 = l2 = None
+    for s in range(80):
+        opt2.zero_grad()
+        logits = net2(X)
+        loss = nn.add(nn.softmax_cross_entropy(logits, y),
+                      nn.scale(net2.layers[0].aux_loss(), 0.01))
+        loss.backward(); opt2.step()
+        if s == 0:
+            f2 = loss.item()
+        l2 = loss.item()
+
+    print(f"[moe] combine_err={combine_err:.1e} active/token={active}  train loss {first:.3f} -> {last:.3f}"
+          f"  aux={aux_val:.3f} aux-train {f2:.3f} -> {l2:.3f}")
+    return (combine_err < 1e-5 and active == {k} and last < first * 0.6
+            and aux_val > 0.0 and l2 < f2 * 0.7)
 
 
 def main() -> int:
