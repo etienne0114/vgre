@@ -47,6 +47,8 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_mul(vgre_ag a, vgre_ag b);
 VGRE_PUBLIC_API vgre_ag vgre_ag_scale(vgre_ag a, float s);
 VGRE_PUBLIC_API vgre_ag vgre_ag_ternary_quantize(vgre_ag w);  // BitNet b1.58 STE ternary
 VGRE_PUBLIC_API vgre_ag vgre_ag_relu(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_exp(vgre_ag x);
+VGRE_PUBLIC_API vgre_ag vgre_ag_softplus(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_gelu(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_silu(vgre_ag x);
 VGRE_PUBLIC_API vgre_ag vgre_ag_sigmoid(vgre_ag x);

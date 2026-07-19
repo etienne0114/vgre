@@ -429,6 +429,30 @@ def test_mamba() -> bool:
             nb[t, d] = (L(a_np, bp) - L(a_np, bm)) / (2 * eps)
     grad_err = max(float(np.max(np.abs(ga - na))), float(np.max(np.abs(gb - nb))))
 
+    # Full multi-state selective SSM (Mamba/S6): the block's forward must match an
+    # independent NumPy reference of the exact Δ/A/B/C recurrence.
+    nn.seed(1)
+    Tt, dim, Ns = 7, 16, 8
+    xx = nn.tensor(rng.standard_normal((Tt, dim)).astype(np.float32))
+    ssm = nn.SSMBlock(dim, d_state=Ns)
+    out = ssm(xx).numpy()
+    xn = xx.numpy()
+
+    def lin(L, v):
+        y = v @ L.W.numpy()
+        return y + L.b.numpy() if L.b is not None else y
+    u = lin(ssm.in_proj, xn)
+    raw = lin(ssm.dt_proj, xn)
+    delta = np.maximum(raw, 0) + np.log1p(np.exp(-np.abs(raw)))     # softplus
+    Bm, Cm = lin(ssm.B_proj, xn), lin(ssm.C_proj, xn)
+    A = -np.exp(ssm.A_log.numpy()); Dsk = ssm.Dskip.numpy()
+    yy = np.zeros((Tt, dim), np.float32); hs = np.zeros((dim, Ns), np.float32)
+    for t in range(Tt):
+        hs = np.exp(delta[t][:, None] * A) * hs + (delta[t] * u[t])[:, None] * Bm[t][None, :]
+        yy[t] = (hs * Cm[t][None, :]).sum(1) + Dsk * u[t]
+    ref = yy @ ssm.out_proj.W.numpy() + ssm.out_proj.b.numpy()
+    ssm_err = float(np.max(np.abs(out - ref)))
+
     # Attention-free Mamba LM: memorize + regenerate.
     nn.seed(5)
     V, TT, D = 16, 14, 32
@@ -460,8 +484,9 @@ def test_mamba() -> bool:
     match = sum(int(x == y) for x, y in zip(gen, tgt))
 
     print(f"[mamba] scan fwd_err={fwd_err:.1e} grad_err={grad_err:.1e}  "
-          f"LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
-    return fwd_err < 1e-6 and grad_err < 1e-3 and last < first * 0.2 and match >= TT - 1
+          f"ssm_block_err={ssm_err:.1e}  LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
+    return (fwd_err < 1e-6 and grad_err < 1e-3 and ssm_err < 1e-4
+            and last < first * 0.2 and match >= TT - 1)
 
 
 def test_speculative_decoding() -> bool:

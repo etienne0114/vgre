@@ -224,6 +224,35 @@ Var relu(const Var& x) {
     return out;
 }
 
+Var exp_(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    for (int64_t i = 0; i < n; ++i) out->data[i] = std::exp(x->data[i]);
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {                 // d/dx e^x = e^x = out
+        if (X->requires_grad)
+            for (int64_t i = 0; i < n; ++i) X->grad[i] += op->grad[i] * op->data[i];
+    };
+    return out;
+}
+
+Var softplus(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    // Numerically-stable log(1+e^x) = max(x,0) + log1p(e^-|x|).
+    for (int64_t i = 0; i < n; ++i) {
+        const float v = x->data[i];
+        out->data[i] = std::max(v, 0.0f) + std::log1p(std::exp(-std::fabs(v)));
+    }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {                 // d/dx softplus = sigmoid(x)
+        if (X->requires_grad)
+            for (int64_t i = 0; i < n; ++i)
+                X->grad[i] += op->grad[i] * (1.0f / (1.0f + std::exp(-X->data[i])));
+    };
+    return out;
+}
+
 // Exact GELU: 0.5·x·(1 + erf(x/√2)).
 //   d/dx = 0.5·(1 + erf(x/√2)) + x·(1/√(2π))·exp(-x²/2)
 Var gelu(const Var& x) {
