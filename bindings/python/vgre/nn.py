@@ -569,6 +569,81 @@ class LoRALinear(Module):
         self.alpha = float(d["alpha"])
 
 
+class QLoRALinear(Module):
+    """QLoRA (arXiv:2305.14314): a frozen, low-bit-quantized base weight + a
+    trainable LoRA adapter.
+
+        y = x @ dequant(base) [+ b] + (alpha/r) · (x @ A) @ B
+
+    The large base is stored quantized — ternary {-1,0,+1} with a per-column
+    absmean scale, ~2 bits/weight — as plain arrays (NOT parameters), so it is
+    never updated and forms no gradient; it is de-quantized transiently inside the
+    forward matmul. Only the small A [in,r], B [r,out] adapters train. That is what
+    lets a big layer be fine-tuned on a laptop: the base's memory is a fraction of
+    fp32. B is zero-initialized so training starts exactly at the (quantized) base.
+    Use adapter_parameters() (== parameters(), which holds only A and B)."""
+
+    def __init__(self, in_features: int, out_features: int, r: int = 8,
+                 alpha: float = 16.0, bias: bool = True, base_weight=None,
+                 base_bias=None):
+        if r <= 0:
+            raise ValueError("QLoRA rank r must be positive")
+        w = _f32(base_weight) if base_weight is not None else \
+            _f32(rng.standard_normal((in_features, out_features)) *
+                 (2.0 / in_features) ** 0.5)
+        if w.shape != (in_features, out_features):
+            raise ValueError(f"base_weight must be [{in_features},{out_features}]")
+        # Freeze the base as ternary codes + per-column absmean scale (numpy, so
+        # never registered as trainable parameters).
+        scale = np.abs(w).mean(axis=0).astype(np.float32)          # [out]
+        inv = np.where(scale == 0.0, 1.0, scale)
+        self._codes = np.clip(np.rint(w / inv), -1, 1).astype(np.int8)   # [in,out]
+        self._scale = scale
+        self._bias = _f32(base_bias) if (bias and base_bias is not None) else \
+            (np.zeros(out_features, np.float32) if bias else None)
+        # Trainable adapter: A ~ N(0,1/r), B = 0 → initial delta is exactly zero.
+        self.A = tensor(rng.standard_normal((in_features, r)) / float(r),
+                        requires_grad=True)
+        self.B = tensor(np.zeros((r, out_features)), requires_grad=True)
+        self.r = r
+        self.alpha = float(alpha)
+
+    @classmethod
+    def from_linear(cls, linear: "Linear", r: int = 8, alpha: float = 16.0) -> "QLoRALinear":
+        """Quantize an existing Linear's weights as the frozen ternary base."""
+        w = linear.W.numpy()
+        b = linear.b.numpy() if linear.b is not None else None
+        return cls(w.shape[0], w.shape[1], r=r, alpha=alpha,
+                   bias=b is not None, base_weight=w, base_bias=b)
+
+    @property
+    def scaling(self) -> float:
+        return self.alpha / self.r
+
+    def adapter_parameters(self) -> List["Tensor"]:
+        return [self.A, self.B]
+
+    def base_bits_per_weight(self) -> float:
+        """Effective storage of the frozen base: ~2-bit ternary + the tiny scale."""
+        n = self._codes.size
+        return (n * 2 + self._scale.size * 32) / n
+
+    def _base(self):                                   # dequant transiently (no grad)
+        return tensor(self._codes.astype(np.float32) * self._scale[None, :])
+
+    def forward(self, x):
+        s = x.shape
+        if len(s) == 3:
+            y2 = self._forward2d(reshape(x, (s[0] * s[1], s[2])))
+            return reshape(y2, (s[0], s[1], self._codes.shape[1]))
+        return self._forward2d(x)
+
+    def _forward2d(self, x):
+        y = matmul(x, self._base())
+        y = add(y, scale(matmul(matmul(x, self.A), self.B), self.scaling))
+        return add(y, tensor(self._bias)) if self._bias is not None else y
+
+
 class Conv2d(Module):
     def __init__(self, in_ch: int, out_ch: int, kernel: int, stride: int = 1,
                  pad: int = 0, bias: bool = True):

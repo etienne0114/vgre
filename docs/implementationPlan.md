@@ -154,17 +154,22 @@ weights).
 
 ---
 
-## Track T6 — QLoRA (quantized-base fine-tuning) · P3
+## Track T6 — QLoRA (quantized-base fine-tuning) · P3  *(DONE)*
 
-**Why.** Fine-tune a large model on a laptop: frozen **int4/ternary** base + trainable fp LoRA
+**Why.** Fine-tune a large model on a laptop: frozen **ternary** base + trainable fp LoRA
 adapters; de-quant only inside the forward matmul. Extends the existing `LoRALinear` + quant.
 
-**Steps.**
-1. `QLoRALinear`: quantized frozen base (int4 or ternary) + LoRA A/B; backward flows only into
-   the adapters; de-quant fused into the base matmul.
-2. Adapter save/load + merge-to-(quantized)-base.
-3. **Tests**: `PythonQLoRA` (adapter gradients match NumPy; frozen-base invariance; N-step AdamW
-   convergence on a quantized base).
+**Status — done.** `vgre.nn.QLoRALinear`: the base weight is frozen as ternary codes {-1,0,+1} +
+per-column absmean scale (~2 bits/weight) stored as plain arrays — **not parameters**, never
+updated, no gradient formed — and de-quantized transiently inside the forward matmul; only the
+LoRA A [in,r], B [r,out] adapters train (B=0 init → starts at the quantized base). `from_linear`
+quantizes an existing Linear; `adapter_parameters()` == `parameters()` (A,B only). Verified
+(`test_nn.py::test_qlora`): parameters() holds exactly {A,B}; the frozen base is 2.25 bits/weight
+(in=128); the initial output equals the quantized base; the adapter gradients match a NumPy
+reference; the base codes are unchanged after training; and a fine-tune converges (loss 4.1 → 0.000).
+
+**Remaining (breadth):** an int4/MXFP4 base option (ternary is in), and dequant-in-GEMM for the
+base path (currently a transient fp32 dequant) to cut the forward's peak memory too.
 
 ---
 
