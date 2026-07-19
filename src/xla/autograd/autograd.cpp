@@ -650,6 +650,58 @@ Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets) {
     return out;
 }
 
+Var index_select(const Var& x, const std::vector<int>& idx) {
+    // Gather rows: out[i] = x[idx[i]]. Backward scatter-adds into x's grad.
+    if (x->shape.size() != 2) throw std::runtime_error("index_select: x must be [N,D]");
+    const int64_t N = x->shape[0], D = x->shape[1];
+    const int64_t M = (int64_t)idx.size();
+    Var out = newNode({M, D}, {x}, x->requires_grad);
+    for (int64_t i = 0; i < M; ++i) {
+        const int r = idx[i];
+        if (r < 0 || r >= N) throw std::runtime_error("index_select: index out of range");
+        std::memcpy(&out->data[i * D], &x->data[(int64_t)r * D], sizeof(float) * D);
+    }
+    Node* op = out.get(); Var X = x;
+    std::vector<int> ix = idx;
+    out->backward_fn = [op, X, ix, M, D]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i) {
+            float* dst = &X->grad[(int64_t)ix[i] * D];
+            const float* src = &op->grad[i * D];
+            for (int64_t j = 0; j < D; ++j) dst[j] += src[j];
+        }
+    };
+    return out;
+}
+
+Var index_add(int64_t rows, const Var& src, const std::vector<int>& idx) {
+    // Scatter-add: out[idx[i]] += src[i], out is [rows, D] (zeros elsewhere).
+    // Backward gathers: src->grad[i] += out->grad[idx[i]]. Dual of index_select.
+    if (src->shape.size() != 2) throw std::runtime_error("index_add: src must be [M,D]");
+    const int64_t M = src->shape[0], D = src->shape[1];
+    if ((int64_t)idx.size() != M) throw std::runtime_error("index_add: idx size != rows of src");
+    Var out = newNode({rows, D}, {src}, src->requires_grad);
+    std::fill(out->data.begin(), out->data.end(), 0.0f);
+    for (int64_t i = 0; i < M; ++i) {
+        const int r = idx[i];
+        if (r < 0 || r >= rows) throw std::runtime_error("index_add: index out of range");
+        float* dst = &out->data[(int64_t)r * D];
+        const float* s = &src->data[i * D];
+        for (int64_t j = 0; j < D; ++j) dst[j] += s[j];
+    }
+    Node* op = out.get(); Var S = src;
+    std::vector<int> ix = idx;
+    out->backward_fn = [op, S, ix, M, D]() {
+        if (!S->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i) {
+            const float* g = &op->grad[(int64_t)ix[i] * D];
+            float* dst = &S->grad[i * D];
+            for (int64_t j = 0; j < D; ++j) dst[j] += g[j];
+        }
+    };
+    return out;
+}
+
 Var ternary_quantize(const Var& w) {
     // BitNet b1.58 straight-through ternary quantization of a 2-D weight [K,N].
     // Forward: per-column absmean quantize to {-1,0,+1} then dequantize, using

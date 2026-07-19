@@ -102,6 +102,13 @@ Var softmax(const Var& x);
 Var transpose(const Var& x);
 // Concatenate two rank-2 tensors along axis 0 (rows) or 1 (cols).
 Var concat(const Var& a, const Var& b, int axis);
+// Row gather / scatter over a 2-D [N,D] tensor (the primitives for sparse
+// Mixture-of-Experts dispatch). index_select picks rows: out[i] = x[idx[i]]
+// (shape [len(idx), D]); its backward scatter-adds gradients back. index_add is
+// the dual: out is [rows, D] zeros with out[idx[i]] += src[i]; its backward
+// gathers. idx values must be in [0, N).
+Var index_select(const Var& x, const std::vector<int>& idx);
+Var index_add(int64_t rows, const Var& src, const std::vector<int>& idx);
 
 // ── Vision ops (so the engine trains CNNs, not only transformers) ────────────
 // 2-D convolution via im2col + GEMM. input[N,Ci,H,W], weight[Co,Ci,Kh,Kw],

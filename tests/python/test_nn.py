@@ -395,10 +395,32 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_gather_scatter() -> bool:
+    # index_select (gather) forward + scatter-add backward, and index_add (scatter)
+    # forward — the primitives that make MoE dispatch compute-sparse.
+    x = nn.tensor(np.arange(20, dtype=np.float32).reshape(5, 4), requires_grad=True)
+    idx = [3, 1, 3]
+    g = nn.index_select(x, idx)
+    gather_ok = np.allclose(g.numpy(), x.numpy()[idx])
+    nn.mean(g).backward()
+    gexp = np.zeros((5, 4), np.float32)
+    for i in idx:
+        gexp[i] += 1.0 / g.numpy().size
+    bwd_ok = np.allclose(x.grad(), gexp)          # duplicated index → summed grad
+
+    s = nn.tensor(np.ones((3, 4), np.float32))
+    sc = nn.index_add(5, s, [0, 2, 2]).numpy()
+    ref = np.zeros((5, 4), np.float32); ref[0] += 1; ref[2] += 2
+    scatter_ok = np.allclose(sc, ref)
+    print(f"[gather] gather={gather_ok} scatter_add_bwd={bwd_ok} scatter={scatter_ok}")
+    return gather_ok and bwd_ok and scatter_ok
+
+
 def test_moe() -> bool:
-    # Mixture-of-Experts top-k routing: the gate-weighted expert combine must
-    # match an independent NumPy reference, exactly k experts fire per token, and
-    # a network with an MoE layer must learn.
+    # Mixture-of-Experts top-k routing: the compute-sparse dispatch (each expert
+    # runs only on its routed tokens via gather/scatter) must match an independent
+    # NumPy reference that evaluates all experts densely, exactly k experts fire
+    # per token, and a network with an MoE layer must learn.
     nn.seed(0)
     T, d, E, k = 12, 8, 4, 2
     x = nn.tensor(np.random.default_rng(3).standard_normal((T, d)).astype(np.float32))
@@ -432,6 +454,7 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_gather_scatter()
     ok &= test_moe()
     ok &= test_bitlinear()
     ok &= test_error_reporting()

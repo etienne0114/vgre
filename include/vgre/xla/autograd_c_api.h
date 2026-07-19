@@ -66,6 +66,8 @@ VGRE_PUBLIC_API vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bi
 VGRE_PUBLIC_API vgre_ag vgre_ag_layer_norm(vgre_ag x, vgre_ag weight, vgre_ag bias, float eps);
 VGRE_PUBLIC_API vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag weight, float eps);
 VGRE_PUBLIC_API vgre_ag vgre_ag_embedding(vgre_ag weight, const int* ids, int n);
+VGRE_PUBLIC_API vgre_ag vgre_ag_index_select(vgre_ag x, const int* idx, int n);       // gather rows
+VGRE_PUBLIC_API vgre_ag vgre_ag_index_add(long long rows, vgre_ag src, const int* idx, int n);  // scatter-add
 VGRE_PUBLIC_API vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base);
 VGRE_PUBLIC_API vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal);
 VGRE_PUBLIC_API vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal);
