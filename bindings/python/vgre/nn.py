@@ -66,6 +66,8 @@ def _bind() -> None:
     _lib.vgre_ag_layer_norm.argtypes = [V, V, V, c.c_float]; _lib.vgre_ag_layer_norm.restype = V
     _lib.vgre_ag_rms_norm.argtypes = [V, V, c.c_float]; _lib.vgre_ag_rms_norm.restype = V
     _lib.vgre_ag_embedding.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_embedding.restype = V
+    _lib.vgre_ag_index_select.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_index_select.restype = V
+    _lib.vgre_ag_index_add.argtypes = [c.c_longlong, V, P(c.c_int), c.c_int]; _lib.vgre_ag_index_add.restype = V
     _lib.vgre_ag_rope.argtypes = [V, c.c_int, c.c_float]; _lib.vgre_ag_rope.restype = V
     _lib.vgre_ag_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_attention.restype = V
     _lib.vgre_ag_flash_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_flash_attention.restype = V
@@ -312,6 +314,16 @@ def rms_norm(x: Tensor, weight: Tensor, eps: float = 1e-5) -> Tensor:
 def embedding(weight: Tensor, ids: Sequence[int]) -> Tensor:
     t = (ctypes.c_int * len(ids))(*[int(v) for v in ids])
     return _new(_lib.vgre_ag_embedding(weight._h, t, len(ids)), (len(ids), weight.shape[1]))
+
+def index_select(x: Tensor, idx: Sequence[int]) -> Tensor:
+    """Gather rows of a 2-D tensor: out[i] = x[idx[i]]  (shape [len(idx), D])."""
+    t = (ctypes.c_int * len(idx))(*[int(v) for v in idx])
+    return _new(_lib.vgre_ag_index_select(x._h, t, len(idx)), (len(idx), x.shape[1]))
+
+def index_add(rows: int, src: Tensor, idx: Sequence[int]) -> Tensor:
+    """Scatter-add: out is [rows, D] with out[idx[i]] += src[i] (dual of gather)."""
+    t = (ctypes.c_int * len(idx))(*[int(v) for v in idx])
+    return _new(_lib.vgre_ag_index_add(int(rows), src._h, t, len(idx)), (rows, src.shape[1]))
 
 def rope(x: Tensor, num_heads: int, base: float = 10000.0) -> Tensor:
     return _new(_lib.vgre_ag_rope(x._h, num_heads, ctypes.c_float(base)), x.shape)
@@ -570,9 +582,11 @@ class MoELayer(Module):
     selected experts stay differentiable, so the router learns end-to-end.
 
     Why it matters: only k of E experts contribute per token, so a huge model has
-    small *active* compute — ideal for CPU clusters. This reference layer
-    evaluates all experts and masks; compute-sparse dispatch + expert-parallel
-    over the cluster collectives is the follow-up (docs/implementationPlan.md T2).
+    small *active* compute — ideal for CPU clusters. Dispatch is compute-sparse:
+    each expert's FFN runs only on the tokens routed to it (via index_select /
+    index_add gather-scatter), so the expensive expert matmuls scale with the
+    active tokens, not tokens×experts. Expert-parallel over the cluster
+    collectives is the follow-up (docs/implementationPlan.md T2).
 
     Input/output are 2-D [tokens, d_model]."""
     def __init__(self, d_model: int, num_experts: int, d_ff: int = 0,
@@ -586,24 +600,33 @@ class MoELayer(Module):
                         for _ in range(num_experts)]
 
     def forward(self, x):
+        T = x.shape[0]
         logits = matmul(x, self.Wg)                           # [T, E]
         L = logits.numpy()
-        # Per-row top-k mask: keep the k largest logits, send the rest to -inf so
-        # softmax puts ~0 weight there (only top-k experts contribute).
+        # Per-row top-k routing: keep the k largest logits, send the rest to -inf
+        # so softmax puts ~0 weight there (only top-k experts contribute).
         topk = np.argpartition(-L, self.k - 1, axis=1)[:, :self.k]
         mask = np.full(L.shape, -1e9, dtype=np.float32)
         np.put_along_axis(mask, topk, 0.0, axis=1)
         gate = softmax(add(logits, tensor(mask)))             # [T, E]
+        routed = mask == 0.0                                  # [T,E] bool: token→expert
 
+        sel_col = [tensor(np.eye(self.E, dtype=np.float32)[:, e:e + 1].copy())
+                   for e in range(self.E)]
         ones_1d = tensor(np.ones((1, self.d), dtype=np.float32))
         out = None
         for e in range(self.E):
-            sel = np.zeros((self.E, 1), dtype=np.float32); sel[e, 0] = 1.0
-            g_e = matmul(gate, tensor(sel))                   # [T,1] = gate[:,e]
-            g_bc = matmul(g_e, ones_1d)                       # [T,d] broadcast
-            term = mul(self.experts[e](x), g_bc)              # gate-weighted expert
+            idx = np.nonzero(routed[:, e])[0].tolist()        # tokens routed to e
+            if not idx:
+                continue
+            x_e = index_select(x, idx)                        # [n_e, d] — its tokens only
+            y_e = self.experts[e](x_e)                        # expert FFN on the sub-batch
+            g_e = matmul(index_select(gate, idx), sel_col[e]) # [n_e,1] = gate[idx,e]
+            weighted = mul(y_e, matmul(g_e, ones_1d))         # [n_e, d]
+            term = index_add(T, weighted, idx)                # scatter back to [T, d]
             out = term if out is None else add(out, term)
-        return out
+        # No token routed anywhere only if T==0; guard for safety.
+        return out if out is not None else matmul(x, tensor(np.zeros((self.d, self.d), np.float32)))
 
 
 class Dropout(Module):

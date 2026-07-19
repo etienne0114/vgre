@@ -50,19 +50,18 @@ project's mission.
 **Why.** Sparse models activate only a few experts per token, so the *active* compute stays small
 even at frontier scale — a natural fit for a cluster of ordinary CPUs, reusing our collectives.
 
-**Status.** **Done:** a learned **top-k router** + gate-weighted expert combine as `vgre.nn.MoELayer`,
-built from the existing autograd ops (router logits → per-token top-k mask → softmax gate →
-one-hot column select + broadcast combine), fully differentiable and trainable. Verified
-(`test_nn.py::test_moe`): the combine matches an independent NumPy reference to 2.4e-07, exactly
-k experts fire per token, and an MoE network trains (loss 1.9 → 0.001).
+**Status.** **Done:** a learned **top-k router** + **compute-sparse** gate-weighted combine as
+`vgre.nn.MoELayer`. New `index_select` (gather) / `index_add` (scatter-add) autograd ops let each
+expert's FFN run **only on the tokens routed to it** (active expert compute ∝ routed tokens, not
+tokens×experts) while staying fully differentiable and trainable. Verified
+(`test_nn.py::test_gather_scatter`, `test_moe`): gather/scatter fwd+bwd correct, the sparse
+dispatch matches an independent dense NumPy reference to 2.4e-07, exactly k experts fire per
+token, and an MoE network trains (loss 1.9 → 0.001).
 
 **Remaining.**
-1. **Compute-sparse dispatch**: the reference layer evaluates all E experts and masks; add a
-   `gather`/`scatter` (index_select) autograd op so only the selected experts run per token
-   (active compute ∝ k/E) — the actual throughput win.
-2. **Load-balancing aux loss** to prevent router collapse.
-3. **`MoELayer`** integrated into the transformer block (drop-in for the dense FFN).
-4. **Expert-parallel**: place experts on different cluster ranks; route tokens with an
+1. **Load-balancing aux loss** to prevent router collapse.
+2. **`MoELayer`** integrated into the transformer block (drop-in for the dense FFN).
+3. **Expert-parallel**: place experts on different cluster ranks; route tokens with an
    **all-to-all** built on the existing TCP/RDMA collective layer; combine with all-reduce
    (`PythonMoEExpertParallel`: 2-process expert-sharded forward == single-process reference).
 
