@@ -63,6 +63,12 @@ static void joinWithTimeout(std::thread& t, const char* name, int timeoutSec = 5
 void TCPClusterManager::shutdown() {
   bool wasEnabled = enabled_.exchange(false);
 
+  // A shutdown returns the manager to its pre-initialization state: runtime
+  // security is disabled (a subsequent initialize() re-enables it from the auth
+  // token). Without this, the process-wide singleton keeps security_enabled_
+  // latched across an init→shutdown cycle on hosts that have an auth token.
+  security_enabled_.store(false, std::memory_order_release);
+
   // Always notify CVs and join threads regardless of wasEnabled.
   // A thread blocked on JIT inside data_processor_thread_ may still be running
   // even after clientLoop set enabled_=false on a disconnect. Skipping join
