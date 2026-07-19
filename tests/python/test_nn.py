@@ -395,6 +395,49 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_speculative_decoding() -> bool:
+    # Lossless speculative decoding: on a GPT that memorized a periodic sequence,
+    # an n-gram drafter proposes the repeat and the target verifies it in one
+    # forward. The speculative output must be TOKEN-FOR-TOKEN identical to plain
+    # greedy decoding, while accepting several tokens per forward (the speedup).
+    nn.seed(7)
+    V, D, P = 12, 32, 4                          # period-4 sequence: 0,1,2,3,0,1,...
+    train = [i % P for i in range(40)]
+    ids, tgt = train[:-1], train[1:]
+
+    class GPT(nn.Module):
+        def __init__(self):
+            self.embed = nn.Embedding(V, D)
+            self.blocks = [nn.TransformerBlock(D, num_heads=4) for _ in range(2)]
+            self.norm = nn.RMSNorm(D)
+            self.head = nn.Linear(D, V, bias=False)
+
+        def forward(self, ids):
+            x = self.embed(ids)
+            for b in self.blocks:
+                x = b(x)
+            return self.head(self.norm(x))
+
+    model = GPT()
+    opt = nn.AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
+    for _ in range(160):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(model(ids), tgt)
+        loss.backward(); opt.step()
+
+    prompt = [0, 1, 2, 3, 0, 1]
+    n_new = 16
+    greedy = nn.greedy_generate(model, prompt, n_new)
+    spec, forwards = nn.speculative_generate(model, prompt, n_new,
+                                             nn.ngram_draft_fn(k=4, n=2), k=4)
+    identical = (greedy == spec)
+    yield_per_fwd = n_new / forwards            # >1 ⟹ multiple tokens per forward
+    print(f"[spec] greedy==speculative: {identical}  "
+          f"tokens/forward={yield_per_fwd:.2f} ({n_new} toks in {forwards} forwards)  "
+          f"greedy_forwards={n_new}")
+    return identical and yield_per_fwd > 1.5
+
+
 def test_moe_lm() -> bool:
     # End-to-end MoE language model: a GPT whose transformer FFN is a sparse
     # Mixture-of-Experts (drop-in). It must overfit a short sequence (train loss
@@ -529,6 +572,7 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_speculative_decoding()
     ok &= test_gather_scatter()
     ok &= test_moe()
     ok &= test_moe_lm()

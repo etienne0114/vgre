@@ -79,19 +79,26 @@ overfits a sequence (loss 3.7 → 0.001) and greedily regenerates it token-for-t
 
 ---
 
-## Track T3 — Speculative decoding · P1
+## Track T3 — Speculative decoding · P1  *(greedy DONE; sampling + KV-cache next)*
 
 **Why.** 2×–10× faster decode on CPU with **identical** output distribution — pure latency win.
 
-**Steps.**
-1. **Drafting** (`src/xla/generation.cpp`): pluggable drafters — n-gram/prompt-lookup (zero extra
-   model), self-speculative (early-exit layers), and small-draft-model.
-2. **Tree verification**: build a token tree, verify with **one** batched forward of the full
-   model over paged KV (`KVCacheManager` already supports paged attention), accept the longest
-   matching prefix; roll the KV back to the accepted length.
-3. **Sampler-exact acceptance** so greedy and temperature/top-p output is provably unchanged.
-4. **Tests**: `XlaSpeculativeDecode` (speculative output == vanilla greedy token-for-token on the
-   in-tree LM; report mean accepted length / speedup).
+**Status.** **Done:** lossless greedy speculative decoding over any `model(ids)→[T,vocab]` model
+(`vgre.nn.speculative_generate` + `greedy_generate` + a zero-cost `ngram_draft_fn`
+prompt-lookup drafter). Each step the drafter proposes up to k tokens; the target verifies them in
+**one** forward over the extended sequence and accepts the longest prefix equal to its own greedy
+argmax, plus one correction/bonus token — so the output is provably identical to greedy. Verified
+(`test_nn.py::test_speculative_decoding`): on a GPT that memorized a periodic sequence, speculative
+== greedy token-for-token, at **4.0 tokens/forward** (16 tokens in 4 target forwards vs 16).
+
+**Remaining.**
+1. **Sampler-exact acceptance** for temperature/top-p (the modified-rejection sampling scheme) so
+   sampled output is distribution-identical, not just greedy.
+2. **Draft-model + self-speculative** drafters (the n-gram drafter is in; add a small draft model
+   and early-exit self-draft).
+3. **KV-cache reuse + rollback** on the C++ `generate_cached` path (`KVCacheManager`) so accepted
+   tokens keep their cache and the batched verify runs on the raw (non-autograd) forward — the
+   production-throughput version. Tree verification for multi-branch drafts.
 
 ---
 

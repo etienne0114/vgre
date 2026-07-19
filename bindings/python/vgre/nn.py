@@ -806,6 +806,70 @@ class Sequential(Module):
         return x
 
 
+# ── Generation: greedy + lossless speculative decoding ──────────────────────
+def greedy_generate(model, prompt: Sequence[int], n_new: int) -> List[int]:
+    """Vanilla greedy decode: append argmax of the last-position logits, n_new
+    times. `model(ids)` must return logits of shape [len(ids), vocab]. Returns
+    the generated tokens (excluding the prompt)."""
+    ctx = list(prompt)
+    for _ in range(n_new):
+        ctx.append(int(np.argmax(model(ctx).numpy()[-1])))
+    return ctx[len(prompt):]
+
+
+def ngram_draft_fn(k: int = 4, n: int = 2):
+    """A zero-cost drafter: propose the tokens that followed the most recent
+    earlier occurrence of the current n-token suffix (prompt-lookup decoding).
+    Great for repetitive / structured text; proposes nothing when unseen."""
+    def draft(ctx: List[int]) -> List[int]:
+        if len(ctx) < n + 1:
+            return []
+        suffix = tuple(ctx[-n:])
+        for i in range(len(ctx) - n - 1, -1, -1):
+            if tuple(ctx[i:i + n]) == suffix:
+                return list(ctx[i + n:i + n + k])
+        return []
+    return draft
+
+
+def speculative_generate(model, prompt: Sequence[int], n_new: int,
+                         draft_fn, k: int = 4):
+    """Lossless speculative decoding (greedy). Each step the drafter proposes up
+    to k tokens; the target model verifies them in ONE forward over the extended
+    sequence, accepting the longest prefix whose tokens equal the target's own
+    greedy argmax, plus one correction/bonus token. The output is IDENTICAL to
+    greedy_generate on the target — the speedup comes from accepting several
+    tokens per target forward.
+
+    Returns (generated_tokens, num_forwards). tokens/num_forwards > 1 is the
+    per-forward token yield (the speculative speedup vs one token per forward)."""
+    ctx = list(prompt)
+    start = len(ctx)
+    forwards = 0
+    while len(ctx) - start < n_new:
+        draft = draft_fn(ctx)[:k]
+        n = len(ctx)
+        logits = model(ctx + draft).numpy()      # [n + len(draft), vocab]
+        forwards += 1
+        # Greedily verify each drafted token against the target's own argmax.
+        accepted = []
+        matched_all = True
+        for j in range(len(draft)):
+            t_j = int(np.argmax(logits[n - 1 + j]))
+            if t_j == draft[j]:
+                accepted.append(draft[j])
+            else:
+                accepted.append(t_j)             # correction = target's greedy token
+                matched_all = False
+                break
+        if matched_all:
+            accepted.append(int(np.argmax(logits[n - 1 + len(draft)])))  # bonus
+        # Never overshoot the requested count.
+        room = n_new - (len(ctx) - start)
+        ctx.extend(accepted[:room])
+    return ctx[start:], forwards
+
+
 # ── Checkpoint I/O (standard safetensors; loadable by VGRE's SafeTensors) ────
 def save(model: "Module", path: str) -> None:
     """Save a module's named parameters as a standard safetensors file."""
