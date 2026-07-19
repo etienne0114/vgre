@@ -395,8 +395,44 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_moe() -> bool:
+    # Mixture-of-Experts top-k routing: the gate-weighted expert combine must
+    # match an independent NumPy reference, exactly k experts fire per token, and
+    # a network with an MoE layer must learn.
+    nn.seed(0)
+    T, d, E, k = 12, 8, 4, 2
+    x = nn.tensor(np.random.default_rng(3).standard_normal((T, d)).astype(np.float32))
+    moe = nn.MoELayer(d, E, d_ff=16, top_k=k)
+    out = moe(x).numpy()
+
+    logits = np.asarray(nn.matmul(x, moe.Wg).numpy())
+    topk = np.argpartition(-logits, k - 1, axis=1)[:, :k]
+    mask = np.full(logits.shape, -1e9, np.float32); np.put_along_axis(mask, topk, 0.0, axis=1)
+    g = np.exp(logits + mask - (logits + mask).max(1, keepdims=True)); g /= g.sum(1, keepdims=True)
+    ref = np.zeros((T, d), np.float32)
+    for e in range(E):
+        ref += g[:, e:e + 1] * moe.experts[e](x).numpy()
+    combine_err = float(np.max(np.abs(out - ref)))
+    active = {int(v) for v in (g > 1e-6).sum(1)}          # experts active per token
+
+    rng = np.random.default_rng(5)
+    X = nn.tensor(rng.standard_normal((48, d)).astype(np.float32))
+    y = [int(v) for v in rng.integers(0, 3, size=48)]
+    net = nn.Sequential(nn.MoELayer(d, E, d_ff=16, top_k=k), nn.ReLU(), nn.Linear(d, 3))
+    opt = nn.AdamW(net.parameters(), lr=3e-2)
+    first = last = None
+    for s in range(80):
+        opt.zero_grad(); loss = nn.softmax_cross_entropy(net(X), y); loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+    print(f"[moe] combine_err={combine_err:.1e} active/token={active}  train loss {first:.3f} -> {last:.3f}")
+    return combine_err < 1e-5 and active == {k} and last < first * 0.6
+
+
 def main() -> int:
     ok = True
+    ok &= test_moe()
     ok &= test_bitlinear()
     ok &= test_error_reporting()
     ok &= test_tensor_parallel()
