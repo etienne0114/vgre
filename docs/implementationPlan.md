@@ -135,17 +135,22 @@ memorizes a sequence (loss 3.4 → 0.000) and greedily regenerates it 14/14.
 
 ---
 
-## Track T5 — MXFP4 microscaling 4-bit (OCP) · P2
+## Track T5 — MXFP4 microscaling 4-bit (OCP) · P2  *(codec + GEMM DONE)*
 
 **Why.** The emerging interoperable 4-bit standard (shared block scale + FP4 elements) for both
 weights and activations.
 
-**Steps.**
-1. **MXFP4 codec** (`src/xla/quant/mxfp4.{h,cpp}`): E2M1 elements + shared E8M0 block scale;
-   encode/decode + `Literal` kind.
-2. **Dequant-in-GEMM** path so MXFP4 weights run without a separate upcast (mirrors the int4
-   path already in `blas_gemm` / `quant_gemm`).
-3. **Tests**: `XlaMxfp4` (round-trip error bound; MXFP4-GEMM == fp reference within tolerance).
+**Status — done.** `include/vgre/xla/mxfp4.h` + `src/xla/gemm/mxfp4.cpp`: E2M1 4-bit elements
+(magnitudes {0,.5,1,1.5,2,3,4,6}) with a shared E8M0 power-of-two scale per 32-element block down
+K — **4.25 bits/weight**. `quantize` / `dequantize` + a **dequant-in-GEMM** `gemm` that applies the
+block scale once per block (the E2M1 code stays 4-bit until multiplied by the activation, no fp32
+expansion). In the LLVM-free `libvgre_nn`. Verified (`XlaMxfp4`): the dequant-in-GEMM equals the
+dense fp32 GEMM of A against the dequantized weights (4e-06), the round-trip is a bounded FP4
+approximation (rel err ≈ 0.12), and the footprint is 4.25 bits/weight.
+
+**Remaining (breadth):** AVX2 unpack/decode SIMD path; a `Literal` storage kind + safetensors/GGUF
+MXFP4 tensor loading so external MXFP4 checkpoints run directly; MXFP4 **activations** (not just
+weights).
 
 ---
 
