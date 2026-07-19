@@ -6,6 +6,7 @@ add_library(vgre_xla OBJECT
     blas_gemm.cpp
     gemm/intree_gemm_f32.cpp
     gemm/ternary_gemm.cpp
+    gemm/mxfp4.cpp
     autograd/autograd.cpp
     autograd/optim.cpp
     model/transformer.cpp
@@ -80,6 +81,7 @@ if(VGRE_BUILD_NN_LIB)
         blas_gemm.cpp
         gemm/intree_gemm_f32.cpp
         gemm/ternary_gemm.cpp
+        gemm/mxfp4.cpp
         autograd/autograd.cpp
         autograd/optim.cpp
         model/transformer.cpp

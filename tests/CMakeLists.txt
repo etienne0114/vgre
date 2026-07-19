@@ -1000,6 +1000,13 @@ if(TARGET vgre_nn)
     target_link_libraries(test_ternary_gemm PRIVATE vgre_nn Threads::Threads)
     add_test(NAME XlaTernaryGemm COMMAND test_ternary_gemm)
     set_tests_properties(XlaTernaryGemm PROPERTIES TIMEOUT 30)
+
+    # MXFP4 (OCP microscaling 4-bit, roadmap T5): dequant-in-GEMM exactness +
+    # codec round-trip + footprint.
+    add_executable(test_mxfp4 xla/test_mxfp4.cpp)
+    target_link_libraries(test_mxfp4 PRIVATE vgre_nn Threads::Threads)
+    add_test(NAME XlaMxfp4 COMMAND test_mxfp4)
+    set_tests_properties(XlaMxfp4 PROPERTIES TIMEOUT 30)
 endif()
 
 # Perf analytics: roofline model + flamegraph collapsed-stack.
