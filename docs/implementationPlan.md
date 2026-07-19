@@ -106,20 +106,30 @@ the analytic target distribution (TV≈0.03, N=1500); and temperature→0 reduce
 
 ---
 
-## Track T4 — State-space models (Mamba-2 / Mamba-3) · P2
+## Track T4 — State-space models (Mamba-2 / Mamba-3) · P2  *(core DONE; parallel scan + loader next)*
 
 **Why.** Linear-time, constant-memory-per-step sequence modeling — a decisive CPU advantage at
 long context (no growing KV cache), and an architecture class beyond transformers.
 
-**Steps.**
-1. **Selective scan** (`src/xla/autograd/scan.cpp`): a **parallel associative prefix-scan**
-   (Blelloch, threaded + SIMD) for the input-dependent SSM recurrence, with its reverse-mode
-   backward (the adjoint scan).
-2. **Mamba block**: input/gate projections, depthwise short conv, selective SSM, output gate —
-   using the MIMO (matrix-matrix) form so it reuses the existing GEMM.
+**Status — the SSM core is complete and proven.**
+- **Selective scan** (`selective_scan(a,b)` autograd op): the input-dependent recurrence
+  h_t = a_t⊙h_{t-1} + b_t with the exact adjoint backward (reverse recurrence
+  G_t = g_t + a_{t+1}·G_{t+1}, dL/db_t = G_t, dL/da_t = G_t·h_{t-1}). Exposed as
+  `vgre.nn.selective_scan`.
+- **Mamba block** (`vgre.nn.SSMBlock` / `MambaBlock`): input-dependent gated linear recurrence —
+  decay a_t = σ(gate·x) (selective), input b_t, h = scan(a,b), output out(h) ⊙ SiLU(act·x); a
+  pre-norm residual, attention-free sequence mixer.
+
+Verified (`test_nn.py::test_mamba`): the scan forward matches a NumPy reference exactly and its
+gradients match finite differences (~1e-5); an attention-free 2-block Mamba LM memorizes a
+sequence (loss 3.8 → 0.000) and greedily regenerates it 14/14.
+
+**Remaining.**
+1. **Parallel scan**: replace the sequential recurrence with the associative (Blelloch)
+   prefix-scan, threaded + SIMD, for throughput on long sequences (the adjoint parallelizes too).
+2. **Full Mamba parameterization**: depthwise short conv + the Δ/A/B/C discretization and the
+   Mamba-3 MIMO (matrix-matrix) state update.
 3. **Loader**: Mamba safetensors/GGUF → the model stack.
-4. **Tests**: `XlaSelectiveScan` (forward + gradient vs a NumPy sequential reference);
-   `PythonMamba` (a small Mamba LM trains and generates).
 
 ---
 

@@ -69,6 +69,7 @@ def _bind() -> None:
     _lib.vgre_ag_embedding.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_embedding.restype = V
     _lib.vgre_ag_index_select.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_index_select.restype = V
     _lib.vgre_ag_index_add.argtypes = [c.c_longlong, V, P(c.c_int), c.c_int]; _lib.vgre_ag_index_add.restype = V
+    _lib.vgre_ag_selective_scan.argtypes = [V, V]; _lib.vgre_ag_selective_scan.restype = V
     _lib.vgre_ag_rope.argtypes = [V, c.c_int, c.c_float]; _lib.vgre_ag_rope.restype = V
     _lib.vgre_ag_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_attention.restype = V
     _lib.vgre_ag_flash_attention.argtypes = [V, V, V, c.c_int, c.c_int]; _lib.vgre_ag_flash_attention.restype = V
@@ -325,6 +326,11 @@ def index_add(rows: int, src: Tensor, idx: Sequence[int]) -> Tensor:
     """Scatter-add: out is [rows, D] with out[idx[i]] += src[i] (dual of gather)."""
     t = (ctypes.c_int * len(idx))(*[int(v) for v in idx])
     return _new(_lib.vgre_ag_index_add(int(rows), src._h, t, len(idx)), (rows, src.shape[1]))
+
+def selective_scan(a: Tensor, b: Tensor) -> Tensor:
+    """State-space-model (Mamba) recurrence h_t = a[t]*h_{t-1} + b[t] over a
+    length-T sequence; a, b are [T, D]. Returns the states h [T, D]."""
+    return _new(_lib.vgre_ag_selective_scan(a._h, b._h), a.shape)
 
 def rope(x: Tensor, num_heads: int, base: float = 10000.0) -> Tensor:
     return _new(_lib.vgre_ag_rope(x._h, num_heads, ctypes.c_float(base)), x.shape)
@@ -776,6 +782,37 @@ class TransformerBlock(Module):
     def aux_loss(self):
         """MoE load-balancing loss for this block (None if the FFN is dense)."""
         return self.moe.aux_loss() if self.moe is not None else None
+
+
+class SSMBlock(Module):
+    """Selective state-space (Mamba-style) mixer: an input-dependent gated linear
+    recurrence over the sequence. The decay a_t = σ(gate·x_t) ∈ (0,1) is
+    selective (data-dependent), b_t = in·x_t is the input, h = scan(a, b), and the
+    output is out(h) gated by SiLU(act·x). Linear-time, constant memory per step —
+    no attention and no growing KV cache, a decisive CPU advantage at long context.
+    Operates on 2-D [T, dim]."""
+    def __init__(self, dim: int):
+        self.gate_proj = Linear(dim, dim)     # selective decay a_t (via sigmoid)
+        self.in_proj = Linear(dim, dim)       # input b_t
+        self.out_proj = Linear(dim, dim)
+        self.act_proj = Linear(dim, dim)      # output gate (SiLU)
+
+    def forward(self, x):
+        a = sigmoid(self.gate_proj(x))        # (0,1) stable, input-dependent decay
+        b = self.in_proj(x)
+        h = selective_scan(a, b)              # [T, dim] linear recurrence
+        return mul(self.out_proj(h), silu(self.act_proj(x)))
+
+
+class MambaBlock(Module):
+    """Pre-norm residual state-space block: x + SSM(RMSNorm(x)). A drop-in
+    sequence mixer alternative to a transformer block (attention-free)."""
+    def __init__(self, dim: int):
+        self.norm = RMSNorm(dim)
+        self.ssm = SSMBlock(dim)
+
+    def forward(self, x):
+        return x + self.ssm(self.norm(x))
 
 
 class MaxPool2d(Module):

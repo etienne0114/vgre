@@ -395,6 +395,75 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_mamba() -> bool:
+    # Selective scan (the SSM recurrence h_t = a_t*h_{t-1}+b_t): forward matches a
+    # NumPy reference exactly, and its analytic gradients match finite differences.
+    # Then an attention-free Mamba LM must memorize + regenerate a sequence.
+    T, Dd = 6, 3
+    rng = np.random.default_rng(0)
+    a_np = (0.5 + 0.3 * rng.standard_normal((T, Dd))).astype(np.float32)
+    b_np = rng.standard_normal((T, Dd)).astype(np.float32)
+    a = nn.tensor(a_np, requires_grad=True); b = nn.tensor(b_np, requires_grad=True)
+    h = nn.selective_scan(a, b)
+
+    href = np.zeros((T, Dd), np.float32); p = np.zeros(Dd, np.float32)
+    for t in range(T):
+        p = a_np[t] * p + b_np[t]; href[t] = p
+    fwd_err = float(np.max(np.abs(h.numpy() - href)))
+
+    w = rng.standard_normal((T, Dd)).astype(np.float32)
+    nn.mean(nn.mul(h, nn.tensor(w))).backward()
+    ga, gb = a.grad().copy(), b.grad().copy()
+
+    def L(av, bv):
+        hh = np.zeros((T, Dd), np.float32); q = np.zeros(Dd, np.float32)
+        for t in range(T):
+            q = av[t] * q + bv[t]; hh[t] = q
+        return float(np.mean(hh * w))
+    eps = 1e-3; na = np.zeros_like(a_np); nb = np.zeros_like(b_np)
+    for t in range(T):
+        for d in range(Dd):
+            ap = a_np.copy(); ap[t, d] += eps; am = a_np.copy(); am[t, d] -= eps
+            na[t, d] = (L(ap, b_np) - L(am, b_np)) / (2 * eps)
+            bp = b_np.copy(); bp[t, d] += eps; bm = b_np.copy(); bm[t, d] -= eps
+            nb[t, d] = (L(a_np, bp) - L(a_np, bm)) / (2 * eps)
+    grad_err = max(float(np.max(np.abs(ga - na))), float(np.max(np.abs(gb - nb))))
+
+    # Attention-free Mamba LM: memorize + regenerate.
+    nn.seed(5)
+    V, TT, D = 16, 14, 32
+    seq = [(i * 3 + 1) % V for i in range(TT + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    class MambaLM(nn.Module):
+        def __init__(self):
+            self.embed = nn.Embedding(V, D)
+            self.blocks = [nn.MambaBlock(D) for _ in range(2)]
+            self.norm = nn.RMSNorm(D); self.head = nn.Linear(D, V, bias=False)
+
+        def forward(self, ids):
+            x = self.embed(ids)
+            for bl in self.blocks:
+                x = bl(x)
+            return self.head(self.norm(x))
+
+    m = MambaLM(); opt = nn.AdamW(m.parameters(), lr=3e-3)
+    first = last = None
+    for s in range(300):
+        opt.zero_grad(); loss = nn.softmax_cross_entropy(m(ids), tgt); loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+    cur = [seq[0]]; gen = []
+    for _ in range(TT):
+        gen.append(int(np.argmax(m(cur).numpy()[-1]))); cur = cur + [gen[-1]]
+    match = sum(int(x == y) for x, y in zip(gen, tgt))
+
+    print(f"[mamba] scan fwd_err={fwd_err:.1e} grad_err={grad_err:.1e}  "
+          f"LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
+    return fwd_err < 1e-6 and grad_err < 1e-3 and last < first * 0.2 and match >= TT - 1
+
+
 def test_speculative_decoding() -> bool:
     # Lossless speculative decoding: on a GPT that memorized a periodic sequence,
     # an n-gram drafter proposes the repeat and the target verifies it in one
@@ -606,6 +675,7 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_mamba()
     ok &= test_speculative_decoding()
     ok &= test_gather_scatter()
     ok &= test_moe()
