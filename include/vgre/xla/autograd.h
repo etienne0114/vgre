@@ -59,6 +59,12 @@ Var bmm(const Var& a, const Var& b);
 Var add(const Var& a, const Var& b);
 Var mul(const Var& a, const Var& b);            // elementwise, same shape
 Var scale(const Var& a, float s);               // a * scalar
+// Straight-through ternary quantization (BitNet b1.58) of a 2-D weight [K,N].
+// Forward returns the dequantized ternary weight (per-column absmean scale), so
+// matmul(x, ternary_quantize(W)) equals the inference-time multiplication-free
+// ternary GEMM; backward is the identity (STE), so gradients train the fp master
+// weight W. This is the quantization-aware-training primitive for BitLinear.
+Var ternary_quantize(const Var& w);
 Var relu(const Var& x);
 Var gelu(const Var& x);                          // exact: 0.5x(1+erf(x/√2))
 Var silu(const Var& x);                          // x * sigmoid(x)

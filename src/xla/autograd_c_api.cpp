@@ -86,6 +86,7 @@ vgre_ag vgre_ag_dropout(vgre_ag x, float p)   { try { return wrap(dropout(ref(x)
 vgre_ag vgre_ag_add(vgre_ag a, vgre_ag b)     { try { return wrap(add(ref(a), ref(b))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_mul(vgre_ag a, vgre_ag b)     { try { return wrap(mul(ref(a), ref(b))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_scale(vgre_ag a, float s)     { try { return wrap(scale(ref(a), s)); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_ternary_quantize(vgre_ag w)   { try { return wrap(ternary_quantize(ref(w))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_relu(vgre_ag x)               { try { return wrap(relu(ref(x))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_gelu(vgre_ag x)               { try { return wrap(gelu(ref(x))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_silu(vgre_ag x)               { try { return wrap(silu(ref(x))); } AG_CATCH(return nullptr) }
