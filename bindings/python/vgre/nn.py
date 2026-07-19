@@ -57,6 +57,7 @@ def _bind() -> None:
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V, V]; f.restype = V
     _lib.vgre_ag_scale.argtypes = [V, c.c_float]; _lib.vgre_ag_scale.restype = V
     _lib.vgre_ag_dropout.argtypes = [V, c.c_float]; _lib.vgre_ag_dropout.restype = V
+    _lib.vgre_ag_ternary_quantize.argtypes = [V]; _lib.vgre_ag_ternary_quantize.restype = V
     for name in ("relu", "gelu", "silu", "sigmoid", "tanh", "mean", "softmax", "transpose", "all_reduce"):
         f = getattr(_lib, "vgre_ag_" + name); f.argtypes = [V]; f.restype = V
     _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
@@ -250,6 +251,14 @@ def dropout(x: Tensor, p: float) -> Tensor:
     """Inverted dropout (stochastic; training only)."""
     return _new(_lib.vgre_ag_dropout(x._h, float(p)), x.shape)
 
+def ternary_quantize(w: Tensor) -> Tensor:
+    """BitNet b1.58 straight-through ternary quantization of a 2-D weight [K,N].
+    Forward returns the dequantized ternary weight (per-column absmean); backward
+    is the identity (STE), so gradients train the fp master weight. Composing it
+    as matmul(x, ternary_quantize(W)) is quantization-aware training whose forward
+    matches the inference-time multiplication-free ternary GEMM."""
+    return _new(_lib.vgre_ag_ternary_quantize(w._h), w.shape)
+
 def add(a: Tensor, b: Tensor) -> Tensor:
     return _new(_lib.vgre_ag_add(a._h, b._h), a.shape)
 
@@ -419,6 +428,29 @@ class Linear(Module):
                 y = add(y, self.b)            # [B*T,O]+[O] bias broadcast (2-D)
             return reshape(y, (s[0], s[1], self.W.shape[1]))
         y = matmul(x, self.W)
+        return add(y, self.b) if self.b is not None else y
+
+
+class BitLinear(Module):
+    """BitNet b1.58 linear layer: a full-precision master weight that is ternary-
+    quantized {-1,0,+1} (per-column absmean) in the forward pass via a
+    straight-through estimator, so the layer trains in fp but its forward matches
+    the inference-time multiplication-free ternary GEMM. Drop-in for Linear —
+    the path to running large models on CPUs with no multiplies in the matmul."""
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        self.W = _kaiming(in_features, in_features, out_features)
+        self.b = tensor(np.zeros(out_features), requires_grad=True) if bias else None
+
+    def forward(self, x):
+        Wq = ternary_quantize(self.W)         # STE ternary weight (fp master trains)
+        s = x.shape
+        if len(s) == 3:                       # [B,T,D]: flatten → matmul → reshape
+            flat = reshape(x, (s[0] * s[1], s[2]))
+            y = matmul(flat, Wq)
+            if self.b is not None:
+                y = add(y, self.b)
+            return reshape(y, (s[0], s[1], self.W.shape[1]))
+        y = matmul(x, Wq)
         return add(y, self.b) if self.b is not None else y
 
 

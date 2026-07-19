@@ -2,6 +2,7 @@
 
 #include "vgre/xla/autograd.h"
 #include "vgre/xla/intree_gemm.h"
+#include "vgre/xla/ternary_gemm.h"
 
 #include <algorithm>
 #include <cmath>
@@ -645,6 +646,30 @@ Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets) {
                 float d = probs[i * V + j] - (j == tgt[i] ? 1.0f : 0.0f);
                 L->grad[i * V + j] += g * d;
             }
+    };
+    return out;
+}
+
+Var ternary_quantize(const Var& w) {
+    // BitNet b1.58 straight-through ternary quantization of a 2-D weight [K,N].
+    // Forward: per-column absmean quantize to {-1,0,+1} then dequantize, using
+    // the exact same codec as the inference ternary GEMM — so a trained model's
+    // forward matches what the multiplication-free kernel computes. Backward:
+    // identity (straight-through estimator), so gradients update the fp master
+    // weight through the non-differentiable rounding.
+    if (w->shape.size() != 2)
+        throw std::runtime_error("ternary_quantize: expected a 2-D weight [K,N]");
+    const int64_t K = w->shape[0], N = w->shape[1];
+    Var out = newNode(w->shape, {w}, w->requires_grad);
+    std::vector<int8_t> codes((size_t)(K * N));
+    std::vector<float>  scale((size_t)N);
+    ternary::quantize(K, N, w->data.data(), codes.data(), scale.data());
+    ternary::dequantize(K, N, codes.data(), scale.data(), out->data.data());
+    Node* op = out.get(); Var W = w;
+    out->backward_fn = [op, W]() {
+        if (!W->requires_grad) return;
+        const int64_t n = W->size();
+        for (int64_t i = 0; i < n; ++i) W->grad[i] += op->grad[i];   // STE
     };
     return out;
 }

@@ -362,8 +362,42 @@ def test_error_reporting() -> bool:
     return raised and cleared
 
 
+def test_bitlinear() -> bool:
+    # BitNet b1.58: the STE ternary_quantize must reproduce the per-column
+    # absmean dequantized weight (so training-forward == inference ternary GEMM)
+    # with an identity straight-through gradient, and a BitLinear network must
+    # actually learn despite ternary weights.
+    W = nn.tensor(np.random.default_rng(0).standard_normal((5, 4)).astype(np.float32),
+                  requires_grad=True)
+    Wq = nn.ternary_quantize(W)
+    Wn = W.numpy(); scale = np.abs(Wn).mean(axis=0)
+    inv = np.where(scale == 0, 1.0, scale)
+    codes = np.where(Wn / inv > 0.5, 1, np.where(Wn / inv < -0.5, -1, 0))
+    ref = codes * scale
+    fwd_err = float(np.max(np.abs(Wq.numpy() - ref)))
+    nn.mean(Wq).backward()
+    ste_ok = np.allclose(W.grad(), 1.0 / W.numpy().size, atol=1e-6)   # identity STE
+
+    rng = np.random.default_rng(1)
+    X = nn.tensor(rng.standard_normal((32, 8)).astype(np.float32))
+    y = [int(v) for v in rng.integers(0, 3, size=32)]
+    net = nn.Sequential(nn.BitLinear(8, 16), nn.ReLU(), nn.BitLinear(16, 3))
+    opt = nn.AdamW(net.parameters(), lr=5e-2)
+    first = last = None
+    for step in range(60):
+        opt.zero_grad()
+        loss = nn.softmax_cross_entropy(net(X), y)
+        loss.backward(); opt.step()
+        if step == 0:
+            first = loss.item()
+        last = loss.item()
+    print(f"[bitlinear] fwd_err={fwd_err:.1e} ste={ste_ok}  train loss {first:.3f} -> {last:.3f}")
+    return fwd_err < 1e-5 and ste_ok and last < first * 0.6
+
+
 def main() -> int:
     ok = True
+    ok &= test_bitlinear()
     ok &= test_error_reporting()
     ok &= test_tensor_parallel()
     ok &= test_distributed_dp()
