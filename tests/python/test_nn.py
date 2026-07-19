@@ -395,6 +395,46 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_qlora() -> bool:
+    # QLoRA: a frozen ternary-quantized base (~2 bits/weight, not a parameter) +
+    # a trainable LoRA adapter. Only A,B train; the base never changes; B=0 means
+    # the layer starts exactly at the quantized base; grads match NumPy; and it
+    # fine-tunes a task to convergence.
+    nn.seed(0)
+    inf, outf, r = 128, 32, 4
+    q = nn.QLoRALinear(inf, outf, r=r, alpha=8, bias=True)
+
+    only_ab = (len(q.parameters()) == 2)
+    bits = q.base_bits_per_weight()
+
+    x = nn.tensor(np.random.default_rng(1).standard_normal((16, inf)).astype(np.float32))
+    base = q._codes.astype(np.float32) * q._scale[None, :]
+    init_ok = float(np.max(np.abs(q(x).numpy() - (x.numpy() @ base + q._bias[None, :])))) < 1e-4
+
+    codes0 = q._codes.copy()
+    tgt = [int(v) for v in np.random.default_rng(2).integers(0, outf, 16)]
+    nn.softmax_cross_entropy(q(x), tgt).backward()
+    gA, gB = q.A.grad().copy(), q.B.grad().copy()
+    Xn, A, B, sc = x.numpy(), q.A.numpy(), q.B.numpy(), q.scaling
+    logits = Xn @ base + sc * (Xn @ A) @ B + q._bias[None, :]
+    pr = np.exp(logits - logits.max(1, keepdims=True)); pr /= pr.sum(1, keepdims=True)
+    oh = np.zeros_like(pr); oh[np.arange(16), tgt] = 1; dl = (pr - oh) / 16
+    grad_ok = (float(np.max(np.abs(gA - sc * Xn.T @ (dl @ B.T)))) < 1e-4 and
+               float(np.max(np.abs(gB - sc * (Xn @ A).T @ dl))) < 1e-4)
+
+    opt = nn.AdamW(q.adapter_parameters(), lr=5e-2)
+    first = last = None
+    for s in range(80):
+        opt.zero_grad(); loss = nn.softmax_cross_entropy(q(x), tgt); loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+    frozen = np.array_equal(codes0, q._codes)
+    print(f"[qlora] params={len(q.parameters())} base_bits={bits:.2f} init_ok={init_ok} "
+          f"grad_ok={grad_ok} frozen={frozen}  fine-tune {first:.3f} -> {last:.3f}")
+    return only_ab and bits < 3.0 and init_ok and grad_ok and frozen and last < first * 0.2
+
+
 def test_mamba() -> bool:
     # Selective scan (the SSM recurrence h_t = a_t*h_{t-1}+b_t): forward matches a
     # NumPy reference exactly, and its analytic gradients match finite differences.
@@ -700,6 +740,7 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_qlora()
     ok &= test_mamba()
     ok &= test_speculative_decoding()
     ok &= test_gather_scatter()
