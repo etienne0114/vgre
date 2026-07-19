@@ -109,6 +109,12 @@ Var concat(const Var& a, const Var& b, int axis);
 // gathers. idx values must be in [0, N).
 Var index_select(const Var& x, const std::vector<int>& idx);
 Var index_add(int64_t rows, const Var& src, const std::vector<int>& idx);
+// Selective scan — the state-space-model (Mamba) recurrence over a length-T
+// sequence: h_t = a[t] ⊙ h_{t-1} + b[t], with h_{-1}=0. a and b are [T, D]
+// (per-step, per-state-channel gate and input); returns the states h [T, D].
+// This is the core linear-recurrence primitive; the Mamba block builds the
+// input-dependent a/b/C around it. Backward is the exact adjoint recurrence.
+Var selective_scan(const Var& a, const Var& b);
 
 // ── Vision ops (so the engine trains CNNs, not only transformers) ────────────
 // 2-D convolution via im2col + GEMM. input[N,Ci,H,W], weight[Co,Ci,Kh,Kw],

@@ -124,6 +124,7 @@ vgre_ag vgre_ag_rms_norm(vgre_ag x, vgre_ag w, float eps) { try { return wrap(rm
 vgre_ag vgre_ag_embedding(vgre_ag w, const int* ids, int n) { try { return wrap(embedding(ref(w), std::vector<int>(ids, ids + n))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_index_select(vgre_ag x, const int* idx, int n) { try { return wrap(index_select(ref(x), std::vector<int>(idx, idx + n))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_index_add(long long rows, vgre_ag src, const int* idx, int n) { try { return wrap(index_add((int64_t)rows, ref(src), std::vector<int>(idx, idx + n))); } AG_CATCH(return nullptr) }
+vgre_ag vgre_ag_selective_scan(vgre_ag a, vgre_ag b) { try { return wrap(selective_scan(ref(a), ref(b))); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_rope(vgre_ag x, int num_heads, float base) { try { return wrap(rope(ref(x), num_heads, base)); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } AG_CATCH(return nullptr) }
 vgre_ag vgre_ag_flash_attention(vgre_ag q, vgre_ag k, vgre_ag v, int num_heads, int causal) { try { return wrap(flash_attention(ref(q), ref(k), ref(v), num_heads, causal != 0)); } AG_CATCH(return nullptr) }
