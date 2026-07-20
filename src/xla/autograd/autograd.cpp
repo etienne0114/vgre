@@ -3,6 +3,7 @@
 #include "vgre/xla/autograd.h"
 #include "vgre/xla/intree_gemm.h"
 #include "vgre/xla/ternary_gemm.h"
+#include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
 #include <cmath>
@@ -681,24 +682,39 @@ Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets) {
 
 Var selective_scan(const Var& a, const Var& b) {
     // Forward linear recurrence h_t = a_t ⊙ h_{t-1} + b_t (h_{-1}=0), a,b [T,D].
+    // The D state channels are independent, so both the forward scan and the
+    // adjoint backward parallelize over D across the thread pool (each channel is
+    // a private sequential recurrence — no cross-channel sharing, bit-identical
+    // to the serial version). This is the "parallel selective scan" that makes
+    // long-sequence SSM inference/training fast on a multicore CPU.
     if (a->shape.size() != 2 || b->shape.size() != 2 || a->shape != b->shape)
         throw std::runtime_error("selective_scan: a and b must be equal 2-D [T,D]");
     const int64_t T = a->shape[0], D = a->shape[1];
     Var out = newNode({T, D}, {a, b}, a->requires_grad || b->requires_grad);
-    for (int64_t d = 0; d < D; ++d) {
+
+    const float* ad = a->data.data();
+    const float* bd = b->data.data();
+    float* od = out->data.data();
+    auto fwd = [ad, bd, od, T, D](int64_t d) {
         float h = 0.0f;
         for (int64_t t = 0; t < T; ++t) {
-            h = a->data[t * D + d] * h + b->data[t * D + d];
-            out->data[t * D + d] = h;
+            h = ad[t * D + d] * h + bd[t * D + d];
+            od[t * D + d] = h;
         }
-    }
+    };
+    // Only fan out when there is enough work to amortize the scheduling.
+    if (D * T >= 8192)
+        ThreadPool::global().parallelFor(D, std::max<int64_t>(1, 8192 / std::max<int64_t>(T, 1)), fwd);
+    else
+        for (int64_t d = 0; d < D; ++d) fwd(d);
+
     Node* op = out.get(); Var A = a, B = b;
     out->backward_fn = [op, A, B, T, D]() {
         const bool ga = A->requires_grad, gb = B->requires_grad;
         if (!ga && !gb) return;
         // Adjoint: total grad G_t = g_t + a_{t+1}·G_{t+1} (reverse recurrence);
         // dL/db_t = G_t; dL/da_t = G_t · h_{t-1}.
-        for (int64_t d = 0; d < D; ++d) {
+        auto bwd = [op, &A, &B, T, D, ga, gb](int64_t d) {
             float carry = 0.0f;                       // a_{t+1}·G_{t+1}
             for (int64_t t = T - 1; t >= 0; --t) {
                 const float G = op->grad[t * D + d] + carry;
@@ -709,7 +725,11 @@ Var selective_scan(const Var& a, const Var& b) {
                 }
                 carry = A->data[t * D + d] * G;
             }
-        }
+        };
+        if (D * T >= 8192)
+            ThreadPool::global().parallelFor(D, std::max<int64_t>(1, 8192 / std::max<int64_t>(T, 1)), bwd);
+        else
+            for (int64_t d = 0; d < D; ++d) bwd(d);
     };
     return out;
 }
