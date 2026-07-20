@@ -469,6 +469,17 @@ def test_mamba() -> bool:
             nb[t, d] = (L(a_np, bp) - L(a_np, bm)) / (2 * eps)
     grad_err = max(float(np.max(np.abs(ga - na))), float(np.max(np.abs(gb - nb))))
 
+    # Parallel path: a large scan (T*D ≥ 8192 fans out over the D channels on the
+    # thread pool) must be bit-identical to the sequential NumPy reference.
+    Tp, Dp = 128, 128
+    ap = (0.9 + 0.05 * rng.standard_normal((Tp, Dp))).astype(np.float32)
+    bp = rng.standard_normal((Tp, Dp)).astype(np.float32)
+    hp = nn.selective_scan(nn.tensor(ap), nn.tensor(bp)).numpy()
+    hpr = np.zeros((Tp, Dp), np.float32); pp = np.zeros(Dp, np.float32)
+    for t in range(Tp):
+        pp = ap[t] * pp + bp[t]; hpr[t] = pp
+    par_err = float(np.max(np.abs(hp - hpr)))
+
     # Full multi-state selective SSM (Mamba/S6): the block's forward must match an
     # independent NumPy reference of the exact Δ/A/B/C recurrence.
     nn.seed(1)
@@ -523,9 +534,9 @@ def test_mamba() -> bool:
         gen.append(int(np.argmax(m(cur).numpy()[-1]))); cur = cur + [gen[-1]]
     match = sum(int(x == y) for x, y in zip(gen, tgt))
 
-    print(f"[mamba] scan fwd_err={fwd_err:.1e} grad_err={grad_err:.1e}  "
+    print(f"[mamba] scan fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} par_err={par_err:.1e} "
           f"ssm_block_err={ssm_err:.1e}  LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
-    return (fwd_err < 1e-6 and grad_err < 1e-3 and ssm_err < 1e-4
+    return (fwd_err < 1e-6 and grad_err < 1e-3 and par_err < 1e-6 and ssm_err < 1e-4
             and last < first * 0.2 and match >= TT - 1)
 
 
