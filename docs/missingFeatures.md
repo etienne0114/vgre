@@ -1,133 +1,124 @@
 # VGRE — Remaining Work & Advanced Roadmap
 
-**Last Updated**: 2026-07-18
+**Last Updated**: 2026-07-21
 
-This file tracks **what is not yet done** and the **new competitive frontier** we are
-building toward. Everything implementable to the project's *real, no-stub* standard
-**without external hardware/accounts has already been delivered, tested, and removed from
-this file** (see git history for the full set). The delivered baseline now includes the
-complete in-tree large-model programme — bf16/fp16 + int4/int8 storage, mmap safetensors /
-GGUF (Q4_0/Q4_1/Q8_0/Q4_K/Q6_K) + GPTQ/AWQ, BLAS-backed GEMM (82×) with dequant-in-GEMM,
-autoregressive generation + samplers, a byte-level BPE tokenizer matching HF token-for-token
-(incl. unified `tokenizer.json`), tensor/pipeline parallelism + GSPMD auto-partitioner over
-real RDMA/TCP sockets, CUDA-C→JIT with the full device-intrinsic surface, a CUDA-GDB RSP
-debugger, LoRA fine-tuning, an HNSW vector index (local RAG), the lightweight LLVM-free
-`libvgre_nn` with a real from-scratch TCP all-reduce, and a hardened C-ABI error channel.
-Verified end-to-end on **real GPT-2 (124M)** matching Hugging Face, and on **real multi-process
-distributed training** (data-, tensor-, pipeline-parallel). **Suite: 300/300.**
+This file tracks **what is not yet done**. Everything implementable to the project's *real,
+no-stub* standard **without external hardware/accounts has been delivered, tested, and removed
+from this file** (see git history for the full set).
 
-The remaining work is now in **three** buckets:
-1. **§1 — New advanced feature roadmap (2026 frontier).** The competitive edge: what makes
-   VGRE *intelligent, modern, and hard to beat* — all buildable in-tree, from scratch,
-   dependency-free, to the same real-no-stub standard.
-2. **§2 — Externally-blocked tracks** (hardware / accounts / auditors / gated downloads).
-3. **§3 — Physical large-model runs** (a real cluster or a license-gated multi-GB download).
+**Delivered baseline.** The complete in-tree large-model programme — bf16/fp16 + int4/int8
+storage, mmap safetensors / GGUF (Q4_0/Q4_1/Q8_0/Q4_K/Q6_K) + GPTQ/AWQ, BLAS-backed GEMM (82×)
+with dequant-in-GEMM, autoregressive generation + samplers, a byte-level BPE tokenizer matching
+HF token-for-token (incl. unified `tokenizer.json`), tensor/pipeline parallelism + GSPMD
+auto-partitioner over real RDMA/TCP sockets, CUDA-C→JIT with the full device-intrinsic surface, a
+CUDA-GDB RSP debugger, LoRA fine-tuning, an HNSW vector index (local RAG), the lightweight
+LLVM-free `libvgre_nn` with a real from-scratch TCP all-reduce, and a hardened C-ABI error
+channel. Verified end-to-end on **real GPT-2 (124M)** matching Hugging Face, and on **real
+multi-process distributed training** (data-, tensor-, pipeline-parallel).
 
----
+**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite: 303/303.**
 
-## 1. New advanced feature roadmap — the 2026 competitive frontier
-
-These are **not yet in-tree** (audited 2026-07-18: no BitNet/ternary, MoE, Mamba/SSM,
-speculative decoding, MXFP4, or QLoRA anywhere in `src/`, `include/`, `bindings/`). Each is
-chosen to advance the core mission — **run and train large models on CPUs and clusters, with
-no GPU, staying lightweight** — and each is built **from scratch** (no new third-party
-dependency), extending code paths that already exist. Detailed build steps live in
-`implementationPlan.md`; success criteria are at the bottom of that file.
-
-### 1.1 — Ternary / 1-bit inference (BitNet b1.58) — **P0, highest-impact lightweight win**
-
-Modern 1.58-bit LLMs constrain every weight to a ternary value {−1, 0, +1}. This turns the
-dominant matmul into a **multiplication-free** accumulate (add/sub only), which is exactly
-where a CPU is *not* disadvantaged versus a GPU. Microsoft's `bitnet.cpp` reports **2.37×–6.17×
-CPU speedups on x86 and up to 82% lower energy**, and runs a **100B-parameter model on a single
-CPU** at reading speed — the strongest possible statement of "eliminate the GPU barrier."
-
-**In-tree, from scratch:**
-- A ternary weight codec (2-bit packed {−1,0,+1}, per-group fp scale) as a new `Literal`
-  storage kind next to the existing bf16/int4/int8 codecs.
-- A **multiplication-free ternary GEMM** micro-kernel (add/sub accumulate, AVX2/AVX-512 +
-  scalar fallback) beside `intree_gemm_f32.cpp`, plus a **T-MAC-style lookup-table** variant
-  (precomputed activation partial sums indexed by packed ternary bytes) for sub-2-bit throughput.
-- A `BitLinear` layer in the in-tree autograd/model stack, and a GGUF loader path for the
-  `I2_S` / TL1 / TL2 ternary tensor types so real BitNet checkpoints load directly.
-
-### 1.2 — Mixture-of-Experts (MoE) with expert-parallel over the cluster — **P1**
-
-Frontier open models (Mixtral, DeepSeek-V3, Qwen-MoE) are sparse: only a few experts fire per
-token, so the *active* compute is small even when the model is huge — ideal for CPU clusters.
-
-**In-tree, from scratch:** a top-k **router/gate**, sparse expert dispatch/combine, an `MoELayer`
-in the autograd stack, and **expert-parallel** sharding that places experts on different cluster
-nodes and routes tokens over the **already-built** all-reduce / all-to-all collectives. This is
-the piece that lets a cluster of ordinary machines serve a frontier-scale MoE.
-
-### 1.3 — Speculative decoding — **P1, 2–10× faster CPU generation**
-
-Draft several tokens cheaply, then verify them in one batched forward of the full model,
-accepting the longest correct prefix. Reported **2×–10× decode latency reduction** with
-identical output distribution.
-
-**In-tree, from scratch:** self-speculative / n-gram / small-draft-model drafting + **tree
-attention verification** wired into `generation.cpp` and `KVCacheManager` (paged KV already
-exists). Lossless: output is provably identical to greedy/sampled decode.
-
-### 1.4 — State-space models (Mamba-2 / Mamba-3) — **P2, linear-time long context**
-
-SSMs run in **linear** time and **constant** memory per step (no growing KV cache), which is a
-decisive CPU advantage at long context. Mamba-3 (2026) adds a MIMO recurrence that maps cleanly
-onto matrix-matrix kernels we already have.
-
-**In-tree, from scratch:** a **parallel selective-scan** (associative prefix-scan, threaded +
-SIMD) op in the autograd engine with its reverse-mode backward, an SSM/Mamba block in the model
-stack, and a GGUF/safetensors loader path for Mamba checkpoints — extending the engine beyond
-transformers.
-
-### 1.5 — MXFP4 microscaling 4-bit (OCP) — **P2**
-
-The Open Compute microscaling FP4 format (shared 8-bit block scale + 4-bit elements) is becoming
-the interop standard for 4-bit weights *and* activations.
-
-**In-tree, from scratch:** an MXFP4 block codec + dequant-in-GEMM path alongside the existing
-int4/GPTQ/AWQ codecs, so MXFP4 checkpoints load and run without a separate upcast pass.
-
-### 1.6 — QLoRA (quantized-base fine-tuning) — **P3**
-
-Combine the existing **LoRA** adapters with the existing **int4/ternary** quantized base so a
-large model can be **fine-tuned on a laptop**: frozen quantized base + trainable fp adapters,
-de-quant only in the forward matmul. Extends `LoRALinear` + the quant codecs already in-tree.
+Remaining work is in **four** buckets:
+1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).
+2. **§2 — The next frontier** (new capabilities worth building, all in-tree and from scratch).
+3. **§3 — Externally-blocked tracks** (hardware / accounts / auditors / gated downloads).
+4. **§4 — Physical large-model runs** (a real cluster or a license-gated multi-GB download).
 
 ---
 
-## 2. Externally-blocked tracks (need hardware, an account, an auditor, or content)
+## 1. Delivered: the 2026 advanced tracks (T1–T6) — and what's narrowly left
+
+All six are **in-tree, from scratch, dependency-free, numerically verified against independent
+references**, and live in the LLVM-free `libvgre_nn`. Build steps and success criteria are in
+`implementationPlan.md`.
+
+| Track | Delivered | Verified by |
+|-------|-----------|-------------|
+| **T1** Ternary / BitNet b1.58 | absmean ternary codec + **multiplication-free** GEMM (AVX2 add/sub masks + scalar); `BitLinear` quantization-aware training via a straight-through `ternary_quantize` op | kernel == dense dequantized GEMM to 1.6e-05; STE grad exact; BitLinear net trains (loss 1.3→0.34) |
+| **T2** Mixture-of-Experts | top-k router; **compute-sparse** dispatch via new `index_select`/`index_add` gather-scatter ops; **expert-parallel** across cluster ranks (all_reduce of partials); Switch load-balance aux loss; MoE drop-in transformer FFN | combine == NumPy 2.4e-07; exactly k experts/token; **2 real OS processes**: forward bit-identical, router-grad sum == full (1.8e-08); MoE-LM regenerates 12/12 |
+| **T3** Speculative decoding | lossless **greedy** speculative decode; **sampler-exact** speculative sampling (min(1,q/p) accept + residual resample); `ngram_draft_fn` and `model_draft_fn` drafters | == greedy token-for-token at 4.0 tokens/forward; sampler-exact empirical dist == analytic target (TV 0.038 on a diffuse q); temp→0 == greedy |
+| **T4** State-space models (Mamba/S6) | `selective_scan` autograd op with exact adjoint, **parallelized over the state channels**; full multi-state selective SSM (Δ=softplus, Ā=exp(Δ⊙A), per-state scan, C-contraction, D-skip); attention-free Mamba LM | scan fwd exact + grads ~1e-5 vs finite differences; parallel path bit-identical (par_err 0.0), **~4.9× at 8 threads**; full block == NumPy Δ/A/B/C reference 7.6e-06; Mamba-LM regenerates 14/14 |
+| **T5** MXFP4 microscaling | OCP E2M1 + shared E8M0 block-scale codec, dequant-in-GEMM | round-trip bound + MXFP4-GEMM == fp reference |
+| **T6** QLoRA | frozen **ternary** base (~2 bits/weight, stored as codes, *not* a parameter, no gradient) + trainable LoRA adapters; `from_linear` | params == {A,B} exactly; base 2.25 bits/weight; init == quantized base; adapter grads == NumPy; base frozen; fine-tune converges (4.1→0.000) |
+
+**Narrow remainders (breadth/perf — no correctness gaps):**
+
+| Track | Left | Nature |
+|-------|------|--------|
+| T1 | GGUF `I2_S`/TL1/TL2 ternary tensor loader | needs a real BitNet-b1.58 checkpoint to verify end-to-end (**external download**) |
+| T3 | KV-cache reuse + rollback on the raw C++ `generate_cached` path; tree verification; self-speculative (early-exit) drafting | **throughput optimization** — the algorithm is complete and proven |
+| T4 | depthwise short conv before the SSM; **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization |
+| T5 | SIMD unpack path for the 4-bit decode (the row-major block layout fights column-wise vectorization) | perf |
+| T6 | int4/MXFP4 base option (ternary is in); dequant-in-GEMM for the base path | breadth / peak-memory |
+
+---
+
+## 2. The next frontier — new capabilities worth building
+
+Each is in-tree, from scratch, and composes primitives we now have. Ordered by
+mission impact (**run/train large models on CPUs + clusters, no GPU, lightweight**).
+
+### 2.1 Hybrid Mamba–Transformer blocks (Jamba-style) — P0
+We now have **both** attention and a real selective SSM. Interleaving them (e.g. 1 attention per
+N Mamba blocks) is the current frontier design: near-linear cost and small KV memory from the SSM
+layers, with attention retained where exact recall matters. This is a *composition* of delivered
+parts — the highest value per unit of work in the whole file.
+
+### 2.2 KV-cache quantization (int8 / int4) — P0
+At long context the KV cache, not the weights, dominates memory. Quantizing K/V per-head with a
+block scale (reusing the ternary/MXFP4 codecs) is the single biggest lever for long-context
+inference on a laptop. Pairs directly with the paged-attention path already in `KVCacheManager`.
+
+### 2.3 Multi-token prediction (MTP) heads — P1
+Extra heads that predict t+2, t+3… turn the model into **its own draft model**, feeding T3's
+speculative decoder with no second model and no extra memory — a compounding win on top of the
+4.0 tokens/forward already measured.
+
+### 2.4 Continuous batching / serving loop — P1
+A real scheduler over the paged KV: admit, evict, and interleave many requests so a CPU box
+serves concurrent users at high utilization. Turns the engine into a *server*, not just a library.
+
+### 2.5 Structured sparsity (2:4 / block) + sparse GEMM — P2
+Complements quantization on the other axis: prune to a hardware-friendly pattern and use a
+sparse micro-kernel. Composes with T1's ternary and T5's MXFP4 codecs.
+
+### 2.6 Quantization-aware distillation — P2
+Train a small ternary/4-bit student from a larger teacher entirely in-tree (we have QAT via
+`BitLinear`, LoRA/QLoRA, and the training stack). The end-to-end "make a frontier model run on a
+cheap laptop" story.
+
+---
+
+## 3. Externally-blocked tracks (need hardware, an account, an auditor, or content)
 
 The in-tree primitives already exist where applicable; only the externally-gated piece remains.
 
 | § | Track | What's left | Blocker |
 |---|-------|-------------|---------|
-| 2.1 | GPU security framework | SEV-SNP/TDX enclaves, HSM, FIPS-140 cert | confidential-computing **hardware** + external **auditor** |
-| 2.2 | Cryptography | homomorphic / threshold crypto, Intel QAT offload | research-grade scope / crypto-accelerator **hardware** |
-| 2.3 | Windows deployment | DirectML backend, AD/Kerberos, Windows containers | Windows-specific **APIs/SDKs** (engine already builds+tests on windows-2022) |
-| 2.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (CPU JIT path is build-verified on macOS) |
-| 2.5 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path runs JAX/TF/PyTorch) |
-| 2.6 | Model serving | TensorRT-LLM / vLLM *compatibility layers* | those external **runtimes** / a live **fleet** |
-| 2.7 | Multi-cloud | apply to live AWS/Azure/GCP | cloud **accounts + credentials** (Terraform module is built) |
-| 2.8 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; ROCm library shims | those **SDKs / hardware** (AMD HIP core runtime is done) |
-| 2.9 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
-| 2.10 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
+| 3.1 | GPU security framework | SEV-SNP/TDX enclaves, HSM, FIPS-140 cert | confidential-computing **hardware** + external **auditor** |
+| 3.2 | Cryptography | homomorphic / threshold crypto, Intel QAT offload | research-grade scope / crypto-accelerator **hardware** |
+| 3.3 | Windows deployment | DirectML backend, AD/Kerberos, Windows containers | Windows-specific **APIs/SDKs** (engine already builds+tests on windows-2022) |
+| 3.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (CPU JIT path is build-verified on macOS) |
+| 3.5 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path runs JAX/TF/PyTorch) |
+| 3.6 | Model serving | TensorRT-LLM / vLLM *compatibility layers* | those external **runtimes** / a live **fleet** |
+| 3.7 | Multi-cloud | apply to live AWS/Azure/GCP | cloud **accounts + credentials** (Terraform module is built) |
+| 3.8 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; ROCm library shims | those **SDKs / hardware** (AMD HIP core runtime is done) |
+| 3.9 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
+| 3.10 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
 
 ---
 
-## 3. Physical large-model runs (external only)
+## 4. Physical large-model runs (external only)
 
 The in-tree engineering is complete and verified over real loopback sockets **and across real OS
 processes** (multi-step data-parallel with zero cross-step drift; cross-process tensor
-parallelism). Only two things remain, both outside the code:
+parallelism; cross-process expert-parallel MoE). Only two things remain, both outside the code:
 
 | Remaining | Why it isn't in-tree |
 |-----------|----------------------|
 | **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | Transport, collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are all built and verified across real OS processes; a true cross-machine run needs **actual networked machines**. |
 | **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | Identical code path to the demonstrated GPT-2 run — it just needs a **license-gated, multi-GB download**. |
 
-Once §1 lands, the same distributed machinery makes these runs *cheaper* on commodity CPUs:
-ternary + MoE + speculative decode shrink both the memory and the compute a physical cluster
-needs, which is the whole point.
+T1–T6 make these runs materially cheaper on commodity CPUs: ternary + MXFP4 + QLoRA shrink the
+memory, MoE shrinks the active compute, speculative decoding shrinks the latency, and the SSM
+path removes the KV cache entirely — which is the whole point.
