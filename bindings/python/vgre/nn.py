@@ -888,6 +888,22 @@ class SSMBlock(Module):
         self.out_proj = Linear(dim, dim)
 
     def forward(self, x):
+        s = x.shape
+        if len(s) == 3:
+            # Batched [B,T,dim]: the recurrence is per sequence and must NEVER
+            # carry state across batch boundaries, so each sequence is scanned
+            # independently and the results re-stacked (a flat [B*T,dim] scan
+            # would leak the end of one sequence into the start of the next).
+            B, T = s[0], s[1]
+            flat = reshape(x, (B * T, s[2]))
+            out = None
+            for b in range(B):
+                yb = self._forward2d(index_select(flat, list(range(b * T, (b + 1) * T))))
+                out = yb if out is None else concat(out, yb, 0)
+            return reshape(out, (B, T, self.dim))
+        return self._forward2d(x)
+
+    def _forward2d(self, x):
         T, dim, N = x.shape[0], self.dim, self.N
         u = self.in_proj(x)                              # [T,dim]
         delta = softplus(self.dt_proj(x))               # [T,dim]  Δ>0
@@ -914,12 +930,44 @@ class SSMBlock(Module):
 class MambaBlock(Module):
     """Pre-norm residual state-space block: x + SSM(RMSNorm(x)). A drop-in
     sequence mixer alternative to a transformer block (attention-free)."""
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, d_state: int = 8):
         self.norm = RMSNorm(dim)
-        self.ssm = SSMBlock(dim)
+        self.ssm = SSMBlock(dim, d_state=d_state)
 
     def forward(self, x):
         return x + self.ssm(self.norm(x))
+
+
+def hybrid_blocks(dim: int, n_layers: int, num_heads: int, attn_every: int = 4,
+                  d_state: int = 8, ff: int = 0, causal: bool = True,
+                  moe_experts: int = 0, moe_top_k: int = 2) -> List[Module]:
+    """Build a hybrid Mamba–Transformer stack (Jamba-style): every `attn_every`-th
+    layer is a `TransformerBlock`, the rest are `MambaBlock`s.
+
+    Why hybridize: the SSM layers are linear-time and keep **no KV cache**, so
+    memory and cost at long context are dominated only by the few attention
+    layers, while attention is retained where exact long-range recall matters.
+    With attn_every=4 only 1 layer in 4 holds a KV cache — a ~4× cut in KV memory
+    versus an all-attention stack of the same depth.
+
+    Both block types take and return [T,dim] or [B,T,dim] with the same residual
+    stream, so they interleave directly.
+
+        blocks = nn.hybrid_blocks(256, n_layers=8, num_heads=8, attn_every=4)
+        # -> Mamba, Mamba, Mamba, Transformer, Mamba, Mamba, Mamba, Transformer
+    """
+    if n_layers <= 0:
+        raise ValueError("n_layers must be positive")
+    if attn_every <= 0:
+        raise ValueError("attn_every must be positive")
+    blocks: List[Module] = []
+    for i in range(n_layers):
+        if (i + 1) % attn_every == 0:
+            blocks.append(TransformerBlock(dim, num_heads, ff=ff, causal=causal,
+                                           moe_experts=moe_experts, moe_top_k=moe_top_k))
+        else:
+            blocks.append(MambaBlock(dim, d_state=d_state))
+    return blocks
 
 
 class MaxPool2d(Module):
