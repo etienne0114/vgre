@@ -102,6 +102,23 @@ def main() -> int:
     else:
         print("[6] load_hf fixture absent — skipped")
 
+    # int8 KV cache: at long context the KV cache dominates memory. Storing it as
+    # int8 + a per-(position, head) absmax scale must not change greedy decoding
+    # (quantization is lossy but the perturbation is far below the argmax margin),
+    # and must cut KV bytes by 4·Dh/(Dh+4).
+    prompt = ids[:6]
+    g_fp = lm.generate(prompt, n_new=16, temperature=0.0, seed=1)
+    lm.set_int8_kv_cache(True)
+    g_q8 = lm.generate(prompt, n_new=16, temperature=0.0, seed=1)
+    D, H = 64, 4
+    Dh = D // H
+    fp_bytes, q8_bytes = 2 * 4 * D, 2 * (D + 4 * H)   # K+V per position per layer
+    print(f"[7] int8 KV cache: greedy identical={g_fp == g_q8}  "
+          f"KV bytes/pos/layer {fp_bytes} -> {q8_bytes} ({fp_bytes / q8_bytes:.2f}x)")
+    assert g_fp == g_q8, "int8 KV cache must not change greedy decoding"
+    assert q8_bytes * 3 < fp_bytes, "int8 KV must be >3x smaller"
+    lm.set_int8_kv_cache(False)
+
     print("PASS — VGRE-LM Python bindings train, generate, and checkpoint")
     return 0
 

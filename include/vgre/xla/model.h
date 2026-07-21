@@ -80,6 +80,17 @@ public:
     void set_int8_inference(bool on);
     bool int8_inference() const { return int8_inference_; }
 
+    // Store the generation KV cache as int8 with a per-(position, head) absmax
+    // scale instead of fp32. At long context the KV cache — not the weights —
+    // dominates memory. Per head this stores Dh bytes + one fp32 scale instead
+    // of 4·Dh bytes, a 4·Dh/(Dh+4) reduction — 3.2× at Dh=16, 3.8× at Dh=64,
+    // approaching 4× as the head dim grows. Quantization is lossy (symmetric
+    // absmax), but the perturbation is small enough that greedy decoding is
+    // typically unchanged. Affects generate_cached() only; weights and
+    // activations are untouched.
+    void set_int8_kv_cache(bool on) { int8_kv_cache_ = on; }
+    bool int8_kv_cache() const { return int8_kv_cache_; }
+
     // Free the fp32 master copies of the big weights after quantizing, so the
     // resident footprint actually drops to the bf16 (½×) / int8 (¼×) size.
     // Requires set_bf16_inference / set_int8_inference first. The model becomes
@@ -115,6 +126,7 @@ private:
     std::vector<Var>  params_;
     bool                  bf16_inference_ = false;
     bool                  int8_inference_ = false;
+    bool                  int8_kv_cache_  = false;
     bool                  fp32_dropped_   = false;
     std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
     // int8 caches. tok_emb is quantized PER ROW (per token): the row scale serves

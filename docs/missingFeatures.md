@@ -72,10 +72,21 @@ flat scan). Verified (`test_nn.py::test_hybrid_mamba_transformer`): batch-indepe
 stack interleaves as `MMMAMMMA`, and a 4-layer hybrid LM trains (3.4 → 0.000) and greedily
 regenerates its sequence 14/14.
 
-### 2.2 KV-cache quantization (int8 / int4) — P0
-At long context the KV cache, not the weights, dominates memory. Quantizing K/V per-head with a
-block scale (reusing the ternary/MXFP4 codecs) is the single biggest lever for long-context
-inference on a laptop. Pairs directly with the paged-attention path already in `KVCacheManager`.
+### 2.2 KV-cache quantization (int8) — **DONE**
+At long context the KV cache, not the weights, dominates memory. `GPT::set_int8_kv_cache(true)`
+(C-ABI `vgre_lm_set_int8_kv_cache`, Python `LanguageModel.set_int8_kv_cache()`) stores the
+generation KV cache as int8 with a **per-(position, head) absmax scale** instead of fp32: per head
+that is Dh bytes + one fp32 scale rather than 4·Dh bytes — a **4·Dh/(Dh+4)** reduction (3.2× at
+Dh=16, 3.8× at Dh=64, → 4× as the head dim grows). Only one representation is allocated, so the
+saving is real, and the fp32 path is untouched when the flag is off.
+
+Quantization is lossy (symmetric absmax), but the perturbation sits far below the argmax margin:
+verified (`test_lm_bindings.py` §7) that a trained LM's **greedy decoding is identical** with int8
+KV, at 512 → 160 KV bytes/position/layer (3.20×). Composes with §2.1 — the hybrid stack
+concentrates KV into the few attention layers, and this shrinks those.
+
+**Left:** int4 KV (a second halving) and wiring the same scheme into `KVCacheManager`'s paged
+pools for the serving path.
 
 ### 2.3 Multi-token prediction (MTP) heads — P1
 Extra heads that predict t+2, t+3… turn the model into **its own draft model**, feeding T3's
