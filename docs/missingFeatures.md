@@ -58,11 +58,19 @@ references**, and live in the LLVM-free `libvgre_nn`. Build steps and success cr
 Each is in-tree, from scratch, and composes primitives we now have. Ordered by
 mission impact (**run/train large models on CPUs + clusters, no GPU, lightweight**).
 
-### 2.1 Hybrid Mamba–Transformer blocks (Jamba-style) — P0
-We now have **both** attention and a real selective SSM. Interleaving them (e.g. 1 attention per
-N Mamba blocks) is the current frontier design: near-linear cost and small KV memory from the SSM
-layers, with attention retained where exact recall matters. This is a *composition* of delivered
-parts — the highest value per unit of work in the whole file.
+### 2.1 Hybrid Mamba–Transformer blocks (Jamba-style) — **DONE**
+`vgre.nn.hybrid_blocks(dim, n_layers, num_heads, attn_every=4, d_state=8, moe_experts=…)` builds an
+interleaved stack: every `attn_every`-th layer is a `TransformerBlock`, the rest are `MambaBlock`s
+(and the attention layers can themselves be MoE). Only 1-in-`attn_every` layer carries a KV cache —
+at `attn_every=4` that is a ~4× cut in KV memory versus an all-attention stack of the same depth,
+while attention is retained where exact long-range recall matters.
+
+Required making the SSM **batch-aware**: `SSMBlock` now accepts `[B,T,dim]` and scans each sequence
+independently (a flattened `[B*T,dim]` scan would leak state across sequence boundaries — the test
+asserts the batched result equals per-sequence scans **exactly (0.0)** *and* differs from the leaky
+flat scan). Verified (`test_nn.py::test_hybrid_mamba_transformer`): batch-independence exact, the
+stack interleaves as `MMMAMMMA`, and a 4-layer hybrid LM trains (3.4 → 0.000) and greedily
+regenerates its sequence 14/14.
 
 ### 2.2 KV-cache quantization (int8 / int4) — P0
 At long context the KV cache, not the weights, dominates memory. Quantizing K/V per-head with a

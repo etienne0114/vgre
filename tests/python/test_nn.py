@@ -395,6 +395,64 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_hybrid_mamba_transformer() -> bool:
+    # Hybrid Mamba-Transformer (Jamba-style). Three properties:
+    #  (a) batched SSM is per-sequence — a [B,T,D] scan must equal scanning each
+    #      sequence alone, and must NOT equal a flattened [B*T,D] scan (which
+    #      would leak state across sequence boundaries);
+    #  (b) hybrid_blocks interleaves the two mixers at the requested ratio, so
+    #      only 1-in-attn_every layer carries a KV cache;
+    #  (c) a hybrid LM trains and greedily regenerates its sequence.
+    nn.seed(0)
+    B, T, D = 3, 6, 16
+    ssm = nn.SSMBlock(D, d_state=4)
+    xn = np.random.default_rng(0).standard_normal((B, T, D)).astype(np.float32)
+    y3 = ssm(nn.tensor(xn)).numpy()
+    per = np.stack([ssm(nn.tensor(xn[b])).numpy() for b in range(B)])
+    batch_indep = float(np.max(np.abs(y3 - per)))
+    leaky = ssm(nn.tensor(xn.reshape(B * T, D))).numpy().reshape(B, T, D)
+    differs_from_leaky = float(np.max(np.abs(y3 - leaky)))
+
+    blocks = nn.hybrid_blocks(D, n_layers=8, num_heads=4, attn_every=4, d_state=4)
+    kinds = ["A" if isinstance(b, nn.TransformerBlock) else "M" for b in blocks]
+    ratio_ok = (kinds == ["M", "M", "M", "A", "M", "M", "M", "A"])
+
+    nn.seed(11)
+    V, TT, Dm = 16, 14, 32
+    seq = [(i * 3 + 1) % V for i in range(TT + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    class Hybrid(nn.Module):
+        def __init__(self):
+            self.e = nn.Embedding(V, Dm)
+            self.blocks = nn.hybrid_blocks(Dm, n_layers=4, num_heads=4,
+                                           attn_every=2, d_state=8)
+            self.n = nn.RMSNorm(Dm); self.h = nn.Linear(Dm, V, bias=False)
+
+        def forward(self, ids):
+            x = self.e(ids)
+            for b in self.blocks:
+                x = b(x)
+            return self.h(self.n(x))
+
+    m = Hybrid(); opt = nn.AdamW(m.parameters(), lr=3e-3)
+    first = last = None
+    for st in range(300):
+        opt.zero_grad(); loss = nn.softmax_cross_entropy(m(ids), tgt); loss.backward(); opt.step()
+        if st == 0:
+            first = loss.item()
+        last = loss.item()
+    cur = [seq[0]]; gen = []
+    for _ in range(TT):
+        gen.append(int(np.argmax(m(cur).numpy()[-1]))); cur = cur + [gen[-1]]
+    match = sum(int(a == b) for a, b in zip(gen, tgt))
+
+    print(f"[hybrid] batch_indep={batch_indep:.1e} (vs leaky flat scan {differs_from_leaky:.2f}) "
+          f"stack={''.join(kinds)}  LM train {first:.3f} -> {last:.3f}  match {match}/{TT}")
+    return (batch_indep < 1e-6 and differs_from_leaky > 1e-3 and ratio_ok
+            and last < first * 0.2 and match >= TT - 1)
+
+
 def test_qlora() -> bool:
     # QLoRA: a frozen ternary-quantized base (~2 bits/weight, not a parameter) +
     # a trainable LoRA adapter. Only A,B train; the base never changes; B=0 means
@@ -751,6 +809,7 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_hybrid_mamba_transformer()
     ok &= test_qlora()
     ok &= test_mamba()
     ok &= test_speculative_decoding()
