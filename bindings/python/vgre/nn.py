@@ -724,19 +724,31 @@ class QLoRALinear(Module):
 
     def __init__(self, in_features: int, out_features: int, r: int = 8,
                  alpha: float = 16.0, bias: bool = True, base_weight=None,
-                 base_bias=None):
+                 base_bias=None, base_format: str = "ternary"):
         if r <= 0:
             raise ValueError("QLoRA rank r must be positive")
+        if base_format not in ("ternary", "int4"):
+            raise ValueError("base_format must be 'ternary' or 'int4'")
         w = _f32(base_weight) if base_weight is not None else \
             _f32(rng.standard_normal((in_features, out_features)) *
                  (2.0 / in_features) ** 0.5)
         if w.shape != (in_features, out_features):
             raise ValueError(f"base_weight must be [{in_features},{out_features}]")
-        # Freeze the base as ternary codes + per-column absmean scale (numpy, so
-        # never registered as trainable parameters).
-        scale = np.abs(w).mean(axis=0).astype(np.float32)          # [out]
-        inv = np.where(scale == 0.0, 1.0, scale)
-        self._codes = np.clip(np.rint(w / inv), -1, 1).astype(np.int8)   # [in,out]
+        self.base_format = base_format
+        # Freeze the base as low-bit codes + a per-column scale (numpy, so never
+        # registered as trainable parameters). ternary: {-1,0,+1} at the absmean
+        # scale (~2 bits). int4: symmetric [-7,7] at the absmax/7 scale (~4 bits,
+        # more faithful for weights with a few large outliers).
+        if base_format == "ternary":
+            scale = np.abs(w).mean(axis=0).astype(np.float32)          # [out]
+            inv = np.where(scale == 0.0, 1.0, scale)
+            self._codes = np.clip(np.rint(w / inv), -1, 1).astype(np.int8)
+            self._bits = 2
+        else:  # int4
+            scale = (np.abs(w).max(axis=0) / 7.0).astype(np.float32)   # [out]
+            inv = np.where(scale == 0.0, 1.0, scale)
+            self._codes = np.clip(np.rint(w / inv), -7, 7).astype(np.int8)
+            self._bits = 4
         self._scale = scale
         self._bias = _f32(base_bias) if (bias and base_bias is not None) else \
             (np.zeros(out_features, np.float32) if bias else None)
@@ -748,12 +760,13 @@ class QLoRALinear(Module):
         self.alpha = float(alpha)
 
     @classmethod
-    def from_linear(cls, linear: "Linear", r: int = 8, alpha: float = 16.0) -> "QLoRALinear":
-        """Quantize an existing Linear's weights as the frozen ternary base."""
+    def from_linear(cls, linear: "Linear", r: int = 8, alpha: float = 16.0,
+                    base_format: str = "ternary") -> "QLoRALinear":
+        """Quantize an existing Linear's weights as the frozen base."""
         w = linear.W.numpy()
         b = linear.b.numpy() if linear.b is not None else None
         return cls(w.shape[0], w.shape[1], r=r, alpha=alpha,
-                   bias=b is not None, base_weight=w, base_bias=b)
+                   bias=b is not None, base_weight=w, base_bias=b, base_format=base_format)
 
     @property
     def scaling(self) -> float:
@@ -763,9 +776,10 @@ class QLoRALinear(Module):
         return [self.A, self.B]
 
     def base_bits_per_weight(self) -> float:
-        """Effective storage of the frozen base: ~2-bit ternary + the tiny scale."""
+        """Effective storage of the frozen base: the code width (~2-bit ternary /
+        ~4-bit int4) plus the tiny per-column fp32 scale."""
         n = self._codes.size
-        return (n * 2 + self._scale.size * 32) / n
+        return (n * self._bits + self._scale.size * 32) / n
 
     def _base(self):                                   # dequant transiently (no grad)
         return tensor(self._codes.astype(np.float32) * self._scale[None, :])
