@@ -96,6 +96,11 @@ Var embedding(const Var& weight, const std::vector<int>& ids);
 // Fused softmax + cross-entropy over rows of logits[M,V] against integer
 // targets (length M). Returns a scalar mean loss; numerically stable.
 Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets);
+// Fused softmax + cross-entropy against dense soft targets[M,V]. Target rows are
+// normalized internally and treated as constants; the backward path is the usual
+// (softmax(logits) - target) / M gradient into logits. This is the primitive for
+// framework-free distillation.
+Var softmax_cross_entropy_soft(const Var& logits, const Var& soft_targets);
 // Mean of all elements -> scalar.
 Var mean(const Var& x);
 // Row-wise softmax over the last dim of x[M,N].

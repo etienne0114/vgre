@@ -117,6 +117,10 @@ vgre_ag vgre_ag_softmax_cross_entropy(vgre_ag logits, const int* targets, int n)
     try { return wrap(softmax_cross_entropy(ref(logits), std::vector<int>(targets, targets + n))); }
     AG_CATCH(return nullptr)
 }
+vgre_ag vgre_ag_softmax_cross_entropy_soft(vgre_ag logits, vgre_ag soft_targets) {
+    try { return wrap(softmax_cross_entropy_soft(ref(logits), ref(soft_targets))); }
+    AG_CATCH(return nullptr)
+}
 vgre_ag vgre_ag_conv2d(vgre_ag input, vgre_ag weight, vgre_ag bias, int stride, int pad) {
     try { return wrap(conv2d(ref(input), ref(weight), bias ? ref(bias) : Var{}, stride, pad)); }
     AG_CATCH(return nullptr)
