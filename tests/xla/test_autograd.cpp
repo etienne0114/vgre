@@ -114,6 +114,20 @@ int main() {
         });
     }
 
+    // 5b1. soft-target cross entropy: distillation loss primitive.
+    {
+        Var target = make({3, 4}, {
+            0.70f, 0.20f, 0.05f, 0.05f,
+            0.10f, 0.55f, 0.25f, 0.10f,
+            0.05f, 0.10f, 0.15f, 0.70f,
+        }, false);
+        checkGrads("soft_sce", {
+            make({3, 4}, randn(12, 31), true),
+        }, [target](const std::vector<Var>& p) {
+            return softmax_cross_entropy_soft(p[0], target);
+        });
+    }
+
     // 5b2. batched matmul (bmm): a[B,M,K] · b[B,K,N]
     checkGrads("bmm", {
         make({2, 3, 4}, randn(24, 61), true),

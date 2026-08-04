@@ -680,6 +680,60 @@ Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets) {
     return out;
 }
 
+// ── Fused softmax + cross-entropy over rows against soft targets[M,V] ────────
+Var softmax_cross_entropy_soft(const Var& logits, const Var& soft_targets) {
+    if (logits->shape.size() != 2) throw std::runtime_error("soft_sce: logits must be [M,V]");
+    if (soft_targets->shape != logits->shape)
+        throw std::runtime_error("soft_sce: soft target shape must match logits");
+    const int64_t M = logits->shape[0], V = logits->shape[1];
+    Var out = newNode({1}, {logits}, logits->requires_grad);
+
+    std::vector<float> probs((size_t)M * V);
+    std::vector<float> targets((size_t)M * V);
+    double loss = 0.0;
+    for (int64_t i = 0; i < M; ++i) {
+        const float* row = &logits->data[i * V];
+        float mx = row[0];
+        for (int64_t j = 1; j < V; ++j) mx = std::max(mx, row[j]);
+        float sum = 0.0f;
+        for (int64_t j = 0; j < V; ++j) {
+            const float e = std::exp(row[j] - mx);
+            probs[i * V + j] = e;
+            sum += e;
+        }
+        const float inv = 1.0f / sum;
+        for (int64_t j = 0; j < V; ++j) probs[i * V + j] *= inv;
+
+        const float* target_row = &soft_targets->data[i * V];
+        float target_sum = 0.0f;
+        for (int64_t j = 0; j < V; ++j) {
+            const float t = target_row[j];
+            if (!std::isfinite(t) || t < 0.0f)
+                throw std::runtime_error("soft_sce: soft targets must be finite and non-negative");
+            target_sum += t;
+        }
+        if (!(target_sum > 0.0f))
+            throw std::runtime_error("soft_sce: each soft-target row must have positive mass");
+        const float target_inv = 1.0f / target_sum;
+        for (int64_t j = 0; j < V; ++j) {
+            const float t = target_row[j] * target_inv;
+            targets[i * V + j] = t;
+            loss += -(double)t * std::log(std::max(probs[i * V + j], 1e-30f));
+        }
+    }
+    out->data[0] = (float)(loss / (double)M);
+
+    Node* op = out.get(); Var L = logits;
+    out->backward_fn = [op, L, probs, targets, M, V]() {
+        if (!L->requires_grad) return;
+        const float g = op->grad[0] / (float)M;
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < V; ++j)
+                L->grad[i * V + j] += g * (probs[i * V + j] - targets[i * V + j]);
+    };
+    return out;
+}
+
 Var selective_scan(const Var& a, const Var& b) {
     // Forward linear recurrence h_t = a_t ⊙ h_{t-1} + b_t (h_{-1}=0), a,b [T,D].
     // The D state channels are independent, so both the forward scan and the

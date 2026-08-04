@@ -395,6 +395,89 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_structured_sparse_linear() -> bool:
+    # N:M structured sparsity: every 4-weight contraction group keeps the top-2
+    # magnitudes per output column, exposes compact bit metadata, masks the
+    # forward exactly, and blocks gradients into pruned weights.
+    rng = np.random.default_rng(14)
+    W = rng.standard_normal((8, 5)).astype(np.float32)
+    b = rng.standard_normal(5).astype(np.float32) * 0.1
+    layer = nn.StructuredSparseLinear(8, 5, n=2, m=4, base_weight=W, base_bias=b)
+    mask = layer.mask
+    meta = layer.metadata()
+    group_counts = [int(mask[start:start + 4, c].sum())
+                    for c in range(mask.shape[1]) for start in range(0, mask.shape[0], 4)]
+    mask_ok = all(v == 2 for v in group_counts)
+    meta_ok = all(int(x).bit_count() == 2 for x in meta.reshape(-1))
+    density_ok = abs(layer.density() - 0.5) < 1e-6
+
+    Xn = rng.standard_normal((6, 8)).astype(np.float32)
+    x = nn.tensor(Xn)
+    out = layer(x).numpy()
+    ref = Xn @ (W * mask) + b[None, :]
+    fwd_err = float(np.max(np.abs(out - ref)))
+
+    loss = nn.mean(layer(x))
+    loss.backward()
+    grad = layer.W.grad()
+    expected = np.outer(Xn.sum(axis=0), np.ones(5, dtype=np.float32)) / float(out.size)
+    grad_ok = (float(np.max(np.abs(grad - expected * mask))) < 1e-6 and
+               np.allclose(grad[mask == 0.0], 0.0))
+
+    nn.seed(15)
+    X = nn.tensor(rng.standard_normal((40, 8)).astype(np.float32))
+    y = [int(v) for v in rng.integers(0, 3, size=40)]
+    net = nn.Sequential(nn.StructuredSparseLinear(8, 16), nn.ReLU(),
+                        nn.StructuredSparseLinear(16, 3))
+    opt = nn.AdamW(net.parameters(), lr=4e-2, weight_decay=0.0)
+    first = last = None
+    for step in range(80):
+        opt.zero_grad(); tr = nn.softmax_cross_entropy(net(X), y); tr.backward(); opt.step()
+        if step == 0:
+            first = tr.item()
+        last = tr.item()
+
+    print(f"[structured-sparse] mask={mask_ok} meta={meta_ok} density={layer.density():.2f} "
+          f"fwd_err={fwd_err:.1e} grad_mask={grad_ok} train {first:.3f}->{last:.3f}")
+    return mask_ok and meta_ok and density_ok and fwd_err < 1e-6 and grad_ok and last < first * 0.7
+
+
+def test_distillation() -> bool:
+    # Soft-target distillation: the native CE-soft gradient must match the
+    # analytic T*(softmax(student/T)-softmax(teacher/T))/M formula, and a
+    # ternary BitLinear student must learn a fixed teacher distribution.
+    rng = np.random.default_rng(16)
+    Ttemp = 2.5
+    z_np = rng.standard_normal((3, 4)).astype(np.float32)
+    t_np = rng.standard_normal((3, 4)).astype(np.float32)
+    z = nn.tensor(z_np, requires_grad=True)
+    loss = nn.distillation_loss(z, t_np, temperature=Ttemp)
+    loss.backward()
+    sp = np.exp(z_np / Ttemp - (z_np / Ttemp).max(1, keepdims=True)); sp /= sp.sum(1, keepdims=True)
+    tp = np.exp(t_np / Ttemp - (t_np / Ttemp).max(1, keepdims=True)); tp /= tp.sum(1, keepdims=True)
+    grad_ref = Ttemp * (sp - tp) / z_np.shape[0]
+    grad_err = float(np.max(np.abs(z.grad() - grad_ref)))
+
+    nn.seed(16)
+    Xn = rng.standard_normal((48, 6)).astype(np.float32)
+    teacher_W = rng.standard_normal((6, 4)).astype(np.float32) * 1.2
+    teacher_logits = Xn @ teacher_W
+    X = nn.tensor(Xn)
+    student = nn.Sequential(nn.BitLinear(6, 18), nn.ReLU(), nn.BitLinear(18, 4))
+    opt = nn.AdamW(student.parameters(), lr=4e-2, weight_decay=0.0)
+    first = last = None
+    for step in range(120):
+        opt.zero_grad()
+        dl = nn.distillation_loss(student(X), teacher_logits, temperature=2.0)
+        dl.backward(); opt.step()
+        if step == 0:
+            first = dl.item()
+        last = dl.item()
+    agree = float(np.mean(np.argmax(student(X).numpy(), axis=1) == np.argmax(teacher_logits, axis=1)))
+    print(f"[distill] grad_err={grad_err:.1e}  ternary student {first:.3f}->{last:.3f} agree={agree:.2f}")
+    return grad_err < 2e-6 and last < first * 0.7 and agree > 0.75
+
+
 def test_mtp() -> bool:
     # Multi-Token Prediction: K heads on a shared trunk, head j predicting j
     # tokens ahead. Trained with the summed CE, each head must learn its
@@ -859,6 +942,8 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_structured_sparse_linear()
+    ok &= test_distillation()
     ok &= test_mtp()
     ok &= test_hybrid_mamba_transformer()
     ok &= test_qlora()

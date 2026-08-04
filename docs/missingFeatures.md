@@ -1,6 +1,6 @@
 # VGRE — Remaining Work & Advanced Roadmap
 
-**Last Updated**: 2026-07-21
+**Last Updated**: 2026-08-04
 
 This file tracks **what is not yet done**. Everything implementable to the project's *real,
 no-stub* standard **without external hardware/accounts has been delivered, tested, and removed
@@ -18,11 +18,10 @@ multi-process distributed training** (data-, tensor-, pipeline-parallel).
 
 **Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite: 303/303.**
 
-Remaining work is in **four** buckets:
+The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
 1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).
-2. **§2 — The next frontier** (new capabilities worth building, all in-tree and from scratch).
-3. **§3 — Externally-blocked tracks** (hardware / accounts / auditors / gated downloads).
-4. **§4 — Physical large-model runs** (a real cluster or a license-gated multi-GB download).
+2. **§3 — Externally-blocked tracks** (hardware / accounts / auditors / gated downloads).
+3. **§4 — Physical large-model runs** (a real cluster or a license-gated multi-GB download).
 
 ---
 
@@ -53,7 +52,7 @@ references**, and live in the LLVM-free `libvgre_nn`. Build steps and success cr
 
 ---
 
-## 2. The next frontier — new capabilities worth building
+## 2. Delivered: the next frontier
 
 Each is in-tree, from scratch, and composes primitives we now have. Ordered by
 mission impact (**run/train large models on CPUs + clusters, no GPU, lightweight**).
@@ -97,18 +96,41 @@ model, no extra KV memory. Verified (`test_nn.py::test_mtp`): trained with the s
 three heads predict their j-ahead token at 100% accuracy, and MTP-drafted speculative decoding is
 lossless vs greedy at **4.0 tokens/forward** — compounding directly with T3.
 
-### 2.4 Continuous batching / serving loop — P1
-A real scheduler over the paged KV: admit, evict, and interleave many requests so a CPU box
-serves concurrent users at high utilization. Turns the engine into a *server*, not just a library.
+### 2.4 Continuous batching / serving loop — **DONE**
+`KVCacheManager` now owns a paged KV pool and `ContinuousBatchScheduler` admits queued requests,
+prefills prompts, advances each running request one token per scheduler step, retires finished
+requests immediately, and reclaims their KV blocks for new arrivals. Requests submitted mid-flight
+join the next scheduler step; the batch cap and KV capacity are both enforced.
 
-### 2.5 Structured sparsity (2:4 / block) + sparse GEMM — P2
-Complements quantization on the other axis: prune to a hardware-friendly pattern and use a
-sparse micro-kernel. Composes with T1's ternary and T5's MXFP4 codecs.
+Verified (`test_kv_cache.cpp`): four requests, including one added mid-run, drain under a
+`maxBatch=2` cap, never exceed the batch limit, and return the KV pool to its initial free-block
+count after retirement. This is the serving lifecycle layer over the paged KV cache; model-specific
+logit sampling can plug in where the test currently appends synthetic K/V rows.
 
-### 2.6 Quantization-aware distillation — P2
-Train a small ternary/4-bit student from a larger teacher entirely in-tree (we have QAT via
-`BitLinear`, LoRA/QLoRA, and the training stack). The end-to-end "make a frontier model run on a
-cheap laptop" story.
+### 2.5 Structured sparsity (2:4 / block) + sparse training path — **DONE**
+`vgre.nn.StructuredSparseLinear(in_features, out_features, n=2, m=4)` adds a fixed N:M pruning mask
+over the contraction dimension of Linear's `[in,out]` weights, physically zeros pruned entries,
+applies `W * mask` in the autograd forward path, and exposes compact per-group bit metadata via
+`metadata()` for sparse inference kernels. Helper APIs `structured_nm_mask()` and
+`structured_nm_metadata()` are available for checkpoint conversion and inspection.
+
+Verified (`test_nn.py::test_structured_sparse_linear`): every 2:4 group keeps exactly two weights,
+metadata bit counts match the mask, forward output equals the dense masked reference exactly,
+pruned weights receive zero gradient, and a 50%-sparse MLP trains to convergence. The older
+core `block_sparse`/N:M math remains available for low-level sparse kernels; the Python training
+path stays lightweight and dependency-free.
+
+### 2.6 Quantization-aware distillation — **DONE**
+The autograd engine now has a native fused `softmax_cross_entropy_soft(logits, soft_targets)` op,
+exported through the C ABI and Python. `vgre.nn.distillation_loss()` implements
+`T^2 * CE(softmax(student/T), softmax(teacher/T))`, with optional hard-label CE blending, and
+`distill_step()` performs one optimizer step from a callable teacher or precomputed teacher logits.
+Teacher probabilities are materialized as constants, so gradients update only the student.
+
+Verified (`test_autograd.cpp::soft_sce`, `test_nn.py::test_distillation`): soft-target CE gradients
+match central finite differences in C++; the Python distillation gradient matches the analytic
+`T * (student_prob - teacher_prob) / batch` formula; and a ternary `BitLinear` student learns a
+fixed teacher distribution with 0.88 teacher-argmax agreement.
 
 ---
 

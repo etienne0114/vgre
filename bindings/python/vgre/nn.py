@@ -65,6 +65,7 @@ def _bind() -> None:
     _lib.vgre_ag_concat.argtypes = [V, V, c.c_int]; _lib.vgre_ag_concat.restype = V
     _lib.vgre_ag_reshape.argtypes = [V, P(I64), c.c_int]; _lib.vgre_ag_reshape.restype = V
     _lib.vgre_ag_softmax_cross_entropy.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_softmax_cross_entropy.restype = V
+    _lib.vgre_ag_softmax_cross_entropy_soft.argtypes = [V, V]; _lib.vgre_ag_softmax_cross_entropy_soft.restype = V
     _lib.vgre_ag_layer_norm.argtypes = [V, V, V, c.c_float]; _lib.vgre_ag_layer_norm.restype = V
     _lib.vgre_ag_rms_norm.argtypes = [V, V, c.c_float]; _lib.vgre_ag_rms_norm.restype = V
     _lib.vgre_ag_embedding.argtypes = [V, P(c.c_int), c.c_int]; _lib.vgre_ag_embedding.restype = V
@@ -310,6 +311,16 @@ def softmax_cross_entropy(logits: Tensor, targets: Sequence[int]) -> Tensor:
     t = (ctypes.c_int * len(targets))(*[int(v) for v in targets])
     return _new(_lib.vgre_ag_softmax_cross_entropy(logits._h, t, len(targets)), (1,))
 
+def softmax_cross_entropy_soft(logits: Tensor, soft_targets) -> Tensor:
+    """Mean soft-target cross-entropy over rows of logits[M,V].
+
+    `soft_targets` may be a Tensor or any array-like [M,V]. Rows are normalized
+    by the native op and treated as constants, which is the loss needed for
+    teacher/student distillation.
+    """
+    tgt = soft_targets if isinstance(soft_targets, Tensor) else tensor(soft_targets)
+    return _new(_lib.vgre_ag_softmax_cross_entropy_soft(logits._h, tgt._h), (1,))
+
 def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
 
@@ -450,6 +461,134 @@ class Linear(Module):
                 y = add(y, self.b)            # [B*T,O]+[O] bias broadcast (2-D)
             return reshape(y, (s[0], s[1], self.W.shape[1]))
         y = matmul(x, self.W)
+        return add(y, self.b) if self.b is not None else y
+
+
+def structured_nm_mask(weight, n: int = 2, m: int = 4) -> np.ndarray:
+    """Return a fixed N:M mask for a 2-D linear weight [in,out].
+
+    For each output column and each group of `m` input-channel weights, the `n`
+    largest-magnitude entries are kept. This is the standard contraction-axis
+    layout used by 2:4 structured sparsity, and it composes directly with
+    Linear's [in,out] weight layout.
+    """
+    if n <= 0 or m <= 0 or n > m:
+        raise ValueError("structured sparsity requires 0 < n <= m")
+    w = weight.numpy() if isinstance(weight, Tensor) else _f32(weight)
+    if w.ndim != 2:
+        raise ValueError("structured_nm_mask expects a 2-D weight [in,out]")
+    rows, cols = w.shape
+    mask = np.zeros((rows, cols), dtype=np.float32)
+    for c in range(cols):
+        for start in range(0, rows, m):
+            stop = min(start + m, rows)
+            group = np.abs(w[start:stop, c])
+            keep = min(n, stop - start)
+            if keep <= 0:
+                continue
+            if keep == group.size:
+                idx = np.arange(group.size)
+            else:
+                idx = np.argpartition(-group, keep - 1)[:keep]
+            mask[start + idx, c] = 1.0
+    return mask
+
+
+def structured_nm_metadata(mask, n: int = 2, m: int = 4) -> np.ndarray:
+    """Pack an N:M mask into bit metadata [ceil(in/m), out].
+
+    Bit `i` in each group is 1 when the corresponding input-channel weight is
+    present. The function validates that every full group has exactly `n` kept
+    weights and every tail group has `min(n, tail)` kept weights.
+    """
+    if n <= 0 or m <= 0 or n > m:
+        raise ValueError("structured sparsity requires 0 < n <= m")
+    ma = _f32(mask)
+    if ma.ndim != 2:
+        raise ValueError("structured_nm_metadata expects a 2-D mask")
+    rows, cols = ma.shape
+    groups = (rows + m - 1) // m
+    meta = np.zeros((groups, cols), dtype=np.uint32)
+    for c in range(cols):
+        for g, start in enumerate(range(0, rows, m)):
+            stop = min(start + m, rows)
+            bits = 0
+            kept = 0
+            for i, v in enumerate(ma[start:stop, c]):
+                if v != 0.0:
+                    bits |= (1 << i)
+                    kept += 1
+            expected = min(n, stop - start)
+            if kept != expected:
+                raise ValueError(f"group {g}, column {c} keeps {kept}, expected {expected}")
+            meta[g, c] = bits
+    return meta
+
+
+class StructuredSparseLinear(Module):
+    """N:M structured sparse linear layer with a fixed pruning mask.
+
+    The trainable fp32 master weight is physically zeroed outside the mask and
+    forward() uses W * mask, so pruned positions contribute no activation and
+    receive zero gradient. This is quantization/pruning-aware training without
+    adding a dependency or a new backend kernel; metadata() exposes the compact
+    bit patterns a sparse micro-kernel can consume.
+    """
+    def __init__(self, in_features: int, out_features: int, n: int = 2, m: int = 4,
+                 bias: bool = True, base_weight=None, base_bias=None):
+        w = _f32(base_weight) if base_weight is not None else \
+            _f32(rng.standard_normal((in_features, out_features)) *
+                 (2.0 / in_features) ** 0.5)
+        if w.shape != (in_features, out_features):
+            raise ValueError(f"base_weight must be [{in_features},{out_features}]")
+        self.n, self.m = int(n), int(m)
+        self._mask = structured_nm_mask(w, self.n, self.m)
+        self.W = tensor(w * self._mask, requires_grad=True)
+        if bias:
+            b = _f32(base_bias) if base_bias is not None else np.zeros(out_features)
+            self.b = tensor(b, requires_grad=True)
+        else:
+            self.b = None
+
+    @classmethod
+    def from_linear(cls, linear: "Linear", n: int = 2, m: int = 4) -> "StructuredSparseLinear":
+        w = linear.W.numpy()
+        b = linear.b.numpy() if linear.b is not None else None
+        return cls(w.shape[0], w.shape[1], n=n, m=m,
+                   bias=b is not None, base_weight=w, base_bias=b)
+
+    @property
+    def mask(self) -> np.ndarray:
+        return self._mask.copy()
+
+    def density(self) -> float:
+        return float(np.mean(self._mask != 0.0))
+
+    def metadata(self) -> np.ndarray:
+        return structured_nm_metadata(self._mask, self.n, self.m)
+
+    def sparse_weight(self) -> np.ndarray:
+        return self.W.numpy() * self._mask
+
+    def prune_from_current(self) -> None:
+        """Recompute the N:M mask from current weights and zero pruned entries."""
+        w = self.W.numpy()
+        self._mask = structured_nm_mask(w, self.n, self.m)
+        self.W.set_(w * self._mask)
+
+    def _masked_weight(self) -> Tensor:
+        return mul(self.W, tensor(self._mask))
+
+    def forward(self, x):
+        Wm = self._masked_weight()
+        s = x.shape
+        if len(s) == 3:
+            flat = reshape(x, (s[0] * s[1], s[2]))
+            y = matmul(flat, Wm)
+            if self.b is not None:
+                y = add(y, self.b)
+            return reshape(y, (s[0], s[1], self.W.shape[1]))
+        y = matmul(x, Wm)
         return add(y, self.b) if self.b is not None else y
 
 
@@ -1138,6 +1277,81 @@ def mtp_loss(head_logits: List["Tensor"], targets: Sequence[int]) -> "Tensor":
         ce = softmax_cross_entropy(lj, list(targets[j:j + n]))
         total = ce if total is None else add(total, ce)
     return total
+
+
+def _flatten_logits(logits: "Tensor") -> "Tensor":
+    if len(logits.shape) == 2:
+        return logits
+    if len(logits.shape) == 3:
+        return reshape(logits, (logits.shape[0] * logits.shape[1], logits.shape[2]))
+    raise ValueError("logits must be [M,V] or [B,M,V]")
+
+
+def _softmax_rows_np(a, temperature: float) -> np.ndarray:
+    if temperature <= 0.0:
+        raise ValueError("temperature must be positive")
+    z = np.asarray(a, dtype=np.float64) / float(temperature)
+    z -= z.max(axis=-1, keepdims=True)
+    p = np.exp(z)
+    p /= p.sum(axis=-1, keepdims=True)
+    return p.astype(np.float32)
+
+
+def distillation_loss(student_logits: "Tensor", teacher_logits_or_probs,
+                      temperature: float = 2.0, hard_targets: Sequence[int] = None,
+                      hard_weight: float = 0.0, teacher_is_probs: bool = False) -> "Tensor":
+    """Teacher/student distillation loss.
+
+    The soft part is T^2 * CE(softmax(student/T), softmax(teacher/T)); teacher
+    probabilities are materialized as constants, so gradients update only the
+    student. Optionally blend hard-label CE with `hard_weight` in [0,1].
+    """
+    if not 0.0 <= hard_weight <= 1.0:
+        raise ValueError("hard_weight must be in [0,1]")
+    student2 = _flatten_logits(student_logits)
+    teacher = (teacher_logits_or_probs.numpy()
+               if isinstance(teacher_logits_or_probs, Tensor)
+               else np.asarray(teacher_logits_or_probs, dtype=np.float32))
+    teacher = teacher.reshape((-1, teacher.shape[-1]))
+    if teacher.shape != student2.shape:
+        raise ValueError(f"teacher shape {teacher.shape} does not match student logits {student2.shape}")
+    if teacher_is_probs:
+        probs = np.asarray(teacher, dtype=np.float32)
+        rows = probs.sum(axis=1, keepdims=True)
+        if np.any(rows <= 0.0) or np.any(probs < 0.0):
+            raise ValueError("teacher probabilities must be non-negative with positive row sums")
+        probs = probs / rows
+    else:
+        probs = _softmax_rows_np(teacher, temperature)
+    soft = scale(softmax_cross_entropy_soft(scale(student2, 1.0 / float(temperature)), probs),
+                 float(temperature) * float(temperature))
+    if hard_targets is None or hard_weight == 0.0:
+        return soft
+    hard = softmax_cross_entropy(student2, list(np.asarray(hard_targets).reshape(-1)))
+    if hard_weight == 1.0:
+        return hard
+    return add(scale(soft, 1.0 - hard_weight), scale(hard, hard_weight))
+
+
+def distill_step(student, teacher, inputs, optimizer: "_Optimizer",
+                 temperature: float = 2.0, hard_targets: Sequence[int] = None,
+                 hard_weight: float = 0.0, teacher_is_probs: bool = False,
+                 clip: float = 1.0) -> float:
+    """One optimizer step for framework-free distillation.
+
+    `student` and `teacher` are callables that accept `inputs`, or `teacher` may
+    be precomputed logits/probabilities. The teacher path is converted to
+    constants before the loss is built.
+    """
+    optimizer.zero_grad()
+    student_logits = student(inputs)
+    teacher_logits = teacher(inputs) if callable(teacher) else teacher
+    loss = distillation_loss(student_logits, teacher_logits, temperature,
+                             hard_targets=hard_targets, hard_weight=hard_weight,
+                             teacher_is_probs=teacher_is_probs)
+    loss.backward()
+    optimizer.step(clip=clip)
+    return loss.item()
 
 
 def mtp_draft_fn(mtp_model, k: int = 0):
