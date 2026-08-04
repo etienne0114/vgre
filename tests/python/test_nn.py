@@ -395,6 +395,56 @@ def test_bitlinear() -> bool:
     return fwd_err < 1e-5 and ste_ok and last < first * 0.6
 
 
+def test_mtp() -> bool:
+    # Multi-Token Prediction: K heads on a shared trunk, head j predicting j
+    # tokens ahead. Trained with the summed CE, each head must learn its
+    # look-ahead, and the heads must serve as the model's OWN draft for
+    # speculative decoding — lossless vs greedy of head 0, several tokens/forward.
+    nn.seed(3)
+    V, T, D, K = 12, 24, 32, 3
+    seq = [i % 4 for i in range(T + 1)]
+    ids, tgt = seq[:-1], seq[1:]
+
+    class Trunk(nn.Module):
+        def __init__(self):
+            self.e = nn.Embedding(V, D)
+            self.blocks = [nn.TransformerBlock(D, num_heads=4) for _ in range(2)]
+            self.n = nn.RMSNorm(D)
+
+        def forward(self, ids):
+            x = self.e(ids)
+            for b in self.blocks:
+                x = b(x)
+            return self.n(x)
+
+    trunk = Trunk(); heads = nn.MTPHeads(D, V, n_predict=K)
+    def mtp_model(ids):
+        return heads(trunk(ids))
+    opt = nn.AdamW(trunk.parameters() + heads.parameters(), lr=3e-3)
+    first = last = None
+    for st in range(300):
+        opt.zero_grad(); loss = nn.mtp_loss(mtp_model(ids), tgt); loss.backward(); opt.step()
+        if st == 0:
+            first = loss.item()
+        last = loss.item()
+
+    hl = [h.numpy() for h in mtp_model(ids)]
+    accs = []
+    for j in range(K):
+        n = T - j
+        accs.append(float((np.argmax(hl[j][:n], 1) == np.array(tgt[j:j + n])).mean()))
+
+    target = lambda c: mtp_model(c)[0]
+    greedy = nn.greedy_generate(target, [0, 1, 2], 12)
+    spec, fw = nn.speculative_generate(target, [0, 1, 2], 12,
+                                       nn.mtp_draft_fn(mtp_model, K), k=K)
+    lossless = (greedy == spec)
+    tpf = 12 / fw
+    print(f"[mtp] train {first:.3f} -> {last:.3f}  head-acc={[round(a,2) for a in accs]}  "
+          f"self-spec lossless={lossless} tok/fwd={tpf:.2f}")
+    return last < first * 0.1 and min(accs) >= 0.99 and lossless and tpf > 1.5
+
+
 def test_hybrid_mamba_transformer() -> bool:
     # Hybrid Mamba-Transformer (Jamba-style). Three properties:
     #  (a) batched SSM is per-sequence — a [B,T,D] scan must equal scanning each
@@ -809,6 +859,7 @@ def test_moe() -> bool:
 
 def main() -> int:
     ok = True
+    ok &= test_mtp()
     ok &= test_hybrid_mamba_transformer()
     ok &= test_qlora()
     ok &= test_mamba()
