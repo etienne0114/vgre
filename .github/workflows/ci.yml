@@ -8,15 +8,13 @@ name: CI
 # honestly claim that platform as supported.
 
 on:
-  # CI auto-runs on push / pull_request are PAUSED to save Actions minutes while
-  # iterating. Run it on demand from the Actions tab → "CI" → "Run workflow"
-  # (workflow_dispatch). To re-enable automatic runs, uncomment the push /
-  # pull_request blocks below.
+  # Public repo → GitHub Actions is free and unlimited, so CI runs on every push
+  # (any branch) and every PR to main. Manual runs stay available via the Actions
+  # tab (workflow_dispatch). ccache keeps rebuilds fast across runs.
   workflow_dispatch:
-  # push:
-  #   branches: [main]
-  # pull_request:
-  #   branches: [main]
+  push:
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -27,6 +25,7 @@ jobs:
   linux:
     name: linux-x86_64
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -39,14 +38,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build clang-18 llvm-18-dev libclang-18-dev \
             libomp-18-dev libsqlite3-dev liblapack-dev \
-            libkeyutils-dev libssl-dev zlib1g-dev
+            libkeyutils-dev libssl-dev zlib1g-dev ccache
           clang++ --version
           cmake --version
+
+      # Cache the compiler object cache across runs so only changed TUs recompile.
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
 
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
         run: cmake --build build --parallel
