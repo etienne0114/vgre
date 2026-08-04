@@ -206,12 +206,18 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     // per head per position instead of 4·Dh bytes — ~3.8× less memory at
     // Dh=64 — which is what dominates footprint at long context. Only one of the
     // two representations is allocated.
-    const bool kv8 = int8_kv_cache_;
-    std::vector<std::vector<float>>  Kc(L), Vc(L);       // fp32 path
-    std::vector<std::vector<int8_t>> Kq(L), Vq(L);       // int8 path
-    std::vector<std::vector<float>>  Ks(L), Vs(L);       // per-(pos,head) scales
+    // int4 needs even D and Dh so head slices are byte-aligned (2 codes/byte).
+    const bool kv4 = int4_kv_cache_ && (D % 2 == 0) && (Dh % 2 == 0);
+    const bool kv8 = int8_kv_cache_ && !kv4;
+    std::vector<std::vector<float>>   Kc(L), Vc(L);      // fp32 path
+    std::vector<std::vector<int8_t>>  Kq(L), Vq(L);      // int8 path
+    std::vector<std::vector<uint8_t>> Kp4(L), Vp4(L);    // int4 packed path (2/byte)
+    std::vector<std::vector<float>>   Ks(L), Vs(L);      // per-(pos,head) scales
     for (int l = 0; l < L; ++l) {
-        if (kv8) {
+        if (kv4) {
+            Kp4[l].resize((size_t)cfg_.max_seq * (D / 2)); Vp4[l].resize((size_t)cfg_.max_seq * (D / 2));
+            Ks[l].resize((size_t)cfg_.max_seq * H); Vs[l].resize((size_t)cfg_.max_seq * H);
+        } else if (kv8) {
             Kq[l].resize((size_t)cfg_.max_seq * D); Vq[l].resize((size_t)cfg_.max_seq * D);
             Ks[l].resize((size_t)cfg_.max_seq * H); Vs[l].resize((size_t)cfg_.max_seq * H);
         } else {
@@ -228,6 +234,31 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             float r = std::nearbyint(src[i] * inv);
             dst[i] = (int8_t)std::min(127.0f, std::max(-127.0f, r));
         }
+    };
+    // Quantize a head-slice [Dh] to symmetric 4-bit, packing 2 codes/byte into
+    // `packed` (the position's D/2-byte row) starting at global channel `off`.
+    // Codes ∈ [-7,7] stored as nibble code+8 ∈ [1,15]. Even off keeps heads
+    // byte-aligned so packing one head never disturbs another.
+    auto quant_head4 = [](const float* src, uint8_t* packed, float& sc, int off, int n) {
+        float amax = 0.0f;
+        for (int i = 0; i < n; ++i) amax = std::max(amax, std::fabs(src[i]));
+        sc = (amax > 0.0f) ? (amax / 7.0f) : 0.0f;
+        const float inv = (sc > 0.0f) ? 1.0f / sc : 0.0f;
+        for (int i = 0; i < n; ++i) {
+            int c = (int)std::nearbyint(src[i] * inv);
+            c = std::min(7, std::max(-7, c));
+            const uint8_t nib = (uint8_t)(c + 8);
+            const int gch = off + i;
+            uint8_t& byte = packed[gch >> 1];
+            if (gch & 1) byte = (uint8_t)((byte & 0x0F) | (nib << 4));
+            else         byte = (uint8_t)((byte & 0xF0) | nib);
+        }
+    };
+    // Dequantize one cached int4 K/V value: channel `gch` (global) at packed row.
+    auto deq4 = [](const uint8_t* packedRow, int gch, float sc) -> float {
+        const uint8_t byte = packedRow[gch >> 1];
+        const int nib = (gch & 1) ? (byte >> 4) : (byte & 0x0F);
+        return (float)(nib - 8) * sc;
     };
 
     std::vector<float> x(D), h(D), q(D), k(D), v(D), attnOut(D), proj(D);
@@ -272,7 +303,13 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, D);
             ropeVec(q.data(), H, Dh, pos, cfg_.rope_base);
             ropeVec(k.data(), H, Dh, pos, cfg_.rope_base);
-            if (kv8) {                                  // quantize this position's K/V per head
+            if (kv4) {                                   // 4-bit packed per head
+                for (int hd = 0; hd < H; ++hd) {
+                    const int off = hd * Dh;
+                    quant_head4(&k[off], &Kp4[l][(size_t)pos * (D / 2)], Ks[l][(size_t)pos * H + hd], off, Dh);
+                    quant_head4(&v[off], &Vp4[l][(size_t)pos * (D / 2)], Vs[l][(size_t)pos * H + hd], off, Dh);
+                }
+            } else if (kv8) {                            // quantize this position's K/V per head
                 for (int hd = 0; hd < H; ++hd) {
                     const int off = hd * Dh;
                     quant_head(&k[off], &Kq[l][(size_t)pos * D + off], Ks[l][(size_t)pos * H + hd], Dh);
@@ -282,14 +319,18 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                 std::memcpy(&Kc[l][(size_t)pos * D], k.data(), sizeof(float) * D);
                 std::memcpy(&Vc[l][(size_t)pos * D], v.data(), sizeof(float) * D);
             }
-            // Per-head attention over cached positions 0..pos. The kv8 branches
-            // sit outside the innermost loops so the hot path stays tight.
+            // Per-head attention over cached positions 0..pos. The kv4/kv8
+            // branches sit outside the innermost loops so the hot path stays tight.
             for (int hd = 0; hd < H; ++hd) {
                 const int off = hd * Dh;
                 float mx = -1e30f;
                 for (int j = 0; j <= pos; ++j) {
                     float s = 0.0f;
-                    if (kv8) {
+                    if (kv4) {
+                        const uint8_t* kp = &Kp4[l][(size_t)j * (D / 2)];
+                        const float ks = Ks[l][(size_t)j * H + hd];
+                        for (int d = 0; d < Dh; ++d) s += q[off + d] * deq4(kp, off + d, ks);
+                    } else if (kv8) {
                         const int8_t* kj = &Kq[l][(size_t)j * D + off];
                         const float ks = Ks[l][(size_t)j * H + hd];
                         for (int d = 0; d < Dh; ++d) s += q[off + d] * ((float)kj[d] * ks);
@@ -302,7 +343,14 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                 float sum = 0.0f;
                 for (int j = 0; j <= pos; ++j) { scores[j] = std::exp(scores[j] - mx); sum += scores[j]; }
                 const float inv = 1.0f / sum;
-                if (kv8) {
+                if (kv4) {
+                    for (int d = 0; d < Dh; ++d) {
+                        float acc = 0.0f;
+                        for (int j = 0; j <= pos; ++j)
+                            acc += scores[j] * inv * deq4(&Vp4[l][(size_t)j * (D / 2)], off + d, Vs[l][(size_t)j * H + hd]);
+                        attnOut[off + d] = acc;
+                    }
+                } else if (kv8) {
                     for (int d = 0; d < Dh; ++d) {
                         float acc = 0.0f;
                         for (int j = 0; j <= pos; ++j)

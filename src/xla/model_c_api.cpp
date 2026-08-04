@@ -79,6 +79,9 @@ void vgre_lm_set_int8_inference(vgre_lm* m, int on) {
     if (m) m->gpt->set_int8_inference(on != 0);
 }
 
+void vgre_lm_set_int4_kv_cache(vgre_lm* m, int on) {
+    if (m) m->gpt->set_int4_kv_cache(on != 0);
+}
 void vgre_lm_set_int8_kv_cache(vgre_lm* m, int on) {
     if (m) m->gpt->set_int8_kv_cache(on != 0);
 }

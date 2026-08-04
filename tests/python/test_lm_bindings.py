@@ -119,6 +119,22 @@ def main() -> int:
     assert q8_bytes * 3 < fp_bytes, "int8 KV must be >3x smaller"
     lm.set_int8_kv_cache(False)
 
+    # int4 KV cache: 4-bit packed (2 codes/byte) + the same per-head scale — a
+    # further ~2x over int8. Coarser than int8, so unlike int8 it is NOT
+    # guaranteed greedy-identical; it is a memory/quality tradeoff. Verify the
+    # memory win and that quality stays high (agreement with fp near 1 here,
+    # since the argmax margins exceed the 4-bit perturbation).
+    lm.set_int4_kv_cache(True)
+    g_q4 = lm.generate(prompt, n_new=16, temperature=0.0, seed=1)
+    lm.set_int4_kv_cache(False)
+    q4_bytes = 2 * (D // 2 + 4 * H)                     # K+V per position per layer
+    agree4 = sum(int(a == b) for a, b in zip(g_q4, g_fp)) / max(1, len(g_fp))
+    print(f"[8] int4 KV cache: greedy agreement vs fp={agree4:.2f}  "
+          f"KV bytes/pos/layer {fp_bytes} -> {q4_bytes} ({fp_bytes / q4_bytes:.2f}x, "
+          f"{q8_bytes / q4_bytes:.2f}x over int8)")
+    assert q4_bytes < q8_bytes, "int4 KV must be smaller than int8"
+    assert agree4 >= 0.75, "int4 KV greedy output must stay close to fp"
+
     print("PASS — VGRE-LM Python bindings train, generate, and checkpoint")
     return 0
 

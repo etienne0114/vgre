@@ -31,6 +31,7 @@ VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
 // scale, fp32 accumulation). Mutually exclusive with bf16. on=0 disables.
 VGRE_PUBLIC_API void      vgre_lm_set_int8_inference(vgre_lm* m, int on);
 VGRE_PUBLIC_API void      vgre_lm_set_int8_kv_cache(vgre_lm* m, int on);  // int8 KV cache
+VGRE_PUBLIC_API void      vgre_lm_set_int4_kv_cache(vgre_lm* m, int on);  // int4 packed KV cache
 
 // Free the fp32 master weights after quantizing so the resident footprint truly
 // drops to ½× (bf16) / ¼× (int8). Serve-only afterwards (training will fail).
