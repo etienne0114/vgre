@@ -88,10 +88,14 @@ concentrates KV into the few attention layers, and this shrinks those.
 **Left:** int4 KV (a second halving) and wiring the same scheme into `KVCacheManager`'s paged
 pools for the serving path.
 
-### 2.3 Multi-token prediction (MTP) heads — P1
-Extra heads that predict t+2, t+3… turn the model into **its own draft model**, feeding T3's
-speculative decoder with no second model and no extra memory — a compounding win on top of the
-4.0 tokens/forward already measured.
+### 2.3 Multi-token prediction (MTP) heads — **DONE**
+`vgre.nn.MTPHeads(dim, vocab, n_predict=K)` — K linear heads on a shared trunk, head j predicting
+j tokens ahead; `mtp_loss(head_logits, targets)` sums the per-head cross-entropy (each head's
+supervised range shrinks by j at the tail); `mtp_draft_fn(mtp_model, K)` uses the heads as the
+model's **own draft** for speculative decoding — K draft tokens from ONE trunk forward, no second
+model, no extra KV memory. Verified (`test_nn.py::test_mtp`): trained with the summed loss all
+three heads predict their j-ahead token at 100% accuracy, and MTP-drafted speculative decoding is
+lossless vs greedy at **4.0 tokens/forward** — compounding directly with T3.
 
 ### 2.4 Continuous batching / serving loop — P1
 A real scheduler over the paged KV: admit, evict, and interleave many requests so a CPU box

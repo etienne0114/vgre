@@ -970,6 +970,24 @@ def hybrid_blocks(dim: int, n_layers: int, num_heads: int, attn_every: int = 4,
     return blocks
 
 
+class MTPHeads(Module):
+    """Multi-Token-Prediction heads (DeepSeek-V3 style): K linear heads on a
+    shared trunk representation, where head j predicts the token j+1 positions
+    ahead (head 0 is the usual next-token head). Training with the summed
+    cross-entropy over all K heads is a denser learning signal; at inference the
+    heads emit K draft tokens from a SINGLE trunk forward, so the model is its
+    own draft model for speculative decoding (see mtp_draft_fn)."""
+    def __init__(self, dim: int, vocab: int, n_predict: int = 4, bias: bool = False):
+        if n_predict <= 0:
+            raise ValueError("n_predict must be positive")
+        self.K = n_predict
+        self.heads = [Linear(dim, vocab, bias=bias) for _ in range(n_predict)]
+
+    def forward(self, h):
+        """h [T,dim] → list of K logits [T,vocab] (one per look-ahead distance)."""
+        return [hd(h) for hd in self.heads]
+
+
 class MaxPool2d(Module):
     def __init__(self, kernel: int, stride: int = None):
         self.kernel, self.stride = kernel, stride or kernel
@@ -1103,6 +1121,36 @@ def speculative_sample(target, draft, prompt: Sequence[int], n_new: int,
         room = n_new - (len(ctx) - start)
         ctx.extend(accepted[:room])
     return ctx[start:], forwards
+
+
+def mtp_loss(head_logits: List["Tensor"], targets: Sequence[int]) -> "Tensor":
+    """Summed multi-token-prediction loss. `head_logits[j]` is head j's logits
+    [T,vocab]; head j at position t is trained to predict targets[t+j] (j tokens
+    further ahead), so its supervised range shrinks by j at the tail. `targets`
+    is the length-T next-token sequence (head 0's targets)."""
+    T = head_logits[0].shape[0]
+    total = None
+    for j, lg in enumerate(head_logits):
+        n = T - j
+        if n <= 0:
+            break
+        lj = index_select(lg, list(range(n)))            # positions 0..n-1
+        ce = softmax_cross_entropy(lj, list(targets[j:j + n]))
+        total = ce if total is None else add(total, ce)
+    return total
+
+
+def mtp_draft_fn(mtp_model, k: int = 0):
+    """Self-speculative drafter: `mtp_model(ctx)` returns the list of per-head
+    logits [T,vocab]; head j predicts j tokens ahead, so the argmax of each head
+    at the LAST position gives K draft tokens from ONE forward — no separate draft
+    model. Pair with speculative_generate whose target is head 0; the output stays
+    identical to greedy while several tokens are verified per target forward."""
+    def draft(ctx: List[int]) -> List[int]:
+        heads = mtp_model(ctx)
+        K = len(heads) if k <= 0 else min(k, len(heads))
+        return [int(np.argmax(heads[j].numpy()[-1])) for j in range(K)]
+    return draft
 
 
 def speculative_generate(model, prompt: Sequence[int], n_new: int,
