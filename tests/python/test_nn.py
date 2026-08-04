@@ -621,9 +621,28 @@ def test_qlora() -> bool:
             first = loss.item()
         last = loss.item()
     frozen = np.array_equal(codes0, q._codes)
+    # int4 base variant: ~4 bits/weight, but a strictly lower reconstruction
+    # error than the 2-bit ternary base (finer quantization), still frozen +
+    # params == {A,B}, and fine-tunes.
+    nn.seed(0)
+    W = np.random.default_rng(7).standard_normal((inf, outf)).astype(np.float32)
+    qt = nn.QLoRALinear(inf, outf, r=r, base_weight=W.copy(), base_format="ternary")
+    qi = nn.QLoRALinear(inf, outf, r=r, base_weight=W.copy(), base_format="int4")
+    err_t = float(np.max(np.abs(W - qt._codes * qt._scale[None, :])))
+    err_i = float(np.max(np.abs(W - qi._codes * qi._scale[None, :])))
+    int4_ok = (len(qi.parameters()) == 2 and 3.0 <= qi.base_bits_per_weight() < 5.0
+               and err_i < err_t and set(np.unique(qi._codes).tolist()) <= set(range(-7, 8)))
+    codes_i0 = qi._codes.copy()
+    opt2 = nn.AdamW(qi.adapter_parameters(), lr=5e-2)
+    for _ in range(40):
+        opt2.zero_grad(); nn.softmax_cross_entropy(qi(x), tgt).backward(); opt2.step()
+    int4_ok = int4_ok and np.array_equal(codes_i0, qi._codes)   # base still frozen
+
     print(f"[qlora] params={len(q.parameters())} base_bits={bits:.2f} init_ok={init_ok} "
-          f"grad_ok={grad_ok} frozen={frozen}  fine-tune {first:.3f} -> {last:.3f}")
-    return only_ab and bits < 3.0 and init_ok and grad_ok and frozen and last < first * 0.2
+          f"grad_ok={grad_ok} frozen={frozen}  fine-tune {first:.3f} -> {last:.3f}  "
+          f"int4(bits={qi.base_bits_per_weight():.2f}, recon_err {err_i:.3f}<{err_t:.3f}={err_i<err_t})")
+    return (only_ab and bits < 3.0 and init_ok and grad_ok and frozen
+            and last < first * 0.2 and int4_ok)
 
 
 def test_mamba() -> bool:
