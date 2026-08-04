@@ -46,7 +46,7 @@ references**, and live in the LLVM-free `libvgre_nn`. Build steps and success cr
 |-------|------|--------|
 | T1 | GGUF `I2_S`/TL1/TL2 ternary tensor loader | needs a real BitNet-b1.58 checkpoint to verify end-to-end (**external download**) |
 | T3 | KV-cache reuse + rollback on the raw C++ `generate_cached` path; tree verification; self-speculative (early-exit) drafting | **throughput optimization** — the algorithm is complete and proven |
-| T4 | depthwise short conv before the SSM; **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization |
+| T4 | ~~depthwise short conv before the SSM~~ **DONE** (causal per-channel conv1d + SiLU in `SSMBlock`, `conv_kernel=4`; numpy-matched, causality exact); **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization |
 | T5 | SIMD unpack path for the 4-bit decode (the row-major block layout fights column-wise vectorization) | perf |
 | T6 | int4/MXFP4 base option (ternary is in); dequant-in-GEMM for the base path | breadth / peak-memory |
 

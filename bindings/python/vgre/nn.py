@@ -1014,9 +1014,10 @@ class SSMBlock(Module):
     Linear-time, constant memory per step — no attention, no growing KV cache.
     Each state channel is one `selective_scan`; the input-dependent B/C give the
     selectivity that makes Mamba competitive with attention. Operates on [T,dim]."""
-    def __init__(self, dim: int, d_state: int = 8):
+    def __init__(self, dim: int, d_state: int = 8, conv_kernel: int = 4):
         self.dim = dim
         self.N = d_state
+        self.conv_kernel = conv_kernel
         self.in_proj = Linear(dim, dim)                 # u_t (SSM input channels)
         self.dt_proj = Linear(dim, dim)                 # Δ_t (per-channel step)
         self.B_proj = Linear(dim, d_state)              # B_t [T,N]
@@ -1025,6 +1026,30 @@ class SSMBlock(Module):
         self.A_log = tensor(A0.astype(np.float32), requires_grad=True)   # [dim,N]
         self.Dskip = tensor(np.ones(dim, np.float32), requires_grad=True)
         self.out_proj = Linear(dim, dim)
+        if conv_kernel > 0:
+            # Depthwise causal short conv over the sequence (one filter per
+            # channel), the Mamba component that mixes a few adjacent tokens
+            # before the SSM. Weights [dim, kernel]; identity-ish init (last tap 1).
+            cw = np.zeros((dim, conv_kernel), np.float32); cw[:, -1] = 1.0
+            self.conv_w = tensor(cw, requires_grad=True)
+            self.conv_b = tensor(np.zeros(dim, np.float32), requires_grad=True)
+
+    def _causal_conv1d(self, u):
+        # Depthwise causal conv: y[t,d] = Σ_i conv_w[d,i]·u[t-(k-1)+i, d] + b[d],
+        # left-padded with zeros so it never reads the future. Built from concat +
+        # index_select + broadcast-mul (all differentiable), then SiLU-gated.
+        T, dim, k = u.shape[0], self.dim, self.conv_kernel
+        up = concat(tensor(np.zeros((k - 1, dim), np.float32)), u, 0)     # [T+k-1, dim]
+        onesT = tensor(np.ones((T, 1), np.float32))
+        y = None
+        for i in range(k):
+            win = index_select(up, list(range(i, i + T)))                # [T,dim] u[t-(k-1)+i]
+            wi = matmul(onesT, reshape(matmul(self.conv_w,
+                        tensor(np.eye(k, dtype=np.float32)[:, i:i + 1].copy())), (1, dim)))
+            term = mul(win, wi)
+            y = term if y is None else add(y, term)
+        y = add(y, matmul(onesT, reshape(self.conv_b, (1, dim))))        # + bias
+        return silu(y)
 
     def forward(self, x):
         s = x.shape
@@ -1045,6 +1070,8 @@ class SSMBlock(Module):
     def _forward2d(self, x):
         T, dim, N = x.shape[0], self.dim, self.N
         u = self.in_proj(x)                              # [T,dim]
+        if self.conv_kernel > 0:
+            u = self._causal_conv1d(u)                   # depthwise short conv + SiLU
         delta = softplus(self.dt_proj(x))               # [T,dim]  Δ>0
         B = self.B_proj(x)                              # [T,N]
         C = self.C_proj(x)                              # [T,N]
