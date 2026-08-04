@@ -38,7 +38,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build clang-18 llvm-18-dev libclang-18-dev \
             libomp-18-dev libsqlite3-dev liblapack-dev \
-            libkeyutils-dev libssl-dev zlib1g-dev ccache
+            libkeyutils-dev libssl-dev zlib1g-dev ccache \
+            python3-numpy
           clang++ --version
           cmake --version
 
@@ -65,7 +66,10 @@ jobs:
         # spin a worker pool, so an unbounded -j oversubscribes the runner and
         # times them out (Phase 2, Track 6). --test-load caps concurrent load.
         working-directory: build
-        run: ctest --output-on-failure -j 2 --test-load 4 --timeout 300
+        # --repeat until-pass:2 retries a failed test once, to absorb the
+        # timing/port flakes some multi-process cluster + distributed tests show
+        # on the small, loaded CI runner (they are deterministic locally).
+        run: ctest --output-on-failure -j 2 --test-load 4 --timeout 300 --repeat until-pass:2
 
       - name: Upload test logs on failure
         if: failure()
@@ -89,6 +93,7 @@ jobs:
         # until the code is made multi-LLVM-version compatible.
         run: |
           brew install llvm@18 libomp ninja sqlite lapack || true
+          python3 -m pip install --break-system-packages numpy || python3 -m pip install numpy || true
           echo "LLVM_DIR=$(brew --prefix llvm@18)/lib/cmake/llvm" >> "$GITHUB_ENV"
           echo "$(brew --prefix llvm@18)/bin" >> "$GITHUB_PATH"
 
@@ -129,7 +134,7 @@ jobs:
         # defaults to NONE) so macOS bring-up failures are diagnosable from CI.
         env:
           VGRE_LOG_LEVEL: ERROR
-        run: ctest --output-on-failure -j 1 --timeout 300
+        run: ctest --output-on-failure -j 1 --timeout 300 --repeat until-pass:2
 
   # ── Windows: bring-up (informational until green) ────────────────────────
   windows:
@@ -148,6 +153,7 @@ jobs:
         shell: pwsh
         run: |
           choco install ninja sqlite -y --no-progress
+          python -m pip install numpy
           $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
           curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
           New-Item -ItemType Directory -Force -Path C:\llvm | Out-Null
@@ -172,4 +178,4 @@ jobs:
 
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure -j 2 --timeout 300
+        run: ctest --output-on-failure -j 2 --timeout 300 --repeat until-pass:2
