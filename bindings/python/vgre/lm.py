@@ -42,6 +42,7 @@ def _bind() -> None:
     _lib.vgre_lm_set_bf16_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_kv_cache.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_int4_kv_cache.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_drop_fp32_weights.argtypes = [c.c_void_p]
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
@@ -188,6 +189,13 @@ class LanguageModel:
         context the KV cache, not the weights, dominates footprint. Affects
         generation only; weights and activations are untouched."""
         _lib.vgre_lm_set_int8_kv_cache(self._h, 1 if on else 0)
+
+    def set_int4_kv_cache(self, on: bool = True) -> None:
+        """Store the generation KV cache as 4-bit packed (2 codes/byte) with a
+        per-(position, head) absmax scale — ~7x less KV memory than fp32, a
+        further ~2x over int8. Coarser than int8: a memory/quality tradeoff
+        (takes precedence over int8 when both are enabled)."""
+        _lib.vgre_lm_set_int4_kv_cache(self._h, 1 if on else 0)
 
     def drop_fp32_weights(self) -> None:
         """Free the fp32 master weights after enabling bf16/int8 inference, so the

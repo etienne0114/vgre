@@ -84,8 +84,16 @@ verified (`test_lm_bindings.py` §7) that a trained LM's **greedy decoding is id
 KV, at 512 → 160 KV bytes/position/layer (3.20×). Composes with §2.1 — the hybrid stack
 concentrates KV into the few attention layers, and this shrinks those.
 
-**Left:** int4 KV (a second halving) and wiring the same scheme into `KVCacheManager`'s paged
-pools for the serving path.
+**int4 KV — DONE.** `set_int4_kv_cache(true)` (C-ABI `vgre_lm_set_int4_kv_cache`, Python
+`LanguageModel.set_int4_kv_cache()`) stores the KV as 4-bit packed (2 codes/byte) with the same
+per-(position, head) absmax scale — 96 vs 160 (int8) vs 512 (fp) bytes/pos/layer at D=64/H=4
+(**5.3× vs fp, 1.67× over int8**). It takes precedence over int8 when both are set and requires
+even D/Dh (byte-aligned heads). Coarser than int8, so — unlike int8 — it is a memory/quality
+tradeoff, **not** guaranteed greedy-identical; verified (`test_lm_bindings.py` §8) that greedy
+output stays ≥0.75 agreement with fp (1.00 on the test model, whose argmax margins exceed the
+4-bit perturbation).
+
+**Left:** wiring the same scheme into `KVCacheManager`'s paged pools for the serving path.
 
 ### 2.3 Multi-token prediction (MTP) heads — **DONE**
 `vgre.nn.MTPHeads(dim, vocab, n_predict=K)` — K linear heads on a shared trunk, head j predicting

@@ -91,6 +91,13 @@ public:
     void set_int8_kv_cache(bool on) { int8_kv_cache_ = on; }
     bool int8_kv_cache() const { return int8_kv_cache_; }
 
+    // int4 KV cache: 4-bit packed (2 codes/byte) with the same per-(position,
+    // head) absmax scale — ~7× smaller than fp32 (Dh/2 bytes + one scale per head
+    // vs 4·Dh), a further ~2× over int8. Coarser than int8, so this trades a
+    // little decode quality for memory; takes precedence over int8 when both set.
+    void set_int4_kv_cache(bool on) { int4_kv_cache_ = on; }
+    bool int4_kv_cache() const { return int4_kv_cache_; }
+
     // Free the fp32 master copies of the big weights after quantizing, so the
     // resident footprint actually drops to the bf16 (½×) / int8 (¼×) size.
     // Requires set_bf16_inference / set_int8_inference first. The model becomes
@@ -127,6 +134,7 @@ private:
     bool                  bf16_inference_ = false;
     bool                  int8_inference_ = false;
     bool                  int8_kv_cache_  = false;
+    bool                  int4_kv_cache_  = false;
     bool                  fp32_dropped_   = false;
     std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
     // int8 caches. tok_emb is quantized PER ROW (per token): the row scale serves
