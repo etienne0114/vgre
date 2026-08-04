@@ -3,48 +3,206 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API Reference · VGRE Documentation</title>
-<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. API Reference.">
-<link rel="canonical" href="https://vgre.dev/docs/api.html">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<title>API Reference — VGRE</title>
+<meta name="description" content="Reference for vgre.LanguageModel, vgre.Tokenizer, and the vgre.nn PyTorch-like autograd framework.">
+<style>
+:root{
+  --bg:#ffffff; --fg:#1c2024; --muted:#5b6570; --border:#e4e8ec;
+  --card:#f7f9fb; --code-bg:#f2f4f7; --code-fg:#1c2024; --accent:#2563b8;
+  --accent-soft:#e8f0fb; --note:#fff8e6; --note-border:#f2d98a;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f1216; --fg:#e6e9ec; --muted:#9aa4ad; --border:#242b32;
+    --card:#161b21; --code-bg:#12161b; --code-fg:#e6e9ec; --accent:#6ea8ff;
+    --accent-soft:#16202e; --note:#231e12; --note-border:#5a4a1f;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased}
+header.top{position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border)}
+nav.top{max-width:960px; margin:0 auto; padding:.7rem 1.2rem; display:flex; align-items:center; gap:1.1rem; flex-wrap:wrap}
+nav.top .brand{font-weight:700; letter-spacing:.02em; margin-right:auto; color:var(--fg); text-decoration:none}
+nav.top a{color:var(--muted); text-decoration:none; font-size:.94rem}
+nav.top a:hover{color:var(--fg)}
+nav.top a.active{color:var(--accent); font-weight:600}
+main{max-width:820px; margin:0 auto; padding:2.2rem 1.2rem 4rem}
+h1{font-size:1.9rem; line-height:1.2; margin:.2rem 0 .6rem}
+h2{font-size:1.35rem; margin:2.6rem 0 .8rem; padding-top:.4rem; border-top:1px solid var(--border)}
+h3{font-size:1.05rem; margin:1.5rem 0 .4rem; font-family:"SF Mono",ui-monospace,monospace}
+.lede{font-size:1.1rem; color:var(--muted); margin:.4rem 0 1.4rem}
+a{color:var(--accent)}
+code{background:var(--code-bg); color:var(--code-fg); padding:.12em .4em; border-radius:5px; font-size:.88em;
+  font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:1rem 1.1rem;
+  overflow-x:auto; font-size:.85rem; line-height:1.55}
+pre code{background:none; padding:0; font-size:inherit}
+ul{padding-left:1.2rem} li{margin:.3rem 0}
+table{border-collapse:collapse; width:100%; margin:1rem 0; font-size:.9rem; display:block; overflow-x:auto}
+th,td{border:1px solid var(--border); padding:.5rem .7rem; text-align:left; vertical-align:top}
+th{background:var(--card)}
+td code{white-space:nowrap}
+.muted{color:var(--muted)}
+footer{max-width:820px; margin:0 auto; padding:2rem 1.2rem 3rem; color:var(--muted); font-size:.88rem; border-top:1px solid var(--border)}
+</style>
 </head>
 <body>
-<header class="site-header">
-  <button class="menu-toggle" aria-label="Menu">☰</button>
-  <a class="brand" href="index.html">
-    <span class="brand-mark">◈</span>
-    <span class="brand-name">VGRE</span>
-    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
-  </a>
-  <div class="header-spacer"></div>
-  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
-  <nav class="header-links">
-    <a href="index.html">Docs</a>
-    <a href="api.html">API</a>
-    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+<header class="top">
+  <nav class="top">
+    <a class="brand" href="index.html">VGRE</a>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quickstart</a>
+    <a class="active" href="api.html">API</a>
+    <a href="deploy.html">Deploy</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
   </nav>
 </header>
-<div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link active" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
-  <main class="content">
-    <h1>API Reference</h1><p class="lead">Python, C ABI, and the CUDA-runtime shim.</p><h2>Python bindings</h2><p>The <code>vgre</code> package wraps the native library via ctypes:</p><table><thead><tr><th>Symbol</th><th>Purpose</th></tr></thead><tbody><tr><td><code>vgre.Tokenizer</code></td><td>BPE tokenizer; <code>train</code>, <code>load_hf</code>, <code>encode</code>, <code>decode</code>.</td></tr><tr><td><code>vgre.LanguageModel</code></td><td>In-tree GPT; <code>train</code>, <code>generate</code>, <code>save</code>, <code>load</code>.</td></tr><tr><td><code>vgre.nn.LoRALinear</code></td><td>Low-rank adapters; <code>adapter_parameters</code>, <code>merge</code>.</td></tr><tr><td><code>vgre.vector.VectorIndex</code></td><td>HNSW ANN; <code>add</code>, <code>search</code>, <code>save</code>, <code>load</code>.</td></tr></tbody></table><h2>C ABI (vgre_c_api.h)</h2><p>The stable C surface the wheel and dashboard bind to. Highlights:</p><pre><code class="lang-cpp">vgre_init();
-vgre_set_profiler_enabled(1);
-vgre_set_block_threads(0);
-vgre_get_memory_bandwidth_stats(&amp;stats);
-// tokenizer
-vgre_bpe* t = vgre_bpe_create();
-vgre_bpe_load_hf(t, &quot;tokenizer.json&quot;);
-int n = vgre_bpe_encode(t, &quot;hi&quot;, ids, 256);</code></pre><h2>CUDA runtime shim (libvgre_cudart)</h2><p>Drop-in <code>libcudart</code> replacement. Preload it (Linux <code>LD_PRELOAD</code>, macOS <code>DYLD_INSERT_LIBRARIES</code>) to route an existing CUDA binary's <code>cuda*</code> calls into VGRE.</p><h2>Dashboard telemetry</h2><p>The dashboard polls a JSON telemetry schema (utilization, kernels, cluster nodes, memory, logs). Full field list in <code>docs/api_reference.md §3–4</code>.</p>
-    <div class="page-nav"><a href="env-vars.html"><div class="dir">← Previous</div><div class="ttl">Environment Variables</div></a><a class="next" href="cli.html"><div class="dir">Next →</div><div class="ttl">CLI Tools</div></a></div>
-  </main>
-  <aside class="toc">
-    <div class="toc-title">On this page</div>
-    <nav class="toc-list"></nav>
-  </aside>
-</div>
-<script src="assets/search-index.js"></script>
-<script src="assets/docs.js"></script>
+<main>
+  <h1>API Reference</h1>
+  <p class="lede">The core surface for training and running language models, plus the
+  <code>vgre.nn</code> framework for building arbitrary networks. Signatures below match the
+  shipped bindings.</p>
+
+  <h2>vgre.LanguageModel</h2>
+  <p>An in-tree Llama-style decoder LM (RMSNorm, RoPE, causal attention, SwiGLU FFN).</p>
+  <pre><code>lm = vgre.LanguageModel(
+    vocab,               # vocabulary size (required)
+    n_layer=4,
+    d_model=256,         # must be divisible by n_head; head_dim must be even
+    n_head=8,
+    d_ff=0,              # 0 → default (SwiGLU inner size derived from d_model)
+    max_seq=256,
+    dropout=0.0,
+    tie_embeddings=False,
+    seed=1234,
+)</code></pre>
+
+  <h3>Properties &amp; training</h3>
+  <table>
+    <tr><th>Member</th><th>Description</th></tr>
+    <tr><td><code>num_parameters</code></td><td>Total parameter count (int).</td></tr>
+    <tr><td><code>train_step(ids, targets, lr=3e-3)</code></td><td>One AdamW step over a single
+      sequence; <code>ids</code> and <code>targets</code> are equal-length token lists. Returns the loss (float).</td></tr>
+    <tr><td><code>train_batch(batch, lr, clip=1.0)</code></td><td>Accumulate gradients over a batch of
+      <code>(ids, targets)</code> pairs, then one clipped optimizer step. Returns mean batch loss. More stable than <code>train_step</code>.</td></tr>
+    <tr><td><code>loss(ids, targets)</code></td><td>Forward-only cross-entropy (no gradient step) — for validation.</td></tr>
+  </table>
+
+  <h3>Generation</h3>
+  <pre><code>lm.generate(
+    prompt,                  # list[int] token ids
+    n_new=32,
+    temperature=0.0,         # <=0 → greedy
+    top_k=0,                 # >0 → keep top-k logits
+    top_p=1.0,               # <1 → nucleus (cumulative-probability) sampling
+    repetition_penalty=1.0,  # >1 → discourage repeats
+    seed=0,
+) -> list[int]               # returns prompt + newly generated tokens</code></pre>
+
+  <h3>Quantized inference &amp; KV cache</h3>
+  <p class="muted">These affect generation only; training stays fp32.</p>
+  <table>
+    <tr><th>Method</th><th>Description</th></tr>
+    <tr><td><code>set_bf16_inference(on=True)</code></td><td>Run generation on bf16-cached weights (half the matmul-weight footprint, fp32 accumulation).</td></tr>
+    <tr><td><code>set_int8_inference(on=True)</code></td><td>Weight-only int8 (~4× smaller, per-channel scale). Mutually exclusive with bf16.</td></tr>
+    <tr><td><code>set_int8_kv_cache(on=True)</code></td><td>Store the KV cache as int8 (per-(position, head) absmax scale). Greedy-identical on tested models.</td></tr>
+    <tr><td><code>set_int4_kv_cache(on=True)</code></td><td>4-bit packed KV cache (further ~2× over int8). A memory/quality tradeoff; takes precedence over int8.</td></tr>
+    <tr><td><code>drop_fp32_weights()</code></td><td>Free the fp32 master weights after enabling bf16/int8 inference. Serve-only afterwards (no more training).</td></tr>
+  </table>
+
+  <h3>Persistence</h3>
+  <table>
+    <tr><td><code>lm.save(path)</code></td><td>Write the model to disk.</td></tr>
+    <tr><td><code>lm.load(path)</code></td><td>Load weights (the constructor config must match the checkpoint).</td></tr>
+  </table>
+
+  <h2>vgre.Tokenizer</h2>
+  <p>A from-scratch byte-level BPE tokenizer, trainable on any text or loadable from Hugging Face files.</p>
+  <table>
+    <tr><th>Member</th><th>Description</th></tr>
+    <tr><td><code>train(corpus, num_merges=512)</code></td><td>Train BPE merges on a string. Returns self.</td></tr>
+    <tr><td><code>load_hf(tokenizer_json_path)</code></td><td>Load a Hugging Face <code>tokenizer.json</code> (GPT-2, Llama-3, Qwen, Phi, …), including special tokens.</td></tr>
+    <tr><td><code>load_gpt2(vocab_json, merges_txt)</code></td><td>Load the two-file GPT-2 tokenizer form.</td></tr>
+    <tr><td><code>encode(text)</code> / <code>decode(ids)</code></td><td>Text ⇄ token ids.</td></tr>
+    <tr><td><code>vocab_size</code></td><td>Vocabulary size (int).</td></tr>
+    <tr><td><code>special_id(content)</code></td><td>Id of a special token (e.g. <code>'&lt;|im_end|&gt;'</code>); <code>-1</code> if absent.</td></tr>
+  </table>
+
+  <h3>vgre.cosine_lr(step, warmup, total, base_lr, min_lr=0.0)</h3>
+  <p>Cosine learning-rate schedule with linear warmup — matches the C++ trainer. Returns a float.</p>
+
+  <h2>vgre.nn — autograd framework</h2>
+  <p>A small PyTorch-like framework: reverse-mode autodiff over VGRE's CPU engine, with tensors,
+  functional ops, layer modules, and optimizers. No GPU, no external ML library.</p>
+  <pre><code>import numpy as np, vgre.nn as nn
+
+W = nn.tensor(np.random.randn(4, 3) * 0.1, requires_grad=True)
+b = nn.tensor(np.zeros(3), requires_grad=True)
+opt = nn.AdamW([W, b], lr=1e-2)
+
+for step in range(200):
+    opt.zero_grad()
+    logits = nn.matmul(x, W) + b                 # x: nn.Tensor [N,4]
+    loss = nn.softmax_cross_entropy(logits, targets)
+    loss.backward()
+    opt.step()</code></pre>
+
+  <h3>Tensor</h3>
+  <p><code>nn.tensor(data, requires_grad=False)</code> wraps a NumPy array. A <code>Tensor</code> has
+  <code>.shape</code>, <code>.size</code>, <code>.numpy()</code>, <code>.grad()</code>,
+  <code>.set_(data)</code>, <code>.item()</code>, and <code>.backward()</code>. Operators
+  <code>@</code> (matmul), <code>+</code>, and <code>*</code> are overloaded.</p>
+
+  <h3>Functional ops</h3>
+  <ul>
+    <li><span class="muted">Linear algebra:</span> <code>matmul</code>, <code>bmm</code>, <code>linear_tied</code>, <code>add</code>, <code>mul</code>, <code>scale</code>, <code>transpose</code>, <code>reshape</code>, <code>concat</code>.</li>
+    <li><span class="muted">Activations:</span> <code>relu</code>, <code>gelu</code>, <code>silu</code>, <code>sigmoid</code>, <code>tanh</code>, <code>exp</code>, <code>softplus</code>, <code>softmax</code>, <code>mean</code>, <code>dropout</code>.</li>
+    <li><span class="muted">Norms &amp; embed:</span> <code>layer_norm</code>, <code>rms_norm</code>, <code>embedding</code>, <code>index_select</code>, <code>index_add</code>.</li>
+    <li><span class="muted">Attention &amp; sequence:</span> <code>rope</code>, <code>attention</code>, <code>flash_attention</code>, <code>selective_scan</code> (Mamba/SSM recurrence).</li>
+    <li><span class="muted">Vision:</span> <code>conv2d</code>, <code>max_pool2d</code>, <code>avg_pool2d</code>, <code>batch_norm2d</code>.</li>
+    <li><span class="muted">Losses:</span> <code>softmax_cross_entropy</code>, <code>softmax_cross_entropy_soft</code>, <code>distillation_loss</code>, <code>mtp_loss</code>.</li>
+    <li><span class="muted">Quantization-aware:</span> <code>ternary_quantize</code> (BitNet b1.58 STE), <code>structured_nm_mask</code> / <code>structured_nm_metadata</code> (N:M sparsity).</li>
+    <li><span class="muted">Memory &amp; distributed:</span> <code>checkpoint</code> (gradient checkpointing), <code>all_reduce</code>, <code>all_reduce_gradients</code>, <code>world_size</code>.</li>
+  </ul>
+
+  <h3>Layer modules</h3>
+  <p>Subclasses of <code>nn.Module</code> (with <code>.parameters()</code>,
+  <code>.named_parameters()</code>, <code>.train()</code>/<code>.eval()</code>):</p>
+  <ul>
+    <li><span class="muted">Core:</span> <code>Linear</code>, <code>Embedding</code>, <code>LayerNorm</code>, <code>RMSNorm</code>, <code>Dropout</code>, <code>Sequential</code>, <code>ReLU</code>, <code>Flatten</code>.</li>
+    <li><span class="muted">Vision:</span> <code>Conv2d</code>, <code>BatchNorm2d</code>, <code>MaxPool2d</code>, <code>AvgPool2d</code>.</li>
+    <li><span class="muted">Transformer &amp; sequence:</span> <code>MultiHeadAttention</code>, <code>TransformerBlock</code> (optionally MoE), <code>SSMBlock</code>, <code>MambaBlock</code>, <code>hybrid_blocks(...)</code>, <code>MTPHeads</code>.</li>
+    <li><span class="muted">Sparse / quantized / adapters:</span> <code>MoELayer</code>, <code>BitLinear</code> (ternary), <code>StructuredSparseLinear</code> (N:M), <code>LoRALinear</code>, <code>QLoRALinear</code>.</li>
+  </ul>
+
+  <h3>Optimizers</h3>
+  <pre><code>nn.AdamW(params, lr=1e-3, weight_decay=0.01)
+nn.SGD(params, lr=1e-2, momentum=0.0, weight_decay=0.0)
+# opt.zero_grad(); loss.backward(); opt.step(clip=1.0); opt.set_lr(lr)</code></pre>
+
+  <h3>Generation helpers</h3>
+  <ul>
+    <li><code>greedy_generate(model, prompt, n_new)</code></li>
+    <li><code>speculative_generate(model, prompt, n_new, draft_fn, k=4)</code> — lossless (greedy-identical) speculative decoding.</li>
+    <li><code>speculative_sample(target, draft, prompt, n_new, k, temperature, top_p, seed)</code> — sampler-exact speculative decoding.</li>
+    <li>Drafters: <code>ngram_draft_fn</code>, <code>model_draft_fn</code>, <code>mtp_draft_fn</code>.</li>
+  </ul>
+
+  <h3>Checkpoint I/O</h3>
+  <p><code>nn.save(model, path)</code> / <code>nn.load(model, path)</code> use standard safetensors,
+  loadable by VGRE's native SafeTensors reader.</p>
+
+  <p class="muted">For deeper coverage, the in-repo markdown (<code>docs/api_reference.md</code>,
+  <code>docs/USER_GUIDE.md</code>) and the docstrings in
+  <code>bindings/python/vgre/lm.py</code> and <code>nn.py</code> are the source of truth.</p>
+</main>
+<footer>
+  VGRE — Virtual GPU Runtime Engine. <a href="index.html">Overview</a> ·
+  <a href="quickstart.html">Quickstart</a> · <a href="deploy.html">Deploy</a> ·
+  <a href="architecture.html">Architecture</a>
+</footer>
 </body>
 </html>

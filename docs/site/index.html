@@ -3,41 +3,166 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Introduction · VGRE Documentation</title>
-<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Introduction.">
-<link rel="canonical" href="https://vgre.dev/docs/index.html">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<title>VGRE — Train and run ML models on CPUs, from scratch</title>
+<meta name="description" content="VGRE is a from-scratch CPU runtime for training and running machine-learning models — no GPU, no external ML framework, lightweight.">
+<style>
+:root{
+  --bg:#ffffff; --fg:#1c2024; --muted:#5b6570; --border:#e4e8ec;
+  --card:#f7f9fb; --code-bg:#f2f4f7; --code-fg:#1c2024; --accent:#2563b8;
+  --accent-soft:#e8f0fb; --note:#fff8e6; --note-border:#f2d98a;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f1216; --fg:#e6e9ec; --muted:#9aa4ad; --border:#242b32;
+    --card:#161b21; --code-bg:#12161b; --code-fg:#e6e9ec; --accent:#6ea8ff;
+    --accent-soft:#16202e; --note:#231e12; --note-border:#5a4a1f;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+header.top{
+  position:sticky; top:0; z-index:10; background:var(--bg);
+  border-bottom:1px solid var(--border);
+}
+nav.top{max-width:960px; margin:0 auto; padding:.7rem 1.2rem; display:flex; align-items:center; gap:1.1rem; flex-wrap:wrap}
+nav.top .brand{font-weight:700; letter-spacing:.02em; margin-right:auto; color:var(--fg); text-decoration:none}
+nav.top a{color:var(--muted); text-decoration:none; font-size:.94rem}
+nav.top a:hover{color:var(--fg)}
+nav.top a.active{color:var(--accent); font-weight:600}
+main{max-width:820px; margin:0 auto; padding:2.2rem 1.2rem 4rem}
+h1{font-size:2rem; line-height:1.2; margin:.2rem 0 .6rem}
+h2{font-size:1.4rem; margin:2.4rem 0 .8rem}
+h3{font-size:1.1rem; margin:1.6rem 0 .5rem}
+.lede{font-size:1.15rem; color:var(--muted); margin:.4rem 0 1.4rem}
+a{color:var(--accent)}
+code{background:var(--code-bg); color:var(--code-fg); padding:.12em .4em; border-radius:5px; font-size:.88em;
+  font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:1rem 1.1rem;
+  overflow-x:auto; font-size:.86rem; line-height:1.55}
+pre code{background:none; padding:0; font-size:inherit}
+.card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:1.1rem 1.2rem; margin:.6rem 0}
+.grid{display:grid; grid-template-columns:1fr 1fr; gap:.9rem; margin:1rem 0}
+@media (max-width:640px){.grid{grid-template-columns:1fr}}
+.note{background:var(--note); border:1px solid var(--note-border); border-radius:10px; padding:.9rem 1.1rem; margin:1.2rem 0}
+.note strong{display:block; margin-bottom:.2rem}
+.pill{display:inline-block; background:var(--accent-soft); color:var(--accent); border-radius:999px;
+  padding:.15rem .7rem; font-size:.78rem; font-weight:600; letter-spacing:.02em}
+ul{padding-left:1.2rem}
+li{margin:.3rem 0}
+footer{max-width:820px; margin:0 auto; padding:2rem 1.2rem 3rem; color:var(--muted); font-size:.88rem; border-top:1px solid var(--border)}
+.btnrow{display:flex; gap:.7rem; flex-wrap:wrap; margin:1.4rem 0}
+.btn{display:inline-block; text-decoration:none; padding:.55rem 1.1rem; border-radius:9px; font-size:.94rem; font-weight:600}
+.btn.primary{background:var(--accent); color:#fff}
+.btn.ghost{border:1px solid var(--border); color:var(--fg)}
+</style>
 </head>
 <body>
-<header class="site-header">
-  <button class="menu-toggle" aria-label="Menu">☰</button>
-  <a class="brand" href="index.html">
-    <span class="brand-mark">◈</span>
-    <span class="brand-name">VGRE</span>
-    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
-  </a>
-  <div class="header-spacer"></div>
-  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
-  <nav class="header-links">
-    <a href="index.html">Docs</a>
+<header class="top">
+  <nav class="top">
+    <a class="brand" href="index.html">VGRE</a>
+    <a class="active" href="index.html">Overview</a>
+    <a href="quickstart.html">Quickstart</a>
     <a href="api.html">API</a>
-    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+    <a href="deploy.html">Deploy</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
   </nav>
 </header>
-<div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link active" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
-  <main class="content">
-    <h1>VGRE — Virtual GPU Runtime</h1><p class="lead">Run unmodified CUDA on any CPU — no GPU required. Plus a full local-AI stack: train, fine-tune with LoRA, retrieve with an in-tree vector index, and generate — all offline, all dependency-free.</p><div class="badges"><span class="badge ok">Linux verified</span><span class="badge ok">macOS build-verified</span><span class="badge ">CUDA ~95%</span><span class="badge ">PTX ~95%</span><span class="badge ok">Zero external vendor lock-in</span></div><p>VGRE intercepts CUDA and OpenCL API calls and executes kernels on the CPU using an LLVM ORC JIT, OpenMP + AVX2/AVX-512 SIMD, OS-level unified memory, and an authenticated TCP cluster transport. The same engine ships an in-tree machine-learning stack so you can go from CUDA experiments to real model training and RAG without a second toolchain.</p><div class="card-grid"><a class="card" href="quickstart.html"><div class="card-icon">🚀</div><h3>Quick Start</h3><p>Install and run your first CUDA program on CPU in five minutes.</p></a><a class="card" href="local-ai.html"><div class="card-icon">🧠</div><h3>Local AI</h3><p>LoRA fine-tuning, HNSW vector search, and the in-tree language model.</p></a><a class="card" href="cluster.html"><div class="card-icon">🔗</div><h3>Clusters</h3><p>Scale across machines over WAN with encrypted, authenticated channels.</p></a><a class="card" href="debugging.html"><div class="card-icon">🐞</div><h3>PTX Debugging</h3><p>Step through PTX kernels with a stock gdb — CUDA-GDB-style, no GPU.</p></a><a class="card" href="dashboard.html"><div class="card-icon">📊</div><h3>Dashboard</h3><p>Real-time telemetry, kernel explorer, cluster topology, memory analysis.</p></a><a class="card" href="api.html"><div class="card-icon">📚</div><h3>API Reference</h3><p>Python, C ABI, CUDA-runtime shim, and dashboard telemetry APIs.</p></a></div><h2>Why VGRE</h2><ul><li><strong>No GPU needed</strong> — learn CUDA, run CI, and develop on any x86-64 or ARM64 machine.</li><li><strong>One stack, both jobs</strong> — GPU emulation and a real ML training/inference/RAG stack in the same runtime.</li><li><strong>Built from scratch</strong> — the JIT, tokenizer, vector index, collectives, and crypto are in-tree, not third-party wrappers, so there is no vendor lock-in and no per-seat dependency cost.</li><li><strong>Private by default</strong> — the entire embed → index → retrieve → generate → fine-tune loop runs offline; your data never leaves the machine.</li></ul><div class="callout warn"><div class="callout-title">Warning</div><p>VGRE is <strong>Linux-verified</strong> (full <code>ctest</code> green). <strong>macOS</strong> is build-verified on Apple Silicon — native engine, JIT, and integration tests pass locally with auto-detected Homebrew <code>llvm@18</code>. <strong>Windows</strong> is code-complete but not yet CI-verified. Hardware-only gaps (Metal MPS, NVIDIA PMU) are in <a href="faq.html">FAQ</a> / <code>missingFeatures.md</code>.</p></div>
-    <div class="page-nav"><span></span><a class="next" href="quickstart.html"><div class="dir">Next →</div><div class="ttl">Quick Start</div></a></div>
-  </main>
-  <aside class="toc">
-    <div class="toc-title">On this page</div>
-    <nav class="toc-list"></nav>
-  </aside>
-</div>
-<script src="assets/search-index.js"></script>
-<script src="assets/docs.js"></script>
+<main>
+  <span class="pill">Technical prototype</span>
+  <h1>Train and run ML models on CPUs — from scratch, no GPU</h1>
+  <p class="lede">VGRE is a lightweight, from-scratch runtime for training and running neural
+  networks entirely on ordinary CPUs. No GPU, no CUDA hardware, and no external
+  machine-learning framework — the tensor engine, autograd, optimizers, transformer,
+  Mamba, and quantization stacks are all in-tree.</p>
+
+  <div class="btnrow">
+    <a class="btn primary" href="quickstart.html">Get started</a>
+    <a class="btn ghost" href="architecture.html">How it works</a>
+  </div>
+
+  <h2>What VGRE is</h2>
+  <p>VGRE (Virtual GPU Runtime Engine) began as a CPU-based emulator for CUDA and grew a
+  complete, dependency-free machine-learning stack on top of it. You can:</p>
+  <ul>
+    <li>Train a small language model or an arbitrary network from Python with a PyTorch-like API.</li>
+    <li>Run autoregressive text generation with greedy, top-k, top-p, and speculative decoding.</li>
+    <li>Use modern building blocks — transformers, Mixture-of-Experts, Mamba/SSM, LoRA/QLoRA,
+        BitNet ternary quantization — implemented from scratch on a CPU SIMD GEMM.</li>
+    <li>Distribute training across processes over TCP (data-, tensor-, and expert-parallel).</li>
+  </ul>
+
+  <div class="grid">
+    <div class="card">
+      <h3>No GPU required</h3>
+      <p>Everything runs on the CPU. The core ML library (<code>libvgre_nn</code>) is
+      LLVM-free and carries essentially no heavy dependencies.</p>
+    </div>
+    <div class="card">
+      <h3>From scratch</h3>
+      <p>SIMD GEMM, reverse-mode autograd, AdamW/SGD, a byte-level BPE tokenizer, and the
+      model layers are all in-tree — no BLAS or ML framework needed for the light path.</p>
+    </div>
+    <div class="card">
+      <h3>Python-first</h3>
+      <p>Import <code>vgre</code>, build a <code>LanguageModel</code> or compose layers with
+      <code>vgre.nn</code>, then train and generate — a small, familiar surface.</p>
+    </div>
+    <div class="card">
+      <h3>Serveable</h3>
+      <p>A minimal HTTP inference server, a Dockerfile, and a fly.io config make it easy to
+      put a trained model behind an endpoint.</p>
+    </div>
+  </div>
+
+  <h2>Who it's for</h2>
+  <ul>
+    <li>Researchers and engineers who want to understand or modify a full ML stack without a GPU.</li>
+    <li>People experimenting with quantization, MoE, SSMs, or distributed training on commodity CPUs.</li>
+    <li>Anyone who wants to train and serve a small model on a laptop or a plain server, offline.</li>
+  </ul>
+
+  <h2>Current status — read this first</h2>
+  <div class="note">
+    <strong>VGRE is an advanced technical prototype, not a production system.</strong>
+    Know what is and isn't demonstrated before relying on it.
+  </div>
+  <p>Verified end-to-end today:</p>
+  <ul>
+    <li>Real <strong>GPT-2 (124M)</strong> inference matching Hugging Face token-for-token.</li>
+    <li>Small in-tree models that train to convergence and generate correctly.</li>
+    <li>Multi-process distributed training over real sockets (data-, tensor-, and expert-parallel)
+        on a single machine across separate OS processes.</li>
+  </ul>
+  <p>Architecturally supported but <strong>not yet demonstrated at scale</strong>:</p>
+  <ul>
+    <li>Frontier-scale checkpoints (e.g. Llama-3 70B/405B) — the same code path as the
+        demonstrated GPT-2 run, but a real large run needs a license-gated multi-GB download.</li>
+    <li>True multi-machine cluster runs across a physical network — the transport, collectives,
+        and partitioner are built and tested across processes, but not across real machines here.</li>
+  </ul>
+  <p>There are <strong>no production-scale performance benchmarks</strong> published here, and this
+  site does not claim any. Treat throughput and memory figures as things to measure on your own
+  hardware.</p>
+
+  <h2>Next steps</h2>
+  <ul>
+    <li><a href="quickstart.html">Quickstart</a> — build the native library, install the bindings,
+        train a tiny model, generate text, and run the inference server.</li>
+    <li><a href="api.html">API reference</a> — the <code>vgre.LanguageModel</code> and
+        <code>vgre.nn</code> surface.</li>
+    <li><a href="deploy.html">Deploy</a> — Docker and fly.io.</li>
+    <li><a href="architecture.html">Architecture</a> — an honest technical overview.</li>
+  </ul>
+</main>
+<footer>
+  VGRE — Virtual GPU Runtime Engine. A from-scratch CPU ML runtime.
+  <a href="https://github.com/etienne0114/vgre">Source on GitHub</a>.
+</footer>
 </body>
 </html>

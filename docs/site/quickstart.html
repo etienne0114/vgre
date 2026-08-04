@@ -3,52 +3,175 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Quick Start · VGRE Documentation</title>
-<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Quick Start.">
-<link rel="canonical" href="https://vgre.dev/docs/quickstart.html">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<title>Quickstart — VGRE</title>
+<meta name="description" content="Build the VGRE native library, install the Python bindings, train a tiny model, generate text, and run the HTTP inference server.">
+<style>
+:root{
+  --bg:#ffffff; --fg:#1c2024; --muted:#5b6570; --border:#e4e8ec;
+  --card:#f7f9fb; --code-bg:#f2f4f7; --code-fg:#1c2024; --accent:#2563b8;
+  --accent-soft:#e8f0fb; --note:#fff8e6; --note-border:#f2d98a;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f1216; --fg:#e6e9ec; --muted:#9aa4ad; --border:#242b32;
+    --card:#161b21; --code-bg:#12161b; --code-fg:#e6e9ec; --accent:#6ea8ff;
+    --accent-soft:#16202e; --note:#231e12; --note-border:#5a4a1f;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased}
+header.top{position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border)}
+nav.top{max-width:960px; margin:0 auto; padding:.7rem 1.2rem; display:flex; align-items:center; gap:1.1rem; flex-wrap:wrap}
+nav.top .brand{font-weight:700; letter-spacing:.02em; margin-right:auto; color:var(--fg); text-decoration:none}
+nav.top a{color:var(--muted); text-decoration:none; font-size:.94rem}
+nav.top a:hover{color:var(--fg)}
+nav.top a.active{color:var(--accent); font-weight:600}
+main{max-width:820px; margin:0 auto; padding:2.2rem 1.2rem 4rem}
+h1{font-size:1.9rem; line-height:1.2; margin:.2rem 0 .6rem}
+h2{font-size:1.35rem; margin:2.4rem 0 .8rem}
+h3{font-size:1.08rem; margin:1.6rem 0 .5rem}
+.lede{font-size:1.1rem; color:var(--muted); margin:.4rem 0 1.4rem}
+a{color:var(--accent)}
+code{background:var(--code-bg); color:var(--code-fg); padding:.12em .4em; border-radius:5px; font-size:.88em;
+  font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:1rem 1.1rem;
+  overflow-x:auto; font-size:.86rem; line-height:1.55}
+pre code{background:none; padding:0; font-size:inherit}
+.note{background:var(--note); border:1px solid var(--note-border); border-radius:10px; padding:.9rem 1.1rem; margin:1.2rem 0}
+.note strong{display:block; margin-bottom:.2rem}
+ul{padding-left:1.2rem} li{margin:.3rem 0}
+table{border-collapse:collapse; width:100%; margin:1rem 0; font-size:.92rem; display:block; overflow-x:auto}
+th,td{border:1px solid var(--border); padding:.55rem .7rem; text-align:left; vertical-align:top}
+th{background:var(--card)}
+footer{max-width:820px; margin:0 auto; padding:2rem 1.2rem 3rem; color:var(--muted); font-size:.88rem; border-top:1px solid var(--border)}
+.step{color:var(--accent); font-weight:700; margin-right:.35rem}
+</style>
 </head>
 <body>
-<header class="site-header">
-  <button class="menu-toggle" aria-label="Menu">☰</button>
-  <a class="brand" href="index.html">
-    <span class="brand-mark">◈</span>
-    <span class="brand-name">VGRE</span>
-    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
-  </a>
-  <div class="header-spacer"></div>
-  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
-  <nav class="header-links">
-    <a href="index.html">Docs</a>
+<header class="top">
+  <nav class="top">
+    <a class="brand" href="index.html">VGRE</a>
+    <a href="index.html">Overview</a>
+    <a class="active" href="quickstart.html">Quickstart</a>
     <a href="api.html">API</a>
-    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+    <a href="deploy.html">Deploy</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
   </nav>
 </header>
-<div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link active" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
-  <main class="content">
-    <h1>Quick Start</h1><p class="lead">From clone to a running CUDA kernel on CPU in a few commands.</p><h2>Automated install (Linux / macOS)</h2><pre><code class="lang-bash">git clone https://github.com/vgre-org/vgre-runtime.git
-cd vgre-runtime
-bash install_local.sh</code></pre><p><code>install_local.sh</code> detects and installs missing dependencies (CMake, LLVM, OpenMP, Flutter), builds the native engine and dashboard, writes <code>~/.vgre/env</code>, creates your auth token, and links the CLI tools into <code>~/.local/bin</code>.</p><p>Open a <strong>new terminal</strong>, then:</p><pre><code class="lang-bash">vgre-dashboard          # launch the real-time monitor
-vgre-start --test       # local master + worker self-test</code></pre><h2>Run a CUDA program</h2><p>Build your CUDA source as usual, then run it against the VGRE runtime shim instead of the NVIDIA driver:</p><pre><code class="lang-bash"># Linux — preload the CUDA-runtime shim
-LD_PRELOAD=$VGRE_INSTALL_DIR/lib/libvgre_cudart.so ./my_cuda_app
+<main>
+  <h1>Quickstart</h1>
+  <p class="lede">Build the native library, install the Python bindings, train a tiny language
+  model, generate text, and stand up the HTTP inference server — all on CPU.</p>
 
-# macOS
-DYLD_INSERT_LIBRARIES=$VGRE_INSTALL_DIR/lib/libvgre_cudart.dylib ./my_cuda_app</code></pre><div class="callout tip"><div class="callout-title">Tip</div><p>No source changes are needed. VGRE implements ~95% of the commonly used CUDA Runtime and Driver APIs; unsupported calls return a clear error rather than silently misbehaving.</p></div><h2>Try the local language model</h2><pre><code class="lang-python">import vgre
-tok = vgre.Tokenizer().train(open(&#x27;corpus.txt&#x27;).read(), num_merges=512)
-lm  = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=4, d_model=256, n_head=4)
-# ... train, then:
-print(tok.decode(lm.generate(tok.encode(&#x27;Once upon a time&#x27;), n_new=40)))</code></pre><p>See <a href="local-ai.html">Local AI</a> for LoRA fine-tuning and RAG.</p>
-    <div class="page-nav"><a href="index.html"><div class="dir">← Previous</div><div class="ttl">Introduction</div></a><a class="next" href="installation.html"><div class="dir">Next →</div><div class="ttl">Installation</div></a></div>
-  </main>
-  <aside class="toc">
-    <div class="toc-title">On this page</div>
-    <nav class="toc-list"></nav>
-  </aside>
-</div>
-<script src="assets/search-index.js"></script>
-<script src="assets/docs.js"></script>
+  <div class="note">
+    <strong>Prerequisites</strong>
+    A C++ toolchain and CMake, Python 3.8+, and NumPy. The lightweight ML library
+    (<code>libvgre_nn</code>) is LLVM-free, so you do not need LLVM for the ML path.
+  </div>
+
+  <h2><span class="step">1.</span>Build the native library</h2>
+  <p>Clone the repository and build the LLVM-free <code>vgre_nn</code> target. This produces the
+  shared library the Python bindings load.</p>
+  <pre><code>git clone https://github.com/etienne0114/vgre
+cd vgre
+
+cmake -S . -B build
+cmake --build build --target vgre_nn
+# → build/src/xla/libvgre_nn.so</code></pre>
+  <p>The bindings can also load the full <code>vgre</code> library (which additionally provides the
+  CUDA-on-CPU runtime and needs LLVM); for training and running models, <code>vgre_nn</code> is all
+  you need.</p>
+
+  <h2><span class="step">2.</span>Install the Python bindings</h2>
+  <p>Install the <code>vgre</code> package (pure-Python ctypes wrappers) and point it at the library
+  you just built:</p>
+  <pre><code>pip install ./bindings/python        # or: pip install -e ./bindings/python
+
+# Tell the bindings where the native library is:
+export VGRE_LIB_PATH="$PWD/build/src/xla/libvgre_nn.so"</code></pre>
+  <p>Prefer not to install? Use the source tree directly:</p>
+  <pre><code>export PYTHONPATH="$PWD/bindings/python:$PYTHONPATH"
+export VGRE_LIB_PATH="$PWD/build/src/xla/libvgre_nn.so"</code></pre>
+  <p>Verify:</p>
+  <pre><code>python -c "import vgre; print('native available:', vgre.NATIVE_AVAILABLE)"</code></pre>
+  <p>If <code>VGRE_LIB_PATH</code> is unset, the loader also searches <code>./build</code>,
+  <code>./build/lib</code>, and the package's bundled <code>lib/</code> directory.</p>
+
+  <h2><span class="step">3.</span>Train a tiny model and generate</h2>
+  <p>This trains a small Llama-style decoder on any plain-text file, then samples from it. Everything
+  runs on the CPU.</p>
+  <pre><code>import vgre
+
+# 1. Train a byte-level BPE tokenizer on your corpus.
+text = open("input.txt").read()            # any plain-text file
+tok  = vgre.Tokenizer().train(text, num_merges=512)
+ids  = tok.encode(text)
+
+# 2. Build a small decoder LM (RMSNorm, RoPE, causal attention, SwiGLU).
+lm = vgre.LanguageModel(
+    vocab=tok.vocab_size,
+    n_layer=4, d_model=256, n_head=8,
+    max_seq=128, seed=1234,
+)
+print("parameters:", lm.num_parameters)
+
+# 3. Train on sliding windows (predict each token from the previous ones).
+seq_len = 64
+for step in range(2000):
+    i = (step * seq_len) % (len(ids) - seq_len - 1)
+    window  = ids[i : i + seq_len]
+    targets = ids[i + 1 : i + seq_len + 1]
+    lr = vgre.cosine_lr(step, warmup=100, total=2000, base_lr=3e-3, min_lr=3e-4)
+    loss = lm.train_step(window, targets, lr)
+    if step % 200 == 0:
+        print(f"step {step:4d}  loss {loss:.3f}")
+
+# 4. Generate text (greedy if temperature<=0; else top-k / nucleus sampling).
+prompt = tok.encode("The ")
+out    = lm.generate(prompt, n_new=60, temperature=0.8, top_k=40, top_p=0.95)
+print(tok.decode(out))
+
+# 5. Persist the model.
+lm.save("model.vgre")</code></pre>
+  <p>See the <a href="api.html">API reference</a> for every argument, the mini-batch
+  <code>train_batch</code> path, quantized inference (<code>set_bf16_inference</code>,
+  <code>set_int8_inference</code>, KV-cache quantization), and the <code>vgre.nn</code> framework for
+  building arbitrary networks.</p>
+
+  <h2><span class="step">4.</span>Run the HTTP inference server</h2>
+  <p>The server loads a saved model and exposes a small JSON API. Start it with:</p>
+  <pre><code>python server/vgre_server.py
+# listens on http://localhost:8000 by default</code></pre>
+
+  <h3>Endpoints</h3>
+  <table>
+    <tr><th>Method &amp; path</th><th>Description</th></tr>
+    <tr><td><code>GET /health</code></td><td>Liveness check. Returns a small JSON status object.</td></tr>
+    <tr><td><code>GET /info</code></td><td>Model / server metadata (e.g. model configuration).</td></tr>
+    <tr><td><code>POST /generate</code></td><td>Generate text. JSON body:
+      <code>{"prompt": &lt;string&gt;, "max_tokens": &lt;int&gt;, "temperature": &lt;float&gt;}</code>.</td></tr>
+  </table>
+
+  <h3>Example requests</h3>
+  <pre><code># Health and info
+curl -s http://localhost:8000/health
+curl -s http://localhost:8000/info
+
+# Generate
+curl -s -X POST http://localhost:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "The ", "max_tokens": 60, "temperature": 0.8}'</code></pre>
+
+  <p>Ready to put this behind a container or a public URL? Continue to
+  <a href="deploy.html">Deploy</a>.</p>
+</main>
+<footer>
+  VGRE — Virtual GPU Runtime Engine. <a href="index.html">Overview</a> ·
+  <a href="api.html">API</a> · <a href="deploy.html">Deploy</a> ·
+  <a href="architecture.html">Architecture</a>
+</footer>
 </body>
 </html>

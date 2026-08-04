@@ -3,41 +3,144 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Architecture · VGRE Documentation</title>
-<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Architecture.">
-<link rel="canonical" href="https://vgre.dev/docs/architecture.html">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<title>Architecture — VGRE</title>
+<meta name="description" content="An honest technical overview of VGRE: CPU CUDA-JIT, in-tree SIMD GEMM, autograd, transformers, Mamba, MoE, quantization, and distributed training over TCP.">
+<style>
+:root{
+  --bg:#ffffff; --fg:#1c2024; --muted:#5b6570; --border:#e4e8ec;
+  --card:#f7f9fb; --code-bg:#f2f4f7; --code-fg:#1c2024; --accent:#2563b8;
+  --accent-soft:#e8f0fb; --note:#fff8e6; --note-border:#f2d98a;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0f1216; --fg:#e6e9ec; --muted:#9aa4ad; --border:#242b32;
+    --card:#161b21; --code-bg:#12161b; --code-fg:#e6e9ec; --accent:#6ea8ff;
+    --accent-soft:#16202e; --note:#231e12; --note-border:#5a4a1f;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased}
+header.top{position:sticky; top:0; z-index:10; background:var(--bg); border-bottom:1px solid var(--border)}
+nav.top{max-width:960px; margin:0 auto; padding:.7rem 1.2rem; display:flex; align-items:center; gap:1.1rem; flex-wrap:wrap}
+nav.top .brand{font-weight:700; letter-spacing:.02em; margin-right:auto; color:var(--fg); text-decoration:none}
+nav.top a{color:var(--muted); text-decoration:none; font-size:.94rem}
+nav.top a:hover{color:var(--fg)}
+nav.top a.active{color:var(--accent); font-weight:600}
+main{max-width:820px; margin:0 auto; padding:2.2rem 1.2rem 4rem}
+h1{font-size:1.9rem; line-height:1.2; margin:.2rem 0 .6rem}
+h2{font-size:1.35rem; margin:2.4rem 0 .8rem}
+h3{font-size:1.08rem; margin:1.5rem 0 .4rem}
+.lede{font-size:1.1rem; color:var(--muted); margin:.4rem 0 1.4rem}
+a{color:var(--accent)}
+code{background:var(--code-bg); color:var(--code-fg); padding:.12em .4em; border-radius:5px; font-size:.88em;
+  font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--code-bg); border:1px solid var(--border); border-radius:10px; padding:1rem 1.1rem;
+  overflow-x:auto; font-size:.86rem; line-height:1.55}
+.card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:1.1rem 1.2rem; margin:.6rem 0}
+.note{background:var(--note); border:1px solid var(--note-border); border-radius:10px; padding:.9rem 1.1rem; margin:1.2rem 0}
+.note strong{display:block; margin-bottom:.2rem}
+.layers{display:flex; flex-direction:column; gap:.5rem; margin:1.2rem 0}
+.layer{border:1px solid var(--border); border-radius:10px; padding:.7rem 1rem; background:var(--card)}
+.layer b{color:var(--accent)}
+ul{padding-left:1.2rem} li{margin:.3rem 0}
+footer{max-width:820px; margin:0 auto; padding:2rem 1.2rem 3rem; color:var(--muted); font-size:.88rem; border-top:1px solid var(--border)}
+</style>
 </head>
 <body>
-<header class="site-header">
-  <button class="menu-toggle" aria-label="Menu">☰</button>
-  <a class="brand" href="index.html">
-    <span class="brand-mark">◈</span>
-    <span class="brand-name">VGRE</span>
-    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
-  </a>
-  <div class="header-spacer"></div>
-  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
-  <nav class="header-links">
-    <a href="index.html">Docs</a>
+<header class="top">
+  <nav class="top">
+    <a class="brand" href="index.html">VGRE</a>
+    <a href="index.html">Overview</a>
+    <a href="quickstart.html">Quickstart</a>
     <a href="api.html">API</a>
-    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+    <a href="deploy.html">Deploy</a>
+    <a class="active" href="architecture.html">Architecture</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
   </nav>
 </header>
-<div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link active" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
-  <main class="content">
-    <h1>Architecture</h1><p class="lead">How the pieces fit together.</p><h2>Layers</h2><ol><li><strong>Interception</strong> — CUDA/OpenCL API shims capture calls at load time.</li><li><strong>Compilation</strong> — Clang AST → LLVM IR → ORC JIT native code, with a persistent disk+memory cache.</li><li><strong>Execution</strong> — OpenMP thread pool + AVX2/AVX-512 SIMD; block/warp scheduling and shared-memory emulation.</li><li><strong>Memory</strong> — UVM via an OS page-fault handler; stream-ordered pools; LZ4-compressed cluster transfers.</li><li><strong>Distribution</strong> — authenticated, encrypted TCP transport; NCCL-style + software-RDMA collectives; tensor/pipeline parallelism and a GSPMD auto-partitioner.</li><li><strong>ML stack</strong> — autograd, BLAS GEMM, tokenizer, samplers, LoRA, HNSW, checkpoint loaders (safetensors / GGUF).</li></ol><h2>Design principles</h2><ul><li>Real implementations only — no stubs, mocks, or placeholder math in shipped paths.</li><li>From-scratch primitives (JIT, tokenizer, vector index, crypto, collectives) to avoid vendor lock-in.</li><li>Warnings-as-errors, and a 300-test suite gating every change on Linux.</li></ul><p>Full detail in <code>docs/ARCHITECTURE.md</code>.</p>
-    <div class="page-nav"><a href="cli.html"><div class="dir">← Previous</div><div class="ttl">CLI Tools</div></a><a class="next" href="faq.html"><div class="dir">Next →</div><div class="ttl">FAQ &amp; Troubleshooting</div></a></div>
-  </main>
-  <aside class="toc">
-    <div class="toc-title">On this page</div>
-    <nav class="toc-list"></nav>
-  </aside>
-</div>
-<script src="assets/search-index.js"></script>
-<script src="assets/docs.js"></script>
+<main>
+  <h1>Architecture</h1>
+  <p class="lede">A short, honest overview of how VGRE runs machine-learning workloads on CPUs —
+  from the CUDA-on-CPU roots to the in-tree ML stack layered on top.</p>
+
+  <div class="layers">
+    <div class="layer"><b>Python bindings</b> — <code>vgre.LanguageModel</code>, <code>vgre.Tokenizer</code>, and the <code>vgre.nn</code> framework (thin ctypes wrappers over a stable C ABI).</div>
+    <div class="layer"><b>Model layers</b> — transformers, Mamba/SSM, Mixture-of-Experts, LoRA/QLoRA, BitNet ternary, structured sparsity.</div>
+    <div class="layer"><b>Autograd engine</b> — reverse-mode autodiff with op adjoints, AdamW/SGD, gradient checkpointing.</div>
+    <div class="layer"><b>Compute kernels</b> — from-scratch SIMD GEMM (fp32/bf16), attention, conv/pool, quantized codecs, selective scan.</div>
+    <div class="layer"><b>CUDA-on-CPU runtime</b> — CUDA-C compiled through an LLVM JIT and executed on the CPU (the original VGRE core).</div>
+    <div class="layer"><b>Distributed layer</b> — collectives (all-reduce) and tensor/pipeline/expert parallelism over TCP sockets.</div>
+  </div>
+
+  <h2>CUDA on the CPU</h2>
+  <p>VGRE started as a virtual GPU runtime: it takes CUDA-C, compiles it through an LLVM-based JIT, and
+  executes the resulting kernels on the CPU — no physical GPU involved. This path implements a broad
+  device-intrinsic surface and even supports source-level debugging. It is the "GPU emulator" heritage
+  of the project and lives in the full <code>vgre</code> library.</p>
+  <p>The machine-learning stack does <em>not</em> require that JIT: the lightweight
+  <code>libvgre_nn</code> library is LLVM-free and self-contained, so training and running models needs
+  only a C++ toolchain.</p>
+
+  <h2>The compute core: SIMD GEMM</h2>
+  <p>At the bottom of the ML stack is a hand-written, threaded, SIMD matrix-multiply (GEMM) for fp32 and
+  bf16, with dequantize-in-GEMM paths for quantized weights. Every higher-level operation — linear
+  layers, attention, convolutions — is expressed on top of it. There is no dependency on an external
+  BLAS for the lightweight path.</p>
+
+  <h2>Autograd and optimizers</h2>
+  <p>A reverse-mode automatic-differentiation engine records a graph of operations and computes exact
+  gradients via each op's adjoint. On top of it sit AdamW and SGD, gradient clipping, dropout, a cosine
+  learning-rate schedule, and gradient checkpointing (recompute activations in the backward pass to
+  trade compute for memory). The Python <code>vgre.nn</code> layer exposes this as a familiar,
+  PyTorch-like API.</p>
+
+  <h2>Model building blocks</h2>
+  <ul>
+    <li><b>Transformers</b> — RMSNorm, RoPE, causal multi-head (and flash) attention, SwiGLU/MLP FFNs.</li>
+    <li><b>Mamba / state-space models</b> — a selective-scan (S6) recurrence that is linear-time and keeps
+        no growing KV cache; usable standalone or interleaved with attention (Jamba-style hybrid stacks).</li>
+    <li><b>Mixture-of-Experts</b> — a learned top-k router with compute-sparse dispatch, so only a few
+        experts run per token; experts can shard across cluster ranks.</li>
+    <li><b>Quantization</b> — BitNet b1.58 ternary weights (multiplication-free GEMM), int8/bf16 weight
+        inference, MXFP4 microscaling, and int8/int4 KV-cache quantization.</li>
+    <li><b>Parameter-efficient fine-tuning</b> — LoRA and QLoRA (a low-bit frozen base plus small
+        trainable adapters), so a large layer can be adapted on a laptop.</li>
+    <li><b>Decoding</b> — greedy, top-k, nucleus sampling, and lossless / sampler-exact speculative
+        decoding, including multi-token-prediction self-drafting.</li>
+  </ul>
+
+  <h2>Distributed training</h2>
+  <p>VGRE ships a from-scratch collective layer (TCP all-reduce) and executors for data-parallel,
+  tensor-parallel, pipeline-parallel, and expert-parallel training. In <code>vgre.nn</code>,
+  <code>all_reduce_gradients()</code> averages gradients across ranks after <code>backward()</code>, and
+  the differentiable <code>all_reduce</code> op enables tensor/expert parallelism where a single layer is
+  too large for one node.</p>
+  <div class="note">
+    <strong>Honest scope</strong>
+    The transport, collectives, and partitioners are built and verified across real OS processes on one
+    machine (bit-identical results, zero cross-step drift). A true run across multiple physical machines,
+    and runs on frontier-scale checkpoints, use the same code paths but have not been demonstrated at that
+    scale here.
+  </div>
+
+  <h2>Where to go deeper</h2>
+  <p>The repository's markdown docs cover the internals in detail:</p>
+  <ul>
+    <li><code>docs/ARCHITECTURE.md</code> — system architecture.</li>
+    <li><code>docs/implementationPlan.md</code> — build targets, tracks, and success criteria.</li>
+    <li><code>docs/missingFeatures.md</code> — an honest ledger of what is delivered vs. externally blocked.</li>
+    <li><code>docs/inTreeLibrariesPlan.md</code> — the from-scratch CPU ML library program.</li>
+    <li><code>docs/api_reference.md</code>, <code>docs/USER_GUIDE.md</code> — reference and guides.</li>
+  </ul>
+
+  <p>Ready to try it? Head back to the <a href="quickstart.html">Quickstart</a>.</p>
+</main>
+<footer>
+  VGRE — Virtual GPU Runtime Engine. <a href="index.html">Overview</a> ·
+  <a href="quickstart.html">Quickstart</a> · <a href="api.html">API</a> ·
+  <a href="deploy.html">Deploy</a>
+</footer>
 </body>
 </html>
