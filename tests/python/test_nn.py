@@ -676,7 +676,7 @@ def test_mamba() -> bool:
     nn.seed(1)
     Tt, dim, Ns = 7, 16, 8
     xx = nn.tensor(rng.standard_normal((Tt, dim)).astype(np.float32))
-    ssm = nn.SSMBlock(dim, d_state=Ns)
+    ssm = nn.SSMBlock(dim, d_state=Ns, conv_kernel=0)   # isolate the SSM math
     out = ssm(xx).numpy()
     xn = xx.numpy()
 
@@ -694,6 +694,24 @@ def test_mamba() -> bool:
         yy[t] = (hs * Cm[t][None, :]).sum(1) + Dsk * u[t]
     ref = yy @ ssm.out_proj.W.numpy() + ssm.out_proj.b.numpy()
     ssm_err = float(np.max(np.abs(out - ref)))
+
+    # Depthwise short conv: matches a NumPy causal conv+bias+SiLU, and is causal —
+    # perturbing a future input must not change any earlier output.
+    kk = 4
+    cssm = nn.SSMBlock(dim, d_state=Ns, conv_kernel=kk)
+    uu = rng.standard_normal((Tt, dim)).astype(np.float32)
+    cy = cssm._causal_conv1d(nn.tensor(uu)).numpy()
+    cw, cb = cssm.conv_w.numpy(), cssm.conv_b.numpy()
+    up = np.concatenate([np.zeros((kk - 1, dim), np.float32), uu], 0)
+    cref = np.zeros((Tt, dim), np.float32)
+    for t in range(Tt):
+        for i in range(kk):
+            cref[t] += cw[:, i] * up[t + i]
+    cref += cb; cref = cref / (1 + np.exp(-cref))
+    conv_err = float(np.max(np.abs(cy - cref)))
+    uu2 = uu.copy(); uu2[Tt - 1] += 5.0
+    cy2 = cssm._causal_conv1d(nn.tensor(uu2)).numpy()
+    conv_causal = float(np.max(np.abs(cy[:Tt - 1] - cy2[:Tt - 1])))   # must be 0
 
     # Attention-free Mamba LM: memorize + regenerate.
     nn.seed(5)
@@ -726,8 +744,10 @@ def test_mamba() -> bool:
     match = sum(int(x == y) for x, y in zip(gen, tgt))
 
     print(f"[mamba] scan fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} par_err={par_err:.1e} "
-          f"ssm_block_err={ssm_err:.1e}  LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
+          f"ssm_block_err={ssm_err:.1e} conv_err={conv_err:.1e} conv_causal={conv_causal:.1e}  "
+          f"LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
     return (fwd_err < 1e-6 and grad_err < 1e-3 and par_err < 1e-6 and ssm_err < 1e-4
+            and conv_err < 1e-5 and conv_causal == 0.0
             and last < first * 0.2 and match >= TT - 1)
 
 
