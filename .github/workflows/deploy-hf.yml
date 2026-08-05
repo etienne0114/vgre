@@ -1,31 +1,32 @@
 name: Deploy inference server (Hugging Face Spaces)
 
-# Card-free public hosting: builds the LLVM-free libvgre_nn in CI, then assembles
-# a slim runtime-only Space (Python + the prebuilt .so + the stdlib server) and
-# pushes it to a Hugging Face Space. HF Spaces are free and need no payment card.
+# Card-free public hosting on the FREE Hugging Face Gradio tier (HF's Docker SDK
+# is paid; Gradio/Static are free). Builds the LLVM-free libvgre_nn.so in CI and
+# ships a Gradio Space (app.py + the prebuilt .so + the vgre package) — no
+# compilation on HF. Built on ubuntu-22.04 (older glibc) so the .so loads on HF's
+# runtime.
 #
 # One-time setup:
-#   1. Create a free Hugging Face account (no card): https://huggingface.co/join
-#   2. Create a write token: https://huggingface.co/settings/tokens (role: write)
-#   3. Add it as a repo secret HF_TOKEN (Settings -> Secrets and variables ->
-#      Actions). Optionally set HF_SPACE (defaults to <your-username>/vgre-server).
-# Then this deploys automatically on push; the Space builds a tiny Python image
-# and serves at https://<username>-vgre-server.hf.space
+#   1. Free Hugging Face account (no card): https://huggingface.co/join
+#   2. Write token: https://huggingface.co/settings/tokens (role: write)
+#   3. Add it as the repo secret HF_TOKEN. Optionally HF_SPACE (default
+#      <your-username>/vgre-server).
+# Then it deploys on push; the Space serves at https://<username>-vgre-server.hf.space
 
 on:
   push:
     branches: [main]
     paths:
-      - "server/**"
-      - "bindings/python/vgre/**"
       - "deploy/hf/**"
+      - "bindings/python/vgre/**"
+      - "server/**"
       - ".github/workflows/deploy-hf.yml"
   workflow_dispatch:
 
 jobs:
   deploy-hf:
-    name: huggingface-space
-    runs-on: ubuntu-24.04
+    name: huggingface-gradio-space
+    runs-on: ubuntu-22.04         # older glibc → the .so loads on HF's runtime
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -36,50 +37,55 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [ -z "${HF_TOKEN}" ]; then
-            echo "HF_TOKEN not set — skipping. Add it (a HF write token) to deploy."
+            echo "HF_TOKEN not set — skipping. Add a HF write token as HF_TOKEN to deploy."
             echo "go=false" >> "$GITHUB_OUTPUT"
           else
             echo "go=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install toolchain
+      - name: Install LLVM 18 + toolchain
         if: steps.gate.outputs.go == 'true'
         run: |
-          sudo apt-get update
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build clang-18 llvm-18-dev libclang-18-dev \
-            libomp-18-dev libssl-dev zlib1g-dev
+            cmake ninja-build llvm-18-dev libclang-18-dev libomp-18-dev \
+            libssl-dev zlib1g-dev
 
       - name: Build libvgre_nn (LLVM-free artifact)
         if: steps.gate.outputs.go == 'true'
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
+            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build --target vgre_nn --parallel
           test -f build/src/xla/libvgre_nn.so
+          echo "── libvgre_nn.so shared deps (must be common system libs only) ──"
+          ldd build/src/xla/libvgre_nn.so || true
 
-      - name: Assemble the Space and push
+      - name: Assemble the Gradio Space and push
         if: steps.gate.outputs.go == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: ${{ secrets.HF_SPACE }}
         run: |
           python3 -m pip install --quiet "huggingface_hub>=0.24"
-          rm -rf space && mkdir -p space/lib
-          cp build/src/xla/libvgre_nn.so   space/lib/libvgre_nn.so
+          rm -rf space && mkdir -p space
+          cp deploy/hf/app.py              space/app.py
+          cp deploy/hf/requirements.txt    space/requirements.txt
+          cp deploy/hf/README.md           space/README.md
           cp -r bindings/python/vgre        space/vgre
-          cp server/vgre_server.py          space/vgre_server.py
-          cp deploy/hf/Dockerfile           space/Dockerfile
-          cp deploy/hf/README.md            space/README.md
+          cp build/src/xla/libvgre_nn.so   space/libvgre_nn.so
           python3 - <<'PY'
           import os
           from huggingface_hub import HfApi
           api = HfApi(token=os.environ["HF_TOKEN"])
           who = api.whoami()["name"]
           repo_id = os.environ.get("HF_SPACE") or f"{who}/vgre-server"
-          api.create_repo(repo_id, repo_type="space", space_sdk="docker", exist_ok=True)
+          api.create_repo(repo_id, repo_type="space", space_sdk="gradio", exist_ok=True)
           api.upload_folder(folder_path="space", repo_id=repo_id, repo_type="space",
-                            commit_message="Deploy VGRE inference server from CI")
+                            commit_message="Deploy VGRE Gradio inference Space from CI")
           slug = repo_id.replace("/", "-")
-          print(f"::notice::Deployed to https://huggingface.co/spaces/{repo_id}  (serves at https://{slug}.hf.space)")
+          print(f"::notice::Deployed to https://huggingface.co/spaces/{repo_id}  (live at https://{slug}.hf.space)")
           PY
