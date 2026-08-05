@@ -6,14 +6,11 @@ name: Deploy inference server (fly.io)
 # token exists. Add the secret: repo Settings → Secrets and variables → Actions
 # → new secret FLY_API_TOKEN (a fly.io *deploy* token, not your password).
 
+# Manual-only: fly.io requires a payment card even for its free allowances, so
+# this does not auto-run (it would fail on every push without a card / created
+# app). The card-free default is Hugging Face Spaces — see deploy-hf.yml. Trigger
+# this from the Actions tab if you have a fly.io card + the app created.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "server/**"
-      - "fly.toml"
-      - "bindings/python/vgre/**"
-      - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
 jobs:
