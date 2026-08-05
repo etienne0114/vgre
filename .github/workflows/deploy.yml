@@ -33,7 +33,9 @@ jobs:
             echo "Add a fly.io deploy token as the FLY_API_TOKEN repo secret to enable auto-deploy."
             exit 0
           fi
-          # Create the app on first run (no-op if it exists or the token is
-          # deploy-scoped; then you'd create it once via the fly.io dashboard).
-          flyctl apps create vgre-server --org personal 2>/dev/null || true
+          # Try to create the app (works only if the token can create apps — an
+          # org-scoped token). A deploy-scoped token can't; in that case create it
+          # once from your machine: `fly apps create vgre-server`.
+          flyctl apps create vgre-server --org personal || \
+            echo "note: could not create the app with this token — create it once manually if it doesn't exist yet"
           flyctl deploy --remote-only --config fly.toml
