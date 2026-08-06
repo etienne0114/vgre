@@ -638,11 +638,26 @@ def test_qlora() -> bool:
         opt2.zero_grad(); nn.softmax_cross_entropy(qi(x), tgt).backward(); opt2.step()
     int4_ok = int4_ok and np.array_equal(codes_i0, qi._codes)   # base still frozen
 
+    # mxfp4 base variant: OCP microscaling — 4-bit E2M1 codes sharing an 8-bit
+    # E8M0 power-of-two scale per 32-row block (~4.25 bits/weight). Finer than
+    # the 2-bit ternary base, still frozen + params == {A,B}, and fine-tunes.
+    qm = nn.QLoRALinear(inf, outf, r=r, base_weight=W.copy(), base_format="mxfp4")
+    err_m = float(np.max(np.abs(W - qm._base().numpy())))
+    mxfp4_ok = (len(qm.parameters()) == 2 and 4.0 <= qm.base_bits_per_weight() < 4.5
+                and err_m < err_t
+                and set(np.unique(np.abs(qm._codes)).tolist()) <= set(range(8)))
+    codes_m0 = qm._codes.copy()
+    opt3 = nn.AdamW(qm.adapter_parameters(), lr=5e-2)
+    for _ in range(40):
+        opt3.zero_grad(); nn.softmax_cross_entropy(qm(x), tgt).backward(); opt3.step()
+    mxfp4_ok = mxfp4_ok and np.array_equal(codes_m0, qm._codes)   # base still frozen
+
     print(f"[qlora] params={len(q.parameters())} base_bits={bits:.2f} init_ok={init_ok} "
           f"grad_ok={grad_ok} frozen={frozen}  fine-tune {first:.3f} -> {last:.3f}  "
-          f"int4(bits={qi.base_bits_per_weight():.2f}, recon_err {err_i:.3f}<{err_t:.3f}={err_i<err_t})")
+          f"int4(bits={qi.base_bits_per_weight():.2f}, recon_err {err_i:.3f}<{err_t:.3f}={err_i<err_t}) "
+          f"mxfp4(bits={qm.base_bits_per_weight():.2f}, recon_err {err_m:.3f}<{err_t:.3f}={err_m<err_t})")
     return (only_ab and bits < 3.0 and init_ok and grad_ok and frozen
-            and last < first * 0.2 and int4_ok)
+            and last < first * 0.2 and int4_ok and mxfp4_ok)
 
 
 def test_mamba() -> bool:

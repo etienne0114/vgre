@@ -708,6 +708,42 @@ class LoRALinear(Module):
         self.alpha = float(d["alpha"])
 
 
+# OCP Microscaling MXFP4: 4-bit E2M1 elements (sign + 2-bit exp + 1-bit mantissa
+# -> magnitudes {0,.5,1,1.5,2,3,4,6}) sharing one power-of-two E8M0 scale per
+# block of 32 elements along the reduction (in_features) axis. Mirrors the
+# quantize/dequantize contract of include/vgre/xla/mxfp4.h, in plain NumPy so
+# the Python base path needs no new C-ABI surface. 4 + 8/32 = 4.25 bits/weight.
+_MXFP4_MAGNITUDES = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+_MXFP4_BLOCK = 32
+
+
+def _mxfp4_quantize(w: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """w: [K,N] fp32. Returns (codes [K,N] int8 in [-7,7], scale [nblocks,N]
+    fp32 power-of-two per 32-row block). codes encode sign*magnitude_index
+    into _MXFP4_MAGNITUDES; 0 is its own sign."""
+    K, N = w.shape
+    nblocks = (K + _MXFP4_BLOCK - 1) // _MXFP4_BLOCK
+    pad = nblocks * _MXFP4_BLOCK - K
+    wp = np.pad(w, ((0, pad), (0, 0))) if pad else w
+    wp = wp.reshape(nblocks, _MXFP4_BLOCK, N)
+    amax = np.abs(wp).max(axis=1)                                    # [nblocks,N]
+    safe_amax = np.where(amax == 0.0, 1.0, amax)
+    scale = np.where(amax == 0.0, 1.0,
+                      np.exp2(np.floor(np.log2(safe_amax)) - 2.0)).astype(np.float32)
+    scaled = wp / scale[:, None, :]
+    mag_idx = np.argmin(np.abs(np.abs(scaled)[..., None] - _MXFP4_MAGNITUDES), axis=-1)
+    codes = np.where(scaled < 0, -mag_idx, mag_idx).astype(np.int8)
+    return codes.reshape(nblocks * _MXFP4_BLOCK, N)[:K], scale
+
+
+def _mxfp4_dequantize(codes: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    K = codes.shape[0]
+    mags = _MXFP4_MAGNITUDES[np.abs(codes)]
+    vals = np.where(codes < 0, -mags, mags)
+    scale_full = np.repeat(scale, _MXFP4_BLOCK, axis=0)[:K]
+    return vals * scale_full
+
+
 class QLoRALinear(Module):
     """QLoRA (arXiv:2305.14314): a frozen, low-bit-quantized base weight + a
     trainable LoRA adapter.
@@ -727,8 +763,8 @@ class QLoRALinear(Module):
                  base_bias=None, base_format: str = "ternary"):
         if r <= 0:
             raise ValueError("QLoRA rank r must be positive")
-        if base_format not in ("ternary", "int4"):
-            raise ValueError("base_format must be 'ternary' or 'int4'")
+        if base_format not in ("ternary", "int4", "mxfp4"):
+            raise ValueError("base_format must be 'ternary', 'int4', or 'mxfp4'")
         w = _f32(base_weight) if base_weight is not None else \
             _f32(rng.standard_normal((in_features, out_features)) *
                  (2.0 / in_features) ** 0.5)
@@ -744,10 +780,13 @@ class QLoRALinear(Module):
             inv = np.where(scale == 0.0, 1.0, scale)
             self._codes = np.clip(np.rint(w / inv), -1, 1).astype(np.int8)
             self._bits = 2
-        else:  # int4
+        elif base_format == "int4":
             scale = (np.abs(w).max(axis=0) / 7.0).astype(np.float32)   # [out]
             inv = np.where(scale == 0.0, 1.0, scale)
             self._codes = np.clip(np.rint(w / inv), -7, 7).astype(np.int8)
+            self._bits = 4
+        else:  # mxfp4: codes [in,out] int8, scale [nblocks,out] power-of-two
+            self._codes, scale = _mxfp4_quantize(w)
             self._bits = 4
         self._scale = scale
         self._bias = _f32(base_bias) if (bias and base_bias is not None) else \
@@ -777,11 +816,15 @@ class QLoRALinear(Module):
 
     def base_bits_per_weight(self) -> float:
         """Effective storage of the frozen base: the code width (~2-bit ternary /
-        ~4-bit int4) plus the tiny per-column fp32 scale."""
+        ~4-bit int4 / ~4-bit mxfp4) plus the scale overhead — one fp32 per column
+        for ternary/int4, one 8-bit E8M0 exponent per 32-row block for mxfp4."""
         n = self._codes.size
-        return (n * self._bits + self._scale.size * 32) / n
+        scale_bits = 8 if self.base_format == "mxfp4" else 32
+        return (n * self._bits + self._scale.size * scale_bits) / n
 
     def _base(self):                                   # dequant transiently (no grad)
+        if self.base_format == "mxfp4":
+            return tensor(_mxfp4_dequantize(self._codes, self._scale))
         return tensor(self._codes.astype(np.float32) * self._scale[None, :])
 
     def forward(self, x):
