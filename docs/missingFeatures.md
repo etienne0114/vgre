@@ -48,7 +48,7 @@ references**, and live in the LLVM-free `libvgre_nn`. Build steps and success cr
 | T3 | KV-cache reuse + rollback on the raw C++ `generate_cached` path; tree verification; self-speculative (early-exit) drafting | **throughput optimization** — the algorithm is complete and proven |
 | T4 | ~~depthwise short conv before the SSM~~ **DONE** (causal per-channel conv1d + SiLU in `SSMBlock`, `conv_kernel=4`; numpy-matched, causality exact); **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization |
 | T5 | SIMD unpack path for the 4-bit decode (the row-major block layout fights column-wise vectorization) | perf |
-| T6 | ~~int4 base option~~ **DONE** (`QLoRALinear(base_format="int4")`: symmetric per-column 4-bit, 4.25 bits/weight, ~11× lower reconstruction error than the 2-bit ternary base); MXFP4 base; dequant-in-GEMM for the base path | breadth / peak-memory |
+| T6 | ~~int4 base option~~ **DONE** (`QLoRALinear(base_format="int4")`: symmetric per-column 4-bit, 4.25 bits/weight, ~11× lower reconstruction error than the 2-bit ternary base); ~~MXFP4 base~~ **DONE** (`QLoRALinear(base_format="mxfp4")`: OCP E2M1 codes + shared E8M0 power-of-two scale per 32-row block, 4.25 bits/weight, numpy-side codec mirroring `include/vgre/xla/mxfp4.h`); dequant-in-GEMM for the base path | breadth / peak-memory |
 
 ---
 
