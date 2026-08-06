@@ -40,6 +40,10 @@ jobs:
             libomp-18-dev libsqlite3-dev liblapack-dev \
             libkeyutils-dev libssl-dev zlib1g-dev ccache \
             python3-numpy
+          # Pin ccache's dir to the path the cache action saves/restores, so
+          # cross-run caching actually kicks in (newer ccache defaults to
+          # ~/.cache/ccache, which the ~/.ccache cache would otherwise miss).
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           clang++ --version
           cmake --version
 
@@ -155,15 +159,29 @@ jobs:
       # official LLVM-18 Windows release tarball instead — it bundles
       # lib/cmake/llvm/ — and build with its own clang++ (MSVC-ABI) so the JIT
       # links the LLVM-18 API VGRE targets. Matches the macOS llvm@18 pin.
+      # Cache the extracted LLVM 18 (~2 GB) so the slow ~500 MB tarball download +
+      # xz extraction only runs on a cache miss — the main reason Windows setup
+      # was slow. Keyed on the pinned LLVM version.
+      - name: Cache LLVM 18
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm
+          key: llvm-18.1.8-windows-msvc
+
       - name: Install LLVM 18 (with CMake config) + Ninja
         shell: pwsh
         run: |
           choco install ninja sqlite -y --no-progress
           python -m pip install numpy
-          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
-          curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
-          New-Item -ItemType Directory -Force -Path C:\llvm | Out-Null
-          tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C C:\llvm --strip-components=1
+          if (-not (Test-Path 'C:\llvm\bin\clang++.exe')) {
+            $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
+            curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
+            New-Item -ItemType Directory -Force -Path C:\llvm | Out-Null
+            tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C C:\llvm --strip-components=1
+          } else {
+            Write-Host "LLVM restored from cache"
+          }
           "C:\llvm\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & C:\llvm\bin\clang++.exe --version
 

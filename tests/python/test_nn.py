@@ -980,34 +980,29 @@ def test_moe() -> bool:
 
 
 def main() -> int:
-    ok = True
-    ok &= test_structured_sparse_linear()
-    ok &= test_distillation()
-    ok &= test_mtp()
-    ok &= test_hybrid_mamba_transformer()
-    ok &= test_qlora()
-    ok &= test_mamba()
-    ok &= test_speculative_decoding()
-    ok &= test_gather_scatter()
-    ok &= test_moe()
-    ok &= test_moe_lm()
-    ok &= test_bitlinear()
-    ok &= test_error_reporting()
-    ok &= test_tensor_parallel()
-    ok &= test_distributed_dp()
-    ok &= test_checkpoint()
-    ok &= test_sgd()
-    ok &= test_dropout_and_tied()
-    ok &= test_mlp_xor()
-    ok &= test_cnn_quadrant()
-    ok &= test_module_api()
-    ok &= test_bn_cnn()
-    ok &= test_transformer_block()
-    ok &= test_gpt_module()
-    if ok:
+    # Run each test, catch exceptions, and record which ones returned False so a
+    # failure names itself (essential when a threshold tips over only on one
+    # platform, e.g. macOS-ARM vs Linux-x86 float differences).
+    tests = [
+        test_structured_sparse_linear, test_distillation, test_mtp,
+        test_hybrid_mamba_transformer, test_qlora, test_mamba,
+        test_speculative_decoding, test_gather_scatter, test_moe, test_moe_lm,
+        test_bitlinear, test_error_reporting, test_tensor_parallel,
+        test_distributed_dp, test_checkpoint, test_sgd, test_dropout_and_tied,
+        test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
+        test_transformer_block, test_gpt_module,
+    ]
+    failed = []
+    for fn in tests:
+        try:
+            if not fn():
+                failed.append(fn.__name__)
+        except Exception as e:  # a crash is a failure, and must name itself too
+            failed.append(f"{fn.__name__} (exception: {e})")
+    if not failed:
         print("PASS — vgre.nn trains MLP + CNN from pure Python")
         return 0
-    print("FAIL")
+    print("FAIL — the following tests did not pass: " + ", ".join(failed))
     return 1
 
 
