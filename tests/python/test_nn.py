@@ -765,7 +765,11 @@ def test_mamba() -> bool:
     print(f"[mamba] scan fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} par_err={par_err:.1e} "
           f"ssm_block_err={ssm_err:.1e} conv_err={conv_err:.1e} conv_causal={conv_causal:.1e}  "
           f"LM train {first:.3f} -> {last:.3f}  greedy match {match}/{TT}")
-    return (fwd_err < 1e-6 and grad_err < 1e-3 and par_err < 1e-6 and ssm_err < 1e-4
+    # par_err is a float-rounding tolerance vs the NumPy reference over a 128-step
+    # recurrence, not a bit-identity check: on macOS-ARM clang's FMA contraction
+    # makes it ~1.7e-6 (Linux x86 ~0). A real parallel-scan bug (cross-channel
+    # leakage) would be O(1), so 1e-4 still catches it while staying portable.
+    return (fwd_err < 1e-6 and grad_err < 1e-3 and par_err < 1e-4 and ssm_err < 1e-4
             and conv_err < 1e-5 and conv_causal == 0.0
             and last < first * 0.2 and match >= TT - 1)
 
