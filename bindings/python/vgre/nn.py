@@ -278,6 +278,12 @@ def _unary(name, x):
     return _new(getattr(_lib, "vgre_ag_" + name)(x._h), x.shape)
 
 def relu(x): return _unary("relu", x)
+def leaky_relu(x: Tensor, negative_slope: float = 0.01) -> Tensor:
+    """max(x, negative_slope*x), composed from existing autograd ops (no new C
+    kernel): leaky = (1-slope)*relu(x) + slope*x, which is x for x>0 and
+    slope*x for x<0, and differentiable through the same primitives relu uses."""
+    r = relu(x)
+    return add(scale(r, 1.0 - negative_slope), scale(x, negative_slope))
 def gelu(x): return _unary("gelu", x)
 def silu(x): return _unary("silu", x)
 def sigmoid(x): return _unary("sigmoid", x)
@@ -853,6 +859,13 @@ class Conv2d(Module):
 
 class ReLU(Module):
     def forward(self, x): return relu(x)
+
+
+class LeakyReLU(Module):
+    def __init__(self, negative_slope: float = 0.01):
+        self.negative_slope = negative_slope
+
+    def forward(self, x): return leaky_relu(x, self.negative_slope)
 
 
 class MoELayer(Module):

@@ -230,6 +230,31 @@ def test_dropout_and_tied() -> bool:
     return 0.2 < frac_zero < 0.8 and eval_identity and tied_ok
 
 
+def test_leaky_relu() -> bool:
+    # leaky_relu is composed from existing ops (relu/scale/add), not a new C
+    # kernel, so this checks both that the composition is forward-correct and
+    # that autograd differentiates through the composition correctly.
+    slope = 0.1
+    rng2 = np.random.default_rng(7)
+    x_np = rng2.standard_normal(64).astype(np.float32)
+    x_np[np.abs(x_np) < 1e-2] += 0.5   # keep clear of the x=0 kink
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.leaky_relu(x, slope)
+    ref = np.where(x_np > 0, x_np, slope * x_np)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    w_np = rng2.standard_normal(64).astype(np.float32)
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = np.where(x_np > 0, 1.0, slope) * w_np / x_np.size
+    grad_err = float(np.max(np.abs(x.grad() - grad_ref)))
+
+    mod = nn.LeakyReLU(slope)
+    mod_ok = bool(np.allclose(mod(nn.tensor(x_np)).numpy(), ref))
+
+    print(f"[leaky_relu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok}")
+    return fwd_err < 1e-6 and grad_err < 1e-5 and mod_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1007,7 +1032,8 @@ def main() -> int:
         test_hybrid_mamba_transformer, test_qlora, test_mamba,
         test_speculative_decoding, test_gather_scatter, test_moe, test_moe_lm,
         test_bitlinear, test_error_reporting, test_tensor_parallel,
-        test_distributed_dp, test_checkpoint, test_sgd, test_dropout_and_tied,
+        test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
+        test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]
