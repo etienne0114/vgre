@@ -868,6 +868,22 @@ class LeakyReLU(Module):
     def forward(self, x): return leaky_relu(x, self.negative_slope)
 
 
+class GELU(Module):
+    def forward(self, x): return gelu(x)
+
+
+class SiLU(Module):
+    def forward(self, x): return silu(x)
+
+
+class Sigmoid(Module):
+    def forward(self, x): return sigmoid(x)
+
+
+class Tanh(Module):
+    def forward(self, x): return tanh(x)
+
+
 class MoELayer(Module):
     """Mixture-of-Experts with a learned top-k router (Shazeer et al.; Mixtral /
     DeepSeek-style). Per token, the router picks its top-k experts by logit; the
