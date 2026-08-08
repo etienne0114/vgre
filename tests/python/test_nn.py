@@ -255,6 +255,49 @@ def test_leaky_relu() -> bool:
     return fwd_err < 1e-6 and grad_err < 1e-5 and mod_ok
 
 
+def test_activation_modules() -> bool:
+    # sigmoid/tanh/silu/gelu already exist as functional ops (used directly
+    # inside SSMBlock/TransformerBlock) but had no Module wrapper like ReLU/
+    # LeakyReLU; this checks the new Sigmoid/Tanh/SiLU/GELU modules against a
+    # from-scratch NumPy/math reference for both forward and gradient.
+    import math
+    rng2 = np.random.default_rng(11)
+    x_np = rng2.standard_normal(64).astype(np.float32)
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def sigmoid_ref(a): return 1.0 / (1.0 + np.exp(-a))
+    erf = np.vectorize(math.erf)
+    def phi_ref(a): return 0.5 * (1.0 + erf(a / math.sqrt(2.0)))            # Phi(x)
+    def pdf_ref(a): return np.exp(-0.5 * a * a) / math.sqrt(2.0 * math.pi)  # phi(x)
+
+    cases = {
+        "sigmoid": (nn.Sigmoid(), nn.sigmoid, sigmoid_ref,
+                    lambda a: sigmoid_ref(a) * (1.0 - sigmoid_ref(a))),
+        "tanh":    (nn.Tanh(), nn.tanh, np.tanh,
+                    lambda a: 1.0 - np.tanh(a) ** 2),
+        "silu":    (nn.SiLU(), nn.silu, lambda a: a * sigmoid_ref(a),
+                    lambda a: sigmoid_ref(a) + a * sigmoid_ref(a) * (1.0 - sigmoid_ref(a))),
+        "gelu":    (nn.GELU(), nn.gelu, lambda a: a * phi_ref(a),
+                    lambda a: phi_ref(a) + a * pdf_ref(a)),
+    }
+
+    ok = True
+    for name, (mod, fn, fwd_ref, grad_ref) in cases.items():
+        ref = fwd_ref(x_np.astype(np.float64)).astype(np.float32)
+        x = nn.tensor(x_np, requires_grad=True)
+        y = fn(x)
+        fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+        nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+        g_ref = (grad_ref(x_np.astype(np.float64)).astype(np.float32) * w_np) / x_np.size
+        grad_err = float(np.max(np.abs(x.grad() - g_ref)))
+
+        mod_ok = bool(np.allclose(mod(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+        print(f"[{name}] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok}")
+        ok = ok and fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
+    return ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1033,6 +1076,7 @@ def main() -> int:
         test_speculative_decoding, test_gather_scatter, test_moe, test_moe_lm,
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
+        test_activation_modules,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
