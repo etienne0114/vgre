@@ -256,10 +256,11 @@ def test_leaky_relu() -> bool:
 
 
 def test_activation_modules() -> bool:
-    # sigmoid/tanh/silu/gelu already exist as functional ops (used directly
-    # inside SSMBlock/TransformerBlock) but had no Module wrapper like ReLU/
-    # LeakyReLU; this checks the new Sigmoid/Tanh/SiLU/GELU modules against a
-    # from-scratch NumPy/math reference for both forward and gradient.
+    # sigmoid/tanh/silu/gelu/softplus already exist as functional ops (used
+    # directly inside SSMBlock/TransformerBlock) but had no Module wrapper like
+    # ReLU/LeakyReLU; this checks the new Sigmoid/Tanh/SiLU/GELU/Softplus
+    # modules against a from-scratch NumPy/math reference for both forward and
+    # gradient.
     import math
     rng2 = np.random.default_rng(11)
     x_np = rng2.standard_normal(64).astype(np.float32)
@@ -279,6 +280,8 @@ def test_activation_modules() -> bool:
                     lambda a: sigmoid_ref(a) + a * sigmoid_ref(a) * (1.0 - sigmoid_ref(a))),
         "gelu":    (nn.GELU(), nn.gelu, lambda a: a * phi_ref(a),
                     lambda a: phi_ref(a) + a * pdf_ref(a)),
+        "softplus": (nn.Softplus(), nn.softplus, lambda a: np.logaddexp(0.0, a),
+                     lambda a: sigmoid_ref(a)),
     }
 
     ok = True

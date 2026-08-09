@@ -884,6 +884,10 @@ class Tanh(Module):
     def forward(self, x): return tanh(x)
 
 
+class Softplus(Module):
+    def forward(self, x): return softplus(x)
+
+
 class MoELayer(Module):
     """Mixture-of-Experts with a learned top-k router (Shazeer et al.; Mixtral /
     DeepSeek-style). Per token, the router picks its top-k experts by logit; the
