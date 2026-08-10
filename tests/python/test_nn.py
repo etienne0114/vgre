@@ -301,6 +301,37 @@ def test_activation_modules() -> bool:
     return ok
 
 
+def test_mish() -> bool:
+    # mish(x) = x*tanh(softplus(x)) is composed from existing ops (mul/tanh/
+    # softplus), not a new C kernel, so this checks both forward correctness
+    # against a from-scratch NumPy reference and that autograd differentiates
+    # through the composition correctly.
+    rng2 = np.random.default_rng(13)
+    x_np = rng2.standard_normal(64).astype(np.float32)
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def softplus_ref(a): return np.logaddexp(0.0, a)
+    def mish_ref(a): return a * np.tanh(softplus_ref(a))
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.mish(x)
+    ref = mish_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    # d/dx [x*tanh(softplus(x))] = tanh(sp) + x*sigmoid(x)*(1-tanh(sp)^2)
+    sp = softplus_ref(x_np.astype(np.float64))
+    t = np.tanh(sp)
+    sig = 1.0 / (1.0 + np.exp(-x_np.astype(np.float64)))
+    grad_ref = (t + x_np.astype(np.float64) * sig * (1.0 - t * t)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.Mish()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+
+    print(f"[mish] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1079,7 +1110,7 @@ def main() -> int:
         test_speculative_decoding, test_gather_scatter, test_moe, test_moe_lm,
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
-        test_activation_modules,
+        test_activation_modules, test_mish,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,

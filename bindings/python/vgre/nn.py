@@ -290,6 +290,11 @@ def sigmoid(x): return _unary("sigmoid", x)
 def tanh(x): return _unary("tanh", x)
 def exp(x): return _unary("exp", x)
 def softplus(x): return _unary("softplus", x)
+def mish(x: Tensor) -> Tensor:
+    """mish(x) = x*tanh(softplus(x)), composed from existing autograd ops (no
+    new C kernel): a smooth, self-gated activation like SiLU/GELU, and
+    differentiable through the same tanh/softplus/mul primitives they use."""
+    return mul(x, tanh(softplus(x)))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -886,6 +891,10 @@ class Tanh(Module):
 
 class Softplus(Module):
     def forward(self, x): return softplus(x)
+
+
+class Mish(Module):
+    def forward(self, x): return mish(x)
 
 
 class MoELayer(Module):
