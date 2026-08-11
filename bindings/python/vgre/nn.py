@@ -295,6 +295,12 @@ def mish(x: Tensor) -> Tensor:
     new C kernel): a smooth, self-gated activation like SiLU/GELU, and
     differentiable through the same tanh/softplus/mul primitives they use."""
     return mul(x, tanh(softplus(x)))
+def log_sigmoid(x: Tensor) -> Tensor:
+    """log(sigmoid(x)) = -softplus(-x), composed from existing autograd ops (no
+    new C kernel): the numerically-stable log-sigmoid used e.g. in
+    binary-cross-entropy-with-logits, differentiable through the same
+    softplus/scale primitives softplus already uses."""
+    return scale(softplus(scale(x, -1.0)), -1.0)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -895,6 +901,10 @@ class Softplus(Module):
 
 class Mish(Module):
     def forward(self, x): return mish(x)
+
+
+class LogSigmoid(Module):
+    def forward(self, x): return log_sigmoid(x)
 
 
 class MoELayer(Module):

@@ -332,6 +332,33 @@ def test_mish() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
 
 
+def test_log_sigmoid() -> bool:
+    # log_sigmoid(x) = -softplus(-x) is composed from existing ops (scale/
+    # softplus), not a new C kernel, so this checks both forward correctness
+    # against a from-scratch NumPy reference (the numerically-stable
+    # -logaddexp(0,-x) form) and that autograd differentiates through the
+    # composition correctly.
+    rng2 = np.random.default_rng(17)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 5.0  # wide range incl. large |x|
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def log_sigmoid_ref(a): return -np.logaddexp(0.0, -a)
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.log_sigmoid(x)
+    ref = log_sigmoid_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    # d/dx log(sigmoid(x)) = sigmoid(-x) = 1 - sigmoid(x)
+    grad_ref = (1.0 / (1.0 + np.exp(x_np.astype(np.float64)))).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.LogSigmoid()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    print(f"[log_sigmoid] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1110,7 +1137,7 @@ def main() -> int:
         test_speculative_decoding, test_gather_scatter, test_moe, test_moe_lm,
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
-        test_activation_modules, test_mish,
+        test_activation_modules, test_mish, test_log_sigmoid,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
