@@ -359,6 +359,34 @@ def test_log_sigmoid() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
 
 
+def test_elu() -> bool:
+    # elu(x) = x for x>0, alpha*(exp(x)-1) for x<=0 is composed from existing
+    # ops (relu/exp/scale/add), not a new C kernel, so this checks both
+    # forward correctness against a from-scratch NumPy reference and that
+    # autograd differentiates through the composition correctly, including
+    # at alpha != 1 and across the x=0 boundary.
+    rng2 = np.random.default_rng(19)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 3.0  # wide range incl. large |x|
+    w_np = rng2.standard_normal(64).astype(np.float32)
+    alpha = 1.5
+
+    def elu_ref(a): return np.where(a > 0, a, alpha * (np.exp(a) - 1.0))
+    def elu_grad_ref(a): return np.where(a > 0, 1.0, alpha * np.exp(a))
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.elu(x, alpha)
+    ref = elu_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = elu_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.ELU(alpha)(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    print(f"[elu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1137,7 +1165,7 @@ def main() -> int:
         test_speculative_decoding, test_gather_scatter, test_moe, test_moe_lm,
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
-        test_activation_modules, test_mish, test_log_sigmoid,
+        test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,

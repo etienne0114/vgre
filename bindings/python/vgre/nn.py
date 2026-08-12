@@ -301,6 +301,16 @@ def log_sigmoid(x: Tensor) -> Tensor:
     binary-cross-entropy-with-logits, differentiable through the same
     softplus/scale primitives softplus already uses."""
     return scale(softplus(scale(x, -1.0)), -1.0)
+def elu(x: Tensor, alpha: float = 1.0) -> Tensor:
+    """ELU(x) = x for x>0, alpha*(exp(x)-1) for x<=0, composed from existing
+    autograd ops (no new C kernel): x - relu(x) == min(x, 0), so
+    relu(x) + alpha*(exp(x - relu(x)) - 1) is x on the positive branch and
+    alpha*(exp(x)-1) on the negative one, differentiable through the same
+    relu/exp/scale/add primitives leaky_relu and mish already use."""
+    r = relu(x)
+    neg = add(x, scale(r, -1.0))
+    ones = tensor(np.ones(x.shape, dtype=np.float32))
+    return add(r, scale(add(exp(neg), scale(ones, -1.0)), alpha))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -905,6 +915,13 @@ class Mish(Module):
 
 class LogSigmoid(Module):
     def forward(self, x): return log_sigmoid(x)
+
+
+class ELU(Module):
+    def __init__(self, alpha: float = 1.0):
+        self.alpha = alpha
+
+    def forward(self, x): return elu(x, self.alpha)
 
 
 class MoELayer(Module):
