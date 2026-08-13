@@ -311,6 +311,22 @@ def elu(x: Tensor, alpha: float = 1.0) -> Tensor:
     neg = add(x, scale(r, -1.0))
     ones = tensor(np.ones(x.shape, dtype=np.float32))
     return add(r, scale(add(exp(neg), scale(ones, -1.0)), alpha))
+def hardsigmoid(x: Tensor) -> Tensor:
+    """Hardsigmoid(x) = clip((x+3)/6, 0, 1), composed from existing autograd
+    ops (no new C kernel): the piecewise-linear sigmoid approximation used in
+    MobileNetV3. min(y,1) is built the same way ELU builds min(x,0): 1 -
+    relu(1-y) is y when y<=1 and 1 when y>1; clip(y,0,1) then follows from
+    relu(y) (clamps below at 0) fed through that same min-with-1 step."""
+    three = tensor(np.full(x.shape, 3.0, dtype=np.float32))
+    ones = tensor(np.ones(x.shape, dtype=np.float32))
+    lo = relu(scale(add(x, three), 1.0 / 6.0))
+    return add(ones, scale(relu(add(ones, scale(lo, -1.0))), -1.0))
+def hardswish(x: Tensor) -> Tensor:
+    """Hardswish(x) = x*hardsigmoid(x), composed from existing autograd ops
+    (no new C kernel): a piecewise-linear, division-free approximation of
+    SiLU/Swish used in MobileNetV3, differentiable through the same
+    relu/add/scale/mul primitives hardsigmoid and mish already use."""
+    return mul(x, hardsigmoid(x))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -922,6 +938,14 @@ class ELU(Module):
         self.alpha = alpha
 
     def forward(self, x): return elu(x, self.alpha)
+
+
+class Hardsigmoid(Module):
+    def forward(self, x): return hardsigmoid(x)
+
+
+class Hardswish(Module):
+    def forward(self, x): return hardswish(x)
 
 
 class MoELayer(Module):

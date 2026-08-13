@@ -387,6 +387,41 @@ def test_elu() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
 
 
+def test_hardswish() -> bool:
+    # hardsigmoid(x) = clip((x+3)/6, 0, 1) and hardswish(x) = x*hardsigmoid(x)
+    # are composed from existing ops (relu/add/scale/mul), not a new C
+    # kernel, so this checks both forward correctness against a from-scratch
+    # NumPy reference and that autograd differentiates through the
+    # composition correctly, including at the x=-3 and x=3 kinks.
+    rng2 = np.random.default_rng(23)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 3.0  # wide range incl. |x|>3
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def hsig_ref(a): return np.clip((a + 3.0) / 6.0, 0.0, 1.0)
+    def hswish_ref(a): return a * hsig_ref(a)
+    def hswish_grad_ref(a):
+        # hsig is piecewise-linear, but hswish = x*hsig(x) is piecewise-quadratic
+        # on (-3,3): d/dx = hsig(x) + x/6 = x/3 + 0.5, which is NOT bounded by
+        # [0,1] (it reaches 1.5 at x->3-), with a genuine kink down to 1 at x=3.
+        return np.where(a <= -3.0, 0.0, np.where(a >= 3.0, 1.0, a / 3.0 + 0.5))
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.hardswish(x)
+    ref = hswish_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = hswish_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    hsig_ok = bool(np.allclose(nn.Hardsigmoid()(nn.tensor(x_np)).numpy(),
+                                hsig_ref(x_np), atol=1e-5))
+    mod_ok = bool(np.allclose(nn.Hardswish()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    print(f"[hardswish] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} "
+          f"hardsigmoid_ok={hsig_ok} module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and hsig_ok and mod_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1166,7 +1201,7 @@ def main() -> int:
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
-        test_dropout_and_tied,
+        test_hardswish, test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]
