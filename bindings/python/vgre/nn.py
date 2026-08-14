@@ -311,6 +311,17 @@ def elu(x: Tensor, alpha: float = 1.0) -> Tensor:
     neg = add(x, scale(r, -1.0))
     ones = tensor(np.ones(x.shape, dtype=np.float32))
     return add(r, scale(add(exp(neg), scale(ones, -1.0)), alpha))
+def celu(x: Tensor, alpha: float = 1.0) -> Tensor:
+    """CELU(x) = x for x>0, alpha*(exp(x/alpha)-1) for x<=0, composed from
+    existing autograd ops (no new C kernel): generalizes ELU by scaling
+    inside the exponent too (ELU is the alpha=1 case), which keeps CELU
+    1-Lipschitz for any alpha>0. Uses the same x - relu(x) == min(x, 0)
+    trick as elu/leaky_relu, differentiable through the same
+    relu/exp/scale/add primitives."""
+    r = relu(x)
+    neg = add(x, scale(r, -1.0))
+    ones = tensor(np.ones(x.shape, dtype=np.float32))
+    return add(r, scale(add(exp(scale(neg, 1.0 / alpha)), scale(ones, -1.0)), alpha))
 def hardsigmoid(x: Tensor) -> Tensor:
     """Hardsigmoid(x) = clip((x+3)/6, 0, 1), composed from existing autograd
     ops (no new C kernel): the piecewise-linear sigmoid approximation used in
@@ -938,6 +949,13 @@ class ELU(Module):
         self.alpha = alpha
 
     def forward(self, x): return elu(x, self.alpha)
+
+
+class CELU(Module):
+    def __init__(self, alpha: float = 1.0):
+        self.alpha = alpha
+
+    def forward(self, x): return celu(x, self.alpha)
 
 
 class Hardsigmoid(Module):

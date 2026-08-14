@@ -387,6 +387,38 @@ def test_elu() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
 
 
+def test_celu() -> bool:
+    # celu(x, alpha) = x for x>0, alpha*(exp(x/alpha)-1) for x<=0 is composed
+    # from existing ops (relu/exp/scale/add), not a new C kernel, so this
+    # checks both forward correctness against a from-scratch NumPy reference
+    # and that autograd differentiates through the composition correctly,
+    # including at alpha != 1 (where CELU diverges from ELU) and across the
+    # x=0 boundary.
+    rng2 = np.random.default_rng(29)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 3.0  # wide range incl. large |x|
+    w_np = rng2.standard_normal(64).astype(np.float32)
+    alpha = 2.0
+
+    def celu_ref(a): return np.where(a > 0, a, alpha * (np.exp(a / alpha) - 1.0))
+    def celu_grad_ref(a): return np.where(a > 0, 1.0, np.exp(a / alpha))
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.celu(x, alpha)
+    ref = celu_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = celu_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.CELU(alpha)(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    # alpha=1 must exactly match the existing ELU implementation.
+    elu_match = bool(np.allclose(nn.celu(x, 1.0).numpy(), nn.elu(x, 1.0).numpy(), atol=1e-6))
+    print(f"[celu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok} "
+          f"elu_match={elu_match}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and elu_match
+
+
 def test_hardswish() -> bool:
     # hardsigmoid(x) = clip((x+3)/6, 0, 1) and hardswish(x) = x*hardsigmoid(x)
     # are composed from existing ops (relu/add/scale/mul), not a new C
@@ -1201,7 +1233,7 @@ def main() -> int:
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
-        test_hardswish, test_dropout_and_tied,
+        test_celu, test_hardswish, test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]
