@@ -454,6 +454,32 @@ def test_hardswish() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and hsig_ok and mod_ok
 
 
+def test_relu6() -> bool:
+    # relu6(x) = min(relu(x), 6) is composed from existing ops (relu/add/scale),
+    # not a new C kernel, so this checks both forward correctness against a
+    # from-scratch NumPy reference and that autograd differentiates through
+    # the composition correctly, including at the x=0 and x=6 kinks.
+    rng2 = np.random.default_rng(31)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 5.0  # wide range incl. |x|>6
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def relu6_ref(a): return np.clip(a, 0.0, 6.0)
+    def relu6_grad_ref(a): return np.where((a > 0.0) & (a < 6.0), 1.0, 0.0)
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.relu6(x)
+    ref = relu6_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = relu6_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.ReLU6()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    print(f"[relu6] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1233,7 +1259,7 @@ def main() -> int:
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
-        test_celu, test_hardswish, test_dropout_and_tied,
+        test_celu, test_hardswish, test_relu6, test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]

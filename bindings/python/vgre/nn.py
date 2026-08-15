@@ -338,6 +338,15 @@ def hardswish(x: Tensor) -> Tensor:
     SiLU/Swish used in MobileNetV3, differentiable through the same
     relu/add/scale/mul primitives hardsigmoid and mish already use."""
     return mul(x, hardsigmoid(x))
+def relu6(x: Tensor) -> Tensor:
+    """ReLU6(x) = min(relu(x), 6), composed from existing autograd ops (no
+    new C kernel): the clipped ReLU used in MobileNetV1/V2 to bound
+    activation range for low-precision inference. Uses the same min(y,c) ==
+    c - relu(c-y) trick hardsigmoid already uses to clip its upper bound,
+    applied to relu(x) instead of a raw affine map."""
+    r = relu(x)
+    six = tensor(np.full(x.shape, 6.0, dtype=np.float32))
+    return add(six, scale(relu(add(six, scale(r, -1.0))), -1.0))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -964,6 +973,10 @@ class Hardsigmoid(Module):
 
 class Hardswish(Module):
     def forward(self, x): return hardswish(x)
+
+
+class ReLU6(Module):
+    def forward(self, x): return relu6(x)
 
 
 class MoELayer(Module):
