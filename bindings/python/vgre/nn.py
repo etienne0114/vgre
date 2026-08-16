@@ -347,6 +347,18 @@ def relu6(x: Tensor) -> Tensor:
     r = relu(x)
     six = tensor(np.full(x.shape, 6.0, dtype=np.float32))
     return add(six, scale(relu(add(six, scale(r, -1.0))), -1.0))
+def softshrink(x: Tensor, lambd: float = 0.5) -> Tensor:
+    """Softshrink(x) = x-lambd for x>lambd, x+lambd for x<-lambd, else 0,
+    composed from existing autograd ops (no new C kernel): the
+    soft-thresholding operator used in LASSO/wavelet denoising. relu(x-lambd)
+    is x-lambd on the upper branch and 0 elsewhere; relu(-x-lambd) is
+    -(x+lambd) on the lower branch and 0 elsewhere (the branches never
+    overlap for lambd>=0), so pos - neg reproduces all three pieces exactly,
+    differentiable through the same relu/scale/add primitives elu/celu use."""
+    lam = tensor(np.full(x.shape, lambd, dtype=np.float32))
+    pos = relu(add(x, scale(lam, -1.0)))
+    neg = relu(add(scale(x, -1.0), scale(lam, -1.0)))
+    return add(pos, scale(neg, -1.0))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -977,6 +989,13 @@ class Hardswish(Module):
 
 class ReLU6(Module):
     def forward(self, x): return relu6(x)
+
+
+class Softshrink(Module):
+    def __init__(self, lambd: float = 0.5):
+        self.lambd = lambd
+
+    def forward(self, x): return softshrink(x, self.lambd)
 
 
 class MoELayer(Module):

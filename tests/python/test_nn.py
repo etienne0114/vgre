@@ -480,6 +480,38 @@ def test_relu6() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok
 
 
+def test_softshrink() -> bool:
+    # softshrink(x, lambd) = x-lambd for x>lambd, x+lambd for x<-lambd, else 0
+    # is composed from existing ops (relu/scale/add), not a new C kernel, so
+    # this checks both forward correctness against a from-scratch NumPy
+    # reference and that autograd differentiates through the composition
+    # correctly, including across the dead zone at the x=-lambd/x=lambd kinks.
+    rng2 = np.random.default_rng(37)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 2.0  # wide range incl. |x|>lambd
+    w_np = rng2.standard_normal(64).astype(np.float32)
+    lambd = 0.5
+
+    def softshrink_ref(a):
+        return np.where(a > lambd, a - lambd, np.where(a < -lambd, a + lambd, 0.0))
+    def softshrink_grad_ref(a):
+        return np.where((a > lambd) | (a < -lambd), 1.0, 0.0)
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.softshrink(x, lambd)
+    ref = softshrink_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = softshrink_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.Softshrink(lambd)(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    zero_ok = bool(np.allclose(nn.softshrink(x, 0.0).numpy(), x_np, atol=1e-6))
+    print(f"[softshrink] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok} "
+          f"zero_ok={zero_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and zero_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1259,7 +1291,7 @@ def main() -> int:
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
-        test_celu, test_hardswish, test_relu6, test_dropout_and_tied,
+        test_celu, test_hardswish, test_relu6, test_softshrink, test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]
