@@ -359,6 +359,12 @@ def softshrink(x: Tensor, lambd: float = 0.5) -> Tensor:
     pos = relu(add(x, scale(lam, -1.0)))
     neg = relu(add(scale(x, -1.0), scale(lam, -1.0)))
     return add(pos, scale(neg, -1.0))
+def tanhshrink(x: Tensor) -> Tensor:
+    """Tanhshrink(x) = x - tanh(x), composed from existing autograd ops (no
+    new C kernel): near-identity for large |x| (tanh saturates to +-1) and
+    cubic-small near 0 (tanh(x)~=x), differentiable through the same
+    tanh/add/scale primitives log_sigmoid/mish already use."""
+    return add(x, scale(tanh(x), -1.0))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -996,6 +1002,10 @@ class Softshrink(Module):
         self.lambd = lambd
 
     def forward(self, x): return softshrink(x, self.lambd)
+
+
+class Tanhshrink(Module):
+    def forward(self, x): return tanhshrink(x)
 
 
 class MoELayer(Module):

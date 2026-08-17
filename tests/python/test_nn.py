@@ -512,6 +512,37 @@ def test_softshrink() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and zero_ok
 
 
+def test_tanhshrink() -> bool:
+    # tanhshrink(x) = x - tanh(x) is composed from existing ops (tanh/add/scale),
+    # not a new C kernel, so this checks both forward correctness against a
+    # from-scratch NumPy reference and that autograd differentiates through the
+    # composition correctly (d/dx = tanh(x)^2, i.e. 1 - sech(x)^2).
+    rng2 = np.random.default_rng(41)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 2.0
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def tanhshrink_ref(a):
+        return a - np.tanh(a)
+    def tanhshrink_grad_ref(a):
+        return np.tanh(a) ** 2
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.tanhshrink(x)
+    ref = tanhshrink_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = tanhshrink_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.Tanhshrink()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    zero_ok = bool(np.allclose(nn.tanhshrink(nn.tensor(np.zeros(4, dtype=np.float32))).numpy(),
+                                np.zeros(4), atol=1e-6))
+    print(f"[tanhshrink] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok} "
+          f"zero_ok={zero_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and zero_ok
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1291,7 +1322,7 @@ def main() -> int:
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
-        test_celu, test_hardswish, test_relu6, test_softshrink, test_dropout_and_tied,
+        test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]
