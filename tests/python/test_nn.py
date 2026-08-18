@@ -543,6 +543,37 @@ def test_tanhshrink() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and zero_ok
 
 
+def test_hardtanh() -> bool:
+    # hardtanh(x, min_val, max_val) = clamp(x, min_val, max_val) is composed
+    # from existing ops (relu/add/scale, the same max(a,b)==b+relu(a-b) trick
+    # relu6 uses twice), not a new C kernel, so this checks both forward
+    # correctness against a from-scratch NumPy reference and that autograd
+    # differentiates through the composition correctly, including at the
+    # min_val/max_val kinks, plus that relu6 is the min_val=0/max_val=6 case.
+    rng2 = np.random.default_rng(43)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 3.0  # wide range incl. |x|>1
+    w_np = rng2.standard_normal(64).astype(np.float32)
+    min_val, max_val = -2.0, 1.5
+
+    def hardtanh_ref(a): return np.clip(a, min_val, max_val)
+    def hardtanh_grad_ref(a): return np.where((a > min_val) & (a < max_val), 1.0, 0.0)
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.hardtanh(x, min_val, max_val)
+    ref = hardtanh_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = hardtanh_grad_ref(x_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.Hardtanh(min_val, max_val)(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    relu6_match = bool(np.allclose(nn.hardtanh(x, 0.0, 6.0).numpy(), nn.relu6(x).numpy(), atol=1e-6))
+    print(f"[hardtanh] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} module_ok={mod_ok} "
+          f"relu6_match={relu6_match}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and relu6_match
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1322,7 +1353,8 @@ def main() -> int:
         test_bitlinear, test_error_reporting, test_tensor_parallel,
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
-        test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_dropout_and_tied,
+        test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
+        test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
     ]

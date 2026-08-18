@@ -365,6 +365,19 @@ def tanhshrink(x: Tensor) -> Tensor:
     cubic-small near 0 (tanh(x)~=x), differentiable through the same
     tanh/add/scale primitives log_sigmoid/mish already use."""
     return add(x, scale(tanh(x), -1.0))
+def hardtanh(x: Tensor, min_val: float = -1.0, max_val: float = 1.0) -> Tensor:
+    """Hardtanh(x) = clamp(x, min_val, max_val), composed from existing
+    autograd ops (no new C kernel): a piecewise-linear saturating gate used
+    as a cheap tanh substitute and (at min_val=0, max_val=6) generalized by
+    relu6 above. Two applications of the same max(a,b) == b + relu(a-b)
+    trick relu6 uses: first clip the top (min(x,max_val) ==
+    max_val - relu(max_val-x)), then clip the bottom of that
+    (max(t,min_val) == min_val + relu(t-min_val)), differentiable through
+    the same relu/add/scale primitives."""
+    mx = tensor(np.full(x.shape, max_val, dtype=np.float32))
+    mn = tensor(np.full(x.shape, min_val, dtype=np.float32))
+    upper = add(mx, scale(relu(add(mx, scale(x, -1.0))), -1.0))
+    return add(mn, relu(add(upper, scale(mn, -1.0))))
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -1006,6 +1019,14 @@ class Softshrink(Module):
 
 class Tanhshrink(Module):
     def forward(self, x): return tanhshrink(x)
+
+
+class Hardtanh(Module):
+    def __init__(self, min_val: float = -1.0, max_val: float = 1.0):
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def forward(self, x): return hardtanh(x, self.min_val, self.max_val)
 
 
 class MoELayer(Module):
