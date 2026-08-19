@@ -378,6 +378,14 @@ def hardtanh(x: Tensor, min_val: float = -1.0, max_val: float = 1.0) -> Tensor:
     mn = tensor(np.full(x.shape, min_val, dtype=np.float32))
     upper = add(mx, scale(relu(add(mx, scale(x, -1.0))), -1.0))
     return add(mn, relu(add(upper, scale(mn, -1.0))))
+_SELU_ALPHA = 1.6732632423543772
+_SELU_SCALE = 1.0507009873554804
+def selu(x: Tensor) -> Tensor:
+    """SELU(x) = scale*(x for x>0, alpha*(exp(x)-1) for x<=0) with the fixed
+    self-normalizing constants from Klambauer et al., composed from existing
+    autograd ops (no new C kernel): SELU is just ELU(x, alpha) rescaled, so
+    this reuses elu's relu/exp/scale/add composition and adds one more scale."""
+    return scale(elu(x, _SELU_ALPHA), _SELU_SCALE)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
 def all_reduce(x):
@@ -1027,6 +1035,10 @@ class Hardtanh(Module):
         self.max_val = max_val
 
     def forward(self, x): return hardtanh(x, self.min_val, self.max_val)
+
+
+class SELU(Module):
+    def forward(self, x): return selu(x)
 
 
 class MoELayer(Module):
