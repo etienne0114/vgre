@@ -1244,6 +1244,22 @@ class TransformerBlock(Module):
         return self.moe.aux_loss() if self.moe is not None else None
 
 
+class SwiGLUMLP(Module):
+    """Gated FFN: down(silu(gate(x)) * up(x)) — the SwiGLU feed-forward used in
+    place of a ReLU/GELU two-layer MLP in Llama/Mistral/Qwen-style transformers
+    (Shazaeer, 2020). Composed entirely from existing ops (Linear, silu, mul),
+    no new C kernel: silu(gate(x)) is the gate that modulates up(x) elementwise
+    before the down projection back to `dim`."""
+    def __init__(self, dim: int, hidden: int = 0):
+        hidden = hidden or 4 * dim
+        self.gate = Linear(dim, hidden, bias=False)
+        self.up = Linear(dim, hidden, bias=False)
+        self.down = Linear(hidden, dim, bias=False)
+
+    def forward(self, x):
+        return self.down(mul(silu(self.gate(x)), self.up(x)))
+
+
 class SSMBlock(Module):
     """Selective state-space (Mamba / S6) mixer with a real d_state-dimensional
     diagonal SSM. Per channel it keeps a state h ∈ ℝ^N and runs the selective

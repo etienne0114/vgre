@@ -607,6 +607,64 @@ def test_selu() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and elu_match
 
 
+def test_swiglu_mlp() -> bool:
+    # SwiGLUMLP: down(silu(gate(x)) * up(x)), the Llama/Mistral/Qwen gated FFN,
+    # composed entirely from existing ops (Linear/silu/mul) -- no new C kernel.
+    # Checks forward correctness against a from-scratch NumPy reference built
+    # from the module's own weight matrices, that autograd's gradient wrt the
+    # input matches a central finite difference through the full
+    # gate/up/down/silu composition, and that a small SwiGLU regressor learns.
+    nn.seed(11)
+    dim, hidden, N = 6, 10, 8
+    mlp = nn.SwiGLUMLP(dim, hidden)
+    rng2 = np.random.default_rng(41)
+    x_np = rng2.standard_normal((N, dim)).astype(np.float32)
+    w_np = rng2.standard_normal((N, dim)).astype(np.float32)
+
+    Wg, Wu, Wd = mlp.gate.W.numpy(), mlp.up.W.numpy(), mlp.down.W.numpy()
+
+    def silu_np(z): return z / (1.0 + np.exp(-z))
+    def ref(a):
+        g, u = a @ Wg, a @ Wu
+        return (silu_np(g) * u) @ Wd
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = mlp(x)
+    ref_y = ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref_y)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    analytic_gx = x.grad().copy()
+
+    def loss_np(a):
+        return float(np.sum(ref(a.astype(np.float64)) * w_np) / w_np.size)
+    eps, i, j = 1e-3, 2, 3
+    x_plus, x_minus = x_np.copy(), x_np.copy()
+    x_plus[i, j] += eps; x_minus[i, j] -= eps
+    fd_gx = (loss_np(x_plus) - loss_np(x_minus)) / (2 * eps)
+    grad_err = abs(float(analytic_gx[i, j]) - fd_gx)
+
+    # a tiny SwiGLU regressor must actually learn a fixed random target.
+    nn.seed(5)
+    reg = nn.SwiGLUMLP(4, 12)
+    xt = nn.tensor(rng.standard_normal((20, 4)).astype(np.float32))
+    target = nn.tensor(rng.standard_normal((20, 4)).astype(np.float32))
+    opt = nn.AdamW(reg.parameters(), lr=1e-2)
+    first = last = None
+    for s in range(200):
+        opt.zero_grad()
+        diff = nn.add(reg(xt), nn.scale(target, -1.0))
+        loss = nn.mean(nn.mul(diff, diff))
+        loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+
+    print(f"[swiglu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} "
+          f"train {first:.3f} -> {last:.3f}")
+    return fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1387,7 +1445,7 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
-        test_selu,
+        test_selu, test_swiglu_mlp,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
