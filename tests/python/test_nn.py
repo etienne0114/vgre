@@ -607,6 +607,46 @@ def test_selu() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and elu_match
 
 
+def test_softmin() -> bool:
+    # Softmin(x) = softmax(-x) over the last dim, composed from existing ops
+    # (scale/softmax), not a new C kernel, so this checks both forward
+    # correctness against a from-scratch NumPy reference (row-wise, one row
+    # per batch element) and that autograd differentiates through the
+    # composition correctly, using the same softmax jacobian-vector-product
+    # formula softmax_cross_entropy is built on.
+    rng2 = np.random.default_rng(59)
+    M, N = 5, 7
+    x_np = rng2.standard_normal((M, N)).astype(np.float32) * 2.0
+    w_np = rng2.standard_normal((M, N)).astype(np.float32)
+
+    def softmin_ref(a):
+        z = -a
+        z = z - z.max(axis=-1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(axis=-1, keepdims=True)
+
+    def softmin_grad_ref(a, w):
+        p = softmin_ref(a)
+        dot = (p * w).sum(axis=-1, keepdims=True)
+        dz = p * (w - dot)  # dL/dz where z = -x
+        return -dz  # dL/dx = -dL/dz
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.softmin(x)
+    ref = softmin_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+    sum_ok = bool(np.allclose(y.numpy().sum(axis=-1), 1.0, atol=1e-5))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = softmin_grad_ref(x_np.astype(np.float64), w_np.astype(np.float64))
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref.astype(np.float32) / x_np.size))))
+
+    mod_ok = bool(np.allclose(nn.Softmin()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    print(f"[softmin] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} sum_ok={sum_ok} "
+          f"module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and sum_ok and mod_ok
+
+
 def test_swiglu_mlp() -> bool:
     # SwiGLUMLP: down(silu(gate(x)) * up(x)), the Llama/Mistral/Qwen gated FFN,
     # composed entirely from existing ops (Linear/silu/mul) -- no new C kernel.
@@ -1445,7 +1485,7 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
-        test_selu, test_swiglu_mlp,
+        test_selu, test_softmin, test_swiglu_mlp,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,

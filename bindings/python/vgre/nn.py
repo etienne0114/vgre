@@ -388,6 +388,12 @@ def selu(x: Tensor) -> Tensor:
     return scale(elu(x, _SELU_ALPHA), _SELU_SCALE)
 def mean(x): return _new(_lib.vgre_ag_mean(x._h), (1,))
 def softmax(x): return _unary("softmax", x)
+def softmin(x: Tensor) -> Tensor:
+    """Softmin(x) = softmax(-x) over the last dim, composed from existing
+    autograd ops (no new C kernel): the smallest entries get the largest
+    weight, differentiable through the same softmax/scale primitives
+    log_sigmoid already uses to negate its input."""
+    return softmax(scale(x, -1.0))
 def all_reduce(x):
     """Differentiable sum-all-reduce across cluster ranks (identity backward).
     Tensor parallelism: a row-parallel layer is all_reduce(matmul(x_shard, W_shard))
@@ -1039,6 +1045,10 @@ class Hardtanh(Module):
 
 class SELU(Module):
     def forward(self, x): return selu(x)
+
+
+class Softmin(Module):
+    def forward(self, x): return softmin(x)
 
 
 class MoELayer(Module):
