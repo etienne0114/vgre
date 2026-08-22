@@ -8,6 +8,7 @@ vgre.nn — build and train arbitrary models from pure Python on VGRE's CPU engi
 
 Both run entirely through the in-tree autograd C ABI — no GPU, no PyTorch/JAX.
 """
+import math
 import os
 import sys
 
@@ -701,6 +702,68 @@ def test_swiglu_mlp() -> bool:
         last = loss.item()
 
     print(f"[swiglu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} "
+          f"train {first:.3f} -> {last:.3f}")
+    return fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5
+
+
+def test_geglu_mlp() -> bool:
+    # GeGLUMLP: down(gelu(gate(x)) * up(x)), the T5 v1.1/PaLM gated FFN,
+    # composed entirely from existing ops (Linear/gelu/mul) -- no new C kernel.
+    # Same checks as SwiGLUMLP: forward vs a from-scratch NumPy reference built
+    # from the module's own weight matrices (exact erf-based GELU), input
+    # gradient vs a central finite difference through the full
+    # gate/up/down/gelu composition, and that a small GeGLU regressor learns.
+    nn.seed(13)
+    dim, hidden, N = 6, 10, 8
+    mlp = nn.GeGLUMLP(dim, hidden)
+    rng2 = np.random.default_rng(43)
+    x_np = rng2.standard_normal((N, dim)).astype(np.float32)
+    w_np = rng2.standard_normal((N, dim)).astype(np.float32)
+
+    Wg, Wu, Wd = mlp.gate.W.numpy(), mlp.up.W.numpy(), mlp.down.W.numpy()
+
+    _erf = np.vectorize(math.erf)
+    def gelu_np(z): return 0.5 * z * (1.0 + _erf(z / math.sqrt(2.0)))
+    def ref(a):
+        g, u = a @ Wg, a @ Wu
+        return (gelu_np(g) * u) @ Wd
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = mlp(x)
+    ref_y = ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref_y)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    analytic_gx = x.grad().copy()
+
+    def loss_np(a):
+        return float(np.sum(ref(a.astype(np.float64)) * w_np) / w_np.size)
+    eps, i, j = 1e-3, 2, 3
+    x_plus, x_minus = x_np.copy(), x_np.copy()
+    x_plus[i, j] += eps; x_minus[i, j] -= eps
+    fd_gx = (loss_np(x_plus) - loss_np(x_minus)) / (2 * eps)
+    grad_err = abs(float(analytic_gx[i, j]) - fd_gx)
+
+    # a tiny GeGLU regressor must actually learn a fixed random target. Uses a
+    # local RNG (not the shared module-level `rng`) so this test doesn't shift
+    # the draw sequence seen by later tests that depend on it (e.g. xor init).
+    nn.seed(7)
+    reg = nn.GeGLUMLP(4, 12)
+    rng3 = np.random.default_rng(17)
+    xt = nn.tensor(rng3.standard_normal((20, 4)).astype(np.float32))
+    target = nn.tensor(rng3.standard_normal((20, 4)).astype(np.float32))
+    opt = nn.AdamW(reg.parameters(), lr=1e-2)
+    first = last = None
+    for s in range(200):
+        opt.zero_grad()
+        diff = nn.add(reg(xt), nn.scale(target, -1.0))
+        loss = nn.mean(nn.mul(diff, diff))
+        loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+
+    print(f"[geglu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} "
           f"train {first:.3f} -> {last:.3f}")
     return fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5
 
@@ -1485,7 +1548,7 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
-        test_selu, test_softmin, test_swiglu_mlp,
+        test_selu, test_softmin, test_swiglu_mlp, test_geglu_mlp,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,

@@ -1270,6 +1270,22 @@ class SwiGLUMLP(Module):
         return self.down(mul(silu(self.gate(x)), self.up(x)))
 
 
+class GeGLUMLP(Module):
+    """Gated FFN: down(gelu(gate(x)) * up(x)) — the GEGLU feed-forward used in
+    place of a plain ReLU/GELU two-layer MLP in T5 v1.1/PaLM-style transformers
+    (Shazeer, 2020). Composed entirely from existing ops (Linear, gelu, mul),
+    no new C kernel: identical structure to SwiGLUMLP with the gate activation
+    swapped from silu to gelu."""
+    def __init__(self, dim: int, hidden: int = 0):
+        hidden = hidden or 4 * dim
+        self.gate = Linear(dim, hidden, bias=False)
+        self.up = Linear(dim, hidden, bias=False)
+        self.down = Linear(hidden, dim, bias=False)
+
+    def forward(self, x):
+        return self.down(mul(gelu(self.gate(x)), self.up(x)))
+
+
 class SSMBlock(Module):
     """Selective state-space (Mamba / S6) mixer with a real d_state-dimensional
     diagonal SSM. Per channel it keeps a state h ∈ ℝ^N and runs the selective
