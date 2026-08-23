@@ -648,6 +648,36 @@ def test_softmin() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and sum_ok and mod_ok
 
 
+def test_gaussian() -> bool:
+    # Gaussian(x) = exp(-x^2), composed from existing ops (mul/scale/exp), not
+    # a new C kernel, so this checks forward correctness against a
+    # from-scratch NumPy reference, that autograd differentiates through the
+    # composition correctly, and that the output is bounded in (0,1] and
+    # peaks at x=0 (the defining bell-curve shape).
+    rng2 = np.random.default_rng(61)
+    x_np = rng2.standard_normal(64).astype(np.float32) * 2.0
+    w_np = rng2.standard_normal(64).astype(np.float32)
+
+    def gaussian_ref(a): return np.exp(-a * a)
+    def gaussian_grad_ref(a): return -2.0 * a * np.exp(-a * a)
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = nn.gaussian(x)
+    ref = gaussian_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+    range_ok = bool(np.all(y.numpy() > 0.0) and np.all(y.numpy() <= 1.0 + 1e-6))
+    peak_ok = bool(np.isclose(nn.gaussian(nn.tensor(np.zeros(1, np.float32))).numpy()[0], 1.0, atol=1e-6))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    grad_ref = gaussian_grad_ref(x_np.astype(np.float64))
+    grad_err = float(np.max(np.abs(x.grad() - (grad_ref.astype(np.float32) * w_np) / x_np.size)))
+
+    mod_ok = bool(np.allclose(nn.Gaussian()(nn.tensor(x_np)).numpy(), ref, atol=1e-5))
+    print(f"[gaussian] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} range_ok={range_ok} "
+          f"peak_ok={peak_ok} module_ok={mod_ok}")
+    return fwd_err < 1e-5 and grad_err < 1e-4 and range_ok and peak_ok and mod_ok
+
+
 def test_swiglu_mlp() -> bool:
     # SwiGLUMLP: down(silu(gate(x)) * up(x)), the Llama/Mistral/Qwen gated FFN,
     # composed entirely from existing ops (Linear/silu/mul) -- no new C kernel.
@@ -1548,7 +1578,7 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
-        test_selu, test_softmin, test_swiglu_mlp, test_geglu_mlp,
+        test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,

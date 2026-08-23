@@ -394,6 +394,13 @@ def softmin(x: Tensor) -> Tensor:
     weight, differentiable through the same softmax/scale primitives
     log_sigmoid already uses to negate its input."""
     return softmax(scale(x, -1.0))
+def gaussian(x: Tensor) -> Tensor:
+    """Gaussian(x) = exp(-x^2), composed from existing autograd ops (no new C
+    kernel): the RBF-network activation, bell-shaped and bounded in (0,1],
+    peaking at x=0 and vanishing as |x|->infinity (unlike the monotone
+    activations above). Built from the same mul/scale/exp primitives elu
+    already uses, with x squared via mul(x,x) rather than a new square op."""
+    return exp(scale(mul(x, x), -1.0))
 def all_reduce(x):
     """Differentiable sum-all-reduce across cluster ranks (identity backward).
     Tensor parallelism: a row-parallel layer is all_reduce(matmul(x_shard, W_shard))
@@ -1049,6 +1056,10 @@ class SELU(Module):
 
 class Softmin(Module):
     def forward(self, x): return softmin(x)
+
+
+class Gaussian(Module):
+    def forward(self, x): return gaussian(x)
 
 
 class MoELayer(Module):
