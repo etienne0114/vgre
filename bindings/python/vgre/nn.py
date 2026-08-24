@@ -401,6 +401,19 @@ def gaussian(x: Tensor) -> Tensor:
     activations above). Built from the same mul/scale/exp primitives elu
     already uses, with x squared via mul(x,x) rather than a new square op."""
     return exp(scale(mul(x, x), -1.0))
+def maximum(a: Tensor, b: Tensor) -> Tensor:
+    """Elementwise max(a,b) = a + relu(b-a), composed from existing autograd
+    ops (no new C kernel): the same max(x,c) == c + relu(x-c) trick
+    relu6/hardtanh/softshrink already use against a constant, generalized
+    here to two same-shape tensors. Differentiable through add/relu/scale:
+    the gradient routes to whichever input was larger at each position (ties,
+    where a==b, route through a, matching relu's tie-break at 0)."""
+    return add(a, relu(add(b, scale(a, -1.0))))
+def minimum(a: Tensor, b: Tensor) -> Tensor:
+    """Elementwise min(a,b) = -max(-a,-b), composed from existing autograd
+    ops (no new C kernel): reuses maximum() above on the negated inputs,
+    differentiable through the same add/relu/scale primitives."""
+    return scale(maximum(scale(a, -1.0), scale(b, -1.0)), -1.0)
 def all_reduce(x):
     """Differentiable sum-all-reduce across cluster ranks (identity backward).
     Tensor parallelism: a row-parallel layer is all_reduce(matmul(x_shard, W_shard))
@@ -1295,6 +1308,28 @@ class GeGLUMLP(Module):
 
     def forward(self, x):
         return self.down(mul(gelu(self.gate(x)), self.up(x)))
+
+
+class Maxout(Module):
+    """Maxout(in_features, out_features, num_pieces=2): each output unit is
+    the elementwise max over `num_pieces` independent affine projections of
+    the input (Goodfellow et al. 2013) -- a piecewise-linear, non-saturating
+    activation that is itself learned rather than fixed (with tied pieces it
+    can represent ReLU, abs, and other convex piecewise-linear functions).
+    Built from `num_pieces` Linear layers plus the maximum() primitive above;
+    no new C kernel needed since maximum() is itself an add/relu/scale
+    composition. `self.pieces` is a plain list of Modules, which Module's
+    `_children`/`named_parameters` already walk (see SwiGLUMLP's gate/up/down
+    for the single-child equivalent)."""
+    def __init__(self, in_features: int, out_features: int, num_pieces: int = 2):
+        assert num_pieces >= 2, "Maxout needs at least 2 pieces"
+        self.pieces = [Linear(in_features, out_features) for _ in range(num_pieces)]
+
+    def forward(self, x):
+        out = self.pieces[0](x)
+        for piece in self.pieces[1:]:
+            out = maximum(out, piece(x))
+        return out
 
 
 class SSMBlock(Module):

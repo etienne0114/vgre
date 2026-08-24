@@ -798,6 +798,87 @@ def test_geglu_mlp() -> bool:
     return fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5
 
 
+def test_maxout() -> bool:
+    # maximum(a,b)/minimum(a,b): elementwise max/min composed from existing
+    # ops (add/relu/scale), not a new C kernel. Checks forward vs NumPy and
+    # that gradient routes entirely to whichever input was larger (the loser
+    # gets zero gradient, matching relu's non-differentiability handling).
+    rng2 = np.random.default_rng(71)
+    a_np = rng2.standard_normal(32).astype(np.float32)
+    b_np = rng2.standard_normal(32).astype(np.float32)
+    a, b = nn.tensor(a_np, requires_grad=True), nn.tensor(b_np, requires_grad=True)
+    ymax = nn.maximum(a, b)
+    fwd_max_err = float(np.max(np.abs(ymax.numpy() - np.maximum(a_np, b_np))))
+    nn.mean(ymax).backward()
+    a_wins = a_np >= b_np
+    grad_max_ok = bool(np.allclose(a.grad(), a_wins.astype(np.float32) / a_np.size) and
+                        np.allclose(b.grad(), (~a_wins).astype(np.float32) / a_np.size))
+
+    a2, b2 = nn.tensor(a_np, requires_grad=True), nn.tensor(b_np, requires_grad=True)
+    ymin = nn.minimum(a2, b2)
+    fwd_min_err = float(np.max(np.abs(ymin.numpy() - np.minimum(a_np, b_np))))
+
+    # Maxout(in,out,num_pieces): elementwise max over `num_pieces` independent
+    # Linear projections (Goodfellow et al. 2013), built from Linear +
+    # maximum() -- no new C kernel. Checks forward vs a from-scratch NumPy
+    # reference built from the module's own per-piece weights, the input
+    # gradient vs a central finite difference through the full
+    # pieces/max composition, and that a tiny Maxout regressor learns.
+    nn.seed(23)
+    dim, out, pieces, N = 5, 4, 3, 8
+    mo = nn.Maxout(dim, out, num_pieces=pieces)
+    rng3 = np.random.default_rng(73)
+    x_np = rng3.standard_normal((N, dim)).astype(np.float32)
+    w_np = rng3.standard_normal((N, out)).astype(np.float32)
+    Ws = [p.W.numpy() for p in mo.pieces]
+    bs = [p.b.numpy() for p in mo.pieces]
+
+    def maxout_ref(xa):
+        outs = [xa @ W + bv for W, bv in zip(Ws, bs)]
+        r = outs[0]
+        for o in outs[1:]:
+            r = np.maximum(r, o)
+        return r
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = mo(x)
+    ref_y = maxout_ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref_y)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    analytic_gx = x.grad().copy()
+
+    def loss_np(xa):
+        return float(np.sum(maxout_ref(xa.astype(np.float64)) * w_np) / w_np.size)
+    eps, i, j = 1e-3, 1, 2
+    x_plus, x_minus = x_np.copy(), x_np.copy()
+    x_plus[i, j] += eps; x_minus[i, j] -= eps
+    fd_gx = (loss_np(x_plus) - loss_np(x_minus)) / (2 * eps)
+    grad_err = abs(float(analytic_gx[i, j]) - fd_gx)
+
+    nn.seed(29)
+    reg = nn.Maxout(4, 4, num_pieces=3)
+    rng4 = np.random.default_rng(79)
+    xt = nn.tensor(rng4.standard_normal((20, 4)).astype(np.float32))
+    target = nn.tensor(rng4.standard_normal((20, 4)).astype(np.float32))
+    opt = nn.AdamW(reg.parameters(), lr=1e-2)
+    first = last = None
+    for s in range(200):
+        opt.zero_grad()
+        diff = nn.add(reg(xt), nn.scale(target, -1.0))
+        loss = nn.mean(nn.mul(diff, diff))
+        loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+
+    print(f"[maxout] max_fwd_err={fwd_max_err:.1e} max_grad_ok={grad_max_ok} "
+          f"min_fwd_err={fwd_min_err:.1e} module_fwd_err={fwd_err:.1e} "
+          f"module_grad_err={grad_err:.1e} train {first:.3f} -> {last:.3f}")
+    return (fwd_max_err < 1e-6 and grad_max_ok and fwd_min_err < 1e-6 and
+            fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5)
+
+
 def test_sgd() -> bool:
     # SGD (with momentum) also minimizes a simple quadratic.
     w = nn.tensor(np.zeros(4, np.float32), requires_grad=True)
@@ -1579,6 +1660,7 @@ def main() -> int:
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
+        test_maxout,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,
