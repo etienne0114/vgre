@@ -449,6 +449,30 @@ def softmax_cross_entropy_soft(logits: Tensor, soft_targets) -> Tensor:
     tgt = soft_targets if isinstance(soft_targets, Tensor) else tensor(soft_targets)
     return _new(_lib.vgre_ag_softmax_cross_entropy_soft(logits._h, tgt._h), (1,))
 
+def huber_loss(pred: Tensor, target: Tensor, delta: float = 1.0, reduction: str = "mean") -> Tensor:
+    """Huber/SmoothL1 loss: 0.5*e^2 for |e|<=delta, delta*(|e|-0.5*delta) for
+    |e|>delta, composed from existing autograd ops (no new C kernel, no
+    division needed): 0.5*clip(|e|,0,delta)^2 + delta*(|e|-clip(|e|,0,delta))
+    is exactly the piecewise formula above, since clip(|e|,0,delta)==|e| in
+    the quadratic region (making the second term 0) and ==delta in the linear
+    region (making the second term delta*(|e|-delta)). |e| is built the same
+    relu(x)+relu(-x) way abs is elsewhere in this module, clip reuses
+    hardtanh's relu/add/scale composition, and mean/mul/add/scale are the
+    same primitives softmax_cross_entropy_soft-adjacent losses use; less
+    sensitive to outliers than a squared-error loss, smoother than L1 near 0."""
+    e = add(pred, scale(target, -1.0))
+    abs_e = add(relu(e), relu(scale(e, -1.0)))
+    clipped = hardtanh(abs_e, 0.0, delta)
+    quadratic = scale(mul(clipped, clipped), 0.5)
+    linear = scale(add(abs_e, scale(clipped, -1.0)), delta)
+    per_elem = add(quadratic, linear)
+    if reduction == "none":
+        return per_elem
+    if reduction == "sum":
+        return scale(mean(per_elem), float(per_elem.shape[0] if len(per_elem.shape) == 1
+                                            else int(np.prod(per_elem.shape))))
+    return mean(per_elem)
+
 def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
 

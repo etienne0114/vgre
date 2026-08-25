@@ -575,6 +575,44 @@ def test_hardtanh() -> bool:
     return fwd_err < 1e-5 and grad_err < 1e-4 and mod_ok and relu6_match
 
 
+def test_huber_loss() -> bool:
+    # huber_loss(pred, target, delta) = 0.5*e^2 for |e|<=delta,
+    # delta*(|e|-0.5*delta) for |e|>delta, composed from existing ops
+    # (relu/hardtanh/mul/add/scale/mean, no new C kernel, no division), so
+    # this checks both forward correctness against a from-scratch NumPy
+    # reference and that autograd differentiates through the composition
+    # correctly, including across the delta kink and both reduction modes.
+    rng2 = np.random.default_rng(59)
+    pred_np = rng2.standard_normal(64).astype(np.float32) * 2.0
+    target_np = rng2.standard_normal(64).astype(np.float32)
+    delta = 0.75
+
+    def huber_ref(p, t):
+        e = p - t
+        ae = np.abs(e)
+        return np.where(ae <= delta, 0.5 * e * e, delta * (ae - 0.5 * delta))
+    def huber_grad_ref(p, t):
+        e = p - t
+        return np.clip(e, -delta, delta)
+
+    pred = nn.tensor(pred_np, requires_grad=True)
+    target = nn.tensor(target_np)
+    y = nn.huber_loss(pred, target, delta, reduction="none")
+    ref = huber_ref(pred_np.astype(np.float64), target_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    loss = nn.huber_loss(pred, target, delta, reduction="mean")
+    mean_ok = bool(np.allclose(loss.numpy(), np.mean(ref), atol=1e-5))
+    loss.backward()
+    grad_ref = huber_grad_ref(pred_np.astype(np.float64), target_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(pred.grad() - grad_ref / pred_np.size)))
+
+    sum_ok = bool(np.allclose(nn.huber_loss(pred, target, delta, reduction="sum").numpy(),
+                               np.sum(ref), atol=1e-3))
+    print(f"[huber_loss] fwd_err={fwd_err:.1e} mean_ok={mean_ok} grad_err={grad_err:.1e} sum_ok={sum_ok}")
+    return fwd_err < 1e-5 and mean_ok and grad_err < 1e-4 and sum_ok
+
+
 def test_selu() -> bool:
     # SELU(x) = scale*(x for x>0, alpha*(exp(x)-1) for x<=0) with the fixed
     # self-normalizing constants (Klambauer et al.), composed from existing
@@ -1659,6 +1697,7 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
+        test_huber_loss,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
         test_maxout,
         test_dropout_and_tied,
