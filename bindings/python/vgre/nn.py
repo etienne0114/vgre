@@ -449,6 +449,21 @@ def softmax_cross_entropy_soft(logits: Tensor, soft_targets) -> Tensor:
     tgt = soft_targets if isinstance(soft_targets, Tensor) else tensor(soft_targets)
     return _new(_lib.vgre_ag_softmax_cross_entropy_soft(logits._h, tgt._h), (1,))
 
+def label_smoothing_cross_entropy(logits: Tensor, targets: Sequence[int], smoothing: float = 0.1) -> Tensor:
+    """Cross-entropy with label smoothing (Szegedy et al. 2016): instead of
+    putting all target mass on the true class, spreads `smoothing` of it
+    uniformly over all V classes — target[true] = 1-smoothing+smoothing/V,
+    target[other] = smoothing/V — which discourages overconfident logits and
+    tends to improve calibration/generalization. Built by constructing that
+    distribution in NumPy and handing it to the existing
+    `softmax_cross_entropy_soft` op (already row-normalizes and has a grad),
+    so no new C++ kernel is needed. smoothing=0 reduces to `targets` getting
+    all the mass, i.e. ordinary cross-entropy."""
+    m, v = logits.shape
+    smooth = np.full((m, v), smoothing / v, dtype=np.float32)
+    smooth[np.arange(m), np.asarray(targets, dtype=np.int64)] += 1.0 - smoothing
+    return softmax_cross_entropy_soft(logits, smooth)
+
 def huber_loss(pred: Tensor, target: Tensor, delta: float = 1.0, reduction: str = "mean") -> Tensor:
     """Huber/SmoothL1 loss: 0.5*e^2 for |e|<=delta, delta*(|e|-0.5*delta) for
     |e|>delta, composed from existing autograd ops (no new C kernel, no

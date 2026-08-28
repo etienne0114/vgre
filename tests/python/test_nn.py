@@ -681,6 +681,44 @@ def test_l1_loss() -> bool:
     return fwd_err < 1e-5 and mean_ok and grad_err < 1e-4 and sum_ok
 
 
+def test_label_smoothing_cross_entropy() -> bool:
+    # label_smoothing_cross_entropy spreads `smoothing` mass off the true
+    # class uniformly over all V classes, then reuses softmax_cross_entropy_soft.
+    # Checks: forward matches a from-scratch NumPy CE-with-smoothing reference,
+    # the gradient matches the standard (softmax(logits)-soft_target)/M formula,
+    # and smoothing=0 collapses to ordinary softmax_cross_entropy exactly.
+    rng3 = np.random.default_rng(37)
+    m, v = 5, 6
+    logits_np = rng3.standard_normal((m, v)).astype(np.float32) * 1.5
+    targets = [2, 0, 5, 3, 1]
+    smoothing = 0.1
+
+    def smoothed_ref(z, tgts, eps):
+        p = np.exp(z - z.max(1, keepdims=True))
+        p /= p.sum(1, keepdims=True)
+        t = np.full_like(z, eps / v)
+        t[np.arange(m), tgts] += 1.0 - eps
+        loss = -np.sum(t * np.log(p)) / m
+        grad = (p - t) / m
+        return loss, grad
+
+    logits = nn.tensor(logits_np, requires_grad=True)
+    loss = nn.label_smoothing_cross_entropy(logits, targets, smoothing=smoothing)
+    ref_loss, ref_grad = smoothed_ref(logits_np.astype(np.float64), targets, smoothing)
+    fwd_err = abs(float(loss.item()) - ref_loss)
+    loss.backward()
+    grad_err = float(np.max(np.abs(logits.grad() - ref_grad.astype(np.float32))))
+
+    logits0 = nn.tensor(logits_np, requires_grad=True)
+    hard = nn.softmax_cross_entropy(logits0, targets)
+    smooth0 = nn.label_smoothing_cross_entropy(logits0, targets, smoothing=0.0)
+    zero_smoothing_ok = bool(np.allclose(hard.numpy(), smooth0.numpy(), atol=1e-5))
+
+    print(f"[label_smoothing_ce] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} "
+          f"zero_smoothing_ok={zero_smoothing_ok}")
+    return fwd_err < 1e-4 and grad_err < 1e-5 and zero_smoothing_ok
+
+
 def test_selu() -> bool:
     # SELU(x) = scale*(x for x>0, alpha*(exp(x)-1) for x<=0) with the fixed
     # self-normalizing constants (Klambauer et al.), composed from existing
@@ -1765,7 +1803,7 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
-        test_huber_loss, test_mse_loss, test_l1_loss,
+        test_huber_loss, test_mse_loss, test_l1_loss, test_label_smoothing_cross_entropy,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
         test_maxout,
         test_dropout_and_tied,
