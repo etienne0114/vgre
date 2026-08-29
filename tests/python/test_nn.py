@@ -942,6 +942,68 @@ def test_geglu_mlp() -> bool:
     return fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5
 
 
+def test_glu() -> bool:
+    # GLU: (xW+b) * sigmoid(xV+c), the Dauphin et al. 2016 gated linear unit,
+    # composed entirely from existing ops (Linear/sigmoid/mul) -- no new C
+    # kernel. Checks forward correctness against a from-scratch NumPy
+    # reference built from the module's own weight matrices, that autograd's
+    # gradient wrt the input matches a central finite difference through the
+    # full value/gate/sigmoid/mul composition, and that a small GLU regressor
+    # learns.
+    nn.seed(19)
+    din, dout, N = 6, 5, 8
+    glu = nn.GLU(din, dout)
+    rng2 = np.random.default_rng(47)
+    x_np = rng2.standard_normal((N, din)).astype(np.float32)
+    w_np = rng2.standard_normal((N, dout)).astype(np.float32)
+
+    Wv, bv = glu.value.W.numpy(), glu.value.b.numpy()
+    Wg, bg = glu.gate.W.numpy(), glu.gate.b.numpy()
+
+    def sigmoid_np(z): return 1.0 / (1.0 + np.exp(-z))
+    def ref(a):
+        return (a @ Wv + bv) * sigmoid_np(a @ Wg + bg)
+
+    x = nn.tensor(x_np, requires_grad=True)
+    y = glu(x)
+    ref_y = ref(x_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref_y)))
+
+    nn.mean(nn.mul(y, nn.tensor(w_np))).backward()
+    analytic_gx = x.grad().copy()
+
+    def loss_np(a):
+        return float(np.sum(ref(a.astype(np.float64)) * w_np) / w_np.size)
+    eps, i, j = 1e-3, 2, 3
+    x_plus, x_minus = x_np.copy(), x_np.copy()
+    x_plus[i, j] += eps; x_minus[i, j] -= eps
+    fd_gx = (loss_np(x_plus) - loss_np(x_minus)) / (2 * eps)
+    grad_err = abs(float(analytic_gx[i, j]) - fd_gx)
+
+    # a tiny GLU regressor must actually learn a fixed random target. Uses a
+    # local RNG (not the shared module-level `rng`) so this test doesn't
+    # shift the draw sequence seen by later tests that depend on it.
+    nn.seed(23)
+    reg = nn.GLU(4, 4)
+    rng3 = np.random.default_rng(29)
+    xt = nn.tensor(rng3.standard_normal((20, 4)).astype(np.float32))
+    target = nn.tensor(rng3.standard_normal((20, 4)).astype(np.float32))
+    opt = nn.AdamW(reg.parameters(), lr=1e-2)
+    first = last = None
+    for s in range(200):
+        opt.zero_grad()
+        diff = nn.add(reg(xt), nn.scale(target, -1.0))
+        loss = nn.mean(nn.mul(diff, diff))
+        loss.backward(); opt.step()
+        if s == 0:
+            first = loss.item()
+        last = loss.item()
+
+    print(f"[glu] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} "
+          f"train {first:.3f} -> {last:.3f}")
+    return fwd_err < 1e-4 and grad_err < 5e-3 and last < first * 0.5
+
+
 def test_maxout() -> bool:
     # maximum(a,b)/minimum(a,b): elementwise max/min composed from existing
     # ops (add/relu/scale), not a new C kernel. Checks forward vs NumPy and
@@ -1805,7 +1867,7 @@ def main() -> int:
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
         test_huber_loss, test_mse_loss, test_l1_loss, test_label_smoothing_cross_entropy,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
-        test_maxout,
+        test_glu, test_maxout,
         test_dropout_and_tied,
         test_mlp_xor, test_cnn_quadrant, test_module_api, test_bn_cnn,
         test_transformer_block, test_gpt_module,

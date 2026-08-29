@@ -1376,6 +1376,26 @@ class GeGLUMLP(Module):
         return self.down(mul(gelu(self.gate(x)), self.up(x)))
 
 
+class GLU(Module):
+    """Gated Linear Unit: (xW+b) * sigmoid(xV+c) (Dauphin et al. 2016) -- the
+    atomic gating building block behind the `gate * up` pattern SwiGLUMLP and
+    GeGLUMLP already wrap around a down-projection, exposed standalone for
+    gated convnets and PixelCNN-style gated activations. The reference
+    formulation splits one projection's output in half; this uses two
+    separate Linear layers instead (mathematically equivalent -- a single
+    [in, 2*out] projection split in half is the same as two independent
+    [in, out] projections, and the C ABI here has no split/slice op), the
+    same trick SwiGLUMLP/GeGLUMLP already use for their gate/up pair.
+    Composed entirely from existing ops (Linear, sigmoid, mul), no new C
+    kernel."""
+    def __init__(self, in_features: int, out_features: int):
+        self.value = Linear(in_features, out_features)
+        self.gate = Linear(in_features, out_features)
+
+    def forward(self, x):
+        return mul(self.value(x), sigmoid(self.gate(x)))
+
+
 class Maxout(Module):
     """Maxout(in_features, out_features, num_pieces=2): each output unit is
     the elementwise max over `num_pieces` independent affine projections of
