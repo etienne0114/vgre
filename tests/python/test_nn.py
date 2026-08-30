@@ -719,6 +719,48 @@ def test_label_smoothing_cross_entropy() -> bool:
     return fwd_err < 1e-4 and grad_err < 1e-5 and zero_smoothing_ok
 
 
+def test_kl_div_loss() -> bool:
+    # kl_div_loss(logits, target_probs) = KL(target_probs || softmax(logits)),
+    # built as softmax_cross_entropy_soft(logits, target_probs) minus the
+    # (constant, gradient-free) target entropy computed in NumPy. Checks:
+    # forward matches a from-scratch NumPy KL reference, the gradient matches
+    # the analytic (softmax(logits)-target_probs)/M formula (identical to
+    # softmax_cross_entropy_soft's, since the entropy offset is constant),
+    # "sum" reduction is M times "mean", and target_probs==softmax(logits)
+    # (self-KL) is ~0.
+    rng4 = np.random.default_rng(83)
+    m, v = 5, 6
+    logits_np = rng4.standard_normal((m, v)).astype(np.float32) * 1.5
+    raw = rng4.uniform(0.1, 1.0, size=(m, v)).astype(np.float64)
+    target_np = (raw / raw.sum(axis=1, keepdims=True)).astype(np.float32)
+
+    def kl_ref(z, t):
+        p = np.exp(z - z.max(1, keepdims=True))
+        p /= p.sum(1, keepdims=True)
+        kl = np.sum(t * (np.log(np.clip(t, 1e-12, 1.0)) - np.log(p)), axis=1)
+        grad = (p - t) / z.shape[0]
+        return float(kl.mean()), grad
+
+    logits = nn.tensor(logits_np, requires_grad=True)
+    loss = nn.kl_div_loss(logits, target_np, reduction="mean")
+    ref_loss, ref_grad = kl_ref(logits_np.astype(np.float64), target_np.astype(np.float64))
+    fwd_err = abs(float(loss.item()) - ref_loss)
+    loss.backward()
+    grad_err = float(np.max(np.abs(logits.grad() - ref_grad.astype(np.float32))))
+
+    sum_ok = bool(np.allclose(nn.kl_div_loss(logits, target_np, reduction="sum").numpy(),
+                               ref_loss * m, atol=1e-3))
+
+    z0 = rng4.standard_normal((3, 4)).astype(np.float32)
+    p0 = np.exp(z0 - z0.max(1, keepdims=True))
+    p0 /= p0.sum(1, keepdims=True)
+    self_kl = float(nn.kl_div_loss(nn.tensor(z0), p0, reduction="mean").item())
+    self_ok = abs(self_kl) < 1e-4
+
+    print(f"[kl_div_loss] fwd_err={fwd_err:.1e} grad_err={grad_err:.1e} sum_ok={sum_ok} self_ok={self_ok}")
+    return fwd_err < 1e-4 and grad_err < 1e-5 and sum_ok and self_ok
+
+
 def test_selu() -> bool:
     # SELU(x) = scale*(x for x>0, alpha*(exp(x)-1) for x<=0) with the fixed
     # self-normalizing constants (Klambauer et al.), composed from existing
@@ -1866,6 +1908,7 @@ def main() -> int:
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
         test_huber_loss, test_mse_loss, test_l1_loss, test_label_smoothing_cross_entropy,
+        test_kl_div_loss,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
         test_glu, test_maxout,
         test_dropout_and_tied,

@@ -515,6 +515,28 @@ def l1_loss(pred: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
                                             else int(np.prod(per_elem.shape))))
     return mean(per_elem)
 
+def kl_div_loss(logits: Tensor, target_probs, reduction: str = "mean") -> Tensor:
+    """KL(target || softmax(logits)) = sum_v target*(log target - log softmax(logits)),
+    averaged over rows ("mean", PyTorch's batchmean) or summed ("sum") — no new
+    C kernel. `softmax_cross_entropy_soft` already computes the mean cross-entropy
+    H(target, logits) = -sum target*log softmax(logits) with a correct gradient
+    (mean row-wise (softmax(logits)-target)); KL = H(target,logits) - H(target),
+    and the target entropy H(target) is a fixed NumPy scalar added as a
+    constant (requires_grad=False) tensor, so it contributes nothing to the
+    backward pass — the gradient w.r.t. logits is exactly softmax_cross_entropy_soft's,
+    which already equals the analytic KL gradient since d/dlogits H(target) = 0."""
+    probs = (target_probs.numpy() if isinstance(target_probs, Tensor)
+             else np.asarray(target_probs, dtype=np.float32))
+    m = probs.shape[0]
+    row_entropy = -(probs * np.log(np.clip(probs, 1e-12, 1.0))).sum(axis=1)
+    ce = softmax_cross_entropy_soft(logits, probs)
+    kl = add(ce, tensor(np.array([-float(row_entropy.mean())], dtype=np.float32)))
+    if reduction == "sum":
+        return scale(kl, float(m))
+    if reduction != "mean":
+        raise ValueError("reduction must be 'mean' or 'sum'")
+    return kl
+
 def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
 
