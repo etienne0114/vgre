@@ -537,6 +537,25 @@ def kl_div_loss(logits: Tensor, target_probs, reduction: str = "mean") -> Tensor
         raise ValueError("reduction must be 'mean' or 'sum'")
     return kl
 
+def binary_cross_entropy_with_logits(logits: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
+    """BCEWithLogits(x,t) = -[t*log(sigmoid(x)) + (1-t)*log(sigmoid(-x))],
+    composed from existing autograd ops (no new C kernel): log_sigmoid(x) and
+    log_sigmoid(-x) are the numerically-stable log(sigmoid) and log(1-sigmoid)
+    terms (log_sigmoid already routes through softplus for stability), and
+    lerping between them by t via b + t*(a-b) is exactly the two-term sum
+    above since (1-t)*b + t*a == b + t*(a-b). Matches mse_loss/l1_loss's
+    reduction handling ("mean"/"sum"/"none"); target may be soft (any value
+    in [0,1], not just 0/1)."""
+    pos = log_sigmoid(logits)
+    neg = log_sigmoid(scale(logits, -1.0))
+    per_elem = scale(add(neg, mul(target, add(pos, scale(neg, -1.0)))), -1.0)
+    if reduction == "none":
+        return per_elem
+    if reduction == "sum":
+        return scale(mean(per_elem), float(per_elem.shape[0] if len(per_elem.shape) == 1
+                                            else int(np.prod(per_elem.shape))))
+    return mean(per_elem)
+
 def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
 

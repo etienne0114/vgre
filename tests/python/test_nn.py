@@ -681,6 +681,41 @@ def test_l1_loss() -> bool:
     return fwd_err < 1e-5 and mean_ok and grad_err < 1e-4 and sum_ok
 
 
+def test_bce_with_logits_loss() -> bool:
+    # binary_cross_entropy_with_logits(x,t) = -[t*log(sigmoid(x)) +
+    # (1-t)*log(sigmoid(-x))], composed from existing ops (log_sigmoid/
+    # add/scale/mul/mean, no new C kernel). Checks forward against the
+    # standard numerically-stable NumPy reference
+    # max(x,0) - x*t + log(1+exp(-|x|)), the gradient against the analytic
+    # sigmoid(x)-t formula, all three reduction modes, and that soft targets
+    # (not just 0/1) work since nothing here assumes binary targets.
+    rng2 = np.random.default_rng(81)
+    pred_np = rng2.standard_normal(64).astype(np.float32) * 3.0
+    target_np = rng2.uniform(0.0, 1.0, size=64).astype(np.float32)
+
+    def bce_ref(x, t):
+        return np.maximum(x, 0) - x * t + np.log1p(np.exp(-np.abs(x)))
+    def bce_grad_ref(x, t):
+        return 1.0 / (1.0 + np.exp(-x)) - t
+
+    pred = nn.tensor(pred_np, requires_grad=True)
+    target = nn.tensor(target_np)
+    y = nn.binary_cross_entropy_with_logits(pred, target, reduction="none")
+    ref = bce_ref(pred_np.astype(np.float64), target_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    loss = nn.binary_cross_entropy_with_logits(pred, target, reduction="mean")
+    mean_ok = bool(np.allclose(loss.numpy(), np.mean(ref), atol=1e-5))
+    loss.backward()
+    grad_ref = bce_grad_ref(pred_np.astype(np.float64), target_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(pred.grad() - grad_ref / pred_np.size)))
+
+    sum_ok = bool(np.allclose(nn.binary_cross_entropy_with_logits(pred, target, reduction="sum").numpy(),
+                               np.sum(ref), atol=1e-3))
+    print(f"[bce_with_logits_loss] fwd_err={fwd_err:.1e} mean_ok={mean_ok} grad_err={grad_err:.1e} sum_ok={sum_ok}")
+    return fwd_err < 1e-4 and mean_ok and grad_err < 1e-4 and sum_ok
+
+
 def test_label_smoothing_cross_entropy() -> bool:
     # label_smoothing_cross_entropy spreads `smoothing` mass off the true
     # class uniformly over all V classes, then reuses softmax_cross_entropy_soft.
@@ -1907,7 +1942,8 @@ def main() -> int:
         test_distributed_dp, test_checkpoint, test_sgd, test_leaky_relu,
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
-        test_huber_loss, test_mse_loss, test_l1_loss, test_label_smoothing_cross_entropy,
+        test_huber_loss, test_mse_loss, test_l1_loss, test_bce_with_logits_loss,
+        test_label_smoothing_cross_entropy,
         test_kl_div_loss,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
         test_glu, test_maxout,
