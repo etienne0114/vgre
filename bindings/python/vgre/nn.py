@@ -556,6 +556,25 @@ def binary_cross_entropy_with_logits(logits: Tensor, target: Tensor, reduction: 
                                             else int(np.prod(per_elem.shape))))
     return mean(per_elem)
 
+def hinge_loss(pred: Tensor, target: Tensor, reduction: str = "mean") -> Tensor:
+    """Hinge loss for margin-based binary classification (linear SVMs):
+    max(0, 1 - target*pred), target in {-1,+1}, composed from existing
+    autograd ops (mul/add/scale/relu/mean, no new C kernel): margin =
+    1 - target*pred (built via the same `tensor(np.full(...))` constant
+    trick relu6/hardtanh use to add a literal), then relu(margin) is exactly
+    the hinge — 0 once a sample clears the margin on the correct side,
+    linear in the (uncapped) violation otherwise. Matches mse_loss/l1_loss's
+    reduction handling ("mean"/"sum"/"none")."""
+    one = tensor(np.full(pred.shape, 1.0, dtype=np.float32))
+    margin = add(one, scale(mul(target, pred), -1.0))
+    per_elem = relu(margin)
+    if reduction == "none":
+        return per_elem
+    if reduction == "sum":
+        return scale(mean(per_elem), float(per_elem.shape[0] if len(per_elem.shape) == 1
+                                            else int(np.prod(per_elem.shape))))
+    return mean(per_elem)
+
 def layer_norm(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     return _new(_lib.vgre_ag_layer_norm(x._h, weight._h, bias._h, ctypes.c_float(eps)), x.shape)
 

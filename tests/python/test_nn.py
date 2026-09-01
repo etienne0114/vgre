@@ -716,6 +716,40 @@ def test_bce_with_logits_loss() -> bool:
     return fwd_err < 1e-4 and mean_ok and grad_err < 1e-4 and sum_ok
 
 
+def test_hinge_loss() -> bool:
+    # hinge_loss(pred, target) = max(0, 1 - target*pred), target in {-1,+1},
+    # composed from existing ops (mul/add/scale/relu/mean, no new C kernel).
+    # Checks forward against a from-scratch NumPy reference, the gradient
+    # (-target where the margin is violated, 0 once a sample clears it) via
+    # autograd, and all three reduction modes. Targets/preds are drawn so no
+    # margin lands exactly on the non-differentiable knee at 1-t*p==0.
+    rng2 = np.random.default_rng(91)
+    pred_np = rng2.standard_normal(64).astype(np.float32) * 2.0
+    target_np = rng2.choice([-1.0, 1.0], size=64).astype(np.float32)
+
+    def hinge_ref(p, t):
+        return np.maximum(0.0, 1.0 - t * p)
+    def hinge_grad_ref(p, t):
+        return np.where(1.0 - t * p > 0.0, -t, 0.0)
+
+    pred = nn.tensor(pred_np, requires_grad=True)
+    target = nn.tensor(target_np)
+    y = nn.hinge_loss(pred, target, reduction="none")
+    ref = hinge_ref(pred_np.astype(np.float64), target_np.astype(np.float64)).astype(np.float32)
+    fwd_err = float(np.max(np.abs(y.numpy() - ref)))
+
+    loss = nn.hinge_loss(pred, target, reduction="mean")
+    mean_ok = bool(np.allclose(loss.numpy(), np.mean(ref), atol=1e-5))
+    loss.backward()
+    grad_ref = hinge_grad_ref(pred_np.astype(np.float64), target_np.astype(np.float64)).astype(np.float32)
+    grad_err = float(np.max(np.abs(pred.grad() - grad_ref / pred_np.size)))
+
+    sum_ok = bool(np.allclose(nn.hinge_loss(pred, target, reduction="sum").numpy(),
+                               np.sum(ref), atol=1e-3))
+    print(f"[hinge_loss] fwd_err={fwd_err:.1e} mean_ok={mean_ok} grad_err={grad_err:.1e} sum_ok={sum_ok}")
+    return fwd_err < 1e-5 and mean_ok and grad_err < 1e-4 and sum_ok
+
+
 def test_label_smoothing_cross_entropy() -> bool:
     # label_smoothing_cross_entropy spreads `smoothing` mass off the true
     # class uniformly over all V classes, then reuses softmax_cross_entropy_soft.
@@ -1943,6 +1977,7 @@ def main() -> int:
         test_activation_modules, test_mish, test_log_sigmoid, test_elu,
         test_celu, test_hardswish, test_relu6, test_softshrink, test_tanhshrink, test_hardtanh,
         test_huber_loss, test_mse_loss, test_l1_loss, test_bce_with_logits_loss,
+        test_hinge_loss,
         test_label_smoothing_cross_entropy,
         test_kl_div_loss,
         test_selu, test_softmin, test_gaussian, test_swiglu_mlp, test_geglu_mlp,
