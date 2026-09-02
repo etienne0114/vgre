@@ -17,8 +17,13 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Do NOT cancel in-progress runs on push: an active auto-committing agent pushes
+  # frequently, and cancel-in-progress killed every run mid-flight — so the slow
+  # Windows job never finished and its LLVM cache never saved (a vicious cycle).
+  # Letting push runs complete lets Windows finish once and seed its cache, after
+  # which it is fast. PR updates still supersede older runs (keyed per-ref/event).
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── Linux: the verified baseline (required) ──────────────────────────────
