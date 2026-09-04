@@ -84,10 +84,18 @@ for _flag in ({"allow_flagging": "never"}, {"flagging_mode": "never"}, {}):
         continue
 
 if __name__ == "__main__":
-    # ssr_mode=False is the authoritative way to keep Gradio's Node SSR proxy
-    # off on HF (see the GRADIO_SSR_MODE note above). It's a no-op kwarg on
-    # Gradio <5, so fall back to a plain launch there.
+    # ssr_mode=False keeps Gradio's Node SSR proxy off on HF (see the
+    # GRADIO_SSR_MODE note above); it's a no-op kwarg on Gradio <5.
+    # prevent_thread_lock=True makes launch() return immediately: on this HF +
+    # Gradio 6 combo the default blocking launch returned on its own, so the
+    # script ended and the server died right after "Running on local URL"
+    # (Space -> RUNTIME_ERROR). We then block the main thread ourselves so the
+    # process — and the server thread — stay alive for good.
+    kwargs = dict(server_name="0.0.0.0", server_port=7860, prevent_thread_lock=True)
     try:
-        demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=False)
+        demo.launch(ssr_mode=False, **kwargs)
     except TypeError:
-        demo.launch(server_name="0.0.0.0", server_port=7860)
+        demo.launch(**kwargs)
+    import time
+    while True:
+        time.sleep(3600)
