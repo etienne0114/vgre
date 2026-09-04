@@ -16,6 +16,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 os.environ.setdefault("VGRE_LIB_PATH", os.path.join(_HERE, "libvgre_nn.so"))
 
+# Disable Gradio 6's SSR (a Node.js proxy on :7860 fronting Python on :7861).
+# On HF's basic CPU tier that Node layer tears the process down right after
+# "Running on local URL" ("Stopping Node.js server..."), so the Space never
+# stays up. Force a pure-Python server on :7860. Must be set before `import
+# gradio`. Env var (not a launch kwarg) so it's a no-op on Gradio 4.x too.
+os.environ.setdefault("GRADIO_SSR_MODE", "False")
+
 import numpy as np  # noqa: E402
 import gradio as gr  # noqa: E402
 import vgre  # noqa: E402
