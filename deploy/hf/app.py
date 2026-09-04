@@ -83,19 +83,14 @@ for _flag in ({"allow_flagging": "never"}, {"flagging_mode": "never"}, {}):
     except TypeError:
         continue
 
-if __name__ == "__main__":
-    # ssr_mode=False keeps Gradio's Node SSR proxy off on HF (see the
-    # GRADIO_SSR_MODE note above); it's a no-op kwarg on Gradio <5.
-    # prevent_thread_lock=True makes launch() return immediately: on this HF +
-    # Gradio 6 combo the default blocking launch returned on its own, so the
-    # script ended and the server died right after "Running on local URL"
-    # (Space -> RUNTIME_ERROR). We then block the main thread ourselves so the
-    # process — and the server thread — stay alive for good.
-    kwargs = dict(server_name="0.0.0.0", server_port=7860, prevent_thread_lock=True)
-    try:
-        demo.launch(ssr_mode=False, **kwargs)
-    except TypeError:
-        demo.launch(**kwargs)
-    import time
-    while True:
-        time.sleep(3600)
+# Launch at MODULE LEVEL, not under `if __name__ == "__main__"`: HF Spaces
+# imports this file as a module (its __name__ is "app", not "__main__"), so a
+# guarded launch never runs and HF's own auto-launch — which exited right after
+# "Running on local URL" (Space -> RUNTIME_ERROR) — took over instead. Calling
+# launch() here means OUR blocking launch runs, keeping the server alive.
+# ssr_mode=False keeps Gradio 6's Node SSR proxy off (no-op kwarg on Gradio <5).
+_launch = dict(server_name="0.0.0.0", server_port=7860)
+try:
+    demo.launch(ssr_mode=False, **_launch)
+except TypeError:
+    demo.launch(**_launch)
