@@ -48,7 +48,7 @@ def generate(prompt: str, max_tokens: int, temperature: float) -> str:
     return prompt + bytes(int(t) & 0xFF for t in gen).decode("utf-8", "replace")
 
 
-demo = gr.Interface(
+_iface_kwargs = dict(
     fn=generate,
     inputs=[
         gr.Textbox(label="Prompt", value="VGRE runs machine learning"),
@@ -62,8 +62,18 @@ demo = gr.Interface(
         "small byte-level **demo model**; point the engine at a trained checkpoint "
         "for real quality. Source: https://github.com/etienne0114/vgre"
     ),
-    allow_flagging="never",
 )
+
+# The kwarg that disables the flag button was renamed across Gradio majors
+# (4.x: allow_flagging="never"; 5.x: flagging_mode="never"; 6.x dropped it).
+# HF picks the Gradio version, so try each name and fall back to none — the app
+# must never die on an unknown-keyword TypeError just to hide a button.
+for _flag in ({"allow_flagging": "never"}, {"flagging_mode": "never"}, {}):
+    try:
+        demo = gr.Interface(**_iface_kwargs, **_flag)
+        break
+    except TypeError:
+        continue
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
