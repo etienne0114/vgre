@@ -1,6 +1,7 @@
-# Do NOT pin gradio here: HF's Gradio SDK injects its own gradio (the version
-# from README's sdk_version, else its latest) into the same pip install, so a
-# hard pin can collide with it (ResolutionImpossible). The Gradio version is
-# selected via `sdk_version` in README.md; app.py is written to work across
-# Gradio 4/5/6 regardless. Keep this file to the extra deps HF doesn't provide.
+# Do NOT pin gradio here, and do NOT set sdk_version in README either: HF's
+# Gradio SDK injects its own gradio (its default, currently 6.x) into the same
+# pip install, and that default is the version guaranteed compatible with HF's
+# base image (an older pin like 4.44.1 breaks: it imports HfFolder, which the
+# image's newer huggingface_hub has removed). app.py is written to run on
+# whatever gradio HF provides (4/5/6). Keep this file to deps HF doesn't ship.
 numpy
