@@ -19,9 +19,10 @@ os.environ.setdefault("VGRE_LIB_PATH", os.path.join(_HERE, "libvgre_nn.so"))
 # Disable Gradio 6's SSR (a Node.js proxy on :7860 fronting Python on :7861).
 # On HF's basic CPU tier that Node layer tears the process down right after
 # "Running on local URL" ("Stopping Node.js server..."), so the Space never
-# stays up. Force a pure-Python server on :7860. Must be set before `import
-# gradio`. Env var (not a launch kwarg) so it's a no-op on Gradio 4.x too.
-os.environ.setdefault("GRADIO_SSR_MODE", "False")
+# stays up. Gradio auto-enables SSR when it detects a Space (SPACE_ID is set),
+# so a setdefault env var is not enough — force it OFF here AND pass
+# ssr_mode=False to launch() below (the authoritative override).
+os.environ["GRADIO_SSR_MODE"] = "False"
 
 import numpy as np  # noqa: E402
 import gradio as gr  # noqa: E402
@@ -83,4 +84,10 @@ for _flag in ({"allow_flagging": "never"}, {"flagging_mode": "never"}, {}):
         continue
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # ssr_mode=False is the authoritative way to keep Gradio's Node SSR proxy
+    # off on HF (see the GRADIO_SSR_MODE note above). It's a no-op kwarg on
+    # Gradio <5, so fall back to a plain launch there.
+    try:
+        demo.launch(server_name="0.0.0.0", server_port=7860, ssr_mode=False)
+    except TypeError:
+        demo.launch(server_name="0.0.0.0", server_port=7860)
