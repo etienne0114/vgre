@@ -1,2 +1,6 @@
-gradio>=4.44
+# Pin Gradio to the 4.x line: HF installs the latest (5.x) by default, which
+# removed gr.Interface(allow_flagging=...) and other 4.x kwargs this app uses,
+# crashing the Space at startup (TypeError: unexpected keyword 'allow_flagging').
+# 4.44.1 is a stable, HF-tested release with the API app.py targets.
+gradio==4.44.1
 numpy
