@@ -1,10 +1,34 @@
 # VGRE — Remaining Work & Advanced Roadmap
 
-**Last Updated**: 2026-08-04
+**Last Updated**: 2026-09-06
 
-This file tracks **what is not yet done**. Everything implementable to the project's *real,
-no-stub* standard **without external hardware/accounts has been delivered, tested, and removed
-from this file** (see git history for the full set).
+This file tracks **what is not yet done**.
+
+> ## ⭐ Primary in-tree program (new, 2026-09): the Zero-Burden Engine
+>
+> The mission is that **anyone can run/train big models on the computer they
+> already own, installing nothing heavy first.** The single hard build burden
+> left is **LLVM 18** (~1 GB; the slow/never-finishing Windows step). The next
+> major version **removes it by building the CUDA-C → machine-code pipeline from
+> scratch, in-tree**, so the whole engine matches the `libvgre_nn` discipline
+> (LLVM/BLAS/CUDA-free). This is now the **top in-tree priority** — it is *not*
+> an "optional flag", it is a from-scratch replacement.
+>
+> Full plan + internet research + phased 0→100% program:
+> **[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)**. Footprint audit + repo
+> hygiene: [`vNext_audit_and_llvm_reduction.md`](vNext_audit_and_llvm_reduction.md).
+>
+> Layered execution backend (ship in order): **Tier 0** promote the existing PTX
+> interpreter to a runtime backend (zero codegen, works everywhere); **Tier 1**
+> copy-and-patch codegen (stencils baked in CI, stitched at runtime — no runtime
+> LLVM, à la CPython 3.13); **Tier 2** optional MIR/QBE-class SSA backend for
+> peak speed. Plus an in-tree CUDA-C front-end (own lexer/parser → VGRE-IR) and
+> making the in-tree thread pool the only threading requirement (OpenMP optional).
+
+The rest of this file tracks the **ML feature tracks** (T1–T6 and the next
+frontier), which were delivered to the project's *real, no-stub* standard; the
+externally-blocked items are unchanged. Note that the earlier claim "everything
+implementable in-tree is done" is **superseded** by the Zero-Burden program above.
 
 **Delivered baseline.** The complete in-tree large-model programme — bf16/fp16 + int4/int8
 storage, mmap safetensors / GGUF (Q4_0/Q4_1/Q8_0/Q4_K/Q6_K) + GPTQ/AWQ, BLAS-backed GEMM (82×)

@@ -107,9 +107,9 @@ struct RuntimeEngine {
 
 ### 3. Kernel Compiler (`src/compiler/`)
 
-**Purpose**: Translate GPU kernels to CPU-executable code via LLVM JIT.
+**Purpose**: Translate GPU kernels to CPU-executable code.
 
-**Pipeline**:
+**Pipeline (current)**:
 ```
 CUDA Kernel Source / PTX Input
     ↓
@@ -123,6 +123,23 @@ LLVM ORC JIT (Generate high-performance host machine code)
     ↓
 Executable Function Pointer (registered in kernelAddressMap_)
 ```
+
+> **Direction (Track Z — Zero-Burden Engine, in progress).** LLVM is the only
+> heavyweight build dependency left (~1 GB; the slow Windows step). It is being
+> replaced by an **in-tree, from-scratch pipeline** so the whole engine matches
+> the LLVM-free `libvgre_nn`. A **layered `ExecutionBackend`** replaces the ORC
+> JIT, selectable at runtime (`VGRE_EXEC_BACKEND`) with Tier 0 as the guaranteed
+> fallback:
+> - **Tier 0 — SIMD interpreter:** the existing `src/debug/ptx_interpreter.cpp`
+>   promoted to a runtime backend (zero codegen; works on every OS/arch).
+> - **Tier 1 — copy-and-patch codegen:** precompiled stencils baked at build
+>   time, stitched at runtime (near-native, **no runtime LLVM** — the CPython
+>   3.13 JIT technique).
+> - **Tier 2 — own SSA backend (optional):** VGRE-IR → classic passes →
+>   linear-scan register allocation → x86-64/AArch64 emitter (MIR/QBE-class).
+>
+> A hand-written CUDA-C lexer/parser → **VGRE-IR** replaces the Clang front-end
+> for the documented CUDA-C subset. See [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
 
 **Key Files**:
 - `clang_kernel_parser.cpp` - Parse CUDA kernel source and build AST representations

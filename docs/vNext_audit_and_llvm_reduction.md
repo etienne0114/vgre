@@ -3,6 +3,13 @@
 **Date:** 2026-09-06 · **Scope:** whole-repo audit, doc-truth reconciliation, and a
 concrete plan to make VGRE lightweight by removing the mandatory LLVM dependency.
 
+> **Direction note (2026-09-06):** the chosen strategy is a **from-scratch
+> replacement** of the LLVM path, *not* an optional `VGRE_ENABLE_JIT` flag — see
+> **[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)** for the authoritative plan.
+> The **footprint measurements, repo-hygiene findings, and doc-truth table below
+> remain valid** and feed that plan; where §2 here mentions an "optional flag",
+> read it as superseded by the layered from-scratch `ExecutionBackend`.
+
 This document is the research deliverable behind the next version. It records
 (1) what is actually true in the tree today, (2) issues that need attention, and
 (3) a staged plan to build the parts we need from scratch so LLVM is optional —

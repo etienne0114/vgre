@@ -1,14 +1,46 @@
 # VGRE Implementation Plan — Advanced Feature Roadmap (2026)
 
-**Last Updated**: 2026-07-21
+**Last Updated**: 2026-09-06
 
-The original Phase-4 enterprise roadmap (50 tracks) **and** the large-model programme (L1–L5)
-are delivered to their software-implementable core — every track buildable to the *real,
-no-stub* standard without external hardware/accounts is done, tested, and committed (see git
-history and `missingFeatures.md`). This plan now describes the **next competitive frontier**:
-six new capabilities that make VGRE *intelligent, modern, and lightweight*, each built **from
-scratch, dependency-free**, extending code paths that already exist. Priority order follows the
-core mission — **run/train large models on CPUs + clusters with no GPU, staying lightweight.**
+The Phase-4 enterprise roadmap, the large-model programme (L1–L5), and the six advanced ML
+tracks (T1–T6) below are delivered to their software-implementable core (see git history and
+`missingFeatures.md`).
+
+> ## 🟢 Track Z — The Zero-Burden Engine · **P0 (current top priority)**
+>
+> **Why.** The mission is that anyone can run/train big models on the computer
+> they already own, **installing nothing heavy first**. The one hard build burden
+> left is **LLVM 18** (~1 GB; the slow/never-finishing Windows build). Track Z
+> removes it by building the **CUDA-C → machine-code pipeline from scratch,
+> in-tree** — the same discipline that already makes `libvgre_nn` LLVM/BLAS/CUDA-
+> free — extended to the whole engine. This is a *from-scratch replacement*, not
+> an optional flag.
+>
+> **Phases (test-first, no stubs):**
+> - **Z-A Decouple & prove the fallback:** drop `llvm::json`→in-tree JSON;
+>   promote `src/debug/ptx_interpreter.cpp` to a runtime `ExecutionBackend`; route
+>   kernel launch through a backend interface. *Exit:* kernel suite passes with
+>   **LLVM absent** (interpreter tier).
+> - **Z-B Own front-end:** hand-written CUDA-C lexer + recursive-descent parser →
+>   a small SSA **VGRE-IR**; publish a growing "supported CUDA-C subset" matrix.
+> - **Z-C Fast codegen (copy-and-patch):** bake stencils in CI, stitch machine
+>   code at runtime (no runtime LLVM; CPython-3.13 technique). *Exit:* **LLVM
+>   removed from the default build.**
+> - **Z-D Peak backend + threading:** optional MIR/QBE-class SSA backend (linear-
+>   scan regalloc + native emitter) for hot kernels; make the in-tree thread pool
+>   the only threading requirement (OpenMP optional).
+> - **Z-E Packaging:** prebuilt binaries with baked stencils so end users compile
+>   nothing.
+>
+> **Full plan + internet research:** [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
+> **Success gate:** builds/runs the kernel + model suites with LLVM absent; no new
+> third-party runtime dependency; every component tested vs an independent
+> reference end-to-end.
+
+The T1–T6 tracks below remain the record of the **ML capability frontier** —
+each built **from scratch, dependency-free** in the LLVM-free `libvgre_nn`.
+Priority order follows the core mission — **run/train large models on CPUs +
+clusters with no GPU, staying lightweight.**
 
 Design rules (unchanged, non-negotiable):
 - **No stubs / mocks / heuristics / placeholders.** Every method is real and fully functioning.
