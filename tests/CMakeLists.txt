@@ -951,6 +951,12 @@ target_link_libraries(test_cuda_lexer PRIVATE vgre Threads::Threads)
 add_test(NAME CudaLexer COMMAND test_cuda_lexer)
 set_tests_properties(CudaLexer PROPERTIES TIMEOUT 30)
 
+# Track Z: the CUDA-C front-end parser -> AST.
+add_executable(test_cuda_parser compiler/test_cuda_parser.cpp)
+target_link_libraries(test_cuda_parser PRIVATE vgre Threads::Threads)
+add_test(NAME CudaParser COMMAND test_cuda_parser)
+set_tests_properties(CudaParser PROPERTIES TIMEOUT 30)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.

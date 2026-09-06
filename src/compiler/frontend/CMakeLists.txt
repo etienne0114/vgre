@@ -3,6 +3,7 @@
 # so nothing mixes. LLVM-free — this is what replaces the Clang front-end.
 add_library(vgre_frontend OBJECT
     lexer.cpp
+    parser.cpp
 )
 
 target_include_directories(vgre_frontend PUBLIC

@@ -1,0 +1,96 @@
+// AST for VGRE's CUDA-C front-end (Track Z). Compact tagged nodes (no virtuals)
+// so the PTX code generator can walk them with a simple switch. Owned by
+// unique_ptr; produced by the parser, consumed by codegen.
+#ifndef VGRE_COMPILER_FRONTEND_AST_H
+#define VGRE_COMPILER_FRONTEND_AST_H
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace vgre {
+namespace compiler {
+namespace frontend {
+
+// A C scalar type plus pointer depth and const-ness (the subset we lower).
+struct Type {
+    enum Base { Void, Bool, Char, Short, Int, Long, Float, Double };
+    Base base = Int;
+    bool isUnsigned = false;
+    int  ptr = 0;           // pointer depth: float* -> 1
+    bool isConst = false;
+
+    bool isPointer() const { return ptr > 0; }
+    bool isFloating() const { return ptr == 0 && (base == Float || base == Double); }
+    // Size in bytes of one element (the pointee if a pointer, else the scalar).
+    int elemBytes() const {
+        switch (base) {
+            case Void:   return 1;
+            case Bool: case Char: return 1;
+            case Short:  return 2;
+            case Int: case Float: return 4;
+            case Long: case Double: return 8;
+        }
+        return 4;
+    }
+};
+
+// ── Expressions ───────────────────────────────────────────────────────────────
+struct Expr {
+    enum Kind { IntLit, FloatLit, Ident, Member, Index, Unary, Binary, Assign, Call };
+    Kind kind;
+    int line = 0, col = 0;
+
+    int64_t     ival = 0;   // IntLit
+    double      fval = 0;   // FloatLit
+    std::string str;        // Ident name / Member field / Call callee / operator spelling
+    std::vector<std::unique_ptr<Expr>> args;
+    // Member: args[0]=object, str=field.  Index: args[0]=base, args[1]=index.
+    // Unary: str=op, args[0].  Binary: str=op, args[0],args[1].
+    // Assign: str=op ("="/"+="/…), args[0]=lhs, args[1]=rhs.  Call: str=callee, args=params.
+};
+using ExprPtr = std::unique_ptr<Expr>;
+
+// ── Statements ────────────────────────────────────────────────────────────────
+struct Stmt {
+    enum Kind { VarDecl, ExprStmt, If, For, While, Block, Return, Empty };
+    Kind kind;
+    int line = 0, col = 0;
+
+    Type        type;       // VarDecl: declared type
+    std::string name;       // VarDecl: variable name
+    ExprPtr     expr;       // VarDecl init / ExprStmt / Return value / If & While condition
+
+    std::vector<std::unique_ptr<Stmt>> body;      // Block stmts / loop body / If then-branch
+    std::vector<std::unique_ptr<Stmt>> elseBody;  // If else-branch
+
+    // For: init statement + condition + increment expression (+ body above).
+    std::unique_ptr<Stmt> forInit;
+    ExprPtr forCond;
+    ExprPtr forIncr;
+};
+using StmtPtr = std::unique_ptr<Stmt>;
+
+// ── Kernel / module ───────────────────────────────────────────────────────────
+struct Param {
+    Type type;
+    std::string name;
+};
+
+struct Kernel {
+    std::string name;
+    std::vector<Param> params;
+    std::vector<StmtPtr> body;
+    bool isGlobal = false;  // had __global__
+};
+
+struct Module {
+    std::vector<std::unique_ptr<Kernel>> kernels;
+};
+
+}  // namespace frontend
+}  // namespace compiler
+}  // namespace vgre
+
+#endif  // VGRE_COMPILER_FRONTEND_AST_H
