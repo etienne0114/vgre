@@ -945,6 +945,12 @@ target_link_libraries(test_json PRIVATE vgre Threads::Threads)
 add_test(NAME CommonJson COMMAND test_json)
 set_tests_properties(CommonJson PROPERTIES TIMEOUT 30)
 
+# Track Z (Zero-Burden Engine): the from-scratch CUDA-C front-end lexer.
+add_executable(test_cuda_lexer compiler/test_cuda_lexer.cpp)
+target_link_libraries(test_cuda_lexer PRIVATE vgre Threads::Threads)
+add_test(NAME CudaLexer COMMAND test_cuda_lexer)
+set_tests_properties(CudaLexer PROPERTIES TIMEOUT 30)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.
