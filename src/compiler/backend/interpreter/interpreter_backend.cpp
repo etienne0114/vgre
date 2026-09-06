@@ -55,20 +55,15 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
         return false;
     }
 
-    // The PtxInterpreter is 1D today; Track Z will extend it to full 3D. Warn if
-    // the launch actually used the y/z dimensions (which the kernel cannot yet
-    // observe), then run the x dimension.
-    if (cfg.gridDim[1] != 1 || cfg.gridDim[2] != 1 ||
-        cfg.blockDim[1] != 1 || cfg.blockDim[2] != 1) {
-        VGRE_LOG_WARN("InterpreterBackend",
-            "3D launch geometry not yet supported by the interpreter tier — "
-            "running the x dimension only (Track Z: 3D interpreter pending).");
-    }
-
     try {
         vgre::debug::PtxInterpreter in(k->ptx(), k->entry());
-        in.launch(static_cast<int>(cfg.gridDim[0]),
-                  static_cast<int>(cfg.blockDim[0]), args, numArgs);
+        const vgre::debug::Dim3 grid{static_cast<int>(cfg.gridDim[0]),
+                                     static_cast<int>(cfg.gridDim[1]),
+                                     static_cast<int>(cfg.gridDim[2])};
+        const vgre::debug::Dim3 block{static_cast<int>(cfg.blockDim[0]),
+                                      static_cast<int>(cfg.blockDim[1]),
+                                      static_cast<int>(cfg.blockDim[2])};
+        in.launch(grid, block, args, numArgs);
         return in.resume() == vgre::debug::StopReason::Exited;
     } catch (const std::exception& e) {
         VGRE_LOG_ERROR("InterpreterBackend",

@@ -64,6 +64,13 @@ struct RegVal {
 // Why the machine stopped.
 enum class StopReason { Running, Breakpoint, Step, Exited, Fault };
 
+// A CUDA-style 3D extent (grid or block). Components default to 1 so a plain
+// 1D launch is {n,1,1}.
+struct Dim3 {
+    int x = 1, y = 1, z = 1;
+    int total() const { return x * y * z; }
+};
+
 class PtxInterpreter {
 public:
     // Parses `ptx` and prepares kernel `entry` for execution. Throws
@@ -72,7 +79,10 @@ public:
 
     // Launch configuration + kernel arguments (CUDA-style: one pointer per
     // .param, dereferenced to the param's size). Resets all execution state.
+    // The 1D overload is a convenience for {gridX,1,1} × {blockX,1,1}; the 3D
+    // overload exposes the full grid/block extents (real %tid/%ctaid .y/.z).
     void launch(int gridX, int blockX, void* const* args, int numArgs);
+    void launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs);
 
     // ── Execution (debugger surface) ─────────────────────────────────────────
     // Run until a breakpoint fires on any thread, or the whole grid exits.
@@ -87,8 +97,8 @@ public:
 
     // ── Inspection ───────────────────────────────────────────────────────────
     const PtxKernel& kernel() const { return kernel_; }
-    int  numThreads() const { return blockX_; }
-    int  currentCta() const { return cta_; }
+    int  numThreads() const { return blockTotal_; }  // threads per CTA (x*y*z)
+    int  currentCta() const { return cta_; }         // linear CTA index
     bool exited() const { return exited_; }
     int  stoppedThread() const { return stoppedThread_; }  // thread that hit the bp/step
     int  pcOf(int thread) const;
@@ -131,7 +141,14 @@ private:
     PtxKernel kernel_;
     std::vector<std::string> regNames_;
 
-    int gridX_ = 0, blockX_ = 0, cta_ = 0;
+    // 3D launch geometry. gridDim_ = %nctaid.{x,y,z}, blockDim_ = %ntid.{x,y,z}.
+    // cta_ is the linear CTA counter (0..gridTotal_); ctaIdx_ is its %ctaid.{x,y,z}.
+    int gridDim_[3]  = {1, 1, 1};
+    int blockDim_[3] = {1, 1, 1};
+    int gridTotal_ = 0;   // gridDim_ x*y*z
+    int blockTotal_ = 0;  // blockDim_ x*y*z
+    int cta_ = 0;
+    int ctaIdx_[3] = {0, 0, 0};
     std::vector<uint8_t> paramBlock_;
     std::vector<uint8_t> shared_;
     std::vector<Thread> threads_;

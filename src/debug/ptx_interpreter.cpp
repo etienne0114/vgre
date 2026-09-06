@@ -251,12 +251,21 @@ void PtxInterpreter::parse(const std::string& ptx, const std::string& entry) {
 // ── Launch / scheduling ───────────────────────────────────────────────────────
 
 void PtxInterpreter::launch(int gridX, int blockX, void* const* args, int numArgs) {
-    if (gridX <= 0 || blockX <= 0) throw std::runtime_error("PTX: bad launch config");
+    // 1D convenience: {gridX,1,1} × {blockX,1,1}.
+    launch(Dim3{gridX, 1, 1}, Dim3{blockX, 1, 1}, args, numArgs);
+}
+
+void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs) {
+    if (grid.x <= 0 || grid.y <= 0 || grid.z <= 0 ||
+        block.x <= 0 || block.y <= 0 || block.z <= 0)
+        throw std::runtime_error("PTX: bad launch config");
     if (numArgs != (int)kernel_.params.size())
         throw std::runtime_error("PTX: kernel expects " +
                                  std::to_string(kernel_.params.size()) + " args");
-    gridX_ = gridX;
-    blockX_ = blockX;
+    gridDim_[0] = grid.x;   gridDim_[1] = grid.y;   gridDim_[2] = grid.z;
+    blockDim_[0] = block.x; blockDim_[1] = block.y; blockDim_[2] = block.z;
+    gridTotal_  = grid.total();
+    blockTotal_ = block.total();
     int total = 0;
     for (const auto& p : kernel_.params) total = std::max(total, p.offset + p.sizeBytes);
     paramBlock_.assign((size_t)total, 0);
@@ -269,8 +278,12 @@ void PtxInterpreter::launch(int gridX, int blockX, void* const* args, int numArg
 
 void PtxInterpreter::startCta(int cta) {
     cta_ = cta;
+    // Decompose the linear CTA index into %ctaid.{x,y,z} (x fastest).
+    ctaIdx_[0] = cta % gridDim_[0];
+    ctaIdx_[1] = (cta / gridDim_[0]) % gridDim_[1];
+    ctaIdx_[2] = cta / (gridDim_[0] * gridDim_[1]);
     shared_.assign((size_t)std::max(kernel_.sharedBytes, 1), 0);
-    threads_.assign((size_t)blockX_, Thread{});
+    threads_.assign((size_t)blockTotal_, Thread{});
 }
 
 bool PtxInterpreter::ctaFinished() const {
@@ -312,7 +325,7 @@ StopReason PtxInterpreter::resume() {
             }
         }
         if (ctaFinished()) {
-            if (cta_ + 1 < gridX_) { startCta(cta_ + 1); continue; }
+            if (cta_ + 1 < gridTotal_) { startCta(cta_ + 1); continue; }
             exited_ = true;
             return StopReason::Exited;
         }
@@ -333,7 +346,7 @@ StopReason PtxInterpreter::stepThread(int thread) {
     if (t.done) return StopReason::Step;
     if (t.atBarrier) releaseBarrierIfReady();
     if (!t.atBarrier) execOne(t, thread);
-    if (ctaFinished() && cta_ + 1 >= gridX_) { exited_ = true; return StopReason::Exited; }
+    if (ctaFinished() && cta_ + 1 >= gridTotal_) { exited_ = true; return StopReason::Exited; }
     return StopReason::Step;
 }
 
@@ -405,14 +418,21 @@ uint64_t PtxInterpreter::evalOperand(Thread& t, int tid, const std::string& s,
                                      int /*sizeBytes*/) const {
     if (s.empty()) return 0;
     if (s[0] == '%') {
-        if (s == "%tid.x") return (uint64_t)tid;
-        if (s == "%tid.y" || s == "%tid.z") return 0;
-        if (s == "%ntid.x") return (uint64_t)blockX_;
-        if (s == "%ntid.y" || s == "%ntid.z") return 1;
-        if (s == "%ctaid.x") return (uint64_t)cta_;
-        if (s == "%ctaid.y" || s == "%ctaid.z") return 0;
-        if (s == "%nctaid.x") return (uint64_t)gridX_;
-        if (s == "%nctaid.y" || s == "%nctaid.z") return 1;
+        // Thread index within the CTA: decompose the linear tid into
+        // %tid.{x,y,z} using the block extents (x fastest).
+        const int bx = blockDim_[0], by = blockDim_[1];
+        if (s == "%tid.x") return (uint64_t)(tid % bx);
+        if (s == "%tid.y") return (uint64_t)((tid / bx) % by);
+        if (s == "%tid.z") return (uint64_t)(tid / (bx * by));
+        if (s == "%ntid.x") return (uint64_t)blockDim_[0];
+        if (s == "%ntid.y") return (uint64_t)blockDim_[1];
+        if (s == "%ntid.z") return (uint64_t)blockDim_[2];
+        if (s == "%ctaid.x") return (uint64_t)ctaIdx_[0];
+        if (s == "%ctaid.y") return (uint64_t)ctaIdx_[1];
+        if (s == "%ctaid.z") return (uint64_t)ctaIdx_[2];
+        if (s == "%nctaid.x") return (uint64_t)gridDim_[0];
+        if (s == "%nctaid.y") return (uint64_t)gridDim_[1];
+        if (s == "%nctaid.z") return (uint64_t)gridDim_[2];
         if (s == "%laneid") return (uint64_t)(tid & 31);
         if (s == "%warpid") return (uint64_t)(tid >> 5);
         auto p = t.preds.find(s);

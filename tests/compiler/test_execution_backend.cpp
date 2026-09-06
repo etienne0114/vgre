@@ -74,6 +74,65 @@ $L__BB0_2:
 }
 )";
 
+// 2D kernel: out[gid] = gid, where the 4x4 element grid is covered by a 2x2
+// grid of 2x2 blocks. Exercises %tid.y, %ntid.y, %ctaid.y, %nctaid.x.
+static const char* kFill2D = R"(
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry fill2d(
+    .param .u64 fill2d_param_0
+)
+{
+    .reg .b32   %r<12>;
+    .reg .b64   %rd<5>;
+
+    ld.param.u64    %rd1, [fill2d_param_0];
+    cvta.to.global.u64  %rd2, %rd1;
+    mov.u32         %r1, %ctaid.x;
+    mov.u32         %r2, %ntid.x;
+    mov.u32         %r3, %tid.x;
+    mad.lo.s32      %r4, %r1, %r2, %r3;     // global_x
+    mov.u32         %r5, %ctaid.y;
+    mov.u32         %r6, %ntid.y;
+    mov.u32         %r7, %tid.y;
+    mad.lo.s32      %r8, %r5, %r6, %r7;     // global_y
+    mov.u32         %r9, %nctaid.x;
+    mul.lo.s32      %r10, %r9, %r2;         // width = nctaid.x * ntid.x
+    mad.lo.s32      %r11, %r8, %r10, %r4;   // gid = global_y*width + global_x
+    mul.wide.s32    %rd3, %r11, 4;
+    add.s64         %rd4, %rd2, %rd3;
+    st.global.u32   [%rd4], %r11;
+    ret;
+}
+)";
+
+// Run the 2D fill through `be`: out[i] must equal i for a 4x4 element grid.
+static void run_fill2d(ExecutionBackend& be, const char* label) {
+    const int W = 4, H = 4, N = W * H;
+    std::vector<int> out(N, -1);
+    int* op = out.data();
+    void* args[] = {&op};
+
+    auto kernel = be.preparePtx(kFill2D, "fill2d");
+    CHECK(kernel != nullptr, "preparePtx(fill2d) succeeds");
+    if (!kernel) return;
+
+    LaunchConfig cfg;                 // 2x2 grid of 2x2 blocks -> 4x4 elements
+    cfg.gridDim[0] = 2;  cfg.gridDim[1] = 2;
+    cfg.blockDim[0] = 2; cfg.blockDim[1] = 2;
+
+    bool ok = be.launch(*kernel, cfg, args, 1);
+    CHECK(ok, "2D backend launch runs to completion");
+
+    int mismatches = 0;
+    for (int i = 0; i < N; ++i)
+        if (out[i] != i) ++mismatches;
+    CHECK(mismatches == 0, "2D fill: out[i] == i for all 16 elements (3D indexing works)");
+    std::printf("  [%s] fill2d mismatches = %d\n", label, mismatches);
+}
+
 // Run saxpy over gridX CTAs × blockX threads through `be` and verify the result.
 static void run_saxpy(ExecutionBackend& be, const char* label) {
     const int N = 64;
@@ -118,6 +177,7 @@ int main() {
         CHECK(std::string(interp->name()) == "interpreter", "backend name is 'interpreter'");
         CHECK(interp->acceptsPtx(), "interpreter backend accepts PTX");
         run_saxpy(*interp, "interpreter");
+        run_fill2d(*interp, "interpreter");  // 3D grid/block indexing
     }
 
     // 2) Unknown backend name returns nullptr (no crash).
