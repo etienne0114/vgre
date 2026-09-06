@@ -938,6 +938,13 @@ target_link_libraries(test_tokenizer PRIVATE vgre)
 add_test(NAME XlaTokenizer COMMAND test_tokenizer)
 set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
 
+# In-tree JSON (vgre::common::json): parser + serializer completeness, so the
+# engine needs no third-party JSON dependency (Track Z).
+add_executable(test_json common/test_json.cpp)
+target_link_libraries(test_json PRIVATE vgre Threads::Threads)
+add_test(NAME CommonJson COMMAND test_json)
+set_tests_properties(CommonJson PROPERTIES TIMEOUT 30)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.
