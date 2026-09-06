@@ -1091,6 +1091,7 @@ endfunction()
 vgre_add_subdirectory(src/common)
 vgre_add_subdirectory(src/core)
 vgre_add_subdirectory(src/compiler)
+vgre_add_subdirectory(src/compiler/backend)  # Track Z: pluggable execution backends
 vgre_add_subdirectory(src/api)
 vgre_add_subdirectory(src/runtime)
 vgre_add_subdirectory(src/advanced)
@@ -1111,6 +1112,7 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
     $<TARGET_OBJECTS:vgre_compiler>
+    $<TARGET_OBJECTS:vgre_backend>
     $<TARGET_OBJECTS:vgre_api>
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
@@ -1228,6 +1230,7 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
     $<TARGET_OBJECTS:vgre_compiler>
+    $<TARGET_OBJECTS:vgre_backend>
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
     $<TARGET_OBJECTS:vgre_compliance>

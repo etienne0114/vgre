@@ -938,6 +938,14 @@ target_link_libraries(test_tokenizer PRIVATE vgre)
 add_test(NAME XlaTokenizer COMMAND test_tokenizer)
 set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
 
+# Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
+# real saxpy PTX kernel through the Tier-0 interpreter backend via the public
+# interface + registry, with NO LLVM/codegen on the path.
+add_executable(test_execution_backend compiler/test_execution_backend.cpp)
+target_link_libraries(test_execution_backend PRIVATE vgre Threads::Threads)
+add_test(NAME ExecutionBackend COMMAND test_execution_backend)
+set_tests_properties(ExecutionBackend PROPERTIES TIMEOUT 60)
+
 # CUDA-GDB debug stepping (§6.1): PTX single-step interpreter (saxpy across
 # CTAs, bar.sync shared-memory reduction, breakpoint/step semantics) + the GDB
 # remote-serial-protocol server exercised over a real localhost socket.
