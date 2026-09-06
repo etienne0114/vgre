@@ -87,9 +87,11 @@ target_include_directories(vgre_advanced PUBLIC
     ${PROJECT_SOURCE_DIR}/src/advanced/vendor/lz4
 )
 
+# Zero-Burden (Track Z): vgre_advanced no longer depends on LLVM — the only two
+# LLVM users here (mps_control.cpp, tcp_cluster/configuration_manager_file_io.cpp)
+# were swapped from llvm::json to the in-tree vgre::common::json parser.
 target_link_libraries(vgre_advanced PRIVATE
     Threads::Threads
-    vgre_llvm_iface
 )
 
 # macOS: adaptive_execution_engine.cpp probes IOKit (AppleSMC) for thermal state.

@@ -9,14 +9,10 @@
 #endif
 
 #include "vgre/common/os_backend.h"
-#if defined(_MSC_VER)
-#  pragma warning(push)
-#  pragma warning(disable: 4244 4267 4100 4127 4624)
-#endif
-#include <llvm/Support/JSON.h>
-#if defined(_MSC_VER)
-#  pragma warning(pop)
-#endif
+// Zero-Burden (Track Z): parse cluster config with the in-tree, dependency-free
+// JSON parser instead of llvm::json — this was one of only two files pulling all
+// of LLVM into the cluster/advanced module just for JSON.
+#include "vgre/common/json.h"
 
 namespace vgre {
 namespace advanced {
@@ -59,44 +55,36 @@ bool ConfigurationManager::saveToYamlFile(const std::string& file_path, const Cl
     return ok;
 }
 
-// ── JSON Parser (llvm::json) ──
+// ── JSON Parser (in-tree vgre::common::json) ──
 
 bool ConfigurationManager::parseJsonConfiguration(const std::string& json_content, ClusterConfiguration& config) {
-    llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(json_content);
-    if (!parsed) {
-        std::string errMsg;
-        llvm::raw_string_ostream os(errMsg);
-        os << parsed.takeError();
-        VGRE_LOG_ERROR("ConfigurationManager", "JSON parse error: " + os.str());
+    vgre::common::json::Value root;
+    if (!vgre::common::json::parse(json_content, root)) {
+        VGRE_LOG_ERROR("ConfigurationManager", "JSON parse error");
         return false;
     }
-
-    const llvm::json::Object* obj = parsed->getAsObject();
-    if (!obj) {
+    if (!root.isObject()) {
         VGRE_LOG_ERROR("ConfigurationManager", "JSON root must be an object");
         return false;
     }
 
-    // Helper lambdas for type-safe extraction with graceful fallback.
-    auto getInt = [&](llvm::StringRef key, int &out) {
-        if (auto *v = obj->get(key))
-            if (auto n = v->getAsInteger()) out = static_cast<int>(*n);
+    using vgre::common::json::Value;
+    // Helper lambdas for type-safe extraction with graceful fallback. JSON
+    // numbers are doubles in the in-tree parser; integer fields cast from num.
+    auto getInt = [&](const char* key, int &out) {
+        if (const Value* v = root.find(key); v && v->isNumber()) out = static_cast<int>(v->num);
     };
-    auto getUInt64 = [&](llvm::StringRef key, size_t &out) {
-        if (auto *v = obj->get(key))
-            if (auto n = v->getAsInteger()) out = static_cast<size_t>(*n);
+    auto getUInt64 = [&](const char* key, size_t &out) {
+        if (const Value* v = root.find(key); v && v->isNumber() && v->num >= 0) out = static_cast<size_t>(v->num);
     };
-    auto getDouble = [&](llvm::StringRef key, double &out) {
-        if (auto *v = obj->get(key))
-            if (auto n = v->getAsNumber()) out = *n;
+    auto getDouble = [&](const char* key, double &out) {
+        if (const Value* v = root.find(key); v && v->isNumber()) out = v->num;
     };
-    auto getBool = [&](llvm::StringRef key, bool &out) {
-        if (auto *v = obj->get(key))
-            if (auto b = v->getAsBoolean()) out = *b;
+    auto getBool = [&](const char* key, bool &out) {
+        if (const Value* v = root.find(key); v && v->isBool()) out = v->b;
     };
-    auto getString = [&](llvm::StringRef key, std::string &out) {
-        if (auto *v = obj->get(key))
-            if (auto s = v->getAsString()) out = s->str();
+    auto getString = [&](const char* key, std::string &out) {
+        if (const Value* v = root.find(key); v && v->isString()) out = v->str;
     };
 
     // Network
