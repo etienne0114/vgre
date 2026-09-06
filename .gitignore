@@ -29,6 +29,10 @@ venv/
 .dart_tool/
 .packages
 build/
+# Any local build tree (build-asan/, build_asan/, build_jit/, build_test/,
+# build-tsan/, build_rdma_fix/, …) — sanitizer/debug/experimental out-of-source
+# builds should never be tracked.
+build*/
 .flutter-plugins
 .flutter-plugins-dependencies
 vgre_dashboard/build/

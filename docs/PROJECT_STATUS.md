@@ -1,17 +1,22 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-07-03 (macOS ARM64 build-verified; docs aligned)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (**293 tests, `-j12`**) on x86-64 Linux  
-**Build Status (macOS)**: ✅ native engine builds on Apple Silicon (ARM64); integration/JIT tests pass locally; full serial `ctest` bring-up in progress  
-**Production Readiness**: core emulation is stable and verified on Linux. macOS CPU path is build-verified with dynamic toolchain discovery. The
-single hard external blocker is **GitHub Actions billing** — every CI run since
-2026-06-22 fails at job start ("recent account payments have failed"), so the
-Windows/macOS matrix cannot execute and Windows remains unverified in
-practice (CI jobs are also `workflow_dispatch`-only / `continue-on-error` on
-macOS until billing is fixed). macOS was **built and tested locally** in July
-2026 (see §1.1). Fix billing, re-enable the push/PR triggers in
-`.github/workflows/ci.yml`, and get one green windows-2022 + macos-arm64 run
-before claiming Windows CI-verified.
+**Last Updated**: 2026-09-06 (CI reactivated + green on Linux/macOS; free Streamlit demo live; LLVM-reduction plan drafted)  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (~300 tests) on x86-64 Linux — the required CI job  
+**Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64) — `test_mamba` (ARM FMA tolerance) and `PythonCAPIVectorAdd` (ctypes ABI signatures) fixed for CI  
+**Build Status (Windows)**: ⚙️ **builds in CI** on `windows-2022` (LLVM-18 tarball cached); `continue-on-error` until fully green  
+**Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
+**Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 is CI-green; Windows builds in CI.
+
+> **CI status corrected (2026-09):** the previous "GitHub Actions billing
+> blocker" is **resolved** — CI now runs free on the public repo on **every
+> push**, with Linux required and macOS/Windows informational
+> (`continue-on-error`) until fully green. The prior text below (billing failing
+> since 2026-06-22) is **historical and no longer true**.
+
+> **Next version:** a staged plan to make the heavy **LLVM dependency optional**
+> (drop `llvm::json`; add `VGRE_ENABLE_JIT`; promote the in-tree PTX interpreter
+> to a runtime backend) is in `docs/vNext_audit_and_llvm_reduction.md`. It
+> targets the slow/never-completing Windows LLVM download directly.
 
 > **2026-07-03 macOS bring-up** (in-tree, not yet full CI-green):
 > - `cmake/VGREPlatform.cmake` auto-detects Homebrew `llvm@18`, `libomp`, SDK,
