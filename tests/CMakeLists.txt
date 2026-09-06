@@ -957,6 +957,12 @@ target_link_libraries(test_cuda_parser PRIVATE vgre Threads::Threads)
 add_test(NAME CudaParser COMMAND test_cuda_parser)
 set_tests_properties(CudaParser PROPERTIES TIMEOUT 30)
 
+# Track Z: END-TO-END — CUDA-C source -> our PTX -> interpreter backend, no LLVM.
+add_executable(test_cuda_e2e compiler/test_cuda_e2e.cpp)
+target_link_libraries(test_cuda_e2e PRIVATE vgre Threads::Threads)
+add_test(NAME CudaEndToEnd COMMAND test_cuda_e2e)
+set_tests_properties(CudaEndToEnd PROPERTIES TIMEOUT 30)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.

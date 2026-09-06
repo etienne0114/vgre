@@ -4,6 +4,7 @@
 add_library(vgre_frontend OBJECT
     lexer.cpp
     parser.cpp
+    codegen.cpp
 )
 
 target_include_directories(vgre_frontend PUBLIC
