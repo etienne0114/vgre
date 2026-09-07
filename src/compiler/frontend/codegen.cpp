@@ -435,9 +435,30 @@ struct Codegen {
         return {};
     }
 
+    // atomicAdd(&arr[i], val): read-modify-write returning the old value. Threads
+    // run sequentially in the interpreter, so a plain ld/add/st is atomic.
+    Val emitAtomicAdd(const Expr& e) {
+        const Expr& a0 = *e.args[0];
+        if (a0.kind != Expr::Unary || a0.str != "&" || a0.args.empty() || a0.args[0]->kind != Expr::Index) {
+            fail("atomicAdd expects &array[index] as its first argument");
+            return {};
+        }
+        Addr addr = emitAddress(*a0.args[0]);
+        if (failed) return {};
+        const Type pt = addr.pointee;
+        Val val = coerce(emitExpr(*e.args[1]), pt);
+        if (failed) return {};
+        std::string oldv = fresh(classOf(pt)), sum = fresh(classOf(pt));
+        emit(std::string(addr.shared ? "ld.shared." : "ld.global.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
+        emit(std::string(pt.isFloating() ? "add.f32 " : "add.s32 ") + sum + ", " + oldv + ", " + val.reg + ";");
+        emit(std::string(addr.shared ? "st.shared." : "st.global.") + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
+        return {oldv, pt};
+    }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
+        if (fn == "atomicAdd" && e.args.size() == 2) return emitAtomicAdd(e);
 
         // Unary intrinsics.
         if (e.args.size() == 1) {

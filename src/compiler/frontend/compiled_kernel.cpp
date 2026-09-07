@@ -359,8 +359,36 @@ struct Compiler {
         return Cell::I(0);
     }
 
+    // atomicAdd(&arr[i], val): read-modify-write returning the old value.
+    ExprFn compileAtomicAdd(const Expr& e) {
+        const Expr& a0 = *e.args[0];
+        if (a0.kind != Expr::Unary || a0.str != "&" || a0.args.empty() || a0.args[0]->kind != Expr::Index) {
+            fail("atomicAdd expects &array[index] as its first argument");
+            return {};
+        }
+        const Expr& index = *a0.args[0];
+        ExprFn base = compileExpr(*index.args[0]);
+        ExprFn idx  = compileExpr(*index.args[1]);
+        ExprFn val  = compileExpr(*e.args[1]);
+        if (failed) return {};
+        Type pt = pointee(index);
+        int bytes = pt.elemBytes();
+        bool fp = pt.isFloating();
+        return [base, idx, val, bytes, fp](TS& ts) -> Cell {
+            void* addr = reinterpret_cast<void*>(base(ts).asI() + idx(ts).asI() * bytes);
+            Cell v = val(ts);
+            if (fp) {
+                if (bytes == 8) { double d; std::memcpy(&d, addr, 8); double nd = d + v.asF(); std::memcpy(addr, &nd, 8); return Cell::F(d); }
+                float f; std::memcpy(&f, addr, 4); float nf = f + static_cast<float>(v.asF()); std::memcpy(addr, &nf, 4); return Cell::F(f);
+            }
+            if (bytes == 8) { int64_t x; std::memcpy(&x, addr, 8); int64_t nx = x + v.asI(); std::memcpy(addr, &nx, 8); return Cell::I(x); }
+            int32_t x; std::memcpy(&x, addr, 4); int32_t nx = x + static_cast<int32_t>(v.asI()); std::memcpy(addr, &nx, 4); return Cell::I(static_cast<int64_t>(x));
+        };
+    }
+
     ExprFn compileCall(const Expr& e) {
         const std::string& fn = e.str;
+        if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         if (e.args.size() == 1) {
             ExprFn a = compileExpr(*e.args[0]); if (failed) return {};
             if (fn == "abs")   return [a](TS& ts) { Cell v = a(ts); return v.isFloat ? Cell::F(std::fabs(v.f)) : Cell::I(std::llabs((long long)v.i)); };

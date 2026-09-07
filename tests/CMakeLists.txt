@@ -977,6 +977,12 @@ target_link_libraries(test_cuda_subset2 PRIVATE vgre Threads::Threads)
 add_test(NAME CudaSubset2 COMMAND test_cuda_subset2)
 set_tests_properties(CudaSubset2 PROPERTIES TIMEOUT 30)
 
+# Track Z: atomicAdd (histogram/scatter-reduce) on both tiers.
+add_executable(test_cuda_atomic compiler/test_cuda_atomic.cpp)
+target_link_libraries(test_cuda_atomic PRIVATE vgre Threads::Threads)
+add_test(NAME CudaAtomic COMMAND test_cuda_atomic)
+set_tests_properties(CudaAtomic PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
