@@ -65,13 +65,18 @@ universal tier first, faster tiers added without breaking correctness:
   warp loop (execute 8/16 threads per SIMD lane). **No machine-code generation at
   all → works on every OS/arch instantly, zero deps.** This is the MVP and the
   permanent fallback.
-- **Tier 1 — Copy-and-patch codegen.** Bake **stencils** (precompiled binary
-  templates with holes) for each VGRE-IR op at **VGRE build time** using the
-  ordinary compiler, ship them inside the library, and at runtime **copy + patch**
-  the holes to stitch a kernel's machine code. This is exactly the technique in
-  CPython 3.13's JIT: near-native speed, tiny runtime, and — crucially — **no
-  LLVM on the user's machine and none at runtime** (Copy-and-Patch, Xu &
-  Kjolstad, arXiv:2011.13127).
+- **Tier 1 — Compiled backend (DONE).** The CUDA-C AST is lowered **once** to
+  slot-based bound closures (`include/vgre/compiler/frontend/compiled_kernel.h`)
+  and executed per-thread with zero string parsing — **~32× faster than the
+  interpreter** (saxpy, N=4096), portable (pure C++, every arch), LLVM-free.
+  Covers the barrier-free subset; `__shared__`/`__syncthreads` kernels fall back
+  to Tier 0 (they need cooperative scheduling). Selected via
+  `VGRE_EXEC_BACKEND=compiled`.
+  - *Future Tier-1b — native copy-and-patch.* Bake per-op machine-code
+    **stencils** at build time and stitch+patch them at runtime for near-native
+    speed with no runtime LLVM (CPython 3.13's technique; Copy-and-Patch, Xu &
+    Kjolstad, arXiv:2011.13127). Arch-specific (x86-64/AArch64), so it layers on
+    top of the portable compiled tier rather than replacing it.
 - **Tier 2 — Own SSA optimizing backend (long-term).** A MIR/QBE-class in-tree
   backend: VGRE-IR (SSA) → a few classic passes (const-fold, DCE, GVN, LICM) →
   **linear-scan register allocation** (Poletto & Sarkar, O(n), JIT-grade) → a
