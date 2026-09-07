@@ -79,6 +79,15 @@ struct Codegen {
     static Type intType() { Type t; t.base = Type::Int; return t; }
     static Type floatType() { Type t; t.base = Type::Float; return t; }
 
+    // The PTX-interpreter codegen tier is 32-bit int / f32 float. Reject 64-bit
+    // scalar types (double/long) rather than silently truncating them — such
+    // kernels correctly use the compiled tier (int64/double) or the JIT.
+    bool ensureSupported(const Type& t) {
+        if (t.base == Type::Double) { fail("'double' unsupported by the interpreter codegen tier — use the compiled tier or the JIT"); return false; }
+        if (t.base == Type::Long)   { fail("'long'/64-bit int unsupported by the interpreter codegen tier — use the compiled tier or the JIT"); return false; }
+        return true;
+    }
+
     // PTX ld/st/param type suffix for a scalar (pointee) type.
     static const char* memSuffix(const Type& t) { return t.isFloating() ? "f32" : "u32"; }
 
@@ -191,6 +200,7 @@ struct Codegen {
     }
 
     Val emitCast(const Expr& e) {
+        if (!ensureSupported(e.castType)) return {};
         Val v = emitExpr(*e.args[0]);
         if (failed) return {};
         Val r = coerce(v, e.castType);
@@ -568,6 +578,7 @@ struct Codegen {
         line = s.line; col = s.col;
         switch (s.kind) {
             case Stmt::VarDecl: {
+                if (!ensureSupported(s.type)) return;
                 if (s.arraySize > 0) {
                     if (!s.isShared) { fail("local arrays are unsupported; use __shared__"); return; }
                     // __shared__ T name[N]  ->  .shared .align 4 .b8 name[N*sizeof(T)]
@@ -642,6 +653,7 @@ struct Codegen {
         // Load parameters into registers / global pointers.
         for (const Param& p : k.params) {
             if (p.name.empty()) continue;  // unnamed param: nothing binds to it
+            if (!ensureSupported(p.type)) return "";
             if (p.type.isPointer()) {
                 std::string raw = fresh(RC::RD64), gbl = fresh(RC::RD64);
                 emit("ld.param.u64 " + raw + ", [" + p.name + "];");

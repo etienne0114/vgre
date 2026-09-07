@@ -983,6 +983,12 @@ target_link_libraries(test_cuda_atomic PRIVATE vgre Threads::Threads)
 add_test(NAME CudaAtomic COMMAND test_cuda_atomic)
 set_tests_properties(CudaAtomic PROPERTIES TIMEOUT 30)
 
+# Track Z: double precision — compiled tier runs it; codegen rejects cleanly.
+add_executable(test_cuda_double compiler/test_cuda_double.cpp)
+target_link_libraries(test_cuda_double PRIVATE vgre Threads::Threads)
+add_test(NAME CudaDouble COMMAND test_cuda_double)
+set_tests_properties(CudaDouble PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
