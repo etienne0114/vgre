@@ -970,6 +970,13 @@ target_link_libraries(test_cuda_subset PRIVATE vgre Threads::Threads)
 add_test(NAME CudaSubset COMMAND test_cuda_subset)
 set_tests_properties(CudaSubset PROPERTIES TIMEOUT 30)
 
+# Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
+# speed vs the interpreter + clean barrier-kernel fallback.
+add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
+target_link_libraries(test_compiled_kernel PRIVATE vgre Threads::Threads)
+add_test(NAME CompiledKernel COMMAND test_compiled_kernel)
+set_tests_properties(CompiledKernel PROPERTIES TIMEOUT 60)
+
 # Track Z: the real CUDA-on-CPU C-ABI (register+launch) routed through the
 # interpreter backend via VGRE_EXEC_BACKEND — no LLVM for this kernel.
 add_executable(test_backend_dispatch api/test_backend_dispatch.cpp)
