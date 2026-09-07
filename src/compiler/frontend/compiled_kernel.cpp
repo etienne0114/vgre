@@ -7,8 +7,10 @@
 
 #include "vgre/compiler/frontend/parser.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -161,9 +163,26 @@ struct Compiler {
             case Expr::Binary: return compileBinary(e);
             case Expr::Assign: return compileAssign(e);
             case Expr::Call:   return compileCall(e);
+            case Expr::Cast:   return compileCast(e);
+            case Expr::Ternary: return compileTernary(e);
         }
         fail("unsupported expression");
         return {};
+    }
+
+    ExprFn compileCast(const Expr& e) {
+        ExprFn a = compileExpr(*e.args[0]);
+        if (failed) return {};
+        Type t = e.castType;
+        return [a, t](TS& ts) { return coerce(a(ts), t); };
+    }
+
+    ExprFn compileTernary(const Expr& e) {
+        ExprFn c = compileExpr(*e.args[0]);
+        ExprFn t = compileExpr(*e.args[1]);
+        ExprFn f = compileExpr(*e.args[2]);
+        if (failed) return {};
+        return [c, t, f](TS& ts) -> Cell { return c(ts).asI() != 0 ? t(ts) : f(ts); };
     }
 
     ExprFn compileMember(const Expr& e) {
@@ -344,14 +363,21 @@ struct Compiler {
         const std::string& fn = e.str;
         if (e.args.size() == 1) {
             ExprFn a = compileExpr(*e.args[0]); if (failed) return {};
+            if (fn == "abs")   return [a](TS& ts) { Cell v = a(ts); return v.isFloat ? Cell::F(std::fabs(v.f)) : Cell::I(std::llabs((long long)v.i)); };
             if (fn == "sqrtf") return [a](TS& ts) { return Cell::F(std::sqrt(a(ts).asF())); };
             if (fn == "fabsf") return [a](TS& ts) { return Cell::F(std::fabs(a(ts).asF())); };
-            if (fn == "__expf") return [a](TS& ts) { return Cell::F(std::exp(a(ts).asF())); };
-            if (fn == "__logf") return [a](TS& ts) { return Cell::F(std::log(a(ts).asF())); };
+            if (fn == "rsqrtf")return [a](TS& ts) { return Cell::F(1.0 / std::sqrt(a(ts).asF())); };
+            if (fn == "sinf")  return [a](TS& ts) { return Cell::F(std::sin(a(ts).asF())); };
+            if (fn == "cosf")  return [a](TS& ts) { return Cell::F(std::cos(a(ts).asF())); };
+            if (fn == "floorf")return [a](TS& ts) { return Cell::F(std::floor(a(ts).asF())); };
+            if (fn == "ceilf") return [a](TS& ts) { return Cell::F(std::ceil(a(ts).asF())); };
+            if (fn == "__expf" || fn == "expf") return [a](TS& ts) { return Cell::F(std::exp(a(ts).asF())); };
+            if (fn == "__logf" || fn == "logf") return [a](TS& ts) { return Cell::F(std::log(a(ts).asF())); };
         } else if (e.args.size() == 2) {
             ExprFn a = compileExpr(*e.args[0]); ExprFn b = compileExpr(*e.args[1]); if (failed) return {};
             if (fn == "fminf") return [a, b](TS& ts) { return Cell::F(std::fmin(a(ts).asF(), b(ts).asF())); };
             if (fn == "fmaxf") return [a, b](TS& ts) { return Cell::F(std::fmax(a(ts).asF(), b(ts).asF())); };
+            if (fn == "powf")  return [a, b](TS& ts) { return Cell::F(std::pow(a(ts).asF(), b(ts).asF())); };
             if (fn == "min") return [a, b](TS& ts) { Cell x = a(ts), y = b(ts); bool fp = x.isFloat || y.isFloat;
                 return fp ? Cell::F(std::fmin(x.asF(), y.asF())) : Cell::I(std::min(x.asI(), y.asI())); };
             if (fn == "max") return [a, b](TS& ts) { Cell x = a(ts), y = b(ts); bool fp = x.isFloat || y.isFloat;

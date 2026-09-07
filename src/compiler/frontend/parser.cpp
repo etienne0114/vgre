@@ -134,8 +134,28 @@ struct Parser {
     // ── Expressions (precedence climbing) ──────────────────────────────────────
     ExprPtr parseExpr() { return parseAssign(); }
 
+    // Conditional operator: cond ? a : b (right-associative, below assignment).
+    ExprPtr parseTernary() {
+        ExprPtr cond = parseBinary(1);
+        if (!cond || failed) return cond;
+        if (at(TokenKind::Question)) {
+            auto node = mkExpr(Expr::Ternary);
+            advance();
+            ExprPtr thenE = parseAssign();          // full expression between ? and :
+            expect(TokenKind::Colon, "':'");
+            if (failed || !thenE) return nullptr;
+            ExprPtr elseE = parseTernary();          // right-associative
+            if (!elseE) return nullptr;
+            node->args.push_back(std::move(cond));
+            node->args.push_back(std::move(thenE));
+            node->args.push_back(std::move(elseE));
+            return node;
+        }
+        return cond;
+    }
+
     ExprPtr parseAssign() {
-        ExprPtr lhs = parseBinary(1);
+        ExprPtr lhs = parseTernary();
         if (!lhs || failed) return lhs;
         if (isAssignOp(kind())) {
             auto node = mkExpr(Expr::Assign);
@@ -170,6 +190,19 @@ struct Parser {
 
     ExprPtr parseUnary() {
         TokenKind k = kind();
+        // C-style cast: '(' <type> ')' <unary>. Distinguished from a parenthesized
+        // expression by a type keyword right after '('.
+        if (k == TokenKind::LParen && pos + 1 < toks.size() && isTypeStart(toks[pos + 1].kind)) {
+            auto node = mkExpr(Expr::Cast);
+            advance();  // '('
+            if (!parseType(node->castType)) { fail("expected a type in cast"); return nullptr; }
+            expect(TokenKind::RParen, "')'");
+            if (failed) return nullptr;
+            ExprPtr operand = parseUnary();
+            if (!operand) return nullptr;
+            node->args.push_back(std::move(operand));
+            return node;
+        }
         if (k == TokenKind::Inc || k == TokenKind::Dec) {          // prefix ++x / --x
             auto node = mkExpr(Expr::Unary);
             node->str = (k == TokenKind::Inc) ? "pre++" : "pre--";

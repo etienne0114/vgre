@@ -38,17 +38,19 @@ struct Type {
 
 // ── Expressions ───────────────────────────────────────────────────────────────
 struct Expr {
-    enum Kind { IntLit, FloatLit, Ident, Member, Index, Unary, Binary, Assign, Call };
+    enum Kind { IntLit, FloatLit, Ident, Member, Index, Unary, Binary, Assign, Call, Cast, Ternary };
     Kind kind;
     int line = 0, col = 0;
 
     int64_t     ival = 0;   // IntLit
     double      fval = 0;   // FloatLit
     std::string str;        // Ident name / Member field / Call callee / operator spelling
+    Type        castType;   // Cast: the target type
     std::vector<std::unique_ptr<Expr>> args;
     // Member: args[0]=object, str=field.  Index: args[0]=base, args[1]=index.
     // Unary: str=op, args[0].  Binary: str=op, args[0],args[1].
     // Assign: str=op ("="/"+="/…), args[0]=lhs, args[1]=rhs.  Call: str=callee, args=params.
+    // Cast: args[0]=operand, castType=target.  Ternary: args[0]=cond,args[1]=then,args[2]=else.
 };
 using ExprPtr = std::unique_ptr<Expr>;
 

@@ -154,9 +154,67 @@ struct Codegen {
             case Expr::Binary: return emitBinary(e);
             case Expr::Assign: return emitAssign(e);
             case Expr::Call: return emitCall(e);
+            case Expr::Cast: return emitCast(e);
+            case Expr::Ternary: return emitTernary(e);
         }
         fail("unsupported expression");
         return {};
+    }
+
+    // Static "is this expression floating-typed?" — needed to pick the result
+    // register class for a ternary before emitting its branches.
+    bool isFloatExpr(const Expr& e) {
+        switch (e.kind) {
+            case Expr::FloatLit: return true;
+            case Expr::IntLit:   return false;
+            case Expr::Ident: { auto it = vars.find(e.str); return it != vars.end() && it->second.type.isFloating(); }
+            case Expr::Member:   return false;  // threadIdx/blockIdx/… are integers
+            case Expr::Index:    return const_cast<Codegen*>(this)->indexPointee(e).isFloating();
+            case Expr::Cast:     return e.castType.isFloating();
+            case Expr::Unary:    return e.str == "!" ? false : isFloatExpr(*e.args[0]);
+            case Expr::Binary: {
+                const std::string& o = e.str;
+                if (o == "<" || o == "<=" || o == ">" || o == ">=" || o == "==" || o == "!=" ||
+                    o == "&&" || o == "||" || o == "&" || o == "|" || o == "^" ||
+                    o == "<<" || o == ">>" || o == "%") return false;
+                return isFloatExpr(*e.args[0]) || isFloatExpr(*e.args[1]);
+            }
+            case Expr::Assign:   return isFloatExpr(*e.args[1]);
+            case Expr::Ternary:  return isFloatExpr(*e.args[1]) || isFloatExpr(*e.args[2]);
+            case Expr::Call: {
+                const std::string& fn = e.str;
+                if (fn == "min" || fn == "max") return !e.args.empty() && isFloatExpr(*e.args[0]);
+                return true;  // the float math intrinsics (sqrtf, fmaf, …) return float
+            }
+        }
+        return false;
+    }
+
+    Val emitCast(const Expr& e) {
+        Val v = emitExpr(*e.args[0]);
+        if (failed) return {};
+        Val r = coerce(v, e.castType);
+        r.type = e.castType;
+        if (e.castType.isPointer()) r.space = v.space;
+        return r;
+    }
+
+    Val emitTernary(const Expr& e) {
+        Type rt = (isFloatExpr(*e.args[1]) || isFloatExpr(*e.args[2])) ? floatType() : intType();
+        std::string res = fresh(classOf(rt));
+        std::string elseL = label(), endL = label();
+        emitCondBranchFalse(*e.args[0], elseL);
+        if (failed) return {};
+        Val t = coerce(emitExpr(*e.args[1]), rt);
+        if (failed) return {};
+        emit(std::string(rt.isFloating() ? "mov.f32 " : "mov.u32 ") + res + ", " + t.reg + ";");
+        emit("bra " + endL + ";");
+        emitLabel(elseL);
+        Val f = coerce(emitExpr(*e.args[2]), rt);
+        if (failed) return {};
+        emit(std::string(rt.isFloating() ? "mov.f32 " : "mov.u32 ") + res + ", " + f.reg + ";");
+        emitLabel(endL);
+        return {res, rt};
     }
 
     // A computed element address: the register holding it, the pointee type, and
@@ -381,20 +439,28 @@ struct Codegen {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
 
-        // Unary float intrinsics: f32 arg -> f32 result.
+        // Unary intrinsics.
         if (e.args.size() == 1) {
-            Val a = coerce(emitExpr(*e.args[0]), floatType());
+            if (fn == "abs") {                          // integer or float abs (type-preserving)
+                Val a = emitExpr(*e.args[0]); if (failed) return {};
+                if (a.type.isFloating()) { std::string d = fresh(RC::F32); emit("abs.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
+                std::string d = fresh(RC::R32); emit("abs.s32 " + d + ", " + a.reg + ";"); return {d, intType()};
+            }
+            Val a = coerce(emitExpr(*e.args[0]), floatType());  // f32 arg -> f32 result
             if (failed) return {};
             std::string d = fresh(RC::F32);
-            if (fn == "sqrtf")      { emit("sqrt.rn.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "fabsf")      { emit("abs.f32 "     + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "__expf") {                       // e^x = 2^(x*log2 e)
+            if (fn == "sqrtf")  { emit("sqrt.rn.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "fabsf")  { emit("abs.f32 "     + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "rsqrtf") { emit("rsqrt.approx.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "sinf")   { emit("sin.approx.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "cosf")   { emit("cos.approx.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "__expf" || fn == "expf") {       // e^x = 2^(x*log2 e)
                 std::string t = fresh(RC::F32);
                 emit("mul.f32 " + t + ", " + a.reg + ", 0f3FB8AA3B;");  // log2(e)
                 emit("ex2.approx.f32 " + d + ", " + t + ";");
                 return {d, floatType()};
             }
-            if (fn == "__logf") {                       // ln x = log2(x)/log2 e
+            if (fn == "__logf" || fn == "logf") {       // ln x = log2(x)*ln 2
                 std::string t = fresh(RC::F32);
                 emit("lg2.approx.f32 " + t + ", " + a.reg + ";");
                 emit("mul.f32 " + d + ", " + t + ", 0f3F317218;");     // ln(2)
@@ -422,6 +488,14 @@ struct Codegen {
                 std::string op = fn == "min" ? "min." : "max.";
                 emit(op + (fp ? "f32 " : "s32 ") + d + ", " + a.reg + ", " + b.reg + ";");
                 return {d, ct};
+            }
+            if (fn == "powf") {                         // x^y = 2^(y*log2 x)
+                a = coerce(a, floatType()); b = coerce(b, floatType());
+                std::string lg = fresh(RC::F32), mul = fresh(RC::F32), d = fresh(RC::F32);
+                emit("lg2.approx.f32 " + lg + ", " + a.reg + ";");
+                emit("mul.f32 " + mul + ", " + b.reg + ", " + lg + ";");
+                emit("ex2.approx.f32 " + d + ", " + mul + ";");
+                return {d, floatType()};
             }
             fail("unsupported call to '" + fn + "'");
             return {};
