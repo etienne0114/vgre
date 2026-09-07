@@ -8,8 +8,13 @@
 #include "vgre/common/json.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 
+using vgre::common::json::DumpOptions;
+using vgre::common::json::Error;
+using vgre::common::json::ErrorCode;
+using vgre::common::json::ParseOptions;
 using vgre::common::json::Value;
 using vgre::common::json::parse;
 using vgre::common::json::dump;
@@ -81,12 +86,111 @@ int main() {
     CHECK(parse(dump(s), s2), "re-serialized escaped string re-parses");
     CHECK(s2.asString() == s.asString(), "escaped string round-trips exactly");
 
-    // ── 5. Malformed inputs rejected ─────────────────────────────────────────
+    // Unicode escapes: paired surrogates decode, lone/misordered surrogates do not.
     Value junk;
+    Value music;
+    CHECK(parse(R"("\uD834\uDD1E")", music), "parse paired UTF-16 surrogate escape");
+    CHECK(music.asString() == std::string("\xF0\x9D\x84\x9E", 4),
+          "surrogate pair decodes to one UTF-8 scalar");
+    CHECK(!parse(R"("\uDD1E")", junk), "reject lone low surrogate");
+    CHECK(!parse(R"("\uD834x")", junk), "reject high surrogate not followed by low surrogate");
+    CHECK(!parse(R"("\uD834\u0041")", junk), "reject high surrogate followed by non-low surrogate");
+    CHECK(!parse(R"("\u12xz")", junk), "reject non-hex unicode escape");
+
+    DumpOptions escaped;
+    escaped.escapeNonAscii = true;
+    std::string escapedOut;
+    Error dumpErr;
+    CHECK(dump(music, escapedOut, escaped, &dumpErr), "dump with non-ASCII escaping succeeds");
+    CHECK(escapedOut == R"("\ud834\udd1e")", "dump emits supplementary scalar as surrogate pair");
+
+    // ── 5. Malformed inputs rejected ─────────────────────────────────────────
     CHECK(!parse("{", junk), "reject truncated object");
     CHECK(!parse("[1,2", junk), "reject truncated array");
     CHECK(!parse("{\"a\":1} trailing", junk), "reject trailing garbage");
     CHECK(!parse("nul", junk), "reject bad literal");
+    CHECK(!parse("+1", junk), "reject leading plus number");
+    CHECK(!parse("01", junk), "reject leading zero number");
+    CHECK(!parse("1.", junk), "reject number with empty fraction");
+    CHECK(!parse("1e", junk), "reject number with empty exponent");
+    CHECK(!parse("1e999", junk), "reject non-finite number");
+
+    Error err;
+    CHECK(!parse(std::string("\"bad\nstring\""), junk, &err) &&
+          err.code == ErrorCode::ControlCharacterInString,
+          "reject unescaped control character in string with useful error code");
+    std::string invalidUtf8 = "\"";
+    invalidUtf8.push_back(static_cast<char>(0xC0));
+    invalidUtf8.push_back(static_cast<char>(0x80));
+    invalidUtf8.push_back('"');
+    CHECK(!parse(invalidUtf8, junk, &err) && err.code == ErrorCode::InvalidUtf8,
+          "reject overlong UTF-8 in string");
+
+    // Duplicate keys are rejected by default, including after escape decoding.
+    CHECK(!parse(R"({"a":1,"a":2})", junk, &err) &&
+          err.code == ErrorCode::DuplicateKey, "reject duplicate object key");
+    CHECK(!parse(R"({"a":1,"\u0061":2})", junk), "reject escaped duplicate object key");
+    ParseOptions allowDup;
+    allowDup.rejectDuplicateKeys = false;
+    CHECK(parse(R"({"a":1,"a":2})", junk, allowDup) && junk.obj.size() == 2 &&
+          junk.find("a")->asInt64() == 1,
+          "duplicate keys can be preserved only when explicitly allowed");
+
+    // Strict integer accessors avoid accidental truncation and double rounding.
+    Value huge;
+    CHECK(parse("9007199254740993", huge), "parse integer above 2^53");
+    CHECK(huge.asUint64() == 9007199254740993ull, "uint64 accessor uses exact token");
+    CHECK(dump(huge) == "9007199254740993", "dump preserves exact parsed integer token");
+    Value fractional;
+    CHECK(parse("3.5", fractional), "parse fractional number");
+    CHECK(fractional.asInt64(123) == 123 && fractional.asUint64(456) == 456,
+          "integer accessors reject fractional values");
+    Value exponentInt;
+    CHECK(parse("1.25e3", exponentInt) && exponentInt.asUint64() == 1250,
+          "integer accessor handles integral exponent form exactly");
+
+    // Memory and input limits are enforced before unbounded growth.
+    ParseOptions tiny;
+    tiny.maxInputBytes = 4;
+    CHECK(!parse("[1,2]", junk, tiny, &err) && err.code == ErrorCode::InputTooLarge,
+          "input byte limit enforced");
+    tiny = ParseOptions{};
+    tiny.maxStringBytes = 3;
+    CHECK(!parse(R"("abcd")", junk, tiny, &err) && err.code == ErrorCode::StringTooLarge,
+          "string byte limit enforced");
+    tiny = ParseOptions{};
+    tiny.maxArrayElements = 2;
+    CHECK(!parse("[1,2,3]", junk, tiny, &err) && err.code == ErrorCode::ArrayTooLarge,
+          "array element limit enforced");
+    tiny = ParseOptions{};
+    tiny.maxObjectMembers = 1;
+    CHECK(!parse(R"({"a":1,"b":2})", junk, tiny, &err) &&
+          err.code == ErrorCode::ObjectTooLarge,
+          "object member limit enforced");
+    tiny = ParseOptions{};
+    tiny.maxTotalValues = 2;
+    CHECK(!parse("[1,2]", junk, tiny, &err) &&
+          err.code == ErrorCode::ValueCountLimitExceeded,
+          "total value-count limit enforced");
+
+    CHECK(!parse("{\n  \"a\" 1}", junk, &err) && err.code == ErrorCode::ExpectedColon &&
+          err.line == 2 && err.column == 7,
+          "error reporting includes line and column");
+
+    // Serialization rejects values that cannot be represented as RFC 8259 JSON.
+    Value inf = Value::number(std::numeric_limits<double>::infinity());
+    CHECK(!dump(inf, escapedOut, DumpOptions{}, &dumpErr) &&
+          dumpErr.code == ErrorCode::NonFiniteNumber,
+          "dump rejects infinity/NaN");
+    Value badString = Value::string(std::string(1, static_cast<char>(0xFF)));
+    CHECK(!dump(badString, escapedOut, DumpOptions{}, &dumpErr) &&
+          dumpErr.code == ErrorCode::InvalidUtf8,
+          "dump rejects invalid UTF-8 string");
+    DumpOptions tinyDump;
+    tinyDump.maxOutputBytes = 4;
+    CHECK(!dump(Value::string("abcd"), escapedOut, tinyDump, &dumpErr) &&
+          dumpErr.code == ErrorCode::OutputTooLarge,
+          "dump output byte limit enforced");
 
     // ── 6. Depth guard: pathological nesting is rejected, not a crash ────────
     std::string deep;
