@@ -58,8 +58,10 @@ struct Stmt {
     Kind kind;
     int line = 0, col = 0;
 
-    Type        type;       // VarDecl: declared type
+    Type        type;       // VarDecl: declared type (element type when arraySize > 0)
     std::string name;       // VarDecl: variable name
+    bool        isShared = false;  // VarDecl: had __shared__
+    int         arraySize = 0;     // VarDecl: 0 = scalar; >0 = array[arraySize]
     ExprPtr     expr;       // VarDecl init / ExprStmt / Return value / If & While condition
 
     std::vector<std::unique_ptr<Stmt>> body;      // Block stmts / loop body / If then-branch

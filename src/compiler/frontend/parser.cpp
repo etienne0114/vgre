@@ -170,6 +170,15 @@ struct Parser {
 
     ExprPtr parseUnary() {
         TokenKind k = kind();
+        if (k == TokenKind::Inc || k == TokenKind::Dec) {          // prefix ++x / --x
+            auto node = mkExpr(Expr::Unary);
+            node->str = (k == TokenKind::Inc) ? "pre++" : "pre--";
+            advance();
+            ExprPtr operand = parseUnary();
+            if (!operand) return nullptr;
+            node->args.push_back(std::move(operand));
+            return node;
+        }
         if (k == TokenKind::Minus || k == TokenKind::Not || k == TokenKind::Tilde ||
             k == TokenKind::Star  || k == TokenKind::Amp || k == TokenKind::Plus) {
             auto node = mkExpr(Expr::Unary);
@@ -214,6 +223,12 @@ struct Parser {
                     }
                 }
                 expect(TokenKind::RParen, "')'");
+                e = std::move(node);
+            } else if (at(TokenKind::Inc) || at(TokenKind::Dec)) {   // postfix x++ / x--
+                auto node = mkExpr(Expr::Unary);
+                node->str = at(TokenKind::Inc) ? "post++" : "post--";
+                advance();
+                node->args.push_back(std::move(e));
                 e = std::move(node);
             } else {
                 break;
@@ -267,7 +282,7 @@ struct Parser {
             case TokenKind::Semicolon:  { auto s = mkStmt(Stmt::Empty); advance(); return s; }
             default: break;
         }
-        if (isTypeStart(kind())) return parseVarDecl();
+        if (isTypeStart(kind()) || at(TokenKind::KwShared)) return parseVarDecl();
         // expression statement
         auto s = mkStmt(Stmt::ExprStmt);
         s->expr = parseExpr();
@@ -289,9 +304,16 @@ struct Parser {
 
     StmtPtr parseVarDecl() {
         auto s = mkStmt(Stmt::VarDecl);
+        if (accept(TokenKind::KwShared)) s->isShared = true;   // __shared__ [type] name[N];
         if (!parseType(s->type)) { fail("expected a type"); return nullptr; }
         if (!at(TokenKind::Identifier)) { fail("expected a variable name"); return nullptr; }
         s->name = advance().text;
+        if (accept(TokenKind::LBracket)) {                     // array declarator name[N]
+            if (!at(TokenKind::IntLiteral)) { fail("expected an array size"); return nullptr; }
+            s->arraySize = static_cast<int>(std::strtoll(advance().text.c_str(), nullptr, 0));
+            expect(TokenKind::RBracket, "']'");
+            if (s->arraySize <= 0) { fail("array size must be positive"); return nullptr; }
+        }
         if (accept(TokenKind::Assign)) {
             s->expr = parseExpr();
             if (!s->expr) return nullptr;

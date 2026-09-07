@@ -963,6 +963,13 @@ target_link_libraries(test_cuda_e2e PRIVATE vgre Threads::Threads)
 add_test(NAME CudaEndToEnd COMMAND test_cuda_e2e)
 set_tests_properties(CudaEndToEnd PROPERTIES TIMEOUT 30)
 
+# Track Z: broader CUDA-C subset — shared memory, __syncthreads, loops, ++/--,
+# math intrinsics, all end-to-end with no LLVM.
+add_executable(test_cuda_subset compiler/test_cuda_subset.cpp)
+target_link_libraries(test_cuda_subset PRIVATE vgre Threads::Threads)
+add_test(NAME CudaSubset COMMAND test_cuda_subset)
+set_tests_properties(CudaSubset PROPERTIES TIMEOUT 30)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.

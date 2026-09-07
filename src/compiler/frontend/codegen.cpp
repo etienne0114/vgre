@@ -21,10 +21,18 @@ namespace frontend {
 
 namespace {
 
-// A computed value: the register holding it and its type.
+// Where a value/pointer lives. Value = a plain register; Global = a 64-bit
+// global address (param pointer after cvta); Shared = a __shared__ array,
+// addressed by its PTX name with 32-bit offsets (ld.shared/st.shared).
+enum class Space { Value, Global, Shared };
+
+// A computed value: the register holding it and its type (+ memory space for
+// pointers/arrays).
 struct Val {
     std::string reg;
     Type type;
+    Space space = Space::Value;
+    std::string sharedName;   // Shared: the PTX .shared symbol name
 };
 
 // PTX register classes.
@@ -39,6 +47,7 @@ RC classOf(const Type& t) {
 struct Codegen {
     const Kernel& k;
     std::string body;                 // instruction stream (built first)
+    std::string sharedDecls;          // .shared declarations (emitted in the decl section)
     int nR = 0, nF = 0, nRd = 0, nP = 0, nLbl = 0;
     std::unordered_map<std::string, Val> vars;  // name -> value (single mutable reg)
     bool failed = false;
@@ -150,34 +159,98 @@ struct Codegen {
         return {};
     }
 
-    // Compute the byte address of base[index] into a fresh %rd; sets pointee.
-    std::string emitAddress(const Expr& index, Type& pointee) {
+    // A computed element address: the register holding it, the pointee type, and
+    // whether it is in shared memory (32-bit addressing, ld/st.shared).
+    struct Addr {
+        std::string reg;
+        Type pointee;
+        bool shared = false;
+    };
+
+    // The element type of an index expression's base, without emitting code
+    // (used to coerce the stored value before emitting the store). In the
+    // supported subset the base is an Ident naming a pointer/array variable.
+    Type indexPointee(const Expr& index) {
         const Expr& base = *index.args[0];
-        Val b = emitExpr(base);
-        if (failed) return "";
-        if (!b.type.isPointer()) { fail("indexing a non-pointer"); return ""; }
-        pointee = b.type; pointee.ptr -= 1;
-        Val idx = emitExpr(*index.args[1]);
-        if (failed) return "";
-        idx = coerce(idx, intType());
-        std::string off = fresh(RC::RD64);
-        emit("mul.wide.s32 " + off + ", " + idx.reg + ", " + std::to_string(pointee.elemBytes()) + ";");
-        std::string addr = fresh(RC::RD64);
-        emit("add.s64 " + addr + ", " + b.reg + ", " + off + ";");
-        return addr;
+        if (base.kind == Expr::Ident) {
+            auto it = vars.find(base.str);
+            if (it != vars.end() && it->second.type.isPointer()) {
+                Type t = it->second.type; t.ptr -= 1; return t;
+            }
+        }
+        return intType();
+    }
+
+    // Compute the address of base[index]. Global uses 64-bit addressing;
+    // __shared__ arrays use 32-bit offsets from the shared symbol.
+    Addr emitAddress(const Expr& index) {
+        Addr a;
+        Val b = emitExpr(*index.args[0]);
+        if (failed) return a;
+        if (!b.type.isPointer()) { fail("indexing a non-pointer"); return a; }
+        a.pointee = b.type; a.pointee.ptr -= 1;
+        Val idx = coerce(emitExpr(*index.args[1]), intType());
+        if (failed) return a;
+        const int elem = a.pointee.elemBytes();
+        if (b.space == Space::Shared) {
+            a.shared = true;
+            std::string base = fresh(RC::R32), off = fresh(RC::R32), addr = fresh(RC::R32);
+            emit("mov.u32 " + base + ", " + b.sharedName + ";");
+            emit("mul.lo.s32 " + off + ", " + idx.reg + ", " + std::to_string(elem) + ";");
+            emit("add.s32 " + addr + ", " + base + ", " + off + ";");
+            a.reg = addr;
+        } else {
+            std::string off = fresh(RC::RD64), addr = fresh(RC::RD64);
+            emit("mul.wide.s32 " + off + ", " + idx.reg + ", " + std::to_string(elem) + ";");
+            emit("add.s64 " + addr + ", " + b.reg + ", " + off + ";");
+            a.reg = addr;
+        }
+        return a;
     }
 
     Val emitLoad(const Expr& index) {
-        Type pointee;
-        std::string addr = emitAddress(index, pointee);
+        Addr a = emitAddress(index);
         if (failed) return {};
-        RC rc = classOf(pointee);
-        std::string d = fresh(rc);
-        emit(std::string("ld.global.") + memSuffix(pointee) + " " + d + ", [" + addr + "];");
-        return {d, pointee};
+        std::string d = fresh(classOf(a.pointee));
+        emit(std::string(a.shared ? "ld.shared." : "ld.global.") + memSuffix(a.pointee) +
+             " " + d + ", [" + a.reg + "];");
+        return {d, a.pointee};
+    }
+
+    // Store `value` (already coerced) to the address of index-expr `lhs`.
+    void emitStore(const Expr& lhs, const Val& value) {
+        Addr a = emitAddress(lhs);
+        if (failed) return;
+        emit(std::string(a.shared ? "st.shared." : "st.global.") + memSuffix(a.pointee) +
+             " [" + a.reg + "], " + value.reg + ";");
+    }
+
+    // ++x / --x / x++ / x-- on a scalar variable (int or float).
+    Val emitIncDec(const Expr& e) {
+        const Expr& operand = *e.args[0];
+        if (operand.kind != Expr::Ident) { fail("'++'/'--' requires a variable"); return {}; }
+        auto it = vars.find(operand.str);
+        if (it == vars.end()) { fail("'++'/'--' of undeclared '" + operand.str + "'"); return {}; }
+        Val& var = it->second;
+        if (var.type.isPointer()) { fail("'++'/'--' on a pointer is unsupported"); return {}; }
+        const bool inc = e.str.find("++") != std::string::npos;
+        const bool pre = e.str.compare(0, 3, "pre") == 0;
+        Val old;
+        if (!pre) {  // postfix: capture the value before the update
+            old.type = var.type;
+            old.reg = fresh(classOf(var.type));
+            emit(std::string(var.type.isFloating() ? "mov.f32 " : "mov.u32 ") + old.reg + ", " + var.reg + ";");
+        }
+        if (var.type.isFloating())
+            emit(std::string(inc ? "add.f32 " : "sub.f32 ") + var.reg + ", " + var.reg + ", 0f3F800000;");
+        else
+            emit(std::string(inc ? "add.s32 " : "sub.s32 ") + var.reg + ", " + var.reg + ", 1;");
+        return pre ? var : old;
     }
 
     Val emitUnary(const Expr& e) {
+        if (e.str == "pre++" || e.str == "pre--" || e.str == "post++" || e.str == "post--")
+            return emitIncDec(e);
         if (e.str == "+") return emitExpr(*e.args[0]);
         Val v = emitExpr(*e.args[0]);
         if (failed) return {};
@@ -286,52 +359,85 @@ struct Codegen {
             return var;
         }
         if (lhs.kind == Expr::Index) {
-            // For compound on memory we'd need the current value; support '=' now.
-            Type pointee;
-            if (op != "=") {
-                // load current, combine, store
+            const Type pointee = indexPointee(lhs);
+            Val value;
+            if (op == "=") {
+                value = emitExpr(*e.args[1]);
+            } else {                       // compound: load current, combine, store
                 Val cur = emitLoad(lhs);
                 if (failed) return {};
-                Val rhs = computeRhs(cur);
-                if (failed) return {};
-                std::string addr = emitAddress(lhs, pointee);
-                if (failed) return {};
-                rhs = coerce(rhs, pointee);
-                emit(std::string("st.global.") + memSuffix(pointee) + " [" + addr + "], " + rhs.reg + ";");
-                return rhs;
+                value = computeRhs(cur);
             }
-            std::string addr = emitAddress(lhs, pointee);
             if (failed) return {};
-            Val rhs = emitExpr(*e.args[1]);
-            if (failed) return {};
-            rhs = coerce(rhs, pointee);
-            emit(std::string("st.global.") + memSuffix(pointee) + " [" + addr + "], " + rhs.reg + ";");
-            return rhs;
+            value = coerce(value, pointee);
+            emitStore(lhs, value);
+            return value;
         }
         fail("invalid assignment target");
         return {};
     }
 
     Val emitCall(const Expr& e) {
-        if (e.str == "__syncthreads" && e.args.empty()) {
-            emit("bar.sync 0;");
-            return {};
-        }
-        // A few common device math intrinsics map to PTX approximations.
+        const std::string& fn = e.str;
+        if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
+
+        // Unary float intrinsics: f32 arg -> f32 result.
         if (e.args.size() == 1) {
-            static const std::unordered_map<std::string, const char*> unary = {
-                {"sqrtf", "sqrt.rn.f32"}, {"__expf", "ex2.approx.f32"},
-            };
-            auto it = unary.find(e.str);
-            if (it != unary.end()) {
-                Val a = coerce(emitExpr(*e.args[0]), floatType());
-                if (failed) return {};
-                std::string d = fresh(RC::F32);
-                emit(std::string(it->second) + " " + d + ", " + a.reg + ";");
+            Val a = coerce(emitExpr(*e.args[0]), floatType());
+            if (failed) return {};
+            std::string d = fresh(RC::F32);
+            if (fn == "sqrtf")      { emit("sqrt.rn.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "fabsf")      { emit("abs.f32 "     + d + ", " + a.reg + ";"); return {d, floatType()}; }
+            if (fn == "__expf") {                       // e^x = 2^(x*log2 e)
+                std::string t = fresh(RC::F32);
+                emit("mul.f32 " + t + ", " + a.reg + ", 0f3FB8AA3B;");  // log2(e)
+                emit("ex2.approx.f32 " + d + ", " + t + ";");
                 return {d, floatType()};
             }
+            if (fn == "__logf") {                       // ln x = log2(x)/log2 e
+                std::string t = fresh(RC::F32);
+                emit("lg2.approx.f32 " + t + ", " + a.reg + ";");
+                emit("mul.f32 " + d + ", " + t + ", 0f3F317218;");     // ln(2)
+                return {d, floatType()};
+            }
+            fail("unsupported call to '" + fn + "'");
+            return {};
         }
-        fail("unsupported call to '" + e.str + "'");
+
+        // Binary intrinsics: min/max (int or float).
+        if (e.args.size() == 2) {
+            Val a = emitExpr(*e.args[0]); if (failed) return {};
+            Val b = emitExpr(*e.args[1]); if (failed) return {};
+            if (fn == "fminf" || fn == "fmaxf") {
+                a = coerce(a, floatType()); b = coerce(b, floatType());
+                std::string d = fresh(RC::F32);
+                emit(std::string(fn == "fminf" ? "min.f32 " : "max.f32 ") + d + ", " + a.reg + ", " + b.reg + ";");
+                return {d, floatType()};
+            }
+            if (fn == "min" || fn == "max") {
+                bool fp = a.type.isFloating() || b.type.isFloating();
+                Type ct = fp ? floatType() : intType();
+                a = coerce(a, ct); b = coerce(b, ct);
+                std::string d = fresh(classOf(ct));
+                std::string op = fn == "min" ? "min." : "max.";
+                emit(op + (fp ? "f32 " : "s32 ") + d + ", " + a.reg + ", " + b.reg + ";");
+                return {d, ct};
+            }
+            fail("unsupported call to '" + fn + "'");
+            return {};
+        }
+
+        // Ternary intrinsic: fmaf(a,b,c) = a*b + c.
+        if (e.args.size() == 3 && fn == "fmaf") {
+            Val a = coerce(emitExpr(*e.args[0]), floatType()); if (failed) return {};
+            Val b = coerce(emitExpr(*e.args[1]), floatType()); if (failed) return {};
+            Val c = coerce(emitExpr(*e.args[2]), floatType()); if (failed) return {};
+            std::string d = fresh(RC::F32);
+            emit("fma.rn.f32 " + d + ", " + a.reg + ", " + b.reg + ", " + c.reg + ";");
+            return {d, floatType()};
+        }
+
+        fail("unsupported call to '" + fn + "'");
         return {};
     }
 
@@ -367,7 +473,18 @@ struct Codegen {
         line = s.line; col = s.col;
         switch (s.kind) {
             case Stmt::VarDecl: {
+                if (s.arraySize > 0) {
+                    if (!s.isShared) { fail("local arrays are unsupported; use __shared__"); return; }
+                    // __shared__ T name[N]  ->  .shared .align 4 .b8 name[N*sizeof(T)]
+                    int bytes = s.arraySize * s.type.elemBytes();
+                    sharedDecls += "\t.shared .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
+                    Type ptr = s.type; ptr.ptr = 1;   // the array decays to a pointer-to-element
+                    Val v; v.type = ptr; v.space = Space::Shared; v.sharedName = s.name;
+                    vars[s.name] = v;
+                    return;
+                }
                 Val v; v.type = s.type; v.reg = fresh(classOf(s.type));
+                if (s.type.isPointer()) v.space = Space::Global;  // a plain pointer var, if assigned one
                 vars[s.name] = v;
                 if (s.expr) {
                     Val init = emitExpr(*s.expr);
@@ -434,7 +551,7 @@ struct Codegen {
                 std::string raw = fresh(RC::RD64), gbl = fresh(RC::RD64);
                 emit("ld.param.u64 " + raw + ", [" + p.name + "];");
                 emit("cvta.to.global.u64 " + gbl + ", " + raw + ";");
-                vars[p.name] = {gbl, p.type};
+                vars[p.name] = {gbl, p.type, Space::Global, ""};
             } else if (p.type.isFloating()) {
                 std::string r = fresh(RC::F32);
                 emit("ld.param.f32 " + r + ", [" + p.name + "];");
@@ -463,6 +580,7 @@ struct Codegen {
         if (nR  > 0) out += "\t.reg .b32 %r<"  + std::to_string(nR)  + ">;\n";
         if (nF  > 0) out += "\t.reg .f32 %f<"  + std::to_string(nF)  + ">;\n";
         if (nRd > 0) out += "\t.reg .b64 %rd<" + std::to_string(nRd) + ">;\n";
+        out += sharedDecls;
         out += body;
         out += "}\n";
         return out;
