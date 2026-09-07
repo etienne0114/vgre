@@ -970,6 +970,13 @@ target_link_libraries(test_cuda_subset PRIVATE vgre Threads::Threads)
 add_test(NAME CudaSubset COMMAND test_cuda_subset)
 set_tests_properties(CudaSubset PROPERTIES TIMEOUT 30)
 
+# Track Z: the real CUDA-on-CPU C-ABI (register+launch) routed through the
+# interpreter backend via VGRE_EXEC_BACKEND — no LLVM for this kernel.
+add_executable(test_backend_dispatch api/test_backend_dispatch.cpp)
+target_link_libraries(test_backend_dispatch PRIVATE vgre Threads::Threads)
+add_test(NAME BackendDispatch COMMAND test_backend_dispatch)
+set_tests_properties(BackendDispatch PROPERTIES TIMEOUT 60)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.

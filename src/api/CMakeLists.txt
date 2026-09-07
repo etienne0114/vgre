@@ -1,4 +1,5 @@
 add_library(vgre_api OBJECT
+    kernel_backend_dispatch.cpp
     cuda_interceptor.cpp
     cuda_interceptor_device.cpp
     cuda_interceptor_memory.cpp

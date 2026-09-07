@@ -7,6 +7,7 @@
  */
 
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/api/kernel_backend_dispatch.h"
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/advanced/ipc_manager.h"
 #include "vgre/advanced/resource_ledger.h"
@@ -370,6 +371,17 @@ int vgre_register_kernel(const char *name, const char *source,
   if (int s = require_initialized(); s != VGRE_SUCCESS)
     return s;
 
+  // Track Z: when VGRE_EXEC_BACKEND selects a non-JIT backend, compile the
+  // kernel with VGRE's own CUDA-C front-end and run it on the execution backend
+  // (no LLVM). Kernels outside the supported subset fall through to the JIT.
+  {
+    uint64_t backendId = 0;
+    if (vgre::api::tryRegisterBackendKernel(std::string(name), std::string(source), backendId)) {
+      *out_kernel_id = backendId;
+      return VGRE_SUCCESS;
+    }
+  }
+
   vgre::KernelId kid = 0;
   auto r = vgre::core::RuntimeEngine::instance().registerKernel(
       std::string(name), std::string(source), kid);
@@ -454,6 +466,15 @@ int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
   if ((grid_dim[1] == 0 && grid_dim[2] != 0) ||
       (block_dim[1] == 0 && block_dim[2] != 0)) {
     return VGRE_ERROR_INVALID_VALUE;
+  }
+
+  // Track Z: if this id was registered on an execution backend, launch there
+  // (no LLVM). -1 means "not a backend kernel" — use the engine/JIT path.
+  {
+    int bd = vgre::api::tryLaunchBackendKernel(kernel_id, grid_dim, block_dim,
+                                               args, num_args, shared_mem);
+    if (bd == 0) return VGRE_SUCCESS;
+    if (bd == 1) return VGRE_ERROR_LAUNCH_FAILURE;
   }
 
   vgre::dim3 gd(grid_dim[0], grid_dim[1], grid_dim[2]);

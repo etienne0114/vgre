@@ -1211,6 +1211,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/vgre_c_api.cpp
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp
+    src/api/kernel_backend_dispatch.cpp  # Track Z: execution-backend register/launch routing
     src/api/metrics_server.cpp
     src/api/build_info.cpp
 )
