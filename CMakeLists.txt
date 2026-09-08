@@ -63,6 +63,11 @@ option(VGRE_MINIMAL           "Lean core runtime: disable all optional integrati
 # from-scratch CUDA-C front-end and run on the interpreter/compiled execution
 # backends. ON keeps the LLVM ORC JIT as an additional/faster path.
 option(VGRE_ENABLE_JIT        "Compile the LLVM-18 ORC JIT kernel backend" ON)
+# Zero-Burden: when OFF, VGRE builds with NO OpenMP dependency (CPU loops run
+# serially via the ignored #pragma omp directives + serial omp_* fallbacks in
+# openmp_helper.h). With VGRE_ENABLE_JIT=OFF too, VGRE builds with just a C++17
+# compiler and nothing else.
+option(VGRE_ENABLE_OPENMP     "Use OpenMP for CPU parallelism (else serial)" ON)
 option(VGRE_BUILD_TESTS       "Build the VGRE CTest test suite"          ON)
 option(VGRE_BUILD_EXAMPLES    "Build the VGRE example programs"          ON)
 option(VGRE_BUILD_DASHBOARD   "Build the Flutter dashboard"              ON)
@@ -435,11 +440,15 @@ if(APPLE)
     endif()
 endif()
 
-find_package(OpenMP REQUIRED COMPONENTS CXX)
+if(VGRE_ENABLE_OPENMP)
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
+else()
+    message(STATUS "OpenMP: DISABLED (VGRE_ENABLE_OPENMP=OFF) — CPU loops run serially")
+endif()
 
 # Linux: prefer Clang's libomp over libgomp to avoid ABI conflicts with LLVM JIT.
 set(_VGRE_LIBOMP_EXTRA "")
-if(UNIX AND NOT APPLE)
+if(VGRE_ENABLE_OPENMP AND UNIX AND NOT APPLE)
     if(NOT DEFINED CACHE{LIBOMP_PATH})
         find_program(_llvm_cfg NAMES llvm-config-18 llvm-config)
         if(_llvm_cfg)
@@ -466,6 +475,15 @@ endif()
 # dynamic section even when no symbols are directly referenced — needed for
 # LD_PRELOAD scenarios where the loaded library initialises OpenMP lazily.
 function(vgre_target_link_openmp target_name visibility)
+    if(NOT VGRE_ENABLE_OPENMP)
+        # No OpenMP: don't pass -fopenmp (so _OPENMP stays undefined and the
+        # serial omp_* fallbacks apply). Silence the now-unknown #pragma omp
+        # directives so a -Werror build still succeeds.
+        if(NOT MSVC)
+            target_compile_options(${target_name} ${visibility} -Wno-unknown-pragmas)
+        endif()
+        return()
+    endif()
     if(MSVC)
         # MSVC (cl.exe / clang-cl with MSVC driver): use /openmp flag.
         # /openmp:llvm enables the Clang-compatible runtime on clang-cl.
