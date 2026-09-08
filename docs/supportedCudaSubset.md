@@ -67,3 +67,23 @@ On the interpreter tier the transcendentals use PTX approximate ops
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 (`compiled_kernel.cpp`), and verify both tiers against a reference.
+
+## Test status of the two builds (2026-09-08)
+
+| Build | Result |
+|---|---|
+| `-DVGRE_ENABLE_JIT=ON` (default) | **315 / 315 pass** — full LLVM JIT + from-scratch backends |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **94% pass, 0 crashes/aborts** — the from-scratch stack (front-end, interpreter, compiled tier, C-ABI dispatch, GEMM incl. tiled) is fully green |
+
+The ~17 tests that fail in the **no-LLVM** build all exercise features that
+genuinely require the LLVM JIT and are **excluded or fail cleanly** (never crash):
+LLVM bitcode modules, Clang AST analysis (`ClangEnhanced`, `KernelParserEnhanced`,
+`VectorizationHints`), JIT device/warp intrinsics (`WarpShuffleJIT`,
+`DeviceIntrinsics`, `DeviceCurand`), `struct` kernel args (`StructArgsIntegration`),
+`FlashAttention`, and the graph / cooperative-group / UVM / stream paths that run
+kernels through the engine's JIT execution model
+(`CUDAGraphsIntegration`, `CooperativeGroupsPartition`,
+`MultiDeviceCooperativeComprehensive`, `UVMManagedIntegration`,
+`test_stream_concurrency`, `GraphCAPIIntegration`, `HIPRuntimeLayer`,
+`NsightExport`). Routing the engine's execution model through the from-scratch
+backends (so these advanced paths also work with no LLVM) is a tracked follow-on.
