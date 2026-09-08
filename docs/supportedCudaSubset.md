@@ -93,7 +93,7 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **317 / 317 pass** — full LLVM JIT + from-scratch backends |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **318 / 318 pass** — full LLVM JIT + from-scratch backends |
 | **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **298 / 298 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). The lone `-j`-load flake, `Phase3ExtAPI`, passes in isolation. |
 | `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **297 / 297 pass, 0 crashes/aborts** — every test that runs, passes (`PythonNn` is a documented `-j`-load flake: passes 3/3 in isolation and with CI's `--repeat until-pass`) |
 
