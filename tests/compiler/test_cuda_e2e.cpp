@@ -93,9 +93,26 @@ extern "C" __global__ void saxpy(float a, const float* x, float* y, int n) {
         }
     }
 
-    // ── unsupported construct fails cleanly (located error, no crash) ─────────
-    auto bad = compileToPtx("__global__ void k(int* p){ int a[4]; a[0]=1; }", "k");
-    CHECK(!bad.ok, "local array (unsupported) reports an error, not wrong code");
+    // ── per-thread local arrays are now supported end-to-end ─────────────────
+    auto la = compileToPtx(
+        "extern \"C\" __global__ void k(int* p){ int a[4]; a[0]=p[0]; a[1]=a[0]+1; p[0]=a[1]; }", "k");
+    CHECK(la.ok, "local array compiles (now supported)");
+    if (la.ok) {
+        auto lk = be->preparePtx(la.ptx, "k");
+        CHECK(lk != nullptr, "local-array PTX loads");
+        if (lk) {
+            int v = 41; void* pv = &v; void* largs[] = {&pv};
+            LaunchConfig lc; lc.gridDim[0] = 1; lc.blockDim[0] = 1;
+            CHECK(be->launch(*lk, lc, largs, 1), "local-array kernel runs");
+            CHECK(v == 42, "local-array kernel result correct");
+        }
+    }
+
+    // ── a still-unsupported construct fails cleanly (located error, no crash) ─
+    auto bad = compileToPtx(
+        "__device__ int f(int x){ return f(x-1); }\n"
+        "__global__ void k(int* p){ p[0] = f(3); }", "k");
+    CHECK(!bad.ok, "recursion (unsupported) reports an error, not wrong code");
 
     if (g_fail == 0)
         std::printf("PASS: CUDA-C end-to-end (front-end -> PTX -> interpreter, no LLVM)\n");

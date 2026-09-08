@@ -54,6 +54,8 @@ struct PtxKernel {
     std::map<std::string, int> labels;          // label -> PC
     std::map<std::string, int> sharedVars;      // .shared name -> arena offset
     int sharedBytes = 0;
+    std::map<std::string, int> localVars;       // .local name -> per-thread arena offset
+    int localBytes = 0;
 };
 
 // 64-bit raw register value; interpretation (s32/u64/f32/…) is per-instruction.
@@ -132,6 +134,7 @@ private:
         bool atBarrier = false;
         std::map<std::string, RegVal> regs;
         std::map<std::string, bool>   preds;
+        std::vector<char> local;   // per-thread .local scratch (sized to localBytes)
     };
 
     void parse(const std::string& ptx, const std::string& entry);

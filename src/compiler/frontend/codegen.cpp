@@ -25,8 +25,10 @@ namespace {
 
 // Where a value/pointer lives. Value = a plain register; Global = a 64-bit
 // global address (param pointer after cvta); Shared = a __shared__ array,
-// addressed by its PTX name with 32-bit offsets (ld.shared/st.shared).
-enum class Space { Value, Global, Shared, ParamStruct };
+// addressed by its PTX name with 32-bit offsets (ld.shared/st.shared); Local = a
+// per-thread array (register-scratch), same 32-bit symbol addressing but in the
+// .local space (ld.local/st.local).
+enum class Space { Value, Global, Shared, Local, ParamStruct };
 
 // A computed value: the register holding it and its type (+ memory space for
 // pointers/arrays). For a by-value struct param, space==ParamStruct and
@@ -36,6 +38,7 @@ struct Val {
     Type type;
     Space space = Space::Value;
     std::string sharedName;   // Shared: the PTX .shared symbol name
+    std::string localName;    // Local: the PTX .local symbol name
     std::string paramName;    // ParamStruct: the .param symbol name
 };
 
@@ -52,6 +55,7 @@ struct Codegen {
     const Kernel& k;
     std::string body;                 // instruction stream (built first)
     std::string sharedDecls;          // .shared declarations (emitted in the decl section)
+    std::string localDecls;           // .local declarations (emitted in the decl section)
     int nR = 0, nF = 0, nRd = 0, nP = 0, nLbl = 0;
     std::unordered_map<std::string, Val> vars;  // name -> value (single mutable reg)
     bool failed = false;
@@ -281,7 +285,14 @@ struct Codegen {
         std::string reg;
         Type pointee;
         bool shared = false;
+        bool local = false;
     };
+
+    // The PTX memory-space prefix for a computed address ("shared.", "local." or
+    // "global.") — used to build ld./st. mnemonics.
+    static std::string spacePrefix(const Addr& a) {
+        return a.shared ? "shared." : a.local ? "local." : "global.";
+    }
 
     // The element type of an index expression's base, without emitting code
     // (used to coerce the stored value before emitting the store). In the
@@ -308,10 +319,11 @@ struct Codegen {
         Val idx = coerce(emitExpr(*index.args[1]), intType());
         if (failed) return a;
         const int elem = a.pointee.elemBytes();
-        if (b.space == Space::Shared) {
-            a.shared = true;
+        if (b.space == Space::Shared || b.space == Space::Local) {
+            (b.space == Space::Shared ? a.shared : a.local) = true;
+            const std::string& sym = (b.space == Space::Shared) ? b.sharedName : b.localName;
             std::string base = fresh(RC::R32), off = fresh(RC::R32), addr = fresh(RC::R32);
-            emit("mov.u32 " + base + ", " + b.sharedName + ";");
+            emit("mov.u32 " + base + ", " + sym + ";");
             emit("mul.lo.s32 " + off + ", " + idx.reg + ", " + std::to_string(elem) + ";");
             emit("add.s32 " + addr + ", " + base + ", " + off + ";");
             a.reg = addr;
@@ -328,7 +340,7 @@ struct Codegen {
         Addr a = emitAddress(index);
         if (failed) return {};
         std::string d = fresh(classOf(a.pointee));
-        emit(std::string(a.shared ? "ld.shared." : "ld.global.") + memSuffix(a.pointee) +
+        emit("ld." + spacePrefix(a) + memSuffix(a.pointee) +
              " " + d + ", [" + a.reg + "];");
         return {d, a.pointee};
     }
@@ -337,7 +349,7 @@ struct Codegen {
     void emitStore(const Expr& lhs, const Val& value) {
         Addr a = emitAddress(lhs);
         if (failed) return;
-        emit(std::string(a.shared ? "st.shared." : "st.global.") + memSuffix(a.pointee) +
+        emit("st." + spacePrefix(a) + memSuffix(a.pointee) +
              " [" + a.reg + "], " + value.reg + ";");
     }
 
@@ -510,11 +522,13 @@ struct Codegen {
         Val val = coerce(emitExpr(*e.args[1]), pt);
         if (failed) return {};
         std::string oldv = fresh(classOf(pt));
-        if (addr.shared) {
+        if (addr.shared || addr.local) {
+            // Shared: one CTA runs sequentially in the interpreter. Local: private
+            // to the thread. Either way a plain ld/add/st is already atomic.
             std::string sum = fresh(classOf(pt));
-            emit(std::string("ld.shared.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
+            emit("ld." + spacePrefix(addr) + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
             emit(std::string(pt.isFloating() ? "add.f32 " : "add.s32 ") + sum + ", " + oldv + ", " + val.reg + ";");
-            emit(std::string("st.shared.") + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
+            emit("st." + spacePrefix(addr) + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
         } else {
             emit(std::string("atom.global.add.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "], " + val.reg + ";");
         }
@@ -683,12 +697,18 @@ struct Codegen {
             case Stmt::VarDecl: {
                 if (!ensureSupported(s.type)) return;
                 if (s.arraySize > 0) {
-                    if (!s.isShared) { fail("local arrays are unsupported; use __shared__"); return; }
-                    // __shared__ T name[N]  ->  .shared .align 4 .b8 name[N*sizeof(T)]
                     int bytes = s.arraySize * s.type.elemBytes();
-                    sharedDecls += "\t.shared .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
                     Type ptr = s.type; ptr.ptr = 1;   // the array decays to a pointer-to-element
-                    Val v; v.type = ptr; v.space = Space::Shared; v.sharedName = s.name;
+                    Val v; v.type = ptr;
+                    if (s.isShared) {
+                        // __shared__ T name[N]  ->  .shared .align 4 .b8 name[N*sizeof(T)]
+                        sharedDecls += "\t.shared .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
+                        v.space = Space::Shared; v.sharedName = s.name;
+                    } else {
+                        // T name[N]  ->  .local .align 4 .b8 name[N*sizeof(T)] (per-thread scratch)
+                        localDecls += "\t.local .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
+                        v.space = Space::Local; v.localName = s.name;
+                    }
                     vars[s.name] = v;
                     return;
                 }
@@ -822,6 +842,7 @@ struct Codegen {
         if (nF  > 0) out += "\t.reg .f32 %f<"  + std::to_string(nF)  + ">;\n";
         if (nRd > 0) out += "\t.reg .b64 %rd<" + std::to_string(nRd) + ">;\n";
         out += sharedDecls;
+        out += localDecls;
         out += body;
         out += "}\n";
         return out;

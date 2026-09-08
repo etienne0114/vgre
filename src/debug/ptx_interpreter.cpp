@@ -219,6 +219,23 @@ void PtxInterpreter::parse(const std::string& ptx, const std::string& entry) {
                 kernel_.sharedBytes = (kernel_.sharedBytes + 15) / 16 * 16;
                 kernel_.sharedVars[name] = kernel_.sharedBytes;
                 kernel_.sharedBytes += bytes;
+            } else if (kind == ".local") {
+                std::string tok, type, name;
+                while (ss >> tok) {
+                    if (tok == ".align") { ss >> tok; continue; }
+                    if (tok[0] == '.') type = tok.substr(1);
+                    else name = tok;
+                }
+                size_t br = name.find('[');
+                int count = 1;
+                if (br != std::string::npos) {
+                    count = std::atoi(name.c_str() + br + 1);
+                    name = name.substr(0, br);
+                }
+                int bytes = typeSize(type) * count;
+                kernel_.localBytes = (kernel_.localBytes + 15) / 16 * 16;
+                kernel_.localVars[name] = kernel_.localBytes;
+                kernel_.localBytes += bytes;
             }
             // .local/.maxntid/… are accepted and ignored for execution.
             continue;
@@ -337,6 +354,8 @@ void PtxInterpreter::startCta(int cta) {
     ctaIdx_[2] = cta / (gridDim_[0] * gridDim_[1]);
     shared_.assign((size_t)std::max(kernel_.sharedBytes, 1), 0);
     threads_.assign((size_t)blockTotal_, Thread{});
+    if (kernel_.localBytes > 0)
+        for (auto& t : threads_) t.local.assign((size_t)kernel_.localBytes, 0);
 }
 
 bool PtxInterpreter::ctaFinished() const {
@@ -503,6 +522,8 @@ uint64_t PtxInterpreter::evalOperand(Thread& t, int tid, const std::string& s,
         return (uint64_t)std::stoll(s);
     auto sh = kernel_.sharedVars.find(s);                            // mov %r, sharedName
     if (sh != kernel_.sharedVars.end()) return (uint64_t)sh->second;
+    auto lo = kernel_.localVars.find(s);                             // mov %r, localName
+    if (lo != kernel_.localVars.end()) return (uint64_t)lo->second;
     throw std::runtime_error("PTX: unknown operand '" + s + "'");
 }
 
@@ -542,6 +563,11 @@ uint64_t PtxInterpreter::loadFrom(Thread& t, int tid, const std::string& memRef,
         std::memcpy(&val, shared_.data() + addr, (size_t)size);
         return val;
     }
+    if (space == "local") {
+        if (addr + size > t.local.size()) throw std::runtime_error("PTX: local OOB load");
+        std::memcpy(&val, t.local.data() + addr, (size_t)size);
+        return val;
+    }
     if (!readGlobal(addr, &val, (size_t)size))
         throw std::runtime_error("PTX: global load fault @" + std::to_string(addr));
     return val;
@@ -555,6 +581,11 @@ void PtxInterpreter::storeTo(Thread& t, int tid, const std::string& memRef,
     if (space == "shared") {
         if (addr + size > shared_.size()) throw std::runtime_error("PTX: shared OOB store");
         std::memcpy(shared_.data() + addr, &val, (size_t)size);
+        return;
+    }
+    if (space == "local") {
+        if (addr + size > t.local.size()) throw std::runtime_error("PTX: local OOB store");
+        std::memcpy(t.local.data() + addr, &val, (size_t)size);
         return;
     }
     if (space == "param") throw std::runtime_error("PTX: st.param outside call frames unsupported");
@@ -663,12 +694,12 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         // cvta(.to).global on a flat CPU address space is the identity.
         setReg(A(0), val(1));
     } else if (mnem == "ld") {
-        std::string space = has("shared") ? "shared" : has("param") ? "param" : "global";
+        std::string space = has("shared") ? "shared" : has("local") ? "local" : has("param") ? "param" : "global";
         uint64_t v = loadFrom(t, tid, A(1), space, size);
         if (isS && size < 8) v = (uint64_t)signExtend(v, size);
         setReg(A(0), v);
     } else if (mnem == "st") {
-        std::string space = has("shared") ? "shared" : has("param") ? "param" : "global";
+        std::string space = has("shared") ? "shared" : has("local") ? "local" : has("param") ? "param" : "global";
         storeTo(t, tid, A(0), space, size, val(1));
     } else if (mnem == "atom") {
         // atom.global.add.<ty> dst, [addr], val — a real atomic RMW so a grid's

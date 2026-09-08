@@ -1045,6 +1045,12 @@ target_link_libraries(test_cuda_struct PRIVATE vgre Threads::Threads)
 add_test(NAME CudaStruct COMMAND test_cuda_struct)
 set_tests_properties(CudaStruct PROPERTIES TIMEOUT 30)
 
+# Track Z: per-thread local (.local) arrays — register scratch (interpreter tier).
+add_executable(test_cuda_local_array compiler/test_cuda_local_array.cpp)
+target_link_libraries(test_cuda_local_array PRIVATE vgre Threads::Threads)
+add_test(NAME CudaLocalArray COMMAND test_cuda_local_array)
+set_tests_properties(CudaLocalArray PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

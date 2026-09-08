@@ -70,7 +70,8 @@ an 8-worker pool, both bit-identical to the serial result.
 | Feature | Status |
 |---|---|
 | global load/store | ✅ |
-| `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier kernels to Tier-0) |
+| per-thread **local** arrays (`float tmp[4];`, register scratch) | ✅ (Tier-0 interpreter; PTX `.local`, private per-thread arena; constant + dynamic indexing) |
+| `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier/array kernels to Tier-0) |
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
 
 ## Intrinsics
@@ -80,10 +81,11 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …); the compiled tier uses libm.
 
 ## Not yet supported (returns an error, falls back to JIT when available)
-- local (non-`__shared__`) arrays
 - templates, recursion
 - texture/surface and warp-shuffle intrinsics
 - `double`/`long` on the interpreter tier (compiled tier + JIT cover them)
+- local arrays on the **compiled** tier (they run on Tier-0 — which is now
+  parallel across CTAs — via the automatic fallback)
 
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
@@ -93,9 +95,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **318 / 318 pass** — full LLVM JIT + from-scratch backends |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **298 / 298 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). The lone `-j`-load flake, `Phase3ExtAPI`, passes in isolation. |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **297 / 297 pass, 0 crashes/aborts** — every test that runs, passes (`PythonNn` is a documented `-j`-load flake: passes 3/3 in isolation and with CI's `--repeat until-pass`) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **319 / 319 pass** — full LLVM JIT + from-scratch backends |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **299 / 299 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **299 / 299 pass, 0 crashes/aborts** — every test that runs, passes |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
