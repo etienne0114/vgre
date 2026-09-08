@@ -58,6 +58,11 @@ list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 # it forces every optional integration OFF (see the override block below), so the
 # image carries only the CUDA/cuBLAS/JIT core. Enable with -DVGRE_MINIMAL=ON.
 option(VGRE_MINIMAL           "Lean core runtime: disable all optional integrations" OFF)
+# Track Z (Zero-Burden Engine): when OFF, VGRE is built with NO LLVM/Clang at all
+# (no ~1 GB LLVM-18 dependency, fast Windows build). Kernels are compiled by the
+# from-scratch CUDA-C front-end and run on the interpreter/compiled execution
+# backends. ON keeps the LLVM ORC JIT as an additional/faster path.
+option(VGRE_ENABLE_JIT        "Compile the LLVM-18 ORC JIT kernel backend" ON)
 option(VGRE_BUILD_TESTS       "Build the VGRE CTest test suite"          ON)
 option(VGRE_BUILD_EXAMPLES    "Build the VGRE example programs"          ON)
 option(VGRE_BUILD_DASHBOARD   "Build the Flutter dashboard"              ON)
@@ -542,6 +547,10 @@ endif()
 # Version specifier in CONFIG mode is unreliable with distro-packaged LLVM
 # (LLVMConfigVersion.cmake may use EXACT compatibility). Find first, then
 # assert the minimum version explicitly — same effect, better portability.
+if(VGRE_ENABLE_JIT)
+# Track Z: the LLVM ORC JIT path. Compiled out entirely with -DVGRE_ENABLE_JIT=OFF,
+# in which case VGRE has NO LLVM/Clang dependency at all.
+add_compile_definitions(VGRE_ENABLE_JIT)
 find_package(LLVM REQUIRED CONFIG)
 if(LLVM_PACKAGE_VERSION VERSION_LESS "18")
     message(FATAL_ERROR
@@ -583,9 +592,18 @@ endif()
 # Likewise, subdirectory OBJECT libraries need the LLVM include path
 # so their #include <llvm/...> directives resolve during compilation.
 include_directories(${LLVM_INCLUDE_DIRS})
+else()
+    # ── Zero-Burden build: no LLVM/Clang ────────────────────────────────────
+    message(STATUS "LLVM: DISABLED (VGRE_ENABLE_JIT=OFF) — building with no LLVM/Clang; "
+                   "kernels compile via the from-scratch front-end and run on the "
+                   "interpreter/compiled execution backends")
+    set(llvm_libs "")
+    # An empty stand-in so consumers that link vgre_llvm_iface stay valid.
+    add_library(vgre_llvm_iface INTERFACE)
+endif()
 
 # ── Windows: DIA SDK discovery via vswhere + multi-edition/year enumeration ───
-if(WIN32)
+if(WIN32 AND VGRE_ENABLE_JIT)
     set(_dia_path "")
 
     # Strategy 1: vswhere (covers all editions atomically)

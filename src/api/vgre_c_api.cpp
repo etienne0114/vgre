@@ -382,6 +382,12 @@ int vgre_register_kernel(const char *name, const char *source,
     }
   }
 
+#ifndef VGRE_ENABLE_JIT
+  // No LLVM JIT in this build — a kernel the from-scratch front-end can't compile
+  // has nowhere to fall back to.
+  return to_status(vgre::VGREResult::ERR_NOT_SUPPORTED);
+#endif
+
   vgre::KernelId kid = 0;
   auto r = vgre::core::RuntimeEngine::instance().registerKernel(
       std::string(name), std::string(source), kid);

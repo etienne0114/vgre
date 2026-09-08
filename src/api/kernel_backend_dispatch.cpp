@@ -48,8 +48,15 @@ uint32_t nz(uint32_t v) { return v ? v : 1u; }
 }  // namespace
 
 bool backendModeActive() {
+#ifndef VGRE_ENABLE_JIT
+    // The LLVM JIT is compiled out — the execution backend is the only path, so
+    // every kernel routes through the from-scratch front-end regardless of the
+    // (now moot) VGRE_EXEC_BACKEND selector.
+    return true;
+#else
     std::string m = modeName();
     return !m.empty() && m != "jit" && m != "llvm";
+#endif
 }
 
 bool tryRegisterBackendKernel(const std::string& name, const std::string& source, uint64_t& outId) {
