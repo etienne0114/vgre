@@ -12,6 +12,15 @@ JIT-enabled build — falls back to the LLVM path.
 Every feature below is verified end-to-end on **both** execution tiers
 (Tier-0 PTX interpreter and Tier-1 compiled) unless noted.
 
+The **Tier-1 compiled** path runs its thread-blocks (CTAs) **in parallel** across
+the in-tree work-stealing thread pool (`include/vgre/xla/thread_pool.h`) — no
+OpenMP, so the fast path is multi-threaded in *every* build, including the bare
+no-LLVM/no-OpenMP one. Barrier-free CTAs are independent, so this is safe; the
+only cross-CTA sharing, `atomicAdd`, uses a real hardware atomic RMW
+(`__atomic_fetch_add` / a bit-CAS loop for floats; a locked fallback elsewhere),
+so results are correct regardless of CTA scheduling. Measured **~5.4× on an
+8-worker pool** for a compute-bound elementwise kernel.
+
 ## Types
 | Type | Interpreter tier | Compiled tier |
 |---|---|---|
@@ -33,7 +42,7 @@ Every feature below is verified end-to-end on **both** execution tiers
 | ternary `cond ? a : b` (nested) | ✅ |
 | C-style casts `(int)x`, `(float)y` | ✅ |
 | indexing `p[i]`, member `threadIdx.x` | ✅ |
-| `atomicAdd(&p[i], v)` (int + float) | ✅ |
+| `atomicAdd(&p[i], v)` (int + float) | ✅ (real atomic RMW — correct under the compiled tier's parallel CTAs) |
 | address-of `&p[i]` (as an atomicAdd target) | ✅ |
 
 ## Statements / control flow
@@ -74,7 +83,7 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 | Build | Result |
 |---|---|
 | `-DVGRE_ENABLE_JIT=ON` (default) | **317 / 317 pass** — full LLVM JIT + from-scratch backends |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **297 / 297 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; CPU loops serial) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **298 / 298 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). The lone `-j`-load flake, `Phase3ExtAPI`, passes in isolation. |
 | `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **297 / 297 pass, 0 crashes/aborts** — every test that runs, passes (`PythonNn` is a documented `-j`-load flake: passes 3/3 in isolation and with CI's `--repeat until-pass`) |
 
 The whole engine kernel path is routed through the from-scratch backends when
