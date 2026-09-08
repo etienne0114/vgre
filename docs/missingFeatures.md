@@ -24,6 +24,22 @@ This file tracks **what is not yet done**.
 > LLVM, à la CPython 3.13); **Tier 2** optional MIR/QBE-class SSA backend for
 > peak speed. Plus an in-tree CUDA-C front-end (own lexer/parser → VGRE-IR) and
 > making the in-tree thread pool the only threading requirement (OpenMP optional).
+>
+> **✅ ACHIEVED (2026-09-08): the LLVM-optional build.** `-DVGRE_ENABLE_JIT=OFF`
+> builds and runs CUDA kernels with **NO LLVM/Clang** — `find_package(LLVM)` is
+> skipped, `libvgre.so` drops **114 MB → 9.8 MB (~12×)**, and kernels compile via
+> the from-scratch CUDA-C front-end (lexer→parser→PTX codegen) and run on the
+> Tier-0 interpreter / Tier-1 compiled backends through the real C-ABI
+> (`vgre_register_kernel`/`vgre_launch_kernel`). Done with no `runtime_engine`
+> surgery via `src/compiler/jit_stubs.cpp` (no-op `LLVMTranslationEngine` + a
+> regex-delegating `ClangKernelParser`). Supported CUDA-C subset today: int/float
+> (+ double/long on the compiled tier), all operators incl. ternary/casts/`++`/
+> compound-assign, if/for/while, global + `__shared__` memory, `__syncthreads`,
+> `atomicAdd`, the `threadIdx/blockIdx/blockDim/gridDim` builtins, and the
+> `sqrtf/rsqrtf/fabsf/abs/expf/logf/sinf/cosf/floorf/ceilf/fminf/fmaxf/min/max/`
+> `fmaf/powf` intrinsics. Remaining: grow the subset (structs, device functions,
+> texture/warp ops), Tier-1b native copy-and-patch, and dropping the REQUIRED
+> OpenMP for the in-tree thread pool.
 
 The rest of this file tracks the **ML feature tracks** (T1–T6 and the next
 frontier), which were delivered to the project's *real, no-stub* standard; the
