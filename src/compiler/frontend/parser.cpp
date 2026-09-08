@@ -434,6 +434,7 @@ struct Parser {
         }
         Type ret;
         if (!parseType(ret)) { fail("expected a return type"); return nullptr; }
+        k->returnType = ret;
         if (!at(TokenKind::Identifier)) { fail("expected a kernel name"); return nullptr; }
         k->name = advance().text;
         expect(TokenKind::LParen, "'('");

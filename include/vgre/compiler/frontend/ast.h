@@ -84,9 +84,10 @@ struct Param {
 
 struct Kernel {
     std::string name;
+    Type returnType;              // void for __global__; the real type for __device__
     std::vector<Param> params;
     std::vector<StmtPtr> body;
-    bool isGlobal = false;  // had __global__
+    bool isGlobal = false;        // had __global__ (vs __device__ helper function)
 };
 
 struct Module {

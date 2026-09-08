@@ -1035,6 +1035,12 @@ target_link_libraries(test_cuda_gemm_tiled PRIVATE vgre Threads::Threads)
 add_test(NAME CudaGemmTiled COMMAND test_cuda_gemm_tiled)
 set_tests_properties(CudaGemmTiled PROPERTIES TIMEOUT 60)
 
+# Track Z: __device__ helper functions (inlined) on the interpreter tier.
+add_executable(test_cuda_device_fn compiler/test_cuda_device_fn.cpp)
+target_link_libraries(test_cuda_device_fn PRIVATE vgre Threads::Threads)
+add_test(NAME CudaDeviceFn COMMAND test_cuda_device_fn)
+set_tests_properties(CudaDeviceFn PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

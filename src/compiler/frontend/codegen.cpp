@@ -12,8 +12,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace vgre {
 namespace compiler {
@@ -54,7 +56,21 @@ struct Codegen {
     std::string err;
     int line = 0, col = 0;
 
-    explicit Codegen(const Kernel& kernel) : k(kernel) {}
+    // __device__ helper functions available for inlining (name -> Kernel), and
+    // the active inline-call context stack (return register + end label + return
+    // type) so a `return` inside an inlined body branches to the call site.
+    const std::unordered_map<std::string, const Kernel*>* deviceFns_ = nullptr;
+    struct InlineCtx { std::string retReg; std::string endLabel; Type retType; };
+    std::vector<InlineCtx> inlineCtx_;
+    std::set<std::string> inlining_;  // recursion guard
+
+    explicit Codegen(const Kernel& kernel,
+                     const std::unordered_map<std::string, const Kernel*>* deviceFns = nullptr)
+        : k(kernel), deviceFns_(deviceFns) {}
+
+    static const char* movFor(const Type& t) {
+        return t.isFloating() ? "mov.f32 " : (t.isPointer() ? "mov.u64 " : "mov.u32 ");
+    }
 
     void fail(const std::string& m) {
         if (failed) return;
@@ -73,7 +89,15 @@ struct Codegen {
     }
     std::string label() { return "$L" + std::to_string(nLbl++); }
 
-    void emit(const std::string& s) { body += "\t"; body += s; body += "\n"; }
+    void emit(const std::string& s) {
+        // Defensive cap: a codegen bug (e.g. runaway inlining) must fail cleanly,
+        // never OOM. 16 MB of PTX text is far beyond any real kernel.
+        if (body.size() > (16u << 20)) {
+            if (!failed) fail("codegen output exceeded 16MB — aborting (last line: " + s + ")");
+            return;
+        }
+        body += "\t"; body += s; body += "\n";
+    }
     void emitLabel(const std::string& l) { body += l; body += ":\n"; }
 
     static Type intType() { Type t; t.base = Type::Int; return t; }
@@ -465,10 +489,57 @@ struct Codegen {
         return {oldv, pt};
     }
 
+    // Inline a call to a __device__ helper function: bind args to a fresh param
+    // scope, emit the body (a `return` branches to the end label with the value
+    // in retReg), then restore the caller's scope. Non-recursive only.
+    Val emitInlineDeviceCall(const Kernel& fn, const Expr& call) {
+        if (inlineCtx_.size() > 64) { fail("__device__ inline depth exceeded at '" + fn.name + "' (recursion?)"); return {}; }
+        if (inlining_.count(fn.name)) { fail("recursive __device__ function '" + fn.name + "' is unsupported"); return {}; }
+        if (call.args.size() != fn.params.size()) { fail("wrong argument count for '" + fn.name + "'"); return {}; }
+
+        std::vector<Val> argVals;
+        for (const auto& a : call.args) { argVals.push_back(emitExpr(*a)); if (failed) return {}; }
+
+        // Fresh param scope: the body sees only its params + its own locals.
+        std::unordered_map<std::string, Val> inlineScope;
+        for (size_t i = 0; i < fn.params.size(); ++i) {
+            const Param& p = fn.params[i];
+            Val v = coerce(argVals[i], p.type);
+            std::string reg = fresh(classOf(p.type));
+            emit(std::string(movFor(p.type)) + reg + ", " + v.reg + ";");
+            Val pv; pv.reg = reg; pv.type = p.type;
+            if (p.type.isPointer()) pv.space = argVals[i].space;  // keep global/shared addressing
+            inlineScope[p.name] = pv;
+        }
+
+        const Type rt = fn.returnType;
+        std::string retReg = (rt.base == Type::Void) ? std::string() : fresh(classOf(rt));
+        std::string endL = label();
+        inlineCtx_.push_back({retReg, endL, rt});
+        inlining_.insert(fn.name);
+
+        std::unordered_map<std::string, Val> savedVars;
+        savedVars.swap(vars);
+        vars = std::move(inlineScope);
+        for (const auto& st : fn.body) { emitStmt(*st); if (failed) break; }
+        emitLabel(endL);
+        vars = std::move(savedVars);
+
+        inlining_.erase(fn.name);
+        inlineCtx_.pop_back();
+        if (failed) return {};
+        if (rt.base == Type::Void) return {};
+        return {retReg, rt};
+    }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
         if (fn == "atomicAdd" && e.args.size() == 2) return emitAtomicAdd(e);
+        if (deviceFns_) {
+            auto it = deviceFns_->find(fn);
+            if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);
+        }
 
         // Unary intrinsics.
         if (e.args.size() == 1) {
@@ -603,7 +674,26 @@ struct Codegen {
             }
             case Stmt::ExprStmt: if (s.expr) emitExpr(*s.expr); return;
             case Stmt::Block: for (auto& st : s.body) { emitStmt(*st); if (failed) return; } return;
-            case Stmt::Return: emit("ret;"); return;
+            case Stmt::Return:
+                if (!inlineCtx_.empty()) {
+                    // Inside an inlined __device__ function: stash the value and
+                    // branch to the call-site continuation (not a kernel `ret`).
+                    // Copy the context fields BY VALUE — emitExpr() below may inline
+                    // a nested device call, push_back to inlineCtx_, and reallocate
+                    // it, which would dangle a reference into the vector.
+                    const std::string retReg = inlineCtx_.back().retReg;
+                    const std::string endLabel = inlineCtx_.back().endLabel;
+                    const Type retType = inlineCtx_.back().retType;
+                    if (s.expr && !retReg.empty()) {
+                        Val v = coerce(emitExpr(*s.expr), retType);
+                        if (failed) return;
+                        emit(std::string(movFor(retType)) + retReg + ", " + v.reg + ";");
+                    }
+                    emit("bra " + endLabel + ";");
+                } else {
+                    emit("ret;");
+                }
+                return;
             case Stmt::Empty: return;
             case Stmt::If: {
                 std::string elseL = label(), endL = label();
@@ -710,12 +800,21 @@ CodegenResult compileToPtx(const std::string& source, const std::string& name) {
     CodegenResult r;
     ParseResult pr = parse(source);
     if (!pr.ok) { r.error = pr.error; return r; }
+    // Collect __device__ helper functions (non-__global__ kernels) for inlining,
+    // and pick the __global__ entry kernel `name` (first __global__ if empty).
+    std::unordered_map<std::string, const Kernel*> deviceFns;
     const Kernel* target = nullptr;
     for (auto& kp : pr.module->kernels) {
-        if (name.empty() || kp->name == name) { target = kp.get(); break; }
+        if (!kp->isGlobal) deviceFns[kp->name] = kp.get();
+        if (!target && (name.empty() ? kp->isGlobal : kp->name == name)) target = kp.get();
     }
     if (!target) { r.error = "kernel not found: " + (name.empty() ? std::string("<first>") : name); return r; }
-    return generatePtx(*target);
+    Codegen cg(*target, &deviceFns);
+    std::string ptx = cg.run();
+    if (cg.failed) { r.error = cg.err; return r; }
+    r.ptx = std::move(ptx);
+    r.ok = true;
+    return r;
 }
 
 }  // namespace frontend
