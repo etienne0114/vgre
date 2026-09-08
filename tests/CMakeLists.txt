@@ -995,6 +995,12 @@ target_link_libraries(test_cuda_gemm PRIVATE vgre Threads::Threads)
 add_test(NAME CudaGemm COMMAND test_cuda_gemm)
 set_tests_properties(CudaGemm PROPERTIES TIMEOUT 60)
 
+# Track Z: tiled shared-memory GEMM (cooperative __syncthreads) on the interpreter.
+add_executable(test_cuda_gemm_tiled compiler/test_cuda_gemm_tiled.cpp)
+target_link_libraries(test_cuda_gemm_tiled PRIVATE vgre Threads::Threads)
+add_test(NAME CudaGemmTiled COMMAND test_cuda_gemm_tiled)
+set_tests_properties(CudaGemmTiled PROPERTIES TIMEOUT 60)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
