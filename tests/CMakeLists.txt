@@ -254,10 +254,13 @@ add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
 set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
 
 
-add_executable(test_flop_counting compiler/test_flop_counting.cpp)
-target_link_libraries(test_flop_counting PRIVATE vgre)
-add_test(NAME FLOPCounting COMMAND test_flop_counting)
-set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+# Uses the LLVM IRBuilder API directly — only meaningful in a JIT-enabled build.
+if(VGRE_ENABLE_JIT)
+    add_executable(test_flop_counting compiler/test_flop_counting.cpp)
+    target_link_libraries(test_flop_counting PRIVATE vgre)
+    add_test(NAME FLOPCounting COMMAND test_flop_counting)
+    set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_vectorization_hints compiler/test_vectorization_hints.cpp)
 target_link_libraries(test_vectorization_hints PRIVATE vgre)
@@ -538,11 +541,13 @@ set_tests_properties(NCCLReduceScatter PROPERTIES TIMEOUT 60)
 
 # PTX warp shuffle emulation — group-aware permutation network (QUEUE-10)
 # Self-contained: provides its own JIT runtime stubs; does not link vgre.
-add_executable(test_warp_shuffle unit/test_warp_shuffle.cpp)
-target_include_directories(test_warp_shuffle PRIVATE
-    ${CMAKE_SOURCE_DIR}/include)
-add_test(NAME WarpShuffle COMMAND test_warp_shuffle)
-set_tests_properties(WarpShuffle PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_warp_shuffle unit/test_warp_shuffle.cpp)
+    target_include_directories(test_warp_shuffle PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME WarpShuffle COMMAND test_warp_shuffle)
+    set_tests_properties(WarpShuffle PROPERTIES TIMEOUT 30)
+endif()
 
 # cuBLAS DOT/NRM2/ASUM Kahan summation + cublasDnrm2 (QUEUE-08)
 add_executable(test_kahan_level1 api/test_kahan_level1.cpp)
@@ -576,10 +581,12 @@ target_include_directories(test_sparse_view PRIVATE ${CMAKE_SOURCE_DIR}/src/api/
 add_test(NAME SparseViewConversions COMMAND test_sparse_view)
 set_tests_properties(SparseViewConversions PROPERTIES TIMEOUT 30)
 
-add_executable(test_ptx_translate api/test_ptx_translate.cpp)
-target_link_libraries(test_ptx_translate PRIVATE vgre)
-add_test(NAME PTXTranslate COMMAND test_ptx_translate)
-set_tests_properties(PTXTranslate PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_ptx_translate api/test_ptx_translate.cpp)
+    target_link_libraries(test_ptx_translate PRIVATE vgre)
+    add_test(NAME PTXTranslate COMMAND test_ptx_translate)
+    set_tests_properties(PTXTranslate PROPERTIES TIMEOUT 30)
+endif()
 
 add_executable(test_metrics_server api/test_metrics_server.cpp)
 target_link_libraries(test_metrics_server PRIVATE vgre_cudart)
@@ -599,17 +606,21 @@ add_test(NAME FlashAttention COMMAND test_flash_attention)
 # (cold) compile, which surfaced as a non-deterministic non-causal failure.
 set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
-add_executable(test_tensorcore_mma integration/test_tensorcore_mma.cpp)
-target_link_libraries(test_tensorcore_mma PRIVATE vgre)
-add_test(NAME TensorCoreMMA COMMAND test_tensorcore_mma)
-# JIT-compiles warp-collective mma kernels — serialise with the other JIT tests.
-set_tests_properties(TensorCoreMMA PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_tensorcore_mma integration/test_tensorcore_mma.cpp)
+    target_link_libraries(test_tensorcore_mma PRIVATE vgre)
+    add_test(NAME TensorCoreMMA COMMAND test_tensorcore_mma)
+    # JIT-compiles warp-collective mma kernels — serialise with the other JIT tests.
+    set_tests_properties(TensorCoreMMA PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 # Phase 3, P3-4: Hopper warp-group MMA (wgmma).
-add_executable(test_wgmma integration/test_wgmma.cpp)
-target_link_libraries(test_wgmma PRIVATE vgre)
-add_test(NAME WgmmaWarpGroup COMMAND test_wgmma)
-set_tests_properties(WgmmaWarpGroup PROPERTIES TIMEOUT 60)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_wgmma integration/test_wgmma.cpp)
+    target_link_libraries(test_wgmma PRIVATE vgre)
+    add_test(NAME WgmmaWarpGroup COMMAND test_wgmma)
+    set_tests_properties(WgmmaWarpGroup PROPERTIES TIMEOUT 60)
+endif()
 
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
@@ -1446,10 +1457,12 @@ add_test(NAME ThreadBlockCluster COMMAND test_cluster)
 set_tests_properties(ThreadBlockCluster PROPERTIES TIMEOUT 30)
 
 # Phase 3, P3-6: end-to-end cluster execution via the executor (executeClustered).
-add_executable(test_cluster_exec integration/test_cluster_exec.cpp)
-target_link_libraries(test_cluster_exec PRIVATE vgre Threads::Threads)
-add_test(NAME ClusterExecution COMMAND test_cluster_exec)
-set_tests_properties(ClusterExecution PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_cluster_exec integration/test_cluster_exec.cpp)
+    target_link_libraries(test_cluster_exec PRIVATE vgre Threads::Threads)
+    add_test(NAME ClusterExecution COMMAND test_cluster_exec)
+    set_tests_properties(ClusterExecution PROPERTIES TIMEOUT 30)
+endif()
 
 # Phase 3, P3-7: Blackwell tcgen05 Tensor Memory (TMEM) data path.
 add_executable(test_tmem core/test_tmem.cpp)
@@ -1656,12 +1669,14 @@ set_tests_properties(EventFlags PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
 
 # ── Runtime block-threading toggle (vgre_set_block_threads is a real control) ─
-add_executable(test_block_threads_toggle unit/test_block_threads_toggle.cpp)
-target_link_libraries(test_block_threads_toggle PRIVATE vgre)
-add_test(NAME BlockThreadsToggle COMMAND test_block_threads_toggle)
-set_tests_properties(BlockThreadsToggle PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
-    TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_block_threads_toggle unit/test_block_threads_toggle.cpp)
+    target_link_libraries(test_block_threads_toggle PRIVATE vgre)
+    add_test(NAME BlockThreadsToggle COMMAND test_block_threads_toggle)
+    set_tests_properties(BlockThreadsToggle PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+        TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 # ── QUEUE-57: cuSOLVER sygvd generalized eigenvalue ──────────────────────────
 add_executable(test_cusolver_sygvd api/test_cusolver_sygvd.cpp)
