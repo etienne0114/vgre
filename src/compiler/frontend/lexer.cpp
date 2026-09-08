@@ -32,6 +32,7 @@ const char* tokenKindName(TokenKind k) {
         case TokenKind::KwDouble:     return "double";
         case TokenKind::KwUnsigned:   return "unsigned";
         case TokenKind::KwSigned:     return "signed";
+        case TokenKind::KwStruct:     return "struct";
         case TokenKind::KwIf:         return "if";
         case TokenKind::KwElse:       return "else";
         case TokenKind::KwFor:        return "for";
@@ -93,6 +94,7 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"short", TokenKind::KwShort}, {"int", TokenKind::KwInt}, {"long", TokenKind::KwLong},
         {"float", TokenKind::KwFloat}, {"double", TokenKind::KwDouble},
         {"unsigned", TokenKind::KwUnsigned}, {"signed", TokenKind::KwSigned},
+        {"struct", TokenKind::KwStruct},
         {"if", TokenKind::KwIf}, {"else", TokenKind::KwElse}, {"for", TokenKind::KwFor},
         {"while", TokenKind::KwWhile}, {"return", TokenKind::KwReturn},
     };

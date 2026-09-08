@@ -26,15 +26,17 @@ namespace {
 // Where a value/pointer lives. Value = a plain register; Global = a 64-bit
 // global address (param pointer after cvta); Shared = a __shared__ array,
 // addressed by its PTX name with 32-bit offsets (ld.shared/st.shared).
-enum class Space { Value, Global, Shared };
+enum class Space { Value, Global, Shared, ParamStruct };
 
 // A computed value: the register holding it and its type (+ memory space for
-// pointers/arrays).
+// pointers/arrays). For a by-value struct param, space==ParamStruct and
+// `paramName` is the PTX .param byte-array symbol (members read via ld.param).
 struct Val {
     std::string reg;
     Type type;
     Space space = Space::Value;
     std::string sharedName;   // Shared: the PTX .shared symbol name
+    std::string paramName;    // ParamStruct: the .param symbol name
 };
 
 // PTX register classes.
@@ -60,13 +62,21 @@ struct Codegen {
     // the active inline-call context stack (return register + end label + return
     // type) so a `return` inside an inlined body branches to the call site.
     const std::unordered_map<std::string, const Kernel*>* deviceFns_ = nullptr;
+    const Module* mod_ = nullptr;     // for struct layouts (findStruct)
     struct InlineCtx { std::string retReg; std::string endLabel; Type retType; };
     std::vector<InlineCtx> inlineCtx_;
     std::set<std::string> inlining_;  // recursion guard
 
     explicit Codegen(const Kernel& kernel,
-                     const std::unordered_map<std::string, const Kernel*>* deviceFns = nullptr)
-        : k(kernel), deviceFns_(deviceFns) {}
+                     const std::unordered_map<std::string, const Kernel*>* deviceFns = nullptr,
+                     const Module* mod = nullptr)
+        : k(kernel), deviceFns_(deviceFns), mod_(mod) {}
+
+    // Struct byte-size from the module's struct table (0 if unknown).
+    int structSize(const std::string& name) const {
+        const StructDef* d = mod_ ? mod_->findStruct(name) : nullptr;
+        return d ? d->size : 0;
+    }
 
     static const char* movFor(const Type& t) {
         return t.isFloating() ? "mov.f32 " : (t.isPointer() ? "mov.u64 " : "mov.u32 ");
@@ -178,6 +188,20 @@ struct Codegen {
                     std::string d = fresh(RC::R32);
                     emit("mov.u32 " + d + ", %" + sregOf(obj.str) + "." + e.str + ";");
                     return {d, intType()};
+                }
+                // Struct member read: obj is a by-value struct param → load the
+                // member scalar from its .param byte array at the member offset.
+                if (obj.kind == Expr::Ident) {
+                    auto it = vars.find(obj.str);
+                    if (it != vars.end() && it->second.space == Space::ParamStruct) {
+                        const StructDef* def = mod_ ? mod_->findStruct(it->second.type.structName) : nullptr;
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (!m) { fail("no member '." + e.str + "' in struct '" + it->second.type.structName + "'"); return {}; }
+                        std::string d = fresh(classOf(m->type));
+                        emit("ld.param." + std::string(memSuffix(m->type)) + " " + d + ", [" +
+                             it->second.paramName + "+" + std::to_string(m->offset) + "];");
+                        return {d, m->type};
+                    }
                 }
                 fail("unsupported member access '." + e.str + "'");
                 return {};
@@ -744,7 +768,11 @@ struct Codegen {
         for (const Param& p : k.params) {
             if (p.name.empty()) continue;  // unnamed param: nothing binds to it
             if (!ensureSupported(p.type)) return "";
-            if (p.type.isPointer()) {
+            if (p.type.isStruct()) {
+                // By-value struct: stays in .param space; members read on access.
+                Val v; v.type = p.type; v.space = Space::ParamStruct; v.paramName = p.name;
+                vars[p.name] = v;
+            } else if (p.type.isPointer()) {
                 std::string raw = fresh(RC::RD64), gbl = fresh(RC::RD64);
                 emit("ld.param.u64 " + raw + ", [" + p.name + "];");
                 emit("cvta.to.global.u64 " + gbl + ", " + raw + ";");
@@ -767,8 +795,16 @@ struct Codegen {
         out += ".version 7.0\n.target sm_52\n.address_size 64\n\n";
         out += ".visible .entry " + k.name + "(\n";
         for (size_t i = 0; i < k.params.size(); ++i) {
-            out += "\t.param ." + std::string(paramSuffix(k.params[i].type)) + " " +
-                   (k.params[i].name.empty() ? ("_arg" + std::to_string(i)) : k.params[i].name);
+            const Type& pt = k.params[i].type;
+            const std::string pname =
+                k.params[i].name.empty() ? ("_arg" + std::to_string(i)) : k.params[i].name;
+            if (pt.isStruct()) {
+                int sz = structSize(pt.structName);
+                if (sz <= 0) sz = 1;
+                out += "\t.param .align 8 .b8 " + pname + "[" + std::to_string(sz) + "]";
+            } else {
+                out += "\t.param ." + std::string(paramSuffix(pt)) + " " + pname;
+            }
             if (i + 1 < k.params.size()) out += ",";
             out += "\n";
         }
@@ -809,7 +845,7 @@ CodegenResult compileToPtx(const std::string& source, const std::string& name) {
         if (!target && (name.empty() ? kp->isGlobal : kp->name == name)) target = kp.get();
     }
     if (!target) { r.error = "kernel not found: " + (name.empty() ? std::string("<first>") : name); return r; }
-    Codegen cg(*target, &deviceFns);
+    Codegen cg(*target, &deviceFns, pr.module.get());
     std::string ptx = cg.run();
     if (cg.failed) { r.error = cg.err; return r; }
     r.ptx = std::move(ptx);

@@ -14,16 +14,21 @@ namespace compiler {
 namespace frontend {
 
 // A C scalar type plus pointer depth and const-ness (the subset we lower).
+// A struct-valued type carries base==Struct and the struct's name; its size and
+// member layout are resolved against the module's struct table.
 struct Type {
-    enum Base { Void, Bool, Char, Short, Int, Long, Float, Double };
+    enum Base { Void, Bool, Char, Short, Int, Long, Float, Double, Struct };
     Base base = Int;
     bool isUnsigned = false;
     int  ptr = 0;           // pointer depth: float* -> 1
     bool isConst = false;
+    std::string structName; // when base == Struct
 
     bool isPointer() const { return ptr > 0; }
+    bool isStruct()  const { return base == Struct && ptr == 0; }
     bool isFloating() const { return ptr == 0 && (base == Float || base == Double); }
     // Size in bytes of one element (the pointee if a pointer, else the scalar).
+    // Struct sizes are not known here — the codegen resolves them via the table.
     int elemBytes() const {
         switch (base) {
             case Void:   return 1;
@@ -31,8 +36,21 @@ struct Type {
             case Short:  return 2;
             case Int: case Float: return 4;
             case Long: case Double: return 8;
+            case Struct: return 0;  // resolved from the struct table
         }
         return 4;
+    }
+};
+
+// A user struct definition (scalar members, natural alignment).
+struct StructMember { Type type; std::string name; int offset = 0; };
+struct StructDef {
+    std::string name;
+    std::vector<StructMember> members;
+    int size = 0;
+    const StructMember* find(const std::string& m) const {
+        for (const auto& mm : members) if (mm.name == m) return &mm;
+        return nullptr;
     }
 };
 
@@ -92,6 +110,11 @@ struct Kernel {
 
 struct Module {
     std::vector<std::unique_ptr<Kernel>> kernels;
+    std::vector<StructDef> structs;
+    const StructDef* findStruct(const std::string& n) const {
+        for (const auto& s : structs) if (s.name == n) return &s;
+        return nullptr;
+    }
 };
 
 }  // namespace frontend

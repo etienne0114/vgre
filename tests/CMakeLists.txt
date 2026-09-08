@@ -198,11 +198,9 @@ target_link_libraries(test_async_sync vgre)
 add_executable(test_graph_cycle integration/test_graph_cycle.cpp)
 target_link_libraries(test_graph_cycle vgre)
 
-if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
-    add_executable(test_struct_args integration/test_struct_args.cpp)
-    target_link_libraries(test_struct_args vgre)
-    add_test(NAME StructArgsIntegration COMMAND test_struct_args)
-endif()
+add_executable(test_struct_args integration/test_struct_args.cpp)
+target_link_libraries(test_struct_args vgre)
+add_test(NAME StructArgsIntegration COMMAND test_struct_args)
 
 add_test(NAME test_cubin_load COMMAND test_cubin_load)
 add_test(NAME test_texture_driver_api COMMAND test_texture_driver_api)
@@ -1040,6 +1038,12 @@ add_executable(test_cuda_device_fn compiler/test_cuda_device_fn.cpp)
 target_link_libraries(test_cuda_device_fn PRIVATE vgre Threads::Threads)
 add_test(NAME CudaDeviceFn COMMAND test_cuda_device_fn)
 set_tests_properties(CudaDeviceFn PROPERTIES TIMEOUT 30)
+
+# Track Z: by-value struct kernel parameters (interpreter tier).
+add_executable(test_cuda_struct compiler/test_cuda_struct.cpp)
+target_link_libraries(test_cuda_struct PRIVATE vgre Threads::Threads)
+add_test(NAME CudaStruct COMMAND test_cuda_struct)
+set_tests_properties(CudaStruct PROPERTIES TIMEOUT 30)
 
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.

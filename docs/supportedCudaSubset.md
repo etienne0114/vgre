@@ -19,6 +19,7 @@ Every feature below is verified end-to-end on **both** execution tiers
 | `float` | ✅ | ✅ |
 | `double`, `long` (64-bit) | ⛔ rejected cleanly (use compiled tier / JIT) | ✅ full f64 / i64 |
 | pointers (`T*`, `const T* __restrict__`) | ✅ | ✅ |
+| by-value `struct` params (scalar members, `.member` reads) | ✅ | defers to interpreter |
 
 ## Expressions
 | Feature | Status |
@@ -59,7 +60,6 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …); the compiled tier uses libm.
 
 ## Not yet supported (returns an error, falls back to JIT when available)
-- `struct` kernel parameters
 - local (non-`__shared__`) arrays
 - templates, recursion
 - texture/surface and warp-shuffle intrinsics
@@ -96,7 +96,7 @@ The tests **excluded** from the no-LLVM build (guarded on `VGRE_ENABLE_JIT` in
 2. **Interpreter-incompatible** — cooperative groups with grid-wide sync
    (`CooperativeGroupsPartition`, `MultiDeviceCooperativeComprehensive`): the
    sequential interpreter cannot provide a resident-grid barrier.
-3. **Broader-CUDA-C-subset follow-ons** — `struct` kernel params
-   (`StructArgsIntegration`) and multi-feature kernels like `FlashAttention`
-   that the from-scratch front-end does not yet compile. (The dual-registry
-   split is fixed — C-API graphs now resolve; both graph paths work with no LLVM.)
+3. **Broader-CUDA-C-subset follow-ons** — multi-feature kernels like
+   `FlashAttention` that the from-scratch front-end does not yet compile.
+   (`struct` kernel params and `__device__` helpers are now supported; the
+   dual-registry split is fixed — both graph paths work with no LLVM.)

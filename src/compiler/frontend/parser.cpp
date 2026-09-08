@@ -74,6 +74,7 @@ struct Parser {
     size_t pos = 0;
     bool failed = false;
     std::string err;
+    Module* mod_ = nullptr;  // module being built (so parseType can resolve struct names)
 
     const Token& cur() const { return toks[pos]; }
     TokenKind kind() const { return toks[pos].kind; }
@@ -101,6 +102,24 @@ struct Parser {
 
     // ── Types ─────────────────────────────────────────────────────────────────
     bool parseType(Type& out) {
+        // Struct type: a known struct name, optionally preceded by the 'struct'
+        // keyword (`struct Foo` or bare `Foo`). Resolved against the module table.
+        bool sawStructKw = (kind() == TokenKind::KwStruct);
+        if (sawStructKw ||
+            (kind() == TokenKind::Identifier && mod_ && mod_->findStruct(cur().text))) {
+            out = Type{};
+            if (sawStructKw) advance();
+            if (kind() != TokenKind::Identifier || !mod_ || !mod_->findStruct(cur().text)) {
+                fail("unknown struct type"); return false;
+            }
+            out.base = Type::Struct;
+            out.structName = advance().text;
+            while (accept(TokenKind::Star)) {
+                out.ptr++;
+                while (accept(TokenKind::KwConst) || accept(TokenKind::KwRestrict)) { /* qualifier */ }
+            }
+            return true;
+        }
         if (!isTypeStart(kind())) return false;
         out = Type{};
         // qualifiers / sign, in any leading order
@@ -456,10 +475,43 @@ struct Parser {
         return k;
     }
 
+    // struct Name { type member; ... };  — scalar/pointer members, natural alignment.
+    bool parseStructDef() {
+        advance();  // 'struct'
+        if (!at(TokenKind::Identifier)) { fail("expected a struct name"); return false; }
+        StructDef def;
+        def.name = advance().text;
+        expect(TokenKind::LBrace, "'{'");
+        int offset = 0, maxAlign = 1;
+        while (!at(TokenKind::RBrace) && !at(TokenKind::End) && !failed) {
+            StructMember mem;
+            if (!parseType(mem.type)) { fail("expected a struct member type"); return false; }
+            if (mem.type.isStruct()) { fail("nested struct members are unsupported"); return false; }
+            if (!at(TokenKind::Identifier)) { fail("expected a struct member name"); return false; }
+            mem.name = advance().text;
+            expect(TokenKind::Semicolon, "';'");
+            const int sz = mem.type.isPointer() ? 8 : mem.type.elemBytes();
+            const int align = sz > 0 ? sz : 1;
+            offset = (offset + align - 1) / align * align;   // natural alignment
+            mem.offset = offset;
+            offset += sz;
+            if (align > maxAlign) maxAlign = align;
+            def.members.push_back(std::move(mem));
+        }
+        expect(TokenKind::RBrace, "'}'");
+        expect(TokenKind::Semicolon, "';'");
+        if (failed) return false;
+        def.size = (offset + maxAlign - 1) / maxAlign * maxAlign;
+        mod_->structs.push_back(std::move(def));
+        return true;
+    }
+
     std::unique_ptr<Module> parseModule() {
         auto m = std::make_unique<Module>();
+        mod_ = m.get();  // so parseType/parseKernel can resolve struct names
         while (!at(TokenKind::End) && !failed) {
             if (accept(TokenKind::Semicolon)) continue;
+            if (at(TokenKind::KwStruct)) { if (!parseStructDef()) return nullptr; continue; }
             auto k = parseKernel();
             if (!k) return nullptr;
             m->kernels.push_back(std::move(k));
