@@ -12,14 +12,25 @@ JIT-enabled build — falls back to the LLVM path.
 Every feature below is verified end-to-end on **both** execution tiers
 (Tier-0 PTX interpreter and Tier-1 compiled) unless noted.
 
-The **Tier-1 compiled** path runs its thread-blocks (CTAs) **in parallel** across
+**Both** execution tiers run a grid's thread-blocks (CTAs) **in parallel** across
 the in-tree work-stealing thread pool (`include/vgre/xla/thread_pool.h`) — no
-OpenMP, so the fast path is multi-threaded in *every* build, including the bare
-no-LLVM/no-OpenMP one. Barrier-free CTAs are independent, so this is safe; the
-only cross-CTA sharing, `atomicAdd`, uses a real hardware atomic RMW
-(`__atomic_fetch_add` / a bit-CAS loop for floats; a locked fallback elsewhere),
-so results are correct regardless of CTA scheduling. Measured **~5.4× on an
-8-worker pool** for a compute-bound elementwise kernel.
+OpenMP, so the multi-core path is live in *every* build, including the bare
+no-LLVM/no-OpenMP one:
+
+* **Tier-1 compiled** parallelises over CTAs directly in `CompiledKernel::launch`.
+* **Tier-0 interpreter** partitions the grid into contiguous CTA ranges, each run
+  by its own interpreter instance (`PtxInterpreter::runCtaRange`) with private
+  shared memory + thread state, so `__shared__`/`__syncthreads` kernels
+  (tiled GEMM, reductions) scale too. The single-instance debugger surface
+  (`resume`/`stepThread`) is untouched.
+
+Barrier-free CTAs are independent, so this is safe; the only cross-CTA sharing,
+`atomicAdd`, is a real hardware atomic RMW on both tiers — the compiled tier via
+`__atomic_fetch_add` / a bit-CAS loop for floats, the interpreter via a real
+`atom.global.add` (`__atomic` builtins, locked fallback for other compilers) —
+so results are correct regardless of CTA scheduling. Measured **~5.4×**
+(compiled, compute-bound elementwise) and **~4.9×** (interpreter, tiled GEMM) on
+an 8-worker pool, both bit-identical to the serial result.
 
 ## Types
 | Type | Interpreter tier | Compiled tier |
@@ -42,7 +53,7 @@ so results are correct regardless of CTA scheduling. Measured **~5.4× on an
 | ternary `cond ? a : b` (nested) | ✅ |
 | C-style casts `(int)x`, `(float)y` | ✅ |
 | indexing `p[i]`, member `threadIdx.x` | ✅ |
-| `atomicAdd(&p[i], v)` (int + float) | ✅ (real atomic RMW — correct under the compiled tier's parallel CTAs) |
+| `atomicAdd(&p[i], v)` (int + float) | ✅ (real atomic RMW on both tiers — correct under parallel CTAs) |
 | address-of `&p[i]` (as an atomicAdd target) | ✅ |
 
 ## Statements / control flow
@@ -59,7 +70,7 @@ so results are correct regardless of CTA scheduling. Measured **~5.4× on an
 | Feature | Status |
 |---|---|
 | global load/store | ✅ |
-| `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter; the compiled tier defers barrier kernels to Tier-0) |
+| `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier kernels to Tier-0) |
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
 
 ## Intrinsics

@@ -493,8 +493,11 @@ struct Codegen {
         return {};
     }
 
-    // atomicAdd(&arr[i], val): read-modify-write returning the old value. Threads
-    // run sequentially in the interpreter, so a plain ld/add/st is atomic.
+    // atomicAdd(&arr[i], val): read-modify-write returning the old value.
+    //  * global: a real `atom.global.add`, so it stays correct when the backend
+    //    runs a grid's CTAs on parallel interpreter instances.
+    //  * shared: within one CTA the interpreter runs threads sequentially, so a
+    //    plain ld/add/st is atomic (a CTA never spans instances).
     Val emitAtomicAdd(const Expr& e) {
         const Expr& a0 = *e.args[0];
         if (a0.kind != Expr::Unary || a0.str != "&" || a0.args.empty() || a0.args[0]->kind != Expr::Index) {
@@ -506,10 +509,15 @@ struct Codegen {
         const Type pt = addr.pointee;
         Val val = coerce(emitExpr(*e.args[1]), pt);
         if (failed) return {};
-        std::string oldv = fresh(classOf(pt)), sum = fresh(classOf(pt));
-        emit(std::string(addr.shared ? "ld.shared." : "ld.global.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
-        emit(std::string(pt.isFloating() ? "add.f32 " : "add.s32 ") + sum + ", " + oldv + ", " + val.reg + ";");
-        emit(std::string(addr.shared ? "st.shared." : "st.global.") + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
+        std::string oldv = fresh(classOf(pt));
+        if (addr.shared) {
+            std::string sum = fresh(classOf(pt));
+            emit(std::string("ld.shared.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
+            emit(std::string(pt.isFloating() ? "add.f32 " : "add.s32 ") + sum + ", " + oldv + ", " + val.reg + ";");
+            emit(std::string("st.shared.") + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
+        } else {
+            emit(std::string("atom.global.add.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "], " + val.reg + ";");
+        }
         return {oldv, pt};
     }
 

@@ -84,6 +84,17 @@ public:
     void launch(int gridX, int blockX, void* const* args, int numArgs);
     void launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs);
 
+    // ── Bulk (non-debug) execution ───────────────────────────────────────────
+    // Set up launch state, then run the CTA sub-range [ctaBegin, ctaEnd) to
+    // completion (no breakpoints). Distinct CTAs are independent, so several
+    // instances can each run a disjoint range on different threads for a
+    // multi-core speedup — this is how the backend parallelises the interpreter
+    // tier. Completely separate from resume()/stepThread() (the debugger surface),
+    // which stay single-instance and sequential. Returns true if the range ran to
+    // exit; throws on a malformed launch or a barrier deadlock.
+    bool runCtaRange(const Dim3& grid, const Dim3& block, void* const* args,
+                     int numArgs, int ctaBegin, int ctaEnd);
+
     // ── Execution (debugger surface) ─────────────────────────────────────────
     // Run until a breakpoint fires on any thread, or the whole grid exits.
     StopReason resume();

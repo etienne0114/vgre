@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -276,6 +277,58 @@ void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* ar
     startCta(0);
 }
 
+bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* const* args,
+                                 int numArgs, int ctaBegin, int ctaEnd) {
+    if (grid.x <= 0 || grid.y <= 0 || grid.z <= 0 ||
+        block.x <= 0 || block.y <= 0 || block.z <= 0)
+        throw std::runtime_error("PTX: bad launch config");
+    if (numArgs != (int)kernel_.params.size())
+        throw std::runtime_error("PTX: kernel expects " +
+                                 std::to_string(kernel_.params.size()) + " args");
+    gridDim_[0] = grid.x;   gridDim_[1] = grid.y;   gridDim_[2] = grid.z;
+    blockDim_[0] = block.x; blockDim_[1] = block.y; blockDim_[2] = block.z;
+    gridTotal_  = grid.total();
+    blockTotal_ = block.total();
+    int total = 0;
+    for (const auto& p : kernel_.params) total = std::max(total, p.offset + p.sizeBytes);
+    paramBlock_.assign((size_t)total, 0);
+    for (int i = 0; i < numArgs; ++i)
+        std::memcpy(paramBlock_.data() + kernel_.params[i].offset, args[i],
+                    (size_t)kernel_.params[i].sizeBytes);
+    exited_ = false;
+
+    if (ctaBegin < 0) ctaBegin = 0;
+    if (ctaEnd > gridTotal_) ctaEnd = gridTotal_;
+
+    // Run each CTA in the range to completion, honouring bar.sync between its
+    // threads — the same cooperative scheduler resume() uses, minus breakpoints.
+    for (int cta = ctaBegin; cta < ctaEnd; ++cta) {
+        startCta(cta);
+        while (true) {
+            releaseBarrierIfReady();
+            bool progressed = false;
+            for (int tid = 0; tid < (int)threads_.size(); ++tid) {
+                Thread& t = threads_[tid];
+                while (!t.done && !t.atBarrier) {
+                    if (!execOne(t, tid)) break;
+                    progressed = true;
+                }
+            }
+            if (ctaFinished()) break;
+            if (!progressed) {
+                releaseBarrierIfReady();
+                bool runnable = false;
+                for (const auto& t : threads_)
+                    if (!t.done && !t.atBarrier) { runnable = true; break; }
+                if (!runnable)
+                    throw std::runtime_error("PTX: deadlock — threads blocked at bar.sync");
+            }
+        }
+    }
+    exited_ = true;
+    return true;
+}
+
 void PtxInterpreter::startCta(int cta) {
     cta_ = cta;
     // Decompose the linear CTA index into %ctaid.{x,y,z} (x fastest).
@@ -509,6 +562,46 @@ void PtxInterpreter::storeTo(Thread& t, int tid, const std::string& memRef,
         throw std::runtime_error("PTX: global store fault @" + std::to_string(addr));
 }
 
+namespace {
+// Real atomic add on global memory, returning the OLD value's raw bits. This is
+// what makes `atom.global.add` correct when a grid's CTAs run concurrently on
+// separate interpreter instances (see InterpreterBackend::launch). `isF` selects
+// float vs integer; for floats `fAdd` is the addend, for ints `intBits`.
+uint64_t atomicAddGlobal(void* p, int size, bool isF, uint64_t intBits, double fAdd) {
+#if defined(__GNUC__) || defined(__clang__)
+    if (isF) {
+        if (size == 8) {
+            auto* q = static_cast<int64_t*>(p);
+            int64_t ob = __atomic_load_n(q, __ATOMIC_RELAXED), nb;
+            double o;
+            do { std::memcpy(&o, &ob, 8); double n = o + fAdd; std::memcpy(&nb, &n, 8); }
+            while (!__atomic_compare_exchange_n(q, &ob, nb, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+            uint64_t r; std::memcpy(&r, &ob, 8); return r;
+        }
+        auto* q = static_cast<int32_t*>(p);
+        int32_t ob = __atomic_load_n(q, __ATOMIC_RELAXED), nb;
+        float o;
+        do { std::memcpy(&o, &ob, 4); float n = o + static_cast<float>(fAdd); std::memcpy(&nb, &n, 4); }
+        while (!__atomic_compare_exchange_n(q, &ob, nb, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+        return static_cast<uint64_t>(static_cast<uint32_t>(ob));
+    }
+    if (size == 8)
+        return static_cast<uint64_t>(__atomic_fetch_add(static_cast<int64_t*>(p), static_cast<int64_t>(intBits), __ATOMIC_RELAXED));
+    return static_cast<uint64_t>(static_cast<uint32_t>(
+        __atomic_fetch_add(static_cast<int32_t*>(p), static_cast<int32_t>(intBits), __ATOMIC_RELAXED)));
+#else
+    static std::mutex m;
+    std::lock_guard<std::mutex> lk(m);
+    if (isF) {
+        if (size == 8) { double o; std::memcpy(&o, p, 8); double n = o + fAdd; std::memcpy(p, &n, 8); uint64_t r; std::memcpy(&r, &o, 8); return r; }
+        float o; std::memcpy(&o, p, 4); float n = o + static_cast<float>(fAdd); std::memcpy(p, &n, 4); uint32_t r; std::memcpy(&r, &o, 4); return r;
+    }
+    if (size == 8) { int64_t o; std::memcpy(&o, p, 8); int64_t n = o + static_cast<int64_t>(intBits); std::memcpy(p, &n, 8); return static_cast<uint64_t>(o); }
+    int32_t o; std::memcpy(&o, p, 4); int32_t n = o + static_cast<int32_t>(intBits); std::memcpy(p, &n, 4); return static_cast<uint64_t>(static_cast<uint32_t>(o));
+#endif
+}
+}  // namespace
+
 // ── The instruction set ───────────────────────────────────────────────────────
 
 bool PtxInterpreter::execOne(Thread& t, int tid) {
@@ -577,6 +670,19 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
     } else if (mnem == "st") {
         std::string space = has("shared") ? "shared" : has("param") ? "param" : "global";
         storeTo(t, tid, A(0), space, size, val(1));
+    } else if (mnem == "atom") {
+        // atom.global.add.<ty> dst, [addr], val — a real atomic RMW so a grid's
+        // CTAs stay correct when the backend runs them on parallel instances.
+        if (!has("global")) throw std::runtime_error("PTX: only atom.global.* is supported");
+        if (!has("add"))    throw std::runtime_error("PTX: only atom.*.add is supported");
+        std::string base; int64_t off;
+        parseMemRef(A(1), base, off);
+        uint64_t addr = evalOperand(t, tid, base, 8) + (uint64_t)off;
+        uint64_t probe = 0;
+        if (!readGlobal(addr, &probe, (size_t)size))
+            throw std::runtime_error("PTX: atom global fault @" + std::to_string(addr));
+        uint64_t old = atomicAddGlobal(reinterpret_cast<void*>(addr), size, isF, val(2), fval(2));
+        setReg(A(0), old);
     } else if (mnem == "add" || mnem == "sub" || mnem == "mul" || mnem == "div" ||
                mnem == "rem" || mnem == "min" || mnem == "max") {
         if (isF) {
