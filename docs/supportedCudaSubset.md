@@ -73,8 +73,8 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **315 / 315 pass** — full LLVM JIT + from-scratch backends |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **294 / 294 pass, 0 crashes/aborts** — every test that runs, passes (`PythonNn` is a documented `-j`-load flake: passes 3/3 in isolation and with CI's `--repeat until-pass`) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **317 / 317 pass** — full LLVM JIT + from-scratch backends |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **297 / 297 pass, 0 crashes/aborts** — every test that runs, passes (`PythonNn` is a documented `-j`-load flake: passes 3/3 in isolation and with CI's `--repeat until-pass`) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
