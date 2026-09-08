@@ -989,6 +989,12 @@ target_link_libraries(test_cuda_double PRIVATE vgre Threads::Threads)
 add_test(NAME CudaDouble COMMAND test_cuda_double)
 set_tests_properties(CudaDouble PROPERTIES TIMEOUT 30)
 
+# Track Z: a real GEMM kernel on both tiers (no LLVM).
+add_executable(test_cuda_gemm compiler/test_cuda_gemm.cpp)
+target_link_libraries(test_cuda_gemm PRIVATE vgre Threads::Threads)
+add_test(NAME CudaGemm COMMAND test_cuda_gemm)
+set_tests_properties(CudaGemm PROPERTIES TIMEOUT 60)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
