@@ -77,11 +77,9 @@ target_link_libraries(test_vgre_ext PRIVATE vgre)
 add_test(NAME Phase3ExtAPI COMMAND test_vgre_ext)
 set_tests_properties(Phase3ExtAPI PROPERTIES TIMEOUT 30)
 
-if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
-    add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
-    target_link_libraries(test_graph_c_api PRIVATE vgre)
-    add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
-endif()
+add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
+target_link_libraries(test_graph_c_api PRIVATE vgre)
+add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
 
 add_executable(test_multi_device integration/test_multi_device.cpp)
 target_link_libraries(test_multi_device PRIVATE vgre)

@@ -371,9 +371,13 @@ int vgre_register_kernel(const char *name, const char *source,
   if (int s = require_initialized(); s != VGRE_SUCCESS)
     return s;
 
-  // Track Z: when VGRE_EXEC_BACKEND selects a non-JIT backend, compile the
-  // kernel with VGRE's own CUDA-C front-end and run it on the execution backend
-  // (no LLVM). Kernels outside the supported subset fall through to the JIT.
+#ifdef VGRE_ENABLE_JIT
+  // JIT build: when VGRE_EXEC_BACKEND selects a non-JIT backend, compile with
+  // VGRE's own CUDA-C front-end and run on the execution backend; kernels outside
+  // the supported subset fall through to the JIT below. In a no-LLVM build we
+  // skip this side registry entirely — the engine itself routes to the backend
+  // (a single kernel registry), so C-API graphs and cudaLaunchKernel resolve the
+  // same kernels.
   {
     uint64_t backendId = 0;
     if (vgre::api::tryRegisterBackendKernel(std::string(name), std::string(source), backendId)) {
@@ -381,13 +385,11 @@ int vgre_register_kernel(const char *name, const char *source,
       return VGRE_SUCCESS;
     }
   }
-
-#ifndef VGRE_ENABLE_JIT
-  // No LLVM JIT in this build — a kernel the from-scratch front-end can't compile
-  // has nowhere to fall back to.
-  return to_status(vgre::VGREResult::ERR_NOT_SUPPORTED);
 #endif
 
+  // Register with the engine. No-LLVM build: registerKernel compiles via the
+  // front-end into a backend kernel (or returns ERR_NOT_SUPPORTED). JIT build:
+  // the LLVM ORC path.
   vgre::KernelId kid = 0;
   auto r = vgre::core::RuntimeEngine::instance().registerKernel(
       std::string(name), std::string(source), kid);
@@ -474,14 +476,17 @@ int vgre_launch_kernel(uint64_t kernel_id, const uint32_t grid_dim[3],
     return VGRE_ERROR_INVALID_VALUE;
   }
 
-  // Track Z: if this id was registered on an execution backend, launch there
-  // (no LLVM). -1 means "not a backend kernel" — use the engine/JIT path.
+#ifdef VGRE_ENABLE_JIT
+  // JIT build: a kernel registered on the side backend dispatch (via
+  // VGRE_EXEC_BACKEND) launches there. -1 means "not a dispatch kernel" → engine.
+  // No-LLVM build skips this — the engine routes backend kernels itself.
   {
     int bd = vgre::api::tryLaunchBackendKernel(kernel_id, grid_dim, block_dim,
                                                args, num_args, shared_mem);
     if (bd == 0) return VGRE_SUCCESS;
     if (bd == 1) return VGRE_ERROR_LAUNCH_FAILURE;
   }
+#endif
 
   vgre::dim3 gd(grid_dim[0], grid_dim[1], grid_dim[2]);
   vgre::dim3 bd(block_dim[0], block_dim[1], block_dim[2]);

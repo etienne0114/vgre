@@ -52,9 +52,16 @@ int main() {
 
     uint64_t kid = 0;
     CHECK(vgre_register_kernel("vecAdd", kVecAdd, &kid) == VGRE_SUCCESS, "register vecAdd");
-    // Backend kernel ids live in a high range — proves the front-end/interpreter
-    // path (not the LLVM JIT) handled this kernel.
-    CHECK(kid >= 0x4000000000000000ULL, "kernel registered on the execution backend (no LLVM)");
+#ifdef VGRE_ENABLE_JIT
+    // JIT build: VGRE_EXEC_BACKEND routes registration through the side backend
+    // dispatch, whose kernel ids live in a high range (proves the front-end/
+    // interpreter path — not the LLVM JIT — handled this kernel).
+    CHECK(kid >= 0x4000000000000000ULL, "kernel registered on the backend dispatch");
+#else
+    // No-LLVM build: the C-ABI routes through the engine's single kernel registry
+    // (which itself runs the from-scratch backend — there is no LLVM at all here).
+    CHECK(kid != 0, "kernel registered (engine backend, no LLVM)");
+#endif
 
     int n = N;
     void* args[] = {&dA, &dB, &dC, &n};
