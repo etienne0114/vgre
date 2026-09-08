@@ -77,9 +77,11 @@ target_link_libraries(test_vgre_ext PRIVATE vgre)
 add_test(NAME Phase3ExtAPI COMMAND test_vgre_ext)
 set_tests_properties(Phase3ExtAPI PROPERTIES TIMEOUT 30)
 
-add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
-target_link_libraries(test_graph_c_api PRIVATE vgre)
-add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_graph_c_api integration/test_graph_c_api.cpp)
+    target_link_libraries(test_graph_c_api PRIVATE vgre)
+    add_test(NAME GraphCAPIIntegration COMMAND test_graph_c_api)
+endif()
 
 add_executable(test_multi_device integration/test_multi_device.cpp)
 target_link_libraries(test_multi_device PRIVATE vgre)
@@ -89,19 +91,23 @@ add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
 set_tests_properties(MultiDeviceIntegration PROPERTIES
     ENVIRONMENT "VGRE_VIRTUAL_DEVICE_COUNT=2")
 
-add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
-target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)
-add_test(NAME MultiDeviceCooperativeComprehensive COMMAND test_multi_device_cooperative_comprehensive)
-set_tests_properties(MultiDeviceCooperativeComprehensive PROPERTIES
-    TIMEOUT 300
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
+    target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)
+    add_test(NAME MultiDeviceCooperativeComprehensive COMMAND test_multi_device_cooperative_comprehensive)
+    set_tests_properties(MultiDeviceCooperativeComprehensive PROPERTIES
+        TIMEOUT 300
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_cooperative_groups_partition unit/test_cooperative_groups_partition.cpp)
-target_link_libraries(test_cooperative_groups_partition PRIVATE vgre)
-add_test(NAME CooperativeGroupsPartition COMMAND test_cooperative_groups_partition)
-set_tests_properties(CooperativeGroupsPartition PROPERTIES
-    TIMEOUT 120
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_cooperative_groups_partition unit/test_cooperative_groups_partition.cpp)
+    target_link_libraries(test_cooperative_groups_partition PRIVATE vgre)
+    add_test(NAME CooperativeGroupsPartition COMMAND test_cooperative_groups_partition)
+    set_tests_properties(CooperativeGroupsPartition PROPERTIES
+        TIMEOUT 120
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
@@ -133,34 +139,40 @@ target_link_libraries(test_syncthreads PRIVATE vgre)
 add_test(NAME SyncthreadsIntegration COMMAND test_syncthreads)
 set_tests_properties(SyncthreadsIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
-add_executable(test_warp_shuffle_jit integration/test_warp_shuffle.cpp)
-target_link_libraries(test_warp_shuffle_jit PRIVATE vgre)
-add_test(NAME WarpShuffleJITIntegration COMMAND test_warp_shuffle_jit)
-set_tests_properties(WarpShuffleJITIntegration PROPERTIES
-    TIMEOUT 120
-    FIXTURES_REQUIRED KMPRegistrationClean
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_warp_shuffle_jit integration/test_warp_shuffle.cpp)
+    target_link_libraries(test_warp_shuffle_jit PRIVATE vgre)
+    add_test(NAME WarpShuffleJITIntegration COMMAND test_warp_shuffle_jit)
+    set_tests_properties(WarpShuffleJITIntegration PROPERTIES
+        TIMEOUT 120
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_device_intrinsics integration/test_device_intrinsics.cpp)
-target_link_libraries(test_device_intrinsics PRIVATE vgre)
-add_test(NAME DeviceIntrinsicsIntegration COMMAND test_device_intrinsics)
-set_tests_properties(DeviceIntrinsicsIntegration PROPERTIES
-    TIMEOUT 180
-    FIXTURES_REQUIRED KMPRegistrationClean
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_device_intrinsics integration/test_device_intrinsics.cpp)
+    target_link_libraries(test_device_intrinsics PRIVATE vgre)
+    add_test(NAME DeviceIntrinsicsIntegration COMMAND test_device_intrinsics)
+    set_tests_properties(DeviceIntrinsicsIntegration PROPERTIES
+        TIMEOUT 180
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_extern_shared integration/test_extern_shared.cpp)
 target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)
 set_tests_properties(ExternSharedIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
-add_executable(test_device_curand integration/test_device_curand.cpp)
-target_link_libraries(test_device_curand PRIVATE vgre)
-add_test(NAME DeviceCurandIntegration COMMAND test_device_curand)
-set_tests_properties(DeviceCurandIntegration PROPERTIES
-    TIMEOUT 120
-    FIXTURES_REQUIRED KMPRegistrationClean
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_device_curand integration/test_device_curand.cpp)
+    target_link_libraries(test_device_curand PRIVATE vgre)
+    add_test(NAME DeviceCurandIntegration COMMAND test_device_curand)
+    set_tests_properties(DeviceCurandIntegration PROPERTIES
+        TIMEOUT 120
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_extern_c_kernel integration/test_extern_c_kernel.cpp)
 target_link_libraries(test_extern_c_kernel PRIVATE vgre)
@@ -188,9 +200,11 @@ target_link_libraries(test_async_sync vgre)
 add_executable(test_graph_cycle integration/test_graph_cycle.cpp)
 target_link_libraries(test_graph_cycle vgre)
 
-add_executable(test_struct_args integration/test_struct_args.cpp)
-target_link_libraries(test_struct_args vgre)
-add_test(NAME StructArgsIntegration COMMAND test_struct_args)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_struct_args integration/test_struct_args.cpp)
+    target_link_libraries(test_struct_args vgre)
+    add_test(NAME StructArgsIntegration COMMAND test_struct_args)
+endif()
 
 add_test(NAME test_cubin_load COMMAND test_cubin_load)
 add_test(NAME test_texture_driver_api COMMAND test_texture_driver_api)
@@ -243,15 +257,19 @@ add_test(NAME ClangParser COMMAND test_clang_parser)
 set_tests_properties(ClangParser PROPERTIES TIMEOUT 300)
 
 
-add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
-target_link_libraries(test_clang_enhanced PRIVATE vgre)
-add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
-set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
+    target_link_libraries(test_clang_enhanced PRIVATE vgre)
+    add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
+    set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
-target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
-add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
-set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
+    target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
+    add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
+    set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 
 # Uses the LLVM IRBuilder API directly — only meaningful in a JIT-enabled build.
@@ -262,10 +280,12 @@ if(VGRE_ENABLE_JIT)
     set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
 endif()
 
-add_executable(test_vectorization_hints compiler/test_vectorization_hints.cpp)
-target_link_libraries(test_vectorization_hints PRIVATE vgre)
-add_test(NAME VectorizationHints COMMAND test_vectorization_hints)
-set_tests_properties(VectorizationHints PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_vectorization_hints compiler/test_vectorization_hints.cpp)
+    target_link_libraries(test_vectorization_hints PRIVATE vgre)
+    add_test(NAME VectorizationHints COMMAND test_vectorization_hints)
+    set_tests_properties(VectorizationHints PROPERTIES TIMEOUT 30)
+endif()
 
 add_executable(test_texture_view unit/test_texture_view.cpp)
 target_link_libraries(test_texture_view PRIVATE vgre)
@@ -601,13 +621,15 @@ target_link_libraries(test_config_buildinfo PRIVATE vgre_cudart)
 add_test(NAME ConfigBuildInfo COMMAND test_config_buildinfo)
 set_tests_properties(ConfigBuildInfo PROPERTIES TIMEOUT 30)
 
-add_executable(test_flash_attention integration/test_flash_attention.cpp)
-target_link_libraries(test_flash_attention PRIVATE vgre)
-add_test(NAME FlashAttention COMMAND test_flash_attention)
-# JIT-compiles its kernels, so serialise it against the other LLVM-JIT tests:
-# under -j2 CI load a concurrent clang fork can transiently fail the first
-# (cold) compile, which surfaced as a non-deterministic non-causal failure.
-set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_flash_attention integration/test_flash_attention.cpp)
+    target_link_libraries(test_flash_attention PRIVATE vgre)
+    add_test(NAME FlashAttention COMMAND test_flash_attention)
+    # JIT-compiles its kernels, so serialise it against the other LLVM-JIT tests:
+    # under -j2 CI load a concurrent clang fork can transiently fail the first
+    # (cold) compile, which surfaced as a non-deterministic non-causal failure.
+    set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
     add_executable(test_tensorcore_mma integration/test_tensorcore_mma.cpp)
@@ -1156,25 +1178,29 @@ target_link_libraries(test_etl PRIVATE vgre)
 add_test(NAME ETLPipeline COMMAND test_etl)
 set_tests_properties(ETLPipeline PROPERTIES TIMEOUT 30)
 
-add_executable(test_nsight_export api/test_nsight_export.cpp)
-target_link_libraries(test_nsight_export PRIVATE vgre)
-if(SQLITE3_LIBRARY)
-    target_link_libraries(test_nsight_export PRIVATE SQLite::SQLite3)
-    add_test(NAME NsightExport COMMAND test_nsight_export)
-    set_tests_properties(NsightExport PROPERTIES
-        TIMEOUT 120
-        FIXTURES_REQUIRED KMPRegistrationClean
-        RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_nsight_export api/test_nsight_export.cpp)
+    target_link_libraries(test_nsight_export PRIVATE vgre)
+    if(SQLITE3_LIBRARY)
+        target_link_libraries(test_nsight_export PRIVATE SQLite::SQLite3)
+        add_test(NAME NsightExport COMMAND test_nsight_export)
+        set_tests_properties(NsightExport PROPERTIES
+            TIMEOUT 120
+            FIXTURES_REQUIRED KMPRegistrationClean
+            RESOURCE_LOCK vgre_llvm_jit)
+    endif()
 endif()
 
 add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
 target_link_libraries(test_ptx_cross_module_link PRIVATE vgre_cudart)
 add_test(NAME PTXCrossModuleLink COMMAND test_ptx_cross_module_link)
 
-add_executable(test_llvm_bitcode_module api/test_llvm_bitcode_module.cpp)
-target_link_libraries(test_llvm_bitcode_module PRIVATE vgre_cudart)
-add_test(NAME LLVMBitcodeModuleDirect COMMAND test_llvm_bitcode_module)
-set_tests_properties(LLVMBitcodeModuleDirect PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_llvm_bitcode_module api/test_llvm_bitcode_module.cpp)
+    target_link_libraries(test_llvm_bitcode_module PRIVATE vgre_cudart)
+    add_test(NAME LLVMBitcodeModuleDirect COMMAND test_llvm_bitcode_module)
+    set_tests_properties(LLVMBitcodeModuleDirect PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_ptx_fp8 api/test_ptx_fp8.cpp)
 target_link_libraries(test_ptx_fp8 PRIVATE vgre_cudart)
@@ -1755,10 +1781,12 @@ target_link_libraries(test_udp_discovery_buffer_safety PRIVATE vgre)
 add_test(NAME UDPDiscoveryBufferSafety COMMAND test_udp_discovery_buffer_safety)
 
 # ── Kernel Fusion Integration Test ─────────────────────────────────────────
-add_executable(test_kernel_fusion integration/test_kernel_fusion.cpp)
-target_link_libraries(test_kernel_fusion PRIVATE vgre)
-add_test(NAME KernelFusionIntegration COMMAND test_kernel_fusion)
-set_tests_properties(KernelFusionIntegration PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_kernel_fusion integration/test_kernel_fusion.cpp)
+    target_link_libraries(test_kernel_fusion PRIVATE vgre)
+    add_test(NAME KernelFusionIntegration COMMAND test_kernel_fusion)
+    set_tests_properties(KernelFusionIntegration PROPERTIES TIMEOUT 30)
+endif()
 
 # ── WebSocket Transport Integration Test ───────────────────────────────────
 add_executable(test_websocket_transport integration/test_websocket_transport.cpp)

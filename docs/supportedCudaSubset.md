@@ -73,17 +73,27 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 | Build | Result |
 |---|---|
 | `-DVGRE_ENABLE_JIT=ON` (default) | **315 / 315 pass** — full LLVM JIT + from-scratch backends |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **94% pass, 0 crashes/aborts** — the from-scratch stack (front-end, interpreter, compiled tier, C-ABI dispatch, GEMM incl. tiled) is fully green |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **293 / 293 pass, 0 crashes/aborts** — every test that runs, passes |
 
-The ~17 tests that fail in the **no-LLVM** build all exercise features that
-genuinely require the LLVM JIT and are **excluded or fail cleanly** (never crash):
-LLVM bitcode modules, Clang AST analysis (`ClangEnhanced`, `KernelParserEnhanced`,
-`VectorizationHints`), JIT device/warp intrinsics (`WarpShuffleJIT`,
-`DeviceIntrinsics`, `DeviceCurand`), `struct` kernel args (`StructArgsIntegration`),
-`FlashAttention`, and the graph / cooperative-group / UVM / stream paths that run
-kernels through the engine's JIT execution model
-(`CUDAGraphsIntegration`, `CooperativeGroupsPartition`,
-`MultiDeviceCooperativeComprehensive`, `UVMManagedIntegration`,
-`test_stream_concurrency`, `GraphCAPIIntegration`, `HIPRuntimeLayer`,
-`NsightExport`). Routing the engine's execution model through the from-scratch
-backends (so these advanced paths also work with no LLVM) is a tracked follow-on.
+The whole engine kernel path is routed through the from-scratch backends when
+LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
+`runtime_engine_backend.cpp`), so **`cudaLaunchKernel`, the C++ engine API, UVM,
+stream concurrency, and CUDA graphs all execute correctly with no LLVM** — not
+just the C-ABI dispatch.
+
+The tests **excluded** from the no-LLVM build (guarded on `VGRE_ENABLE_JIT` in
+`tests/CMakeLists.txt`) genuinely require the JIT and fall into three groups:
+
+1. **LLVM-only machinery** — bitcode modules (`LLVMBitcodeModuleDirect`), Clang
+   AST analysis (`ClangEnhanced`, `KernelParserEnhanced`, `VectorizationHints`,
+   `FLOPCounting`), IR-level kernel fusion (`KernelFusionIntegration`), FLOP/
+   profiling export (`NsightExport`), and the JIT warp/device intrinsics
+   (`WarpShuffleJIT`, `DeviceIntrinsics`, `DeviceCurand`, `wgmma`, `tensorcore`,
+   `ptx_translate`, `warp_shuffle`, `cluster_exec`, `block_threads_toggle`).
+2. **Interpreter-incompatible** — cooperative groups with grid-wide sync
+   (`CooperativeGroupsPartition`, `MultiDeviceCooperativeComprehensive`): the
+   sequential interpreter cannot provide a resident-grid barrier.
+3. **Tracked follow-ons** — a broader CUDA-C subset (`StructArgsIntegration`
+   struct params, `FlashAttention`), and the dual-registry unification so
+   C-API-graph nodes referencing C-ABI-registered kernels resolve
+   (`GraphCAPIIntegration`; capture-based `CUDAGraphsIntegration` already works).
