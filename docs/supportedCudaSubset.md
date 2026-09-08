@@ -73,13 +73,15 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 | Build | Result |
 |---|---|
 | `-DVGRE_ENABLE_JIT=ON` (default) | **315 / 315 pass** — full LLVM JIT + from-scratch backends |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **293 / 293 pass, 0 crashes/aborts** — every test that runs, passes |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM) | **294 / 294 pass, 0 crashes/aborts** — every test that runs, passes (`PythonNn` is a documented `-j`-load flake: passes 3/3 in isolation and with CI's `--repeat until-pass`) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
-`runtime_engine_backend.cpp`), so **`cudaLaunchKernel`, the C++ engine API, UVM,
-stream concurrency, and CUDA graphs all execute correctly with no LLVM** — not
-just the C-ABI dispatch.
+`runtime_engine_backend.cpp`), through a **single unified kernel registry** — the
+no-LLVM C-ABI (`vgre_register_kernel`/`vgre_launch_kernel`) registers with the
+engine rather than a side store — so **`cudaLaunchKernel`, the C++ engine API,
+UVM, stream concurrency, capture-based CUDA graphs, AND C-API graphs
+(`GraphCAPIIntegration`) all execute correctly with no LLVM**.
 
 The tests **excluded** from the no-LLVM build (guarded on `VGRE_ENABLE_JIT` in
 `tests/CMakeLists.txt`) genuinely require the JIT and fall into three groups:
@@ -93,7 +95,7 @@ The tests **excluded** from the no-LLVM build (guarded on `VGRE_ENABLE_JIT` in
 2. **Interpreter-incompatible** — cooperative groups with grid-wide sync
    (`CooperativeGroupsPartition`, `MultiDeviceCooperativeComprehensive`): the
    sequential interpreter cannot provide a resident-grid barrier.
-3. **Tracked follow-ons** — a broader CUDA-C subset (`StructArgsIntegration`
-   struct params, `FlashAttention`), and the dual-registry unification so
-   C-API-graph nodes referencing C-ABI-registered kernels resolve
-   (`GraphCAPIIntegration`; capture-based `CUDAGraphsIntegration` already works).
+3. **Broader-CUDA-C-subset follow-ons** — `struct` kernel params
+   (`StructArgsIntegration`) and multi-feature kernels like `FlashAttention`
+   that the from-scratch front-end does not yet compile. (The dual-registry
+   split is fixed — C-API graphs now resolve; both graph paths work with no LLVM.)
