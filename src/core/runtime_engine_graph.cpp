@@ -119,6 +119,16 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
       uint32_t blocksTotal = op.gridDim.total();
       uint64_t flopsPerBlock = blocksTotal > 0 ? op.kernelArgs.flops / blocksTotal : 0;
       uint64_t bytesPerBlock = blocksTotal > 0 ? op.kernelArgs.memBytes / blocksTotal : 0;
+#ifndef VGRE_ENABLE_JIT
+      // Zero-Burden build: graph kernel nodes have no JIT fn — run through the
+      // from-scratch backend (whole-grid launch), addressed by kernel name.
+      if (!op.kernelArgs.fn) {
+        RuntimeEngine::instance().launchBackendByName(
+            op.kernelArgs.name, op.gridDim, op.blockDim,
+            const_cast<void **>(op.kernelArgs.argPtrs.data()),
+            op.kernelArgs.sharedMemBytes);
+      } else
+#endif
       exec->execute(op.kernelArgs.fn, op.gridDim, op.blockDim,
                     const_cast<void **>(op.kernelArgs.argPtrs.data()),
                     op.kernelArgs.sharedMemBytes,
@@ -339,8 +349,12 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
             if (nameIt != kernelNames_.end()) actualId = nameIt->second;
           }
 
+          bool isBackendKernel = false;
+#ifndef VGRE_ENABLE_JIT
+          isBackendKernel = backendKernels_.count(actualId) != 0;
+#endif
           auto it = kernelCache_.find(actualId);
-          if (it == kernelCache_.end()) {
+          if (it == kernelCache_.end() && !isBackendKernel) {
             auto pendingIt = pendingKernels_.find(actualId);
             if (pendingIt != pendingKernels_.end()) {
               VGRE_LOG_INFO("RuntimeEngine",
@@ -378,8 +392,8 @@ VGREResult RuntimeEngine::dispatchGraphNodes(const std::vector<GraphNode> &nodes
 
           op.gridDim = node.gridDim;
           op.blockDim = node.blockDim;
-          op.kernelArgs.fn = it->second;
-          if (!op.kernelArgs.fn)
+          op.kernelArgs.fn = isBackendKernel ? CompiledKernelFn{} : it->second;
+          if (!isBackendKernel && !op.kernelArgs.fn)
             VGRE_LOG_ERROR("RuntimeEngine",
                            "Assigned EMPTY function to op for kernel: " +
                                node.kernelName);

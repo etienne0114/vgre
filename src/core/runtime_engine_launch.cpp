@@ -90,6 +90,23 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
 
   vgre::common::MetricsRegistry::instance().addKernelLaunch();  // /metrics counter
 
+#ifndef VGRE_ENABLE_JIT
+  // Zero-Burden build: execute registered backend kernels via the from-scratch
+  // interpreter/compiled backend (whole-grid launch). Graph-captured launches
+  // fall through to the capture-recording path below.
+  {
+    std::shared_ptr<BackendKernel> bk;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      if (captureState_.find(stream) == captureState_.end()) {
+        auto it = backendKernels_.find(id);
+        if (it != backendKernels_.end()) bk = it->second;
+      }
+    }
+    if (bk) return launchBackendKernel(bk, gridDim, blockDim, args, sharedMem);
+  }
+#endif
+
   CompiledKernelFn fn;
   std::shared_ptr<std::vector<std::vector<uint8_t>>> argValues;
   std::shared_ptr<std::vector<void *>> safeArgs;

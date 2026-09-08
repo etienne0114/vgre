@@ -15,6 +15,7 @@ add_library(vgre_core OBJECT
     event.cpp
     runtime_engine.cpp
     runtime_engine_launch.cpp
+    runtime_engine_backend.cpp  # no-LLVM backend routing (#ifndef VGRE_ENABLE_JIT)
     kv_cache.cpp
     runtime_engine_graph.cpp
     runtime_engine_graph_extended.cpp

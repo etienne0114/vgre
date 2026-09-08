@@ -108,6 +108,14 @@ public:
                           size_t sharedMem = 0, StreamId stream = 0,
                           const dim3 &gridOffset = dim3(0, 0, 0));
 
+#ifndef VGRE_ENABLE_JIT
+  // Zero-Burden build: launch a registered backend kernel by name (the graph
+  // executor addresses kernels by name). ERR_INVALID_KERNEL if not a backend
+  // kernel. Public so the static graph-op executor can reach it.
+  VGREResult launchBackendByName(const std::string &name, const dim3 &gridDim,
+                                 const dim3 &blockDim, void **args, size_t sharedMem);
+#endif
+
   // Convenience: register + launch in one call
   VGREResult launchKernel(const std::string &name, const std::string &source,
                           const dim3 &gridDim, const dim3 &blockDim,
@@ -386,6 +394,20 @@ private:
   Scheduler *scheduler_ = nullptr;
   std::unique_ptr<compiler::KernelParser> parser_;
   std::unique_ptr<compiler::LLVMTranslationEngine> translator_;
+
+#ifndef VGRE_ENABLE_JIT
+  // Zero-Burden build (no LLVM): kernels are compiled by the from-scratch CUDA-C
+  // front-end and executed on the interpreter/compiled backend. Registered
+  // backend kernels are keyed by KernelId; launchKernel routes direct (non-graph-
+  // captured) launches here. Defined in runtime_engine_backend.cpp.
+  struct BackendKernel;
+  std::unordered_map<KernelId, std::shared_ptr<BackendKernel>> backendKernels_;
+  std::shared_ptr<BackendKernel> makeBackendKernel(const std::string &name,
+                                                   const std::string &source);
+  VGREResult launchBackendKernel(const std::shared_ptr<BackendKernel> &bk,
+                                 const dim3 &gridDim, const dim3 &blockDim,
+                                 void **args, size_t sharedMem);
+#endif
   std::unique_ptr<runtime::CPUParallelExecutor> executor_;
   std::unique_ptr<runtime::VectorEngine> vectorEngine_;
   std::unique_ptr<GraphManager> graphManager_;
