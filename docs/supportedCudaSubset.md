@@ -43,6 +43,7 @@ Every feature below is verified end-to-end on **both** execution tiers
 | `for`, `while` | ✅ |
 | `return` | ✅ |
 | blocks / scopes | ✅ (single flat scope) |
+| `__device__` helper functions | ✅ (inlined; nested calls OK; recursion rejected) |
 
 ## Memory & builtins
 | Feature | Status |
@@ -58,7 +59,7 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …); the compiled tier uses libm.
 
 ## Not yet supported (returns an error, falls back to JIT when available)
-- `struct` kernel parameters and user `__device__` functions
+- `struct` kernel parameters
 - local (non-`__shared__`) arrays
 - templates, recursion
 - texture/surface and warp-shuffle intrinsics
