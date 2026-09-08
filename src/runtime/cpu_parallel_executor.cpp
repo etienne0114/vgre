@@ -178,6 +178,14 @@ VGREResult CPUParallelExecutor::execute(CompiledKernelFn fn,
                                         uint64_t bytesPerBlock,
                                         const dim3 &gridOffset,
                                         bool usesSyncthreads) {
+  // A null compiled function reaches here only when JIT compilation was skipped
+  // (e.g. VGRE_ENABLE_JIT=OFF and a kernel that took the engine path rather than
+  // the execution backend). Fail cleanly instead of dereferencing null.
+  if (!fn || !*fn) {
+    VGRE_LOG_ERROR("CPUParallelExecutor",
+                   "null kernel function — kernel was not compiled (JIT disabled?)");
+    return VGREResult::ERR_NOT_SUPPORTED;
+  }
   totalLaunches_++;
   const uint32_t totalBlocks = gridDim.total();
   const int totalBlocksI = static_cast<int>(totalBlocks);
@@ -354,6 +362,10 @@ VGREResult CPUParallelExecutor::executeCooperative(CompiledKernelFn fn,
                                                     size_t sharedMemSize,
                                                     uint64_t flopsPerBlock,
                                                     uint64_t bytesPerBlock) {
+    if (!fn || !*fn) {
+        VGRE_LOG_ERROR("CPUParallelExecutor", "null kernel function — not compiled (JIT disabled?)");
+        return VGREResult::ERR_NOT_SUPPORTED;
+    }
     totalLaunches_++;
     const uint32_t totalBlocks = gridDim.total();
 
@@ -473,6 +485,10 @@ VGREResult CPUParallelExecutor::executeClustered(CompiledKernelFn fn,
                                                  size_t sharedMemSize,
                                                  uint64_t flopsPerBlock,
                                                  uint64_t bytesPerBlock) {
+    if (!fn || !*fn) {
+        VGRE_LOG_ERROR("CPUParallelExecutor", "null kernel function — not compiled (JIT disabled?)");
+        return VGREResult::ERR_NOT_SUPPORTED;
+    }
     auto& pool = vgre::runtime::BlockWorkerPool::instance();
     pool.initialize();
     const uint32_t clusterSize = clusterDim.total();
@@ -593,6 +609,10 @@ VGREResult CPUParallelExecutor::executeSyncthreads(CompiledKernelFn fn,
                                                    uint64_t flopsPerBlock,
                                                    uint64_t bytesPerBlock,
                                                    const dim3 &gridOffset) {
+    if (!fn || !*fn) {
+        VGRE_LOG_ERROR("CPUParallelExecutor", "null kernel function — not compiled (JIT disabled?)");
+        return VGREResult::ERR_NOT_SUPPORTED;
+    }
     totalLaunches_++;
     const uint32_t totalBlocks    = gridDim.total();
     const uint32_t threadsPerBlock = blockDim.total();

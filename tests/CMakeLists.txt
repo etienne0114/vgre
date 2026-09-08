@@ -296,12 +296,15 @@ add_executable(test_radix_sort core/test_radix_sort.cpp)
 target_link_libraries(test_radix_sort PRIVATE vgre)
 add_test(NAME RadixSort COMMAND test_radix_sort)
 
-add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
-target_link_libraries(test_roofline_autotuner PRIVATE vgre)
-add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
-set_tests_properties(RooflineAutoTuner PROPERTIES
-    TIMEOUT 120
-    RESOURCE_LOCK vgre_llvm_jit)
+# Benchmarks real kernel launches through the JIT — requires VGRE_ENABLE_JIT.
+if(VGRE_ENABLE_JIT)
+    add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
+    target_link_libraries(test_roofline_autotuner PRIVATE vgre)
+    add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
+    set_tests_properties(RooflineAutoTuner PROPERTIES
+        TIMEOUT 120
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_memory_concurrency unit/test_memory_concurrency.cpp)
 target_link_libraries(test_memory_concurrency PRIVATE vgre)
