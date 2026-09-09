@@ -113,17 +113,26 @@ inline void rmsNormVec(const float* x, const float* g, float* out, int D, float 
     const float inv = 1.0f / std::sqrt(ss / (float)D + eps);
     for (int i = 0; i < D; ++i) out[i] = x[i] * inv * g[i];
 }
-// RoPE on a single vector v[H*Dh] at absolute position pos.
-inline void ropeVec(float* v, int H, int Dh, int pos, float base) {
+// RoPE on a single vector v[H*Dh] at absolute position `pos`. The rotation
+// angle θ_i = pos·base^(-2i/Dh) depends only on (pos, i) — NOT the head — so the
+// Dh/2 cos/sin values are computed ONCE (into caller scratch cs/sn) and applied
+// to every head, instead of recomputing pow/cos/sin H× per call. `invFreq[i] =
+// base^(-2i/Dh)` is precomputed by the caller (constant per model), removing the
+// per-element pow from the token loop entirely. Bit-identical to the naive form.
+inline void ropeVec(float* v, int H, int Dh, int pos, const float* invFreq,
+                    float* cs, float* sn) {
     const int half = Dh / 2;
+    for (int i = 0; i < half; ++i) {
+        const float theta = (float)pos * invFreq[i];
+        cs[i] = std::cos(theta);
+        sn[i] = std::sin(theta);
+    }
     for (int h = 0; h < H; ++h) {
         float* p = v + h * Dh;
         for (int i = 0; i < half; ++i) {
-            const float theta = (float)pos * std::pow(base, -2.0f * (float)i / (float)Dh);
-            const float c = std::cos(theta), s = std::sin(theta);
             const float a = p[2 * i], b = p[2 * i + 1];
-            p[2 * i]     = a * c - b * s;
-            p[2 * i + 1] = a * s + b * c;
+            p[2 * i]     = a * cs[i] - b * sn[i];
+            p[2 * i + 1] = a * sn[i] + b * cs[i];
         }
     }
 }
@@ -261,6 +270,13 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         return (float)(nib - 8) * sc;
     };
 
+    // RoPE inverse frequencies (constant across the whole run) + cos/sin scratch,
+    // so the token loop never recomputes pow, and cos/sin are computed once per
+    // Q/K (not per head). See ropeVec.
+    std::vector<float> invFreq(Dh / 2), rcos(Dh / 2), rsin(Dh / 2);
+    for (int i = 0; i < Dh / 2; ++i)
+        invFreq[i] = std::pow(cfg_.rope_base, -2.0f * (float)i / (float)Dh);
+
     std::vector<float> x(D), h(D), q(D), k(D), v(D), attnOut(D), proj(D);
     std::vector<float> h2(D), gate(F), up(F), ff(D), logits(V);
     std::vector<float> scores(cfg_.max_seq);
@@ -301,8 +317,8 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D);
             mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, D);
             mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, D);
-            ropeVec(q.data(), H, Dh, pos, cfg_.rope_base);
-            ropeVec(k.data(), H, Dh, pos, cfg_.rope_base);
+            ropeVec(q.data(), H, Dh, pos, invFreq.data(), rcos.data(), rsin.data());
+            ropeVec(k.data(), H, Dh, pos, invFreq.data(), rcos.data(), rsin.data());
             if (kv4) {                                   // 4-bit packed per head
                 for (int hd = 0; hd < H; ++hd) {
                     const int off = hd * Dh;
