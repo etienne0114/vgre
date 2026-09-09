@@ -132,10 +132,16 @@ private:
         int pc = 0;
         bool done = false;
         bool atBarrier = false;
+        bool atShfl = false;       // parked at a warp-shuffle rendezvous
+        uint64_t shflVal = 0;      // the value this lane offers to the shuffle
         std::map<std::string, RegVal> regs;
         std::map<std::string, bool>   preds;
         std::vector<char> local;   // per-thread .local scratch (sized to localBytes)
     };
+
+    // A thread that can still execute an instruction right now (not exited, not
+    // parked at a barrier or a warp-shuffle rendezvous).
+    static bool runnable(const Thread& t) { return !t.done && !t.atBarrier && !t.atShfl; }
 
     void parse(const std::string& ptx, const std::string& entry);
     // Validate the config and load grid/block extents + the packed param block.
@@ -145,6 +151,9 @@ private:
     // barrier without advancing.
     bool execOne(Thread& t, int tid);
     void releaseBarrierIfReady();
+    // When every active lane of `anyTid`'s warp has reached the shuffle, perform
+    // the cross-lane exchange and advance them all (a warp-wide rendezvous).
+    void releaseShflIfReady(int anyTid);
     void startCta(int cta);
     bool ctaFinished() const;
 

@@ -189,8 +189,10 @@ struct Compiler {
     }
     void scanExprBarriers(const Expr* e) {
         if (!e || failed) return;
-        if (e->kind == Expr::Call && e->str == "__syncthreads")
-            fail("__syncthreads needs the interpreter tier");
+        if (e->kind == Expr::Call &&
+            (e->str == "__syncthreads" || e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
+             e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync"))
+            fail("warp-cooperative op needs the interpreter tier");   // __syncthreads / __shfl_*
         for (auto& a : e->args) scanExprBarriers(a.get());
     }
 

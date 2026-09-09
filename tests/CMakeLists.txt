@@ -1063,6 +1063,12 @@ target_link_libraries(test_cuda_array2d PRIVATE vgre Threads::Threads)
 add_test(NAME CudaArray2D COMMAND test_cuda_array2d)
 set_tests_properties(CudaArray2D PROPERTIES TIMEOUT 30)
 
+# Track Z: warp-shuffle intrinsics (__shfl[_up|_down|_xor]_sync) on the interpreter.
+add_executable(test_cuda_warp_shuffle compiler/test_cuda_warp_shuffle.cpp)
+target_link_libraries(test_cuda_warp_shuffle PRIVATE vgre Threads::Threads)
+add_test(NAME CudaWarpShuffle COMMAND test_cuda_warp_shuffle)
+set_tests_properties(CudaWarpShuffle PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

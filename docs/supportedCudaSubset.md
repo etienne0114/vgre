@@ -74,6 +74,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | **multi-dimensional** arrays (`float As[16][16]`, `As[ty][tx]`) | ✅ N-D declarations + N-D indexing flatten to row-major offsets, so textbook tiled kernels compile verbatim. Works for both `__shared__` and local arrays. |
 | `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier/`__shared__` kernels to Tier-0) |
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
+| **warp shuffle** — `__shfl_sync`, `__shfl_up_sync`, `__shfl_down_sync`, `__shfl_xor_sync` | ✅ Tier-0 interpreter (32-lane warp rendezvous; optional power-of-two `width`; 32-bit values). Warp-cooperative, so the compiled tier defers these to Tier-0. |
 
 ## Intrinsics
 `sqrt`, `rsqrt`, `fabs`, `abs` (int/float, width-preserving), `exp`/`__expf`,
@@ -96,7 +97,9 @@ workload runs on the from-scratch front-end.
 
 ## Not yet supported (returns an error, falls back to JIT when available)
 - templates, recursion
-- texture/surface and warp-shuffle intrinsics
+- texture/surface intrinsics
+- warp shuffle of 64-bit values, and `__shfl`/`__ballot` predicate/vote variants
+  beyond the four `__shfl_*_sync` forms
 
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
@@ -106,9 +109,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **321 / 321 pass** — full LLVM JIT + from-scratch backends |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **301 / 301 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **301 / 301 pass, 0 crashes/aborts** — the lone `-j`-load flake, `Phase3ExtAPI`, passes in isolation |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **322 / 322 pass** — full LLVM JIT + from-scratch backends (`XlaBlasGemm` is a heavy `-j`-load timing flake: passes in isolation) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **302 / 302 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **302 / 302 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +

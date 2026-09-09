@@ -306,8 +306,9 @@ bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* cons
     if (ctaBegin < 0) ctaBegin = 0;
     if (ctaEnd > gridTotal_) ctaEnd = gridTotal_;
 
-    // Run each CTA in the range to completion, honouring bar.sync between its
-    // threads — the same cooperative scheduler resume() uses, minus breakpoints.
+    // Run each CTA in the range to completion, honouring bar.sync / shfl.sync
+    // between its threads — the same cooperative scheduler resume() uses, minus
+    // breakpoints.
     for (int cta = ctaBegin; cta < ctaEnd; ++cta) {
         startCta(cta);
         while (true) {
@@ -315,7 +316,7 @@ bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* cons
             bool progressed = false;
             for (int tid = 0; tid < (int)threads_.size(); ++tid) {
                 Thread& t = threads_[tid];
-                while (!t.done && !t.atBarrier) {
+                while (runnable(t)) {
                     if (!execOne(t, tid)) break;
                     progressed = true;
                 }
@@ -323,11 +324,11 @@ bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* cons
             if (ctaFinished()) break;
             if (!progressed) {
                 releaseBarrierIfReady();
-                bool runnable = false;
+                bool anyRunnable = false;
                 for (const auto& t : threads_)
-                    if (!t.done && !t.atBarrier) { runnable = true; break; }
-                if (!runnable)
-                    throw std::runtime_error("PTX: deadlock — threads blocked at bar.sync");
+                    if (runnable(t)) { anyRunnable = true; break; }
+                if (!anyRunnable)
+                    throw std::runtime_error("PTX: deadlock — threads blocked at bar.sync / shfl.sync");
             }
         }
     }
@@ -366,6 +367,54 @@ void PtxInterpreter::releaseBarrierIfReady() {
     for (auto& t : threads_) t.atBarrier = false;
 }
 
+void PtxInterpreter::releaseShflIfReady(int anyTid) {
+    // Warps are 32 consecutive threads by flattened thread id.
+    const int total = (int)threads_.size();
+    const int warpBase = anyTid - (anyTid % 32);
+    const int warpEnd = std::min(warpBase + 32, total);
+
+    // Ready only when every active (non-exited) lane has reached the shuffle.
+    for (int L = warpBase; L < warpEnd; ++L)
+        if (!threads_[L].done && !threads_[L].atShfl) return;
+
+    // Snapshot the offered values first (writes below must not see updated ones).
+    uint64_t offered[32];
+    for (int L = warpBase; L < warpEnd; ++L) offered[L - warpBase] = threads_[L].shflVal;
+
+    for (int L = warpBase; L < warpEnd; ++L) {
+        Thread& t = threads_[L];
+        if (!t.atShfl) continue;                       // an exited lane
+        const PtxInstr& I = kernel_.code[t.pc];
+        std::vector<std::string> parts = splitDots(I.op);   // shfl.sync.<mode>.b32
+        const std::string mode = parts.size() > 2 ? parts[2] : "idx";
+        int width = (int)evalOperand(t, L, I.args[3], 4);    // c = subwarp width (our encoding)
+        if (width <= 0 || width > 32) width = 32;
+        const int laneArg = (int)evalOperand(t, L, I.args[2], 4);  // b = srcLane/delta/mask
+        const int lane = L - warpBase;
+        const int subBase = warpBase + (lane / width) * width;
+        const int laneInSub = lane % width;
+
+        int srcSub = laneInSub;
+        bool own = false;
+        if (mode == "idx")       srcSub = laneArg % width;
+        else if (mode == "up")   { srcSub = laneInSub - laneArg; if (srcSub < 0) own = true; }
+        else if (mode == "down") { srcSub = laneInSub + laneArg; if (srcSub >= width) own = true; }
+        else if (mode == "bfly") { srcSub = laneInSub ^ laneArg; if (srcSub >= width) own = true; }
+
+        const int src = subBase + srcSub;
+        uint64_t result;
+        if (own || src < warpBase || src >= warpEnd || threads_[src].done)
+            result = t.shflVal;                        // inactive source → keep own value (CUDA)
+        else
+            result = offered[src - warpBase];
+
+        t.regs[I.args[0]].u = zeroExtend(result, 4);   // write d (b32)
+        t.atShfl = false;
+        ++t.pc;
+        if (t.pc >= (int)kernel_.code.size()) t.done = true;
+    }
+}
+
 StopReason PtxInterpreter::resume() {
     if (exited_) return StopReason::Exited;
     // Step the previously-stopped thread over its breakpoint first (gdb also
@@ -379,7 +428,7 @@ StopReason PtxInterpreter::resume() {
         bool progressed = false;
         for (int tid = 0; tid < (int)threads_.size(); ++tid) {
             Thread& t = threads_[tid];
-            while (!t.done && !t.atBarrier) {
+            while (runnable(t)) {
                 if (breakpoints_.count(t.pc)) { stoppedThread_ = tid; return StopReason::Breakpoint; }
                 if (!execOne(t, tid)) break;
                 progressed = true;
@@ -393,8 +442,8 @@ StopReason PtxInterpreter::resume() {
         if (!progressed) {
             releaseBarrierIfReady();
             for (const auto& t : threads_)
-                if (!t.done && !t.atBarrier) goto again;   // barrier released
-            throw std::runtime_error("PTX: deadlock — threads blocked at bar.sync");
+                if (runnable(t)) goto again;   // barrier/shuffle released
+            throw std::runtime_error("PTX: deadlock — threads blocked at bar.sync / shfl.sync");
         }
     again:;
     }
@@ -651,6 +700,14 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         t.atBarrier = true;
         ++t.pc;
         releaseBarrierIfReady();
+        return true;
+    } else if (mnem == "shfl") {
+        // Warp shuffle: park at this instruction offering our value; the last
+        // lane of the warp to arrive performs the exchange for everyone. pc is
+        // NOT advanced here — releaseShflIfReady writes the result and advances.
+        t.shflVal = evalOperand(t, tid, A(1), 4) & 0xffffffffu;   // 'a' (b32 value)
+        t.atShfl = true;
+        releaseShflIfReady(tid);
         return true;
     } else if (mnem == "bra") {
         const std::string& target = I.args.back();

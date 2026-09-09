@@ -703,10 +703,36 @@ struct Codegen {
                canon == "sin" || canon == "cos" || canon == "exp" || canon == "log";
     }
 
+    // Warp shuffle: __shfl[_up|_down|_xor]_sync(mask, var, lane [, width]).
+    // Lowers to `shfl.sync.<mode>.b32 d, var, lane, <width>, mask` — the c operand
+    // carries the subwarp width (our interpreter's encoding). Only 32-bit values.
+    Val emitShfl(const Expr& e) {
+        const std::string& fn = e.str;
+        if (e.args.size() < 3 || e.args.size() > 4) { fail("'" + fn + "' expects (mask, var, lane[, width])"); return {}; }
+        Val mask = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+        Val var  = emitExpr(*e.args[1]);                    if (failed) return {};
+        if (is64BitScalar(var.type)) { fail("warp shuffle of 64-bit values is unsupported"); return {}; }
+        Val lane = coerce(emitExpr(*e.args[2]), intType()); if (failed) return {};
+        int width = 32;
+        if (e.args.size() == 4) {
+            if (e.args[3]->kind != Expr::IntLit) { fail("shuffle width must be a constant"); return {}; }
+            width = static_cast<int>(e.args[3]->ival);
+            if (width <= 0 || width > 32 || (width & (width - 1))) { fail("shuffle width must be a power of two in [1,32]"); return {}; }
+        }
+        const char* mode = fn == "__shfl_sync" ? "idx" : fn == "__shfl_up_sync" ? "up" :
+                           fn == "__shfl_down_sync" ? "down" : "bfly";
+        std::string d = fresh(classOf(var.type));
+        emit("shfl.sync." + std::string(mode) + ".b32 " + d + ", " + var.reg + ", " +
+             lane.reg + ", " + std::to_string(width) + ", " + mask.reg + ";");
+        return {d, var.type};
+    }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
         if (fn == "atomicAdd" && e.args.size() == 2) return emitAtomicAdd(e);
+        if (fn == "__shfl_sync" || fn == "__shfl_up_sync" ||
+            fn == "__shfl_down_sync" || fn == "__shfl_xor_sync") return emitShfl(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);
