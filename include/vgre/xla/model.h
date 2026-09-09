@@ -59,10 +59,24 @@ public:
     // new token instead of re-running the full forward (which is O(T²) per step).
     // Pure raw-float inference (no autograd tape). The greedy 2-arg form is
     // token-identical to the reference generate() free function.
+    // `specDraftK > 0` enables lossless greedy speculative decoding: a bigram
+    // drafter proposes up to specDraftK tokens and one batched forward verifies
+    // them, so a run of correct guesses costs a single forward pass. The emitted
+    // tokens are identical to the plain greedy path (specDraftK == 0); the draft
+    // only changes how many forwards run. Active only for greedy sampling with
+    // fp32/bf16 weights + fp32 KV; otherwise it decodes normally.
     std::vector<int> generate_cached(std::vector<int> prompt, int n_new,
-                                     const SampleConfig& cfg);
+                                     const SampleConfig& cfg, int specDraftK = 0);
     std::vector<int> generate_cached(std::vector<int> prompt, int n_new) {
         return generate_cached(std::move(prompt), n_new, SampleConfig{});
+    }
+    // Greedy speculative decode with a draft window of `k` tokens (lossless).
+    std::vector<int> generate_speculative(std::vector<int> prompt, int n_new, int k,
+                                          const SampleConfig& cfg) {
+        return generate_cached(std::move(prompt), n_new, cfg, k);
+    }
+    std::vector<int> generate_speculative(std::vector<int> prompt, int n_new, int k) {
+        return generate_cached(std::move(prompt), n_new, SampleConfig{}, k);
     }
 
     // Enable bf16-weight inference: the big matmul weights are cached as bf16

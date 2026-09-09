@@ -62,7 +62,24 @@ int main() {
     CHECK(equalBoth(gpt, prompt, nNew, "int8"), "int8: batched prefill == sequential");
     gpt.set_int8_inference(false);
 
+    // ── Speculative decoding is lossless: identical tokens to greedy ─────────
+    auto specEqualsGreedy = [&](GPT& g, int k, const char* tag) {
+        std::vector<int> greedy = g.generate_cached(prompt, nNew);       // plain greedy
+        std::vector<int> spec   = g.generate_speculative(prompt, nNew, k);
+        if (greedy.size() != spec.size()) { std::printf("  [%s k=%d] size %zu vs %zu\n", tag, k, greedy.size(), spec.size()); return false; }
+        for (size_t i = 0; i < greedy.size(); ++i)
+            if (greedy[i] != spec[i]) { std::printf("  [%s k=%d] mismatch at %zu: %d vs %d\n", tag, k, i, greedy[i], spec[i]); return false; }
+        return true;
+    };
+    for (int k : {2, 3, 6}) CHECK(specEqualsGreedy(gpt, k, "fp32"), "fp32: speculative == greedy (lossless)");
+    gpt.set_bf16_inference(true);
+    for (int k : {2, 6}) CHECK(specEqualsGreedy(gpt, k, "bf16"), "bf16: speculative == greedy (lossless)");
+    gpt.set_bf16_inference(false);
+    gpt.set_int8_inference(true);
+    for (int k : {2, 6}) CHECK(specEqualsGreedy(gpt, k, "int8"), "int8: speculative == greedy (lossless)");
+    gpt.set_int8_inference(false);
+
     if (g_fail == 0)
-        std::printf("PASS: batched prefill is bit-identical to sequential (fp32/bf16/int8)\n");
+        std::printf("PASS: batched prefill bit-identical + speculative decode lossless (fp32/bf16/int8)\n");
     return g_fail ? 1 : 0;
 }

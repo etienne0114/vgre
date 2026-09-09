@@ -10,6 +10,7 @@
 #include <cstring>
 #include <random>
 #include <stdexcept>
+#include <unordered_map>
 
 // AVX2 int8→fp32 accumulate for the batched int8 prefill, dispatched at runtime
 // via __builtin_cpu_supports (scalar fallback everywhere else). Same pattern as
@@ -298,7 +299,7 @@ int sampleToken(std::vector<float>& logits, const std::vector<int>& history,
 }  // namespace
 
 std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
-                                      const SampleConfig& sc) {
+                                      const SampleConfig& sc, int specDraftK) {
     const int D = cfg_.d_model, H = cfg_.n_head, Dh = cfg_.head_dim();
     const int F = cfg_.ff(), V = cfg_.vocab, L = cfg_.n_layer;
     const float scale = 1.0f / std::sqrt((float)Dh);
@@ -543,9 +544,18 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     // exact math, so the result is bit-identical to sequential prefill. Supported
     // for fp32/bf16 weights with the fp32 KV cache (int8 weights / quantized KV
     // fall back to sequential decode).
-    auto prefill_batched = [&](const std::vector<int>& toks) {
+    // Batched forward of `toks` at absolute positions startPos..startPos+P-1:
+    // fills the fp32 KV cache and leaves each token's final hidden state in `Xb`
+    // (P*D, caller-sized). Each projection is one GEMM over all P tokens (weights
+    // loaded once); RoPE, the KV write, and the per-row causal attention (over
+    // cache 0..startPos+p) reuse decode's exact math, so it is bit-identical to
+    // decoding the P tokens one at a time from position startPos. The caller
+    // applies the LM head to whichever rows it needs. Used by both the prompt
+    // prefill (startPos=0, last row) and speculative verification (startPos=pos,
+    // all rows).
+    auto run_chunk = [&](const std::vector<int>& toks, int startPos, std::vector<float>& Xb) {
         const int P = (int)toks.size();
-        std::vector<float> Xb((size_t)P * D), Hn((size_t)P * D);
+        std::vector<float> Hn((size_t)P * D);
         std::vector<float> Qb((size_t)P * D), Kb((size_t)P * D), Vb((size_t)P * D);
         std::vector<float> Ao((size_t)P * D), Pj((size_t)P * D);
         std::vector<float> Gt((size_t)P * F), Up2((size_t)P * F), Fb((size_t)P * D);
@@ -568,28 +578,30 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, D);
             mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, D);
             for (int p = 0; p < P; ++p) {
-                ropeVec(&Qb[(size_t)p * D], H, Dh, p, invFreq.data(), rcos.data(), rsin.data());
-                ropeVec(&Kb[(size_t)p * D], H, Dh, p, invFreq.data(), rcos.data(), rsin.data());
-                std::memcpy(&Kc[l][(size_t)p * D], &Kb[(size_t)p * D], sizeof(float) * D);
-                std::memcpy(&Vc[l][(size_t)p * D], &Vb[(size_t)p * D], sizeof(float) * D);
+                const int ap = startPos + p;                 // absolute position
+                ropeVec(&Qb[(size_t)p * D], H, Dh, ap, invFreq.data(), rcos.data(), rsin.data());
+                ropeVec(&Kb[(size_t)p * D], H, Dh, ap, invFreq.data(), rcos.data(), rsin.data());
+                std::memcpy(&Kc[l][(size_t)ap * D], &Kb[(size_t)p * D], sizeof(float) * D);
+                std::memcpy(&Vc[l][(size_t)ap * D], &Vb[(size_t)p * D], sizeof(float) * D);
             }
-            for (int p = 0; p < P; ++p) {                    // per-row causal attention
+            for (int p = 0; p < P; ++p) {                    // per-row causal attention over 0..startPos+p
+                const int ap = startPos + p;
                 const float* qr = &Qb[(size_t)p * D];
                 float* aor = &Ao[(size_t)p * D];
                 for (int hd = 0; hd < H; ++hd) {
                     const int off = hd * Dh;
                     float mx = -1e30f;
-                    for (int j = 0; j <= p; ++j) {
+                    for (int j = 0; j <= ap; ++j) {
                         const float* kj = &Kc[l][(size_t)j * D + off];
                         float s = 0.0f; for (int d = 0; d < Dh; ++d) s += qr[off + d] * kj[d];
                         s *= scale; sc2[j] = s; if (s > mx) mx = s;
                     }
                     float sum = 0.0f;
-                    for (int j = 0; j <= p; ++j) { sc2[j] = std::exp(sc2[j] - mx); sum += sc2[j]; }
+                    for (int j = 0; j <= ap; ++j) { sc2[j] = std::exp(sc2[j] - mx); sum += sc2[j]; }
                     const float inv = 1.0f / sum;
                     for (int d = 0; d < Dh; ++d) {
                         float acc = 0.0f;
-                        for (int j = 0; j <= p; ++j) acc += sc2[j] * inv * Vc[l][(size_t)j * D + off + d];
+                        for (int j = 0; j <= ap; ++j) acc += sc2[j] * inv * Vc[l][(size_t)j * D + off + d];
                         aor[off + d] = acc;
                     }
                 }
@@ -604,7 +616,6 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, Fb.data(), F, D);
             for (int i = 0; i < P * D; ++i) Xb[i] += Fb[i];  // residual
         }
-        emitLogits(&Xb[(size_t)(P - 1) * D]);                // only the last token's logits
     };
 
     if (prompt.empty()) return prompt;
@@ -612,10 +623,84 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     const bool canBatch = batched_prefill_ && !kv4 && !kv8 &&
                           prompt.size() > 1 && (int64_t)prompt.size() <= cfg_.max_seq;
     if (canBatch) {
-        prefill_batched(prompt);
+        std::vector<float> Xpf((size_t)prompt.size() * D);
+        run_chunk(prompt, 0, Xpf);
+        emitLogits(&Xpf[(size_t)(prompt.size() - 1) * D]);   // logits after the last prompt token
         pos = (int)prompt.size();
     } else {
         for (size_t i = 0; i < prompt.size(); ++i) decode(prompt[i], pos++);  // sequential prefill
+    }
+
+    // ── Speculative decoding (lossless greedy) ───────────────────────────────
+    // A cheap bigram drafter proposes a run of tokens; one batched forward
+    // verifies them all at once. Accepted drafts keep the KV that batch already
+    // wrote (never recomputed); a mismatch simply stops the run and the next
+    // iteration decodes the correct token, overwriting the stale cache slots. The
+    // emitted tokens are exactly the greedy argmax at every step, so the output is
+    // identical to the greedy plain loop — only fewer forward passes when drafts
+    // hit. Greedy + fp32/bf16 weights (canBatch) only; otherwise the plain loop.
+    auto argmaxV = [](const float* p, int n) { int b = 0; for (int j = 1; j < n; ++j) if (p[j] > p[b]) b = j; return b; };
+    const bool greedySpec = (sc.temperature <= 0.0f) && (sc.top_k <= 0) && (sc.top_p >= 1.0f);
+    if (specDraftK > 0 && greedySpec && canBatch) {
+        std::unordered_map<int, int> bigram;                 // last token → the token that followed it
+        for (size_t i = 1; i < prompt.size(); ++i) bigram[prompt[i - 1]] = prompt[i];
+        int produced = 0;
+        std::vector<float> Lrow, Xv;
+        while (produced < n_new && pos < cfg_.max_seq) {
+            // `logits` predicts position `pos`. Emit its greedy token and cache it.
+            const int cur = argmaxV(logits.data(), V);
+            if (!prompt.empty()) bigram[prompt.back()] = cur;
+            prompt.push_back(cur);
+            decode(cur, pos++); ++produced;                  // updates `logits` to predict the new `pos`
+            if (produced >= n_new || pos >= cfg_.max_seq) break;
+
+            // Draft a run by chasing the bigram map from `cur`.
+            std::vector<int> drafts;
+            const int room = std::min(specDraftK, cfg_.max_seq - pos);
+            for (int i = 0, look = cur; i < room; ++i) {
+                auto it = bigram.find(look);
+                if (it == bigram.end()) break;
+                drafts.push_back(it->second);
+                look = it->second;
+            }
+            if (drafts.empty()) continue;                    // nothing to verify → next iteration
+
+            // The dist predicting position `pos` (before the verify pass clobbers
+            // the `logits` member via emitLogits) — the acceptance test for the
+            // first draft.
+            std::vector<float> pred0(logits);
+
+            // One batched forward verifies all drafts at positions pos..pos+Kd-1.
+            const int Kd = (int)drafts.size();
+            Lrow.assign((size_t)Kd * V, 0.0f);
+            Xv.assign((size_t)Kd * D, 0.0f);
+            run_chunk(drafts, pos, Xv);
+            for (int i = 0; i < Kd; ++i) {
+                emitLogits(&Xv[(size_t)i * D]);
+                std::memcpy(&Lrow[(size_t)i * V], logits.data(), sizeof(float) * V);
+            }
+            // draft[i] (for position pos+i) is correct iff it equals the greedy
+            // token of the logits predicting pos+i: pred0 for i==0, else Lrow[i-1].
+            // Accept the longest matching prefix.
+            int acc = 0;
+            for (int i = 0; i < Kd; ++i) {
+                const float* pred = (i == 0) ? pred0.data() : &Lrow[(size_t)(i - 1) * V];
+                if (drafts[i] != argmaxV(pred, V)) break;
+                ++acc;
+            }
+            // Accepted drafts: KV already correct in the cache (written by run_chunk
+            // at pos..pos+acc-1) → reuse, just record + advance.
+            for (int i = 0; i < acc && produced < n_new && pos < cfg_.max_seq; ++i) {
+                bigram[prompt.back()] = drafts[i];
+                prompt.push_back(drafts[i]);
+                ++pos; ++produced;
+            }
+            // Restore `logits` to predict the new `pos`: pred0 if nothing was
+            // accepted (emitLogits clobbered it), else Lrow[acc-1].
+            std::memcpy(logits.data(), acc > 0 ? &Lrow[(size_t)(acc - 1) * V] : pred0.data(),
+                        sizeof(float) * V);
+        }
+        return prompt;
     }
 
     for (int step = 0; step < n_new && pos < cfg_.max_seq; ++step) {
