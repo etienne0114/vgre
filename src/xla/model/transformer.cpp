@@ -11,6 +11,14 @@
 #include <random>
 #include <stdexcept>
 
+// AVX2 int8→fp32 accumulate for the batched int8 prefill, dispatched at runtime
+// via __builtin_cpu_supports (scalar fallback everywhere else). Same pattern as
+// src/xla/gemm/ternary_gemm.cpp.
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#  include <immintrin.h>
+#  define VGRE_TX_AVX2 1
+#endif
+
 namespace vgre {
 namespace xla {
 namespace model {
@@ -158,33 +166,84 @@ inline void gemv_int8(const float* x, const int8_t* W8, const float* scale,
 // rows (the weights stream through cache once instead of P times) — the per-
 // (p,n) reduction stays k=0..K-1, so it is bit-identical to P separate
 // gemv_int8 calls. `acc` is caller scratch of length P*N.
+constexpr int kI8RowBlk = 4;   // prompt rows processed together (register block)
+
+// Accumulate a block of `rb` prompt rows: acc[r][n] += Σ_k Xr[r][k]·(float)W8[k,n].
+// Each weight element (and, in the AVX2 path, each int8→fp32 widen) is decoded
+// ONCE per k and reused across all rb rows — the reuse that turns this from
+// weight-bandwidth-bound into compute-bound. `acc`/`Xr` point at the block's
+// first row; rows are N / K apart. mul+add (not fma) keeps the per-(r,n) k-order
+// rounding identical to the scalar gemv_int8 reference → bit-identical.
+inline void int8_block_scalar(float* acc, const float* Xr, int rb,
+                              const int8_t* W8, int K, int N) {
+    for (int k = 0; k < K; ++k) {
+        const int8_t* row = W8 + (size_t)k * N;
+        for (int r = 0; r < rb; ++r) {
+            const float xk = Xr[(size_t)r * K + k];
+            float* ar = acc + (size_t)r * N;
+            for (int n = 0; n < N; ++n) ar[n] += xk * (float)row[n];
+        }
+    }
+}
+
+#if defined(VGRE_TX_AVX2)
+__attribute__((target("avx2")))
+inline void int8_block_avx2(float* acc, const float* Xr, int rb,
+                            const int8_t* W8, int K, int N) {
+    for (int k = 0; k < K; ++k) {
+        const int8_t* row = W8 + (size_t)k * N;
+        __m256 xk[kI8RowBlk];
+        for (int r = 0; r < rb; ++r) xk[r] = _mm256_set1_ps(Xr[(size_t)r * K + k]);
+        int n = 0;
+        for (; n + 8 <= N; n += 8) {
+            const __m256 cf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(   // decode 8 int8 once
+                _mm_loadl_epi64(reinterpret_cast<const __m128i*>(row + n))));
+            for (int r = 0; r < rb; ++r) {
+                float* ar = acc + (size_t)r * N + n;
+                _mm256_storeu_ps(ar, _mm256_add_ps(_mm256_loadu_ps(ar), _mm256_mul_ps(xk[r], cf)));
+            }
+        }
+        for (; n < N; ++n) {
+            const float w = (float)row[n];
+            for (int r = 0; r < rb; ++r) acc[(size_t)r * N + n] += Xr[(size_t)r * K + k] * w;
+        }
+    }
+}
+inline bool int8_use_avx2() { static const bool ok = __builtin_cpu_supports("avx2"); return ok; }
+#endif
+
+// Weight-only int8 BATCHED GEMM: Y[P,N] = (X[P,K]·W8[K,N]) · per-column scale.
+// Parallelised over blocks of kI8RowBlk prompt rows; within a block each weight
+// element is decoded once and reused across the rows. Each (p,n) reduction stays
+// k=0..K-1, so it is bit-identical to P separate gemv_int8 calls. `acc` is caller
+// scratch (P*N).
 inline void gemm_int8_rows(const float* X, int P, const int8_t* W8, const float* scale,
                            float* Y, int K, int N, std::vector<float>& acc) {
     acc.assign((size_t)P * N, 0.0f);
-    // Parallelise over the P rows (each row's reduction is independent, so the
-    // per-(p,n) k=0..K-1 order is preserved → still bit-identical to gemv_int8).
-    // k-outer per row keeps each int8 weight row contiguous for the inner n-loop.
-    auto rows = [&](int64_t p0, int64_t p1) {
-        for (int k = 0; k < K; ++k) {
-            const int8_t* row = W8 + (size_t)k * N;
-            for (int64_t p = p0; p < p1; ++p) {
-                const float xk = X[(size_t)p * K + k];
-                float* ap = acc.data() + (size_t)p * N;
-                for (int n = 0; n < N; ++n) ap[n] += xk * (float)row[n];
-            }
-        }
-        for (int64_t p = p0; p < p1; ++p) {
-            const float* ap = acc.data() + (size_t)p * N;
-            float* yp = Y + (size_t)p * N;
-            for (int n = 0; n < N; ++n) yp[n] = ap[n] * scale[n];
+    const int nblk = (P + kI8RowBlk - 1) / kI8RowBlk;
+    auto oneBlock = [&](int64_t bi) {
+        const int p0 = (int)bi * kI8RowBlk;
+        const int rb = std::min(kI8RowBlk, P - p0);
+        float* ab = acc.data() + (size_t)p0 * N;
+        const float* xb = X + (size_t)p0 * K;
+#if defined(VGRE_TX_AVX2)
+        if (int8_use_avx2()) int8_block_avx2(ab, xb, rb, W8, K, N);
+        else                 int8_block_scalar(ab, xb, rb, W8, K, N);
+#else
+        int8_block_scalar(ab, xb, rb, W8, K, N);
+#endif
+        for (int r = 0; r < rb; ++r) {
+            const float* ar = ab + (size_t)r * N;
+            float* yr = Y + (size_t)(p0 + r) * N;
+            for (int n = 0; n < N; ++n) yr[n] = ar[n] * scale[n];
         }
     };
     auto& pool = vgre::xla::ThreadPool::global();
-    if (P >= 4 && pool.concurrency() > 1) {
-        const int64_t grain = std::max<int64_t>(1, (int64_t)P / (int64_t)(pool.concurrency() * 4));
-        pool.parallelFor(P, grain, [&](int64_t p) { rows(p, p + 1); });
+    if (nblk >= 2 && pool.concurrency() > 1) {
+        const int64_t grain = std::max<int64_t>(1, (int64_t)nblk / (int64_t)(pool.concurrency() * 4));
+        pool.parallelFor(nblk, grain, oneBlock);
     } else {
-        rows(0, P);
+        for (int bi = 0; bi < nblk; ++bi) oneBlock(bi);
     }
 }
 
