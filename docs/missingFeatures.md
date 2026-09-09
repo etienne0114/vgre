@@ -87,7 +87,7 @@ references**, and live in the LLVM-free `libvgre_nn`. Build steps and success cr
 | T1 | GGUF `I2_S`/TL1/TL2 ternary tensor loader | needs a real BitNet-b1.58 checkpoint to verify end-to-end (**external download**) |
 | T3 | KV-cache reuse + rollback on the raw C++ `generate_cached` path; tree verification; self-speculative (early-exit) drafting | **throughput optimization** — the algorithm is complete and proven |
 | T4 | ~~depthwise short conv before the SSM~~ **DONE** (causal per-channel conv1d + SiLU in `SSMBlock`, `conv_kernel=4`; numpy-matched, causality exact); **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization |
-| T5 | SIMD unpack path for the 4-bit decode (the row-major block layout fights column-wise vectorization) | perf |
+| T5 | ~~SIMD unpack path for the 4-bit decode~~ **DONE** — the MXFP4 GEMM now decodes each 32-element block **once** into a stack buffer reused across all M rows (M× fewer nibble decodes) with a contiguous, auto-vectorizable fp32 block-dot and a contiguous per-column accumulator: **21.4× vs the old per-(m,n) decode** (M=256,K=N=2048), bit-identical result. Portable (no arch intrinsics). | perf |
 | T6 | ~~int4 base option~~ **DONE** (`QLoRALinear(base_format="int4")`: symmetric per-column 4-bit, 4.25 bits/weight, ~11× lower reconstruction error than the 2-bit ternary base); ~~MXFP4 base~~ **DONE** (`QLoRALinear(base_format="mxfp4")`: OCP E2M1 codes + shared E8M0 power-of-two scale per 32-row block, 4.25 bits/weight, numpy-side codec mirroring `include/vgre/xla/mxfp4.h`); dequant-in-GEMM for the base path | breadth / peak-memory |
 
 ---

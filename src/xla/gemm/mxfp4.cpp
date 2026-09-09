@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace vgre {
 namespace xla {
@@ -61,6 +62,15 @@ inline uint8_t get_code(const uint8_t* codes, int64_t idx) {
     return (idx & 1) ? (uint8_t)(byte >> 4) : (uint8_t)(byte & 0x0F);
 }
 
+// Dot product of `len` (≤ 32) contiguous fp32 pairs — the GEMM inner kernel over
+// one decoded MXFP4 block. Contiguous, so the compiler auto-vectorizes it
+// wherever SIMD is enabled, and it stays correct on every arch.
+inline float block_dot(const float* a, const float* w, int len) {
+    float r = 0.0f;
+    for (int j = 0; j < len; ++j) r += a[j] * w[j];
+    return r;
+}
+
 }  // namespace
 
 void quantize(int64_t K, int64_t N, const float* W,
@@ -95,24 +105,26 @@ void dequantize(int64_t K, int64_t N, const uint8_t* codes, const uint8_t* scale
 void gemm(int64_t M, int64_t N, int64_t K,
           const float* A, const uint8_t* codes, const uint8_t* scales, float* C) {
     const int64_t nblk = (K + kBlock - 1) / kBlock;
-    // For each output column, accumulate block by block so the shared scale is
-    // applied once per 32-element block (dequant-in-GEMM: the E2M1 code stays
-    // 4-bit until multiplied by the activation).
-    for (int64_t m = 0; m < M; ++m) {
-        const float* a = A + m * K;
-        float* c = C + m * N;
-        for (int64_t n = 0; n < N; ++n) {
-            float acc = 0.0f;
-            for (int64_t b = 0; b < nblk; ++b) {
-                const int64_t k0 = b * kBlock, k1 = std::min(k0 + kBlock, K);
-                const float s = scale_from_byte(scales[b * N + n]);
-                float blk = 0.0f;
-                for (int64_t k = k0; k < k1; ++k)
-                    blk += a[k] * decode(get_code(codes, k * N + n));
-                acc += blk * s;                       // scale factors out of the block
-            }
-            c[n] = acc;
+    // Column-major over the weight: decode each 32-element block ONCE (into a
+    // stack buffer) and reuse it across all M rows of A — M× fewer nibble
+    // decodes than a per-(m,n) loop — then take a contiguous, vectorizable fp32
+    // dot per row. The shared block scale still factors out (dequant-in-GEMM:
+    // the E2M1 codes stay 4-bit until multiplied by the activation). `col` is a
+    // contiguous per-column accumulator so the strided C write happens once.
+    std::vector<float> col((size_t)M, 0.0f);
+    for (int64_t n = 0; n < N; ++n) {
+        std::fill(col.begin(), col.end(), 0.0f);
+        for (int64_t b = 0; b < nblk; ++b) {
+            const int64_t k0 = b * kBlock, k1 = std::min(k0 + kBlock, K);
+            const int len = (int)(k1 - k0);
+            const float s = scale_from_byte(scales[b * N + n]);
+            float wdec[kBlock];
+            for (int j = 0; j < len; ++j)
+                wdec[j] = decode(get_code(codes, (k0 + j) * N + n));   // unscaled E2M1
+            for (int64_t m = 0; m < M; ++m)
+                col[(size_t)m] += block_dot(A + m * K + k0, wdec, len) * s;
         }
+        for (int64_t m = 0; m < M; ++m) C[m * N + n] = col[(size_t)m];
     }
 }
 
