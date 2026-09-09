@@ -148,33 +148,21 @@ inline void ropeVec(float* v, int H, int Dh, int pos, const float* invFreq,
 }
 inline float siluf(float x) { return x / (1.0f + std::exp(-x)); }
 
-// Weight-only int8 GEMV: y[n] = scale[n] · Σ_k x[k]·W8[k,n], W8 row-major [K,N].
-// k-outer so each int8 weight row is read contiguously (the inner loop
-// auto-vectorizes at -O3). `acc` is a caller-provided scratch of length N.
-inline void gemv_int8(const float* x, const int8_t* W8, const float* scale,
-                      float* y, int K, int N, std::vector<float>& acc) {
-    acc.assign(N, 0.0f);
-    for (int k = 0; k < K; ++k) {
-        const float xk = x[k];
-        const int8_t* row = W8 + (size_t)k * N;
-        for (int n = 0; n < N; ++n) acc[n] += xk * (float)row[n];
-    }
-    for (int n = 0; n < N; ++n) y[n] = acc[n] * scale[n];
-}
-
-// Weight-only int8 BATCHED GEMM: Y[P,N] = (X[P,K]·W8[K,N]) · per-column scale.
-// k-outer so each int8 weight row W8[k,:] is read once and reused across all P
-// rows (the weights stream through cache once instead of P times) — the per-
-// (p,n) reduction stays k=0..K-1, so it is bit-identical to P separate
-// gemv_int8 calls. `acc` is caller scratch of length P*N.
-constexpr int kI8RowBlk = 4;   // prompt rows processed together (register block)
+// Weight-only int8 GEMM: Y[P,N] = (X[P,K]·W8[K,N]) · per-column scale. The single
+// int8 kernel for the whole model — P=1 is the per-token decode GEMV, P>1 the
+// batched prompt prefill. Rows are processed in register blocks so each int8
+// weight (and its int8→fp32 widen) is decoded once and reused across the block;
+// the per-(p,n) reduction stays k=0..K-1, so P=1 and P>1 give bit-identical
+// results (what makes batched prefill == sequential decode). `acc` is caller
+// scratch of length P*N.
+constexpr int kI8RowBlk = 4;   // rows processed together (register block)
 
 // Accumulate a block of `rb` prompt rows: acc[r][n] += Σ_k Xr[r][k]·(float)W8[k,n].
 // Each weight element (and, in the AVX2 path, each int8→fp32 widen) is decoded
 // ONCE per k and reused across all rb rows — the reuse that turns this from
 // weight-bandwidth-bound into compute-bound. `acc`/`Xr` point at the block's
 // first row; rows are N / K apart. mul+add (not fma) keeps the per-(r,n) k-order
-// rounding identical to the scalar gemv_int8 reference → bit-identical.
+// rounding identical to the scalar block reference → P=1 == P>1 bit-identical.
 inline void int8_block_scalar(float* acc, const float* Xr, int rb,
                               const int8_t* W8, int K, int N) {
     for (int k = 0; k < K; ++k) {
@@ -216,7 +204,7 @@ inline bool int8_use_avx2() { static const bool ok = __builtin_cpu_supports("avx
 // Weight-only int8 BATCHED GEMM: Y[P,N] = (X[P,K]·W8[K,N]) · per-column scale.
 // Parallelised over blocks of kI8RowBlk prompt rows; within a block each weight
 // element is decoded once and reused across the rows. Each (p,n) reduction stays
-// k=0..K-1, so it is bit-identical to P separate gemv_int8 calls. `acc` is caller
+// k=0..K-1, so P=1 (decode) and P>1 (prefill) are bit-identical. `acc` is caller
 // scratch (P*N).
 inline void gemm_int8_rows(const float* X, int P, const int8_t* W8, const float* scale,
                            float* Y, int K, int N, std::vector<float>& acc) {
@@ -385,7 +373,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     auto mv = [&](const float* xv, const float* Wf, const uint16_t* Wb,
                   const Q8* q8, float* y, int K, int N) {
         if (int8) {
-            gemv_int8(xv, q8->w.data(), q8->scale.data(), y, K, N, i8acc);
+            gemm_int8_rows(xv, 1, q8->w.data(), q8->scale.data(), y, K, N, i8acc);  // P=1 (per-token)
         } else if (bf16) {
             xbf.resize(K);
             for (int i = 0; i < K; ++i) xbf[i] = f32_to_bf16(xv[i]);
