@@ -80,6 +80,16 @@ an 8-worker pool, both bit-identical to the serial result.
 On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …); the compiled tier uses libm.
 
+## Worked example: FlashAttention
+
+These pieces compose. `tests/compiler/test_cuda_flash_attention.cpp` compiles a
+real **flash-attention** kernel — `__shared__` K/V tiles + `__syncthreads()`
+cooperative loading, a per-thread local `acc[D]` accumulator, the online-softmax
+running-max/running-sum rescale (no N² score matrix), and `expf`/`fmaxf` — with
+**no LLVM**, runs it on the Tier-0 interpreter, and matches a CPU
+softmax-attention reference to ~5e-8 (float rounding). The canonical transformer
+workload runs on the from-scratch front-end.
+
 ## Not yet supported (returns an error, falls back to JIT when available)
 - templates, recursion
 - texture/surface and warp-shuffle intrinsics
@@ -95,9 +105,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **319 / 319 pass** — full LLVM JIT + from-scratch backends |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **299 / 299 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **299 / 299 pass, 0 crashes/aborts** — every test that runs, passes |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **320 / 320 pass** — full LLVM JIT + from-scratch backends |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **300 / 300 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **300 / 300 pass, 0 crashes/aborts** — every test that runs, passes |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
@@ -108,7 +118,7 @@ UVM, stream concurrency, capture-based CUDA graphs, AND C-API graphs
 (`GraphCAPIIntegration`) all execute correctly with no LLVM**.
 
 The tests **excluded** from the no-LLVM build (guarded on `VGRE_ENABLE_JIT` in
-`tests/CMakeLists.txt`) genuinely require the JIT and fall into three groups:
+`tests/CMakeLists.txt`) genuinely require the JIT and fall into two groups:
 
 1. **LLVM-only machinery** — bitcode modules (`LLVMBitcodeModuleDirect`), Clang
    AST analysis (`ClangEnhanced`, `KernelParserEnhanced`, `VectorizationHints`,
@@ -119,7 +129,7 @@ The tests **excluded** from the no-LLVM build (guarded on `VGRE_ENABLE_JIT` in
 2. **Interpreter-incompatible** — cooperative groups with grid-wide sync
    (`CooperativeGroupsPartition`, `MultiDeviceCooperativeComprehensive`): the
    sequential interpreter cannot provide a resident-grid barrier.
-3. **Broader-CUDA-C-subset follow-ons** — multi-feature kernels like
-   `FlashAttention` that the from-scratch front-end does not yet compile.
-   (`struct` kernel params and `__device__` helpers are now supported; the
-   dual-registry split is fixed — both graph paths work with no LLVM.)
+
+(`struct` kernel params, `__device__` helpers, per-thread local arrays, and a
+full **flash-attention** kernel are now supported on the from-scratch front-end;
+the dual-registry split is fixed — both graph paths work with no LLVM.)
