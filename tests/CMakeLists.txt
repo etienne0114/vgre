@@ -1057,6 +1057,12 @@ target_link_libraries(test_cuda_flash_attention PRIVATE vgre Threads::Threads)
 add_test(NAME CudaFlashAttention COMMAND test_cuda_flash_attention)
 set_tests_properties(CudaFlashAttention PROPERTIES TIMEOUT 30)
 
+# Track Z: multi-dimensional array syntax (2D __shared__ tiles + 2D local arrays).
+add_executable(test_cuda_array2d compiler/test_cuda_array2d.cpp)
+target_link_libraries(test_cuda_array2d PRIVATE vgre Threads::Threads)
+add_test(NAME CudaArray2D COMMAND test_cuda_array2d)
+set_tests_properties(CudaArray2D PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

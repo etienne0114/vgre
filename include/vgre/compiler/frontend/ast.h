@@ -81,7 +81,9 @@ struct Stmt {
     Type        type;       // VarDecl: declared type (element type when arraySize > 0)
     std::string name;       // VarDecl: variable name
     bool        isShared = false;  // VarDecl: had __shared__
-    int         arraySize = 0;     // VarDecl: 0 = scalar; >0 = array[arraySize]
+    int         arraySize = 0;     // VarDecl: 0 = scalar; >0 = total element count
+    std::vector<int> arrayDims;    // VarDecl: per-dimension sizes ([N] or [N][M]…);
+                                   // empty for a scalar. arraySize == product(dims).
     ExprPtr     expr;       // VarDecl init / ExprStmt / Return value / If & While condition
 
     std::vector<std::unique_ptr<Stmt>> body;      // Block stmts / loop body / If then-branch

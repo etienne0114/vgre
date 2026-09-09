@@ -71,7 +71,8 @@ an 8-worker pool, both bit-identical to the serial result.
 |---|---|
 | global load/store | ✅ |
 | per-thread **local** arrays (`float tmp[4];`, register scratch) | ✅ **both tiers** — Tier-0: PTX `.local` per-thread arena; Tier-1 compiled: a private run of Cell slots (so no-barrier local-array kernels stay on the fast path). Constant + dynamic indexing. |
-| `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier/array kernels to Tier-0) |
+| **multi-dimensional** arrays (`float As[16][16]`, `As[ty][tx]`) | ✅ N-D declarations + N-D indexing flatten to row-major offsets, so textbook tiled kernels compile verbatim. Works for both `__shared__` and local arrays. |
+| `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier/`__shared__` kernels to Tier-0) |
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
 
 ## Intrinsics
@@ -103,9 +104,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **320 / 320 pass** — full LLVM JIT + from-scratch backends |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **300 / 300 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **300 / 300 pass, 0 crashes/aborts** — every test that runs, passes |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **321 / 321 pass** — full LLVM JIT + from-scratch backends |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **301 / 301 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **301 / 301 pass, 0 crashes/aborts** — the lone `-j`-load flake, `Phase3ExtAPI`, passes in isolation |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +

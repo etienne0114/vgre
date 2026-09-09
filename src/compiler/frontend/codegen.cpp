@@ -58,6 +58,7 @@ struct Codegen {
     std::string localDecls;           // .local declarations (emitted in the decl section)
     int nR = 0, nF = 0, nRd = 0, nP = 0, nLbl = 0;
     std::unordered_map<std::string, Val> vars;  // name -> value (single mutable reg)
+    std::unordered_map<std::string, std::vector<int>> arrayDims_;  // declared array -> dim sizes
     bool failed = false;
     std::string err;
     int line = 0, col = 0;
@@ -297,10 +298,22 @@ struct Codegen {
     // The element type of an index expression's base, without emitting code
     // (used to coerce the stored value before emitting the store). In the
     // supported subset the base is an Ident naming a pointer/array variable.
+    // Peel nested Index nodes (`A[i][j]` → Index(Index(A,i),j)). Returns the
+    // innermost base expr and fills `idxs` with the index expressions in
+    // outer-dimension-first order ([i, j] for A[i][j]).
+    static const Expr* peelIndex(const Expr& index, std::vector<const Expr*>& idxs) {
+        std::vector<const Expr*> rev;
+        const Expr* cur = &index;
+        while (cur->kind == Expr::Index) { rev.push_back(cur->args[1].get()); cur = cur->args[0].get(); }
+        for (auto it = rev.rbegin(); it != rev.rend(); ++it) idxs.push_back(*it);
+        return cur;
+    }
+
     Type indexPointee(const Expr& index) {
-        const Expr& base = *index.args[0];
-        if (base.kind == Expr::Ident) {
-            auto it = vars.find(base.str);
+        std::vector<const Expr*> idxs;
+        const Expr* root = peelIndex(index, idxs);
+        if (root->kind == Expr::Ident) {
+            auto it = vars.find(root->str);
             if (it != vars.end() && it->second.type.isPointer()) {
                 Type t = it->second.type; t.ptr -= 1; return t;
             }
@@ -308,28 +321,60 @@ struct Codegen {
         return intType();
     }
 
-    // Compute the address of base[index]. Global uses 64-bit addressing;
-    // __shared__ arrays use 32-bit offsets from the shared symbol.
+    // Compute the address of an index expression, flattening multi-dimensional
+    // declared arrays (row-major: A[i][j] → A[i*cols + j]). Global uses 64-bit
+    // addressing; __shared__/.local arrays use 32-bit offsets from the symbol.
     Addr emitAddress(const Expr& index) {
         Addr a;
-        Val b = emitExpr(*index.args[0]);
-        if (failed) return a;
-        if (!b.type.isPointer()) { fail("indexing a non-pointer"); return a; }
+        std::vector<const Expr*> idxs;
+        const Expr* root = peelIndex(index, idxs);
+        const bool isArray = root->kind == Expr::Ident && arrayDims_.count(root->str);
+
+        Val b;
+        if (isArray) {
+            b = vars[root->str];
+            const std::vector<int>& dims = arrayDims_[root->str];
+            if (idxs.size() != dims.size()) {
+                fail("array '" + root->str + "' expects " + std::to_string(dims.size()) +
+                     " index(es), got " + std::to_string(idxs.size()));
+                return a;
+            }
+        } else {
+            if (idxs.size() != 1) { fail("multi-dimensional indexing requires a declared array"); return a; }
+            b = emitExpr(*root);
+            if (failed) return a;
+            if (!b.type.isPointer()) { fail("indexing a non-pointer"); return a; }
+        }
         a.pointee = b.type; a.pointee.ptr -= 1;
-        Val idx = coerce(emitExpr(*index.args[1]), intType());
+
+        // Fold the indices into one element offset, row-major.
+        Val flat = coerce(emitExpr(*idxs[0]), intType());
         if (failed) return a;
+        if (isArray) {
+            const std::vector<int>& dims = arrayDims_[root->str];
+            for (size_t d = 1; d < idxs.size(); ++d) {
+                std::string m = fresh(RC::R32);
+                emit("mul.lo.s32 " + m + ", " + flat.reg + ", " + std::to_string(dims[d]) + ";");
+                Val ik = coerce(emitExpr(*idxs[d]), intType());
+                if (failed) return a;
+                std::string s = fresh(RC::R32);
+                emit("add.s32 " + s + ", " + m + ", " + ik.reg + ";");
+                flat = {s, intType()};
+            }
+        }
+
         const int elem = a.pointee.elemBytes();
         if (b.space == Space::Shared || b.space == Space::Local) {
             (b.space == Space::Shared ? a.shared : a.local) = true;
             const std::string& sym = (b.space == Space::Shared) ? b.sharedName : b.localName;
             std::string base = fresh(RC::R32), off = fresh(RC::R32), addr = fresh(RC::R32);
             emit("mov.u32 " + base + ", " + sym + ";");
-            emit("mul.lo.s32 " + off + ", " + idx.reg + ", " + std::to_string(elem) + ";");
+            emit("mul.lo.s32 " + off + ", " + flat.reg + ", " + std::to_string(elem) + ";");
             emit("add.s32 " + addr + ", " + base + ", " + off + ";");
             a.reg = addr;
         } else {
             std::string off = fresh(RC::RD64), addr = fresh(RC::RD64);
-            emit("mul.wide.s32 " + off + ", " + idx.reg + ", " + std::to_string(elem) + ";");
+            emit("mul.wide.s32 " + off + ", " + flat.reg + ", " + std::to_string(elem) + ";");
             emit("add.s64 " + addr + ", " + b.reg + ", " + off + ";");
             a.reg = addr;
         }
@@ -710,6 +755,8 @@ struct Codegen {
                         v.space = Space::Local; v.localName = s.name;
                     }
                     vars[s.name] = v;
+                    arrayDims_[s.name] = s.arrayDims.empty()
+                                             ? std::vector<int>{s.arraySize} : s.arrayDims;
                     return;
                 }
                 Val v; v.type = s.type; v.reg = fresh(classOf(s.type));

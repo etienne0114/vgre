@@ -360,11 +360,16 @@ struct Parser {
         if (!parseType(s->type)) { fail("expected a type"); return nullptr; }
         if (!at(TokenKind::Identifier)) { fail("expected a variable name"); return nullptr; }
         s->name = advance().text;
-        if (accept(TokenKind::LBracket)) {                     // array declarator name[N]
+        while (accept(TokenKind::LBracket)) {                  // array declarator name[N][M]…
             if (!at(TokenKind::IntLiteral)) { fail("expected an array size"); return nullptr; }
-            s->arraySize = static_cast<int>(std::strtoll(advance().text.c_str(), nullptr, 0));
+            int dim = static_cast<int>(std::strtoll(advance().text.c_str(), nullptr, 0));
             expect(TokenKind::RBracket, "']'");
-            if (s->arraySize <= 0) { fail("array size must be positive"); return nullptr; }
+            if (dim <= 0) { fail("array size must be positive"); return nullptr; }
+            s->arrayDims.push_back(dim);
+        }
+        if (!s->arrayDims.empty()) {
+            s->arraySize = 1;
+            for (int d : s->arrayDims) s->arraySize *= d;      // total element count
         }
         if (accept(TokenKind::Assign)) {
             s->expr = parseExpr();
