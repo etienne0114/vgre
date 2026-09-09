@@ -70,7 +70,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | Feature | Status |
 |---|---|
 | global load/store | ✅ |
-| per-thread **local** arrays (`float tmp[4];`, register scratch) | ✅ (Tier-0 interpreter; PTX `.local`, private per-thread arena; constant + dynamic indexing) |
+| per-thread **local** arrays (`float tmp[4];`, register scratch) | ✅ **both tiers** — Tier-0: PTX `.local` per-thread arena; Tier-1 compiled: a private run of Cell slots (so no-barrier local-array kernels stay on the fast path). Constant + dynamic indexing. |
 | `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier/array kernels to Tier-0) |
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
 
@@ -94,8 +94,6 @@ workload runs on the from-scratch front-end.
 - templates, recursion
 - texture/surface and warp-shuffle intrinsics
 - `double`/`long` on the interpreter tier (compiled tier + JIT cover them)
-- local arrays on the **compiled** tier (they run on Tier-0 — which is now
-  parallel across CTAs — via the automatic fallback)
 
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier

@@ -198,6 +198,11 @@ public:
 struct Compiler {
     std::unordered_map<std::string, size_t> slot;   // var name -> register slot
     std::unordered_map<std::string, Type> vtype;    // var name -> type
+    // Per-thread local arrays (`float acc[8];`): a contiguous run of Cell slots
+    // [base, base+size). Indexed by slot, not by memory address — private to the
+    // thread, so no barriers/atomics are needed and these stay on the fast tier.
+    struct LocalArr { size_t base; Type elem; int size; };
+    std::unordered_map<std::string, LocalArr> arrays;
     size_t nextSlot = 0;
     bool failed = false;
     std::string err;
@@ -221,7 +226,14 @@ struct Compiler {
     void scan(const Stmt& s) {
         if (failed) return;
         if (s.kind == Stmt::VarDecl) {
-            if (s.isShared || s.arraySize > 0) { fail("__shared__/arrays need the interpreter tier"); return; }
+            if (s.isShared) { fail("__shared__ needs the interpreter tier"); return; }
+            if (s.arraySize > 0) {
+                // Reserve a contiguous slot run for the per-thread local array.
+                size_t base = nextSlot;
+                nextSlot += (size_t)s.arraySize;
+                arrays[s.name] = LocalArr{base, s.type, s.arraySize};
+                return;
+            }
             declare(s.name, s.type);
         }
         scanExprBarriers(s.expr.get());
@@ -293,10 +305,22 @@ struct Compiler {
         return {};
     }
 
+    // If an index expression's base is a local-array Ident, the array; else null.
+    const LocalArr* asLocalArray(const Expr& index) const {
+        const Expr& base = *index.args[0];
+        if (base.kind == Expr::Ident) {
+            auto it = arrays.find(base.str);
+            if (it != arrays.end()) return &it->second;
+        }
+        return nullptr;
+    }
+
     // The pointee (element) type of an index base — for load/store width.
     Type pointee(const Expr& index) {
         const Expr& base = *index.args[0];
         if (base.kind == Expr::Ident) {
+            auto la = arrays.find(base.str);
+            if (la != arrays.end()) return la->second.elem;
             auto it = vtype.find(base.str);
             if (it != vtype.end() && it->second.isPointer()) { Type t = it->second; t.ptr -= 1; return t; }
         }
@@ -304,6 +328,16 @@ struct Compiler {
     }
 
     ExprFn compileLoad(const Expr& e) {
+        if (const LocalArr* la = asLocalArray(e)) {          // acc[i] — slot access
+            ExprFn idx = compileExpr(*e.args[1]);
+            if (failed) return {};
+            size_t base = la->base; int sz = la->size;
+            return [base, idx, sz](TS& ts) -> Cell {
+                int64_t i = idx(ts).asI();
+                if (i < 0 || i >= sz) return Cell::I(0);     // OOB → 0 (no fault)
+                return ts.regs[base + (size_t)i];
+            };
+        }
         ExprFn base = compileExpr(*e.args[0]);
         ExprFn idx  = compileExpr(*e.args[1]);
         if (failed) return {};
@@ -323,6 +357,16 @@ struct Compiler {
 
     // Store `value` to index-expr `lhs`.
     StmtFn compileStore(const Expr& lhs, ExprFn value) {
+        if (const LocalArr* la = asLocalArray(lhs)) {        // acc[i] = v — slot access
+            ExprFn idx = compileExpr(*lhs.args[1]);
+            if (failed) return {};
+            size_t base = la->base; int sz = la->size; Type pt = la->elem;
+            return [base, idx, value, sz, pt](TS& ts) {
+                int64_t i = idx(ts).asI();
+                if (i < 0 || i >= sz) return;                // OOB → drop (no fault)
+                ts.regs[base + (size_t)i] = coerce(value(ts), pt);
+            };
+        }
         ExprFn base = compileExpr(*lhs.args[0]);
         ExprFn idx  = compileExpr(*lhs.args[1]);
         if (failed) return {};
@@ -461,6 +505,19 @@ struct Compiler {
             return {};
         }
         const Expr& index = *a0.args[0];
+        if (const LocalArr* la = asLocalArray(index)) {      // atomicAdd(&acc[i], v) — slot RMW
+            ExprFn idx = compileExpr(*index.args[1]);
+            ExprFn val = compileExpr(*e.args[1]);
+            if (failed) return {};
+            size_t base = la->base; int sz = la->size; Type pt = la->elem;
+            return [base, idx, val, sz, pt](TS& ts) -> Cell {
+                int64_t i = idx(ts).asI();
+                if (i < 0 || i >= sz) return Cell::I(0);
+                Cell old = ts.regs[base + (size_t)i];        // private to the thread → plain RMW
+                ts.regs[base + (size_t)i] = coerce(binop("+", old, val(ts)), pt);
+                return old;
+            };
+        }
         ExprFn base = compileExpr(*index.args[0]);
         ExprFn idx  = compileExpr(*index.args[1]);
         ExprFn val  = compileExpr(*e.args[1]);
@@ -513,6 +570,10 @@ struct Compiler {
         line = s.line; col = s.col;
         switch (s.kind) {
             case Stmt::VarDecl: {
+                if (s.arraySize > 0) {
+                    // Local array: slots reserved in scan(), zeroed by regs.resize().
+                    return [](TS&) {};
+                }
                 size_t sl = slot[s.name];
                 Type vt = s.type;
                 if (s.expr) {
