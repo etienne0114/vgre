@@ -596,8 +596,7 @@ struct Codegen {
             Val rhs = computeRhs(var);
             if (failed) return {};
             rhs = coerce(rhs, var.type);
-            const char* mov = var.type.isFloating() ? "mov.f32 " : (var.type.isPointer() ? "mov.u64 " : "mov.u32 ");
-            emit(std::string(mov) + var.reg + ", " + rhs.reg + ";");
+            emit(std::string(movFor(var.type)) + var.reg + ", " + rhs.reg + ";");
             return var;
         }
         if (lhs.kind == Expr::Index) {
@@ -692,6 +691,18 @@ struct Codegen {
         return {retReg, rt};
     }
 
+    // Map a unary float-math intrinsic name to its canonical op + precision.
+    // The `f`-suffixed spelling is f32; the bare C name is f64 (double).
+    // `__expf`/`__logf` are the f32 fast variants.
+    static bool recognizeUnaryMath(const std::string& fn, std::string& canon, bool& dbl) {
+        if (fn == "__expf") { canon = "exp"; dbl = false; return true; }
+        if (fn == "__logf") { canon = "log"; dbl = false; return true; }
+        dbl = fn.empty() || fn.back() != 'f';
+        canon = dbl ? fn : fn.substr(0, fn.size() - 1);   // strip trailing 'f' for f32
+        return canon == "sqrt" || canon == "fabs" || canon == "rsqrt" ||
+               canon == "sin" || canon == "cos" || canon == "exp" || canon == "log";
+    }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
@@ -703,30 +714,51 @@ struct Codegen {
 
         // Unary intrinsics.
         if (e.args.size() == 1) {
-            if (fn == "abs") {                          // integer or float abs (type-preserving)
+            if (fn == "abs") {                          // integer or float abs (width-preserving)
                 Val a = emitExpr(*e.args[0]); if (failed) return {};
-                if (a.type.isFloating()) { std::string d = fresh(RC::F32); emit("abs.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
-                std::string d = fresh(RC::R32); emit("abs.s32 " + d + ", " + a.reg + ";"); return {d, intType()};
+                std::string d = fresh(classOf(a.type));
+                emit("abs." + (a.type.isFloating() ? floatSuffix(a.type) : intSuffix(a.type)) +
+                     " " + d + ", " + a.reg + ";");
+                return {d, a.type};
             }
-            Val a = coerce(emitExpr(*e.args[0]), floatType());  // f32 arg -> f32 result
+            if (fn == "floorf" || fn == "floor" || fn == "ceilf" || fn == "ceil") {
+                const bool dbl = (fn == "floor" || fn == "ceil");
+                const std::string suf = dbl ? "f64" : "f32";
+                const Type ft = dbl ? doubleType() : floatType();
+                Val a = coerce(emitExpr(*e.args[0]), ft); if (failed) return {};
+                std::string d = fresh(classOf(ft));
+                // round-to-integer-in-float: .rmi = floor, .rpi = ceil.
+                const std::string rnd = (fn == "floorf" || fn == "floor") ? "rmi" : "rpi";
+                emit("cvt." + rnd + "." + suf + "." + suf + " " + d + ", " + a.reg + ";");
+                return {d, ft};
+            }
+            // Float math intrinsic: the `f`-suffixed name is f32, the bare C name
+            // is f64 (double). `__expf`/`__logf` are the f32 fast variants.
+            std::string canon; bool dbl;
+            if (!recognizeUnaryMath(fn, canon, dbl)) { fail("unsupported call to '" + fn + "'"); return {}; }
+            const Type ft = dbl ? doubleType() : floatType();
+            const std::string suf = dbl ? "f64" : "f32";
+            Val a = coerce(emitExpr(*e.args[0]), ft);
             if (failed) return {};
-            std::string d = fresh(RC::F32);
-            if (fn == "sqrtf")  { emit("sqrt.rn.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "fabsf")  { emit("abs.f32 "     + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "rsqrtf") { emit("rsqrt.approx.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "sinf")   { emit("sin.approx.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "cosf")   { emit("cos.approx.f32 " + d + ", " + a.reg + ";"); return {d, floatType()}; }
-            if (fn == "__expf" || fn == "expf") {       // e^x = 2^(x*log2 e)
-                std::string t = fresh(RC::F32);
-                emit("mul.f32 " + t + ", " + a.reg + ", 0f3FB8AA3B;");  // log2(e)
-                emit("ex2.approx.f32 " + d + ", " + t + ";");
-                return {d, floatType()};
+            std::string d = fresh(classOf(ft));
+            if (canon == "sqrt")  { emit("sqrt.rn." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "fabs")  { emit("abs." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "rsqrt") { emit("rsqrt.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "sin")   { emit("sin.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "cos")   { emit("cos.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "exp") {                       // e^x = 2^(x*log2 e)
+                std::string t = fresh(classOf(ft));
+                std::string log2e = dbl ? f64imm(1.4426950408889634) : "0f3FB8AA3B";
+                emit("mul." + suf + " " + t + ", " + a.reg + ", " + log2e + ";");
+                emit("ex2.approx." + suf + " " + d + ", " + t + ";");
+                return {d, ft};
             }
-            if (fn == "__logf" || fn == "logf") {       // ln x = log2(x)*ln 2
-                std::string t = fresh(RC::F32);
-                emit("lg2.approx.f32 " + t + ", " + a.reg + ";");
-                emit("mul.f32 " + d + ", " + t + ", 0f3F317218;");     // ln(2)
-                return {d, floatType()};
+            if (canon == "log") {                       // ln x = log2(x)*ln 2
+                std::string t = fresh(classOf(ft));
+                std::string ln2 = dbl ? f64imm(0.6931471805599453) : "0f3F317218";
+                emit("lg2.approx." + suf + " " + t + ", " + a.reg + ";");
+                emit("mul." + suf + " " + d + ", " + t + ", " + ln2 + ";");
+                return {d, ft};
             }
             fail("unsupported call to '" + fn + "'");
             return {};
@@ -736,41 +768,50 @@ struct Codegen {
         if (e.args.size() == 2) {
             Val a = emitExpr(*e.args[0]); if (failed) return {};
             Val b = emitExpr(*e.args[1]); if (failed) return {};
-            if (fn == "fminf" || fn == "fmaxf") {
-                a = coerce(a, floatType()); b = coerce(b, floatType());
-                std::string d = fresh(RC::F32);
-                emit(std::string(fn == "fminf" ? "min.f32 " : "max.f32 ") + d + ", " + a.reg + ", " + b.reg + ";");
-                return {d, floatType()};
+            if (fn == "fminf" || fn == "fmaxf" || fn == "fmin" || fn == "fmax") {
+                const bool dbl = (fn == "fmin" || fn == "fmax");
+                const bool isMin = (fn == "fminf" || fn == "fmin");
+                const Type ft = dbl ? doubleType() : floatType();
+                const std::string suf = dbl ? "f64" : "f32";
+                a = coerce(a, ft); b = coerce(b, ft);
+                std::string d = fresh(classOf(ft));
+                emit(std::string(isMin ? "min." : "max.") + suf + " " + d + ", " + a.reg + ", " + b.reg + ";");
+                return {d, ft};
             }
-            if (fn == "min" || fn == "max") {
-                bool fp = a.type.isFloating() || b.type.isFloating();
-                Type ct = fp ? floatType() : intType();
+            if (fn == "min" || fn == "max") {           // int or float, width-preserving
+                const bool fp = a.type.isFloating() || b.type.isFloating();
+                Type ct = promote(a.type, b.type);
                 a = coerce(a, ct); b = coerce(b, ct);
                 std::string d = fresh(classOf(ct));
-                std::string op = fn == "min" ? "min." : "max.";
-                emit(op + (fp ? "f32 " : "s32 ") + d + ", " + a.reg + ", " + b.reg + ";");
+                emit(std::string(fn == "min" ? "min." : "max.") + (fp ? floatSuffix(ct) : intSuffix(ct)) +
+                     " " + d + ", " + a.reg + ", " + b.reg + ";");
                 return {d, ct};
             }
-            if (fn == "powf") {                         // x^y = 2^(y*log2 x)
-                a = coerce(a, floatType()); b = coerce(b, floatType());
-                std::string lg = fresh(RC::F32), mul = fresh(RC::F32), d = fresh(RC::F32);
-                emit("lg2.approx.f32 " + lg + ", " + a.reg + ";");
-                emit("mul.f32 " + mul + ", " + b.reg + ", " + lg + ";");
-                emit("ex2.approx.f32 " + d + ", " + mul + ";");
-                return {d, floatType()};
+            if (fn == "powf" || fn == "pow") {          // x^y = 2^(y*log2 x)
+                const bool dbl = (fn == "pow");
+                const Type ft = dbl ? doubleType() : floatType();
+                const std::string suf = dbl ? "f64" : "f32";
+                a = coerce(a, ft); b = coerce(b, ft);
+                std::string lg = fresh(classOf(ft)), mul = fresh(classOf(ft)), d = fresh(classOf(ft));
+                emit("lg2.approx." + suf + " " + lg + ", " + a.reg + ";");
+                emit("mul." + suf + " " + mul + ", " + b.reg + ", " + lg + ";");
+                emit("ex2.approx." + suf + " " + d + ", " + mul + ";");
+                return {d, ft};
             }
             fail("unsupported call to '" + fn + "'");
             return {};
         }
 
-        // Ternary intrinsic: fmaf(a,b,c) = a*b + c.
-        if (e.args.size() == 3 && fn == "fmaf") {
-            Val a = coerce(emitExpr(*e.args[0]), floatType()); if (failed) return {};
-            Val b = coerce(emitExpr(*e.args[1]), floatType()); if (failed) return {};
-            Val c = coerce(emitExpr(*e.args[2]), floatType()); if (failed) return {};
-            std::string d = fresh(RC::F32);
-            emit("fma.rn.f32 " + d + ", " + a.reg + ", " + b.reg + ", " + c.reg + ";");
-            return {d, floatType()};
+        // Ternary intrinsic: fmaf/fma(a,b,c) = a*b + c (f32 / f64).
+        if (e.args.size() == 3 && (fn == "fmaf" || fn == "fma")) {
+            const bool dbl = (fn == "fma");
+            const Type ft = dbl ? doubleType() : floatType();
+            Val a = coerce(emitExpr(*e.args[0]), ft); if (failed) return {};
+            Val b = coerce(emitExpr(*e.args[1]), ft); if (failed) return {};
+            Val c = coerce(emitExpr(*e.args[2]), ft); if (failed) return {};
+            std::string d = fresh(classOf(ft));
+            emit("fma.rn." + std::string(dbl ? "f64" : "f32") + " " + d + ", " + a.reg + ", " + b.reg + ", " + c.reg + ";");
+            return {d, ft};
         }
 
         fail("unsupported call to '" + fn + "'");
@@ -785,22 +826,23 @@ struct Codegen {
              cond.str == ">=" || cond.str == "==" || cond.str == "!=")) {
             Val a = emitExpr(*cond.args[0]); if (failed) return;
             Val b = emitExpr(*cond.args[1]); if (failed) return;
-            bool fp = a.type.isFloating() || b.type.isFloating();
-            Type ct = fp ? floatType() : intType();
+            Type ct = promote(a.type, b.type);
             a = coerce(a, ct); b = coerce(b, ct);
             // Inverted predicate → branch when the original condition is false.
             const std::string& o = cond.str;
             const char* inv = o == "<" ? "ge" : o == "<=" ? "gt" : o == ">" ? "le" :
                               o == ">=" ? "lt" : o == "==" ? "ne" : "eq";
             std::string p = fresh(RC::Pred);
-            emit(std::string("setp.") + inv + (fp ? ".f32 " : ".s32 ") + p + ", " + a.reg + ", " + b.reg + ";");
+            emit("setp." + std::string(inv) + "." + arithSuffix(ct) + " " + p + ", " + a.reg + ", " + b.reg + ";");
             emit("@" + p + " bra " + lbl + ";");
             return;
         }
         Val c = emitExpr(cond);
         if (failed) return;
         std::string p = fresh(RC::Pred);
-        emit("setp.eq.s32 " + p + ", " + c.reg + ", 0;");
+        std::string zero = !c.type.isFloating() ? "0"
+                         : (c.type.base == Type::Double ? f64imm(0.0) : f32imm(0.0));
+        emit("setp.eq." + arithSuffix(c.type) + " " + p + ", " + c.reg + ", " + zero + ";");
         emit("@" + p + " bra " + lbl + ";");
     }
 
@@ -835,8 +877,7 @@ struct Codegen {
                     Val init = emitExpr(*s.expr);
                     if (failed) return;
                     init = coerce(init, s.type);
-                    const char* mov = s.type.isFloating() ? "mov.f32 " : (s.type.isPointer() ? "mov.u64 " : "mov.u32 ");
-                    emit(std::string(mov) + v.reg + ", " + init.reg + ";");
+                    emit(std::string(movFor(s.type)) + v.reg + ", " + init.reg + ";");
                 }
                 return;
             }

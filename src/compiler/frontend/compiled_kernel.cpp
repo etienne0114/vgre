@@ -509,26 +509,28 @@ struct Compiler {
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         if (e.args.size() == 1) {
             ExprFn a = compileExpr(*e.args[0]); if (failed) return {};
+            // The Cell stores every float as a double, so the f32 and f64 spellings
+            // (sqrtf/sqrt, …) compute identically here — accept both.
             if (fn == "abs")   return [a](TS& ts) { Cell v = a(ts); return v.isFloat ? Cell::F(std::fabs(v.f)) : Cell::I(std::llabs((long long)v.i)); };
-            if (fn == "sqrtf") return [a](TS& ts) { return Cell::F(std::sqrt(a(ts).asF())); };
-            if (fn == "fabsf") return [a](TS& ts) { return Cell::F(std::fabs(a(ts).asF())); };
-            if (fn == "rsqrtf")return [a](TS& ts) { return Cell::F(1.0 / std::sqrt(a(ts).asF())); };
-            if (fn == "sinf")  return [a](TS& ts) { return Cell::F(std::sin(a(ts).asF())); };
-            if (fn == "cosf")  return [a](TS& ts) { return Cell::F(std::cos(a(ts).asF())); };
-            if (fn == "floorf")return [a](TS& ts) { return Cell::F(std::floor(a(ts).asF())); };
-            if (fn == "ceilf") return [a](TS& ts) { return Cell::F(std::ceil(a(ts).asF())); };
-            if (fn == "__expf" || fn == "expf") return [a](TS& ts) { return Cell::F(std::exp(a(ts).asF())); };
-            if (fn == "__logf" || fn == "logf") return [a](TS& ts) { return Cell::F(std::log(a(ts).asF())); };
+            if (fn == "sqrtf"  || fn == "sqrt")  return [a](TS& ts) { return Cell::F(std::sqrt(a(ts).asF())); };
+            if (fn == "fabsf"  || fn == "fabs")  return [a](TS& ts) { return Cell::F(std::fabs(a(ts).asF())); };
+            if (fn == "rsqrtf" || fn == "rsqrt") return [a](TS& ts) { return Cell::F(1.0 / std::sqrt(a(ts).asF())); };
+            if (fn == "sinf"   || fn == "sin")   return [a](TS& ts) { return Cell::F(std::sin(a(ts).asF())); };
+            if (fn == "cosf"   || fn == "cos")   return [a](TS& ts) { return Cell::F(std::cos(a(ts).asF())); };
+            if (fn == "floorf" || fn == "floor") return [a](TS& ts) { return Cell::F(std::floor(a(ts).asF())); };
+            if (fn == "ceilf"  || fn == "ceil")  return [a](TS& ts) { return Cell::F(std::ceil(a(ts).asF())); };
+            if (fn == "__expf" || fn == "expf" || fn == "exp") return [a](TS& ts) { return Cell::F(std::exp(a(ts).asF())); };
+            if (fn == "__logf" || fn == "logf" || fn == "log") return [a](TS& ts) { return Cell::F(std::log(a(ts).asF())); };
         } else if (e.args.size() == 2) {
             ExprFn a = compileExpr(*e.args[0]); ExprFn b = compileExpr(*e.args[1]); if (failed) return {};
-            if (fn == "fminf") return [a, b](TS& ts) { return Cell::F(std::fmin(a(ts).asF(), b(ts).asF())); };
-            if (fn == "fmaxf") return [a, b](TS& ts) { return Cell::F(std::fmax(a(ts).asF(), b(ts).asF())); };
-            if (fn == "powf")  return [a, b](TS& ts) { return Cell::F(std::pow(a(ts).asF(), b(ts).asF())); };
+            if (fn == "fminf" || fn == "fmin") return [a, b](TS& ts) { return Cell::F(std::fmin(a(ts).asF(), b(ts).asF())); };
+            if (fn == "fmaxf" || fn == "fmax") return [a, b](TS& ts) { return Cell::F(std::fmax(a(ts).asF(), b(ts).asF())); };
+            if (fn == "powf"  || fn == "pow")  return [a, b](TS& ts) { return Cell::F(std::pow(a(ts).asF(), b(ts).asF())); };
             if (fn == "min") return [a, b](TS& ts) { Cell x = a(ts), y = b(ts); bool fp = x.isFloat || y.isFloat;
                 return fp ? Cell::F(std::fmin(x.asF(), y.asF())) : Cell::I(std::min(x.asI(), y.asI())); };
             if (fn == "max") return [a, b](TS& ts) { Cell x = a(ts), y = b(ts); bool fp = x.isFloat || y.isFloat;
                 return fp ? Cell::F(std::fmax(x.asF(), y.asF())) : Cell::I(std::max(x.asI(), y.asI())); };
-        } else if (e.args.size() == 3 && fn == "fmaf") {
+        } else if (e.args.size() == 3 && (fn == "fmaf" || fn == "fma")) {
             ExprFn a = compileExpr(*e.args[0]); ExprFn b = compileExpr(*e.args[1]); ExprFn c = compileExpr(*e.args[2]);
             if (failed) return {};
             return [a, b, c](TS& ts) { return Cell::F(std::fma(a(ts).asF(), b(ts).asF(), c(ts).asF())); };

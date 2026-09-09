@@ -791,6 +791,10 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         uint64_t out;
         if (isFloatType(srcT) && isFloatType(dstT)) {
             double d = ss == 8 ? asF64(raw) : (double)asF32(raw);
+            if (has("rmi")) d = std::floor(d);            // floorf/floor
+            else if (has("rpi")) d = std::ceil(d);        // ceilf/ceil
+            else if (has("rni")) d = std::nearbyint(d);   // round-to-nearest-even
+            else if (has("rzi")) d = std::trunc(d);       // round-toward-zero
             out = typeSize(dstT) == 8 ? fromF64(d) : fromF32((float)d);
         } else if (isFloatType(srcT)) {                              // float → int
             double d = ss == 8 ? asF64(raw) : (double)asF32(raw);

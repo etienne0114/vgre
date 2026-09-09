@@ -76,10 +76,13 @@ an 8-worker pool, both bit-identical to the serial result.
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
 
 ## Intrinsics
-`sqrtf`, `rsqrtf`, `fabsf`, `abs` (int/float), `expf`/`__expf`, `logf`/`__logf`,
-`sinf`, `cosf`, `floorf`, `ceilf`, `fminf`, `fmaxf`, `min`, `max`, `fmaf`, `powf`.
+`sqrt`, `rsqrt`, `fabs`, `abs` (int/float, width-preserving), `exp`/`__expf`,
+`log`/`__logf`, `sin`, `cos`, `floor`, `ceil`, `fmin`, `fmax`, `min`, `max`,
+`fma`, `pow` — each in both the **f32** `…f`-suffixed spelling and the **f64**
+(double) bare-C spelling (`sqrtf`↔`sqrt`, `fmaf`↔`fma`, …), picked by the name.
 On the interpreter tier the transcendentals use PTX approximate ops
-(`sin.approx`, `ex2.approx`, …); the compiled tier uses libm.
+(`sin.approx`, `ex2.approx`, …) evaluated at the operand's width; the compiled
+tier uses libm.
 
 ## Worked example: FlashAttention
 

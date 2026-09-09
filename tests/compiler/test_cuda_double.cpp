@@ -58,6 +58,16 @@ extern "C" __global__ void lmul(long* out, const long* base, int n) {
     }
 })";
 
+// Double-precision transcendentals via the bare C names (sqrt/exp/fma/fabs/floor).
+static const char* kDmath = R"(
+extern "C" __global__ void dmath(double* out, const double* in, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i < n) {
+        double x = in[i];
+        out[i] = sqrt(fabs(x)) + exp(x * 0.1) + fma(x, x, 1.0) + floor(x);
+    }
+})";
+
 int main() {
     const int N = 100;
 
@@ -117,6 +127,37 @@ int main() {
             CHECK(ck->launch(g, b32, args, 3), "compiled long kernel runs");
             bool ok2 = true; for (int i = 0; i < N; ++i) if (out[i] != ref[i]) { ok2 = false; break; }
             CHECK(ok2, "compiled tier: exact int64 arithmetic");
+        }
+    }
+
+    // ── double transcendentals (sqrt/exp/fma/fabs/floor) on both tiers ───────
+    {
+        std::vector<double> in(N), out(N, 0);
+        for (int i = 0; i < N; ++i) in[i] = (i - 50) * 0.3;
+        double* ip = in.data(); double* op = out.data(); int n = N;
+        void* args[] = {&op, &ip, &n};
+        auto ref = [&](int i) {
+            double x = in[i];
+            return std::sqrt(std::fabs(x)) + std::exp(x * 0.1) + std::fma(x, x, 1.0) + std::floor(x);
+        };
+        auto refOk = [&]() {
+            for (int i = 0; i < N; ++i) if (std::fabs(out[i] - ref(i)) > 1e-9) {
+                std::printf("  i=%d got=%.12g want=%.12g\n", i, out[i], ref(i)); return false; }
+            return true;
+        };
+
+        CHECK(runInterp(kDmath, "dmath", (N + 31) / 32, 32, args, 3),
+              "double transcendentals run on the interpreter");
+        CHECK(refOk(), "interpreter: sqrt/exp/fma/fabs/floor match libm (double)");
+
+        std::fill(out.begin(), out.end(), 0);
+        std::string err;
+        auto ck = CompiledKernel::compileSource(kDmath, "dmath", err);
+        CHECK(ck != nullptr, "double transcendentals compile on the compiled tier");
+        if (ck) {
+            Extent g{(uint32_t)((N + 31) / 32), 1, 1}, b32{32, 1, 1};
+            CHECK(ck->launch(g, b32, args, 3), "compiled dmath runs");
+            CHECK(refOk(), "compiled tier: sqrt/exp/fma/fabs/floor match libm (double)");
         }
     }
 
