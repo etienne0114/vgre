@@ -299,6 +299,50 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         }
     };
 
+    // Batched matrix-matrix Y[P,N] = X[P,K]·W[K,N] over P rows at once, fp32 or
+    // bf16 weights — the per-element K reduction is identical to `mv` (M-tiling is
+    // independent of the K-blocking), so this is bit-identical to P separate `mv`
+    // calls while loading each weight once. Used by the batched prefill.
+    std::vector<uint16_t> xbfB;   // bf16 activation scratch [P*K]
+    auto mvB = [&](const float* Xf, int P, const float* Wf, const uint16_t* Wb,
+                   float* Y, int K, int N) {
+        if (bf16) {
+            xbfB.resize((size_t)P * K);
+            for (int i = 0; i < P * K; ++i) xbfB[i] = f32_to_bf16(Xf[i]);
+            intree::gemm_bf16_rows(false, false, P, N, K, xbfB.data(), Wb, Y, 0, P);
+        } else {
+            intree::gemm_f32_threaded(false, false, P, N, K, Xf, Wf, Y);
+        }
+    };
+
+    // Final RMSNorm of `xv[D]` + LM head → `logits`. Shared by single-token
+    // decode and the batched prefill (which applies it to the last row only).
+    auto emitLogits = [&](const float* xv) {
+        rmsNormVec(xv, final_g_->data.data(), h.data(), D, cfg_.norm_eps);
+        if (cfg_.tie_embeddings) {
+            // Tied head: logits[v] = Σ_d h[d]·tok_emb[v,d], using the same
+            // quantized embedding table as the gather.
+            if (int8) {
+                for (int v = 0; v < V; ++v) {
+                    const int8_t* row = &tok_emb_q8_.w[(size_t)v * D];
+                    float acc = 0.0f;
+                    for (int d = 0; d < D; ++d) acc += h[d] * (float)row[d];
+                    logits[v] = acc * tok_emb_q8_.scale[v];
+                }
+            } else if (bf16) {
+                xbf.resize(D);
+                for (int d = 0; d < D; ++d) xbf[d] = f32_to_bf16(h[d]);
+                intree::gemm_bf16_rows(false, true, 1, V, D, xbf.data(),
+                                       tok_emb_bf16_.data(), logits.data(), 0, 1);
+            } else {
+                intree::gemm_f32_threaded(false, true, 1, V, D, h.data(),
+                                          tok_emb_->data.data(), logits.data());
+            }
+        } else {
+            mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
+        }
+    };
+
     // Decode one token at absolute position `pos`; writes next-token logits.
     auto decode = [&](int token, int pos) {
         if (int8) {
@@ -391,35 +435,86 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, ff.data(), F, D);
             for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
         }
-        rmsNormVec(x.data(), final_g_->data.data(), h.data(), D, cfg_.norm_eps);
-        if (cfg_.tie_embeddings) {
-            // Tied head: logits[v] = Σ_d h[d]·tok_emb[v,d], using the same
-            // quantized embedding table as the gather (per-row int8 scale = the
-            // per-vocab output scale; bf16/​fp32 likewise).
-            if (int8) {
-                for (int v = 0; v < V; ++v) {
-                    const int8_t* row = &tok_emb_q8_.w[(size_t)v * D];
-                    float acc = 0.0f;
-                    for (int d = 0; d < D; ++d) acc += h[d] * (float)row[d];
-                    logits[v] = acc * tok_emb_q8_.scale[v];
-                }
-            } else if (bf16) {
-                xbf.resize(D);
-                for (int d = 0; d < D; ++d) xbf[d] = f32_to_bf16(h[d]);
-                intree::gemm_bf16_rows(false, true, 1, V, D, xbf.data(),
-                                       tok_emb_bf16_.data(), logits.data(), 0, 1);
-            } else {
-                intree::gemm_f32_threaded(false, true, 1, V, D, h.data(),
-                                          tok_emb_->data.data(), logits.data());
-            }
-        } else {
-            mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
+        emitLogits(x.data());
+    };
+
+    // Batched prefill: process the whole prompt at once so each weight is loaded
+    // ONCE across all P tokens (a threaded, cache-tiled GEMM per projection)
+    // instead of P weight-bound GEMVs. Only the projection GEMMs are batched;
+    // RoPE, the fp32-KV write, and the per-row causal attention reuse decode's
+    // exact math, so the result is bit-identical to sequential prefill. Supported
+    // for fp32/bf16 weights with the fp32 KV cache (int8 weights / quantized KV
+    // fall back to sequential decode).
+    auto prefill_batched = [&](const std::vector<int>& toks) {
+        const int P = (int)toks.size();
+        std::vector<float> Xb((size_t)P * D), Hn((size_t)P * D);
+        std::vector<float> Qb((size_t)P * D), Kb((size_t)P * D), Vb((size_t)P * D);
+        std::vector<float> Ao((size_t)P * D), Pj((size_t)P * D);
+        std::vector<float> Gt((size_t)P * F), Up2((size_t)P * F), Fb((size_t)P * D);
+        std::vector<float> sc2(cfg_.max_seq);
+        for (int p = 0; p < P; ++p) {                        // embed
+            float* xr = &Xb[(size_t)p * D];
+            if (bf16) { const uint16_t* row = &tok_emb_bf16_[(int64_t)toks[p] * D];
+                        for (int d = 0; d < D; ++d) xr[d] = bf16_to_f32(row[d]); }
+            else      { std::memcpy(xr, &tok_emb_->data[(int64_t)toks[p] * D], sizeof(float) * D); }
         }
+        for (int l = 0; l < L; ++l) {
+            const Layer& Ly = layers_[l];
+            for (int p = 0; p < P; ++p)
+                rmsNormVec(&Xb[(size_t)p * D], Ly.ln1_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
+            mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), Qb.data(), D, D);
+            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), Kb.data(), D, D);
+            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), Vb.data(), D, D);
+            for (int p = 0; p < P; ++p) {
+                ropeVec(&Qb[(size_t)p * D], H, Dh, p, invFreq.data(), rcos.data(), rsin.data());
+                ropeVec(&Kb[(size_t)p * D], H, Dh, p, invFreq.data(), rcos.data(), rsin.data());
+                std::memcpy(&Kc[l][(size_t)p * D], &Kb[(size_t)p * D], sizeof(float) * D);
+                std::memcpy(&Vc[l][(size_t)p * D], &Vb[(size_t)p * D], sizeof(float) * D);
+            }
+            for (int p = 0; p < P; ++p) {                    // per-row causal attention
+                const float* qr = &Qb[(size_t)p * D];
+                float* aor = &Ao[(size_t)p * D];
+                for (int hd = 0; hd < H; ++hd) {
+                    const int off = hd * Dh;
+                    float mx = -1e30f;
+                    for (int j = 0; j <= p; ++j) {
+                        const float* kj = &Kc[l][(size_t)j * D + off];
+                        float s = 0.0f; for (int d = 0; d < Dh; ++d) s += qr[off + d] * kj[d];
+                        s *= scale; sc2[j] = s; if (s > mx) mx = s;
+                    }
+                    float sum = 0.0f;
+                    for (int j = 0; j <= p; ++j) { sc2[j] = std::exp(sc2[j] - mx); sum += sc2[j]; }
+                    const float inv = 1.0f / sum;
+                    for (int d = 0; d < Dh; ++d) {
+                        float acc = 0.0f;
+                        for (int j = 0; j <= p; ++j) acc += sc2[j] * inv * Vc[l][(size_t)j * D + off + d];
+                        aor[off + d] = acc;
+                    }
+                }
+            }
+            mvB(Ao.data(), P, Ly.Wo->data.data(), Ly.Wo_bf16.data(), Pj.data(), D, D);
+            for (int i = 0; i < P * D; ++i) Xb[i] += Pj[i];  // residual
+            for (int p = 0; p < P; ++p)
+                rmsNormVec(&Xb[(size_t)p * D], Ly.ln2_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
+            mvB(Hn.data(), P, Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), Gt.data(),  D, F);
+            mvB(Hn.data(), P, Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   Up2.data(), D, F);
+            for (int i = 0; i < P * F; ++i) Gt[i] = siluf(Gt[i]) * Up2[i];   // SwiGLU
+            mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), Fb.data(), F, D);
+            for (int i = 0; i < P * D; ++i) Xb[i] += Fb[i];  // residual
+        }
+        emitLogits(&Xb[(size_t)(P - 1) * D]);                // only the last token's logits
     };
 
     if (prompt.empty()) return prompt;
     int pos = 0;
-    for (size_t i = 0; i < prompt.size(); ++i) decode(prompt[i], pos++);  // prefill
+    const bool canBatch = !int8 && !kv4 && !kv8 &&
+                          prompt.size() > 1 && (int64_t)prompt.size() <= cfg_.max_seq;
+    if (canBatch) {
+        prefill_batched(prompt);
+        pos = (int)prompt.size();
+    } else {
+        for (size_t i = 0; i < prompt.size(); ++i) decode(prompt[i], pos++);  // sequential prefill
+    }
 
     for (int step = 0; step < n_new && pos < cfg_.max_seq; ++step) {
         const int next = sampleToken(logits, prompt, sc, rng);
