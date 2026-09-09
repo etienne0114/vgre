@@ -7,6 +7,7 @@
 
 #include "vgre/compiler/frontend/parser.h"
 
+#include "vgre/common/atomic_rmw.h"
 #include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
@@ -15,7 +16,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -49,78 +49,19 @@ struct TS {
 using ExprFn = std::function<Cell(TS&)>;
 using StmtFn = std::function<void(TS&)>;
 
-// Real atomic read-modify-write for atomicAdd. The compiled tier runs CTAs in
-// parallel (see CompiledKernelImpl::launch), so the accumulate MUST be atomic
-// or concurrent CTAs racing the same address would lose updates. Returns the
-// OLD value (CUDA atomicAdd semantics).
-#if defined(__GNUC__) || defined(__clang__)
-int64_t atomicAddInt(void* addr, int bytes, int64_t v) {
-    if (bytes == 8) return __atomic_fetch_add(static_cast<int64_t*>(addr), v, __ATOMIC_RELAXED);
-    return static_cast<int64_t>(
-        __atomic_fetch_add(static_cast<int32_t*>(addr), static_cast<int32_t>(v), __ATOMIC_RELAXED));
+// atomicAdd over the Cell/byte-width convention, returning the OLD value. The
+// compiled tier runs a grid's CTAs on parallel OS threads (see
+// CompiledKernelImpl::launch), so these dispatch to the shared lock-free RMW
+// primitives in <vgre/common/atomic_rmw.h>.
+inline int64_t atomicAddInt(void* addr, int bytes, int64_t v) {
+    if (bytes == 8) return static_cast<int64_t>(common::atomicAddU64(addr, static_cast<uint64_t>(v)));
+    return static_cast<int64_t>(static_cast<int32_t>(
+        common::atomicAddU32(addr, static_cast<uint32_t>(v))));
 }
-double atomicAddFloat(void* addr, int bytes, double v) {
-    if (bytes == 8) {
-        auto* p = static_cast<int64_t*>(addr);
-        int64_t ob = __atomic_load_n(p, __ATOMIC_RELAXED);
-        double old, nw;
-        int64_t nb;
-        do {
-            std::memcpy(&old, &ob, 8);
-            nw = old + v;
-            std::memcpy(&nb, &nw, 8);
-        } while (!__atomic_compare_exchange_n(p, &ob, nb, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-        return old;
-    }
-    auto* p = static_cast<int32_t*>(addr);
-    int32_t ob = __atomic_load_n(p, __ATOMIC_RELAXED);
-    float old, nw;
-    int32_t nb;
-    do {
-        std::memcpy(&old, &ob, 4);
-        nw = old + static_cast<float>(v);
-        std::memcpy(&nb, &nw, 4);
-    } while (!__atomic_compare_exchange_n(p, &ob, nb, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-    return static_cast<double>(old);
+inline double atomicAddFloat(void* addr, int bytes, double v) {
+    if (bytes == 8) return common::atomicAddF64(addr, v);
+    return static_cast<double>(common::atomicAddF32(addr, static_cast<float>(v)));
 }
-#else
-// Portable fallback (e.g. MSVC): one lock guards every atomicAdd. Correct, and
-// atomics are a small fraction of real kernel work.
-std::mutex& atomicMutex() {
-    static std::mutex m;
-    return m;
-}
-int64_t atomicAddInt(void* addr, int bytes, int64_t v) {
-    std::lock_guard<std::mutex> lk(atomicMutex());
-    if (bytes == 8) {
-        int64_t x;
-        std::memcpy(&x, addr, 8);
-        int64_t nx = x + v;
-        std::memcpy(addr, &nx, 8);
-        return x;
-    }
-    int32_t x;
-    std::memcpy(&x, addr, 4);
-    int32_t nx = x + static_cast<int32_t>(v);
-    std::memcpy(addr, &nx, 4);
-    return static_cast<int64_t>(x);
-}
-double atomicAddFloat(void* addr, int bytes, double v) {
-    std::lock_guard<std::mutex> lk(atomicMutex());
-    if (bytes == 8) {
-        double d;
-        std::memcpy(&d, addr, 8);
-        double nd = d + v;
-        std::memcpy(addr, &nd, 8);
-        return d;
-    }
-    float f;
-    std::memcpy(&f, addr, 4);
-    float nf = f + static_cast<float>(v);
-    std::memcpy(addr, &nf, 4);
-    return static_cast<double>(f);
-}
-#endif
 
 Cell coerce(const Cell& v, const Type& t) {
     if (t.isPointer()) return Cell::I(v.asI());

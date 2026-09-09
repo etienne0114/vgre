@@ -138,6 +138,9 @@ private:
     };
 
     void parse(const std::string& ptx, const std::string& entry);
+    // Validate the config and load grid/block extents + the packed param block.
+    // Shared by launch() (debugger entry) and runCtaRange() (parallel backend).
+    void setupLaunch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs);
     // Executes exactly one instruction on t; returns false if t blocked at a
     // barrier without advancing.
     bool execOne(Thread& t, int tid);

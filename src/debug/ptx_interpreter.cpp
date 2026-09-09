@@ -2,12 +2,13 @@
 
 #include "vgre/debug/ptx_interpreter.h"
 
+#include "vgre/common/atomic_rmw.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 
@@ -273,7 +274,7 @@ void PtxInterpreter::launch(int gridX, int blockX, void* const* args, int numArg
     launch(Dim3{gridX, 1, 1}, Dim3{blockX, 1, 1}, args, numArgs);
 }
 
-void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs) {
+void PtxInterpreter::setupLaunch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs) {
     if (grid.x <= 0 || grid.y <= 0 || grid.z <= 0 ||
         block.x <= 0 || block.y <= 0 || block.z <= 0)
         throw std::runtime_error("PTX: bad launch config");
@@ -291,28 +292,16 @@ void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* ar
         std::memcpy(paramBlock_.data() + kernel_.params[i].offset, args[i],
                     (size_t)kernel_.params[i].sizeBytes);
     exited_ = false;
+}
+
+void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs) {
+    setupLaunch(grid, block, args, numArgs);
     startCta(0);
 }
 
 bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* const* args,
                                  int numArgs, int ctaBegin, int ctaEnd) {
-    if (grid.x <= 0 || grid.y <= 0 || grid.z <= 0 ||
-        block.x <= 0 || block.y <= 0 || block.z <= 0)
-        throw std::runtime_error("PTX: bad launch config");
-    if (numArgs != (int)kernel_.params.size())
-        throw std::runtime_error("PTX: kernel expects " +
-                                 std::to_string(kernel_.params.size()) + " args");
-    gridDim_[0] = grid.x;   gridDim_[1] = grid.y;   gridDim_[2] = grid.z;
-    blockDim_[0] = block.x; blockDim_[1] = block.y; blockDim_[2] = block.z;
-    gridTotal_  = grid.total();
-    blockTotal_ = block.total();
-    int total = 0;
-    for (const auto& p : kernel_.params) total = std::max(total, p.offset + p.sizeBytes);
-    paramBlock_.assign((size_t)total, 0);
-    for (int i = 0; i < numArgs; ++i)
-        std::memcpy(paramBlock_.data() + kernel_.params[i].offset, args[i],
-                    (size_t)kernel_.params[i].sizeBytes);
-    exited_ = false;
+    setupLaunch(grid, block, args, numArgs);
 
     if (ctaBegin < 0) ctaBegin = 0;
     if (ctaEnd > gridTotal_) ctaEnd = gridTotal_;
@@ -594,42 +583,22 @@ void PtxInterpreter::storeTo(Thread& t, int tid, const std::string& memRef,
 }
 
 namespace {
-// Real atomic add on global memory, returning the OLD value's raw bits. This is
-// what makes `atom.global.add` correct when a grid's CTAs run concurrently on
-// separate interpreter instances (see InterpreterBackend::launch). `isF` selects
-// float vs integer; for floats `fAdd` is the addend, for ints `intBits`.
+// atom.global.add over the interpreter's raw-bits convention, returning the OLD
+// value's raw bits — correct when a grid's CTAs run concurrently on separate
+// interpreter instances (see InterpreterBackend::launch). `isF` selects float vs
+// integer; for floats `fAdd` is the addend, for ints `intBits`. Dispatches to the
+// shared lock-free RMW primitives in <vgre/common/atomic_rmw.h>.
 uint64_t atomicAddGlobal(void* p, int size, bool isF, uint64_t intBits, double fAdd) {
-#if defined(__GNUC__) || defined(__clang__)
     if (isF) {
         if (size == 8) {
-            auto* q = static_cast<int64_t*>(p);
-            int64_t ob = __atomic_load_n(q, __ATOMIC_RELAXED), nb;
-            double o;
-            do { std::memcpy(&o, &ob, 8); double n = o + fAdd; std::memcpy(&nb, &n, 8); }
-            while (!__atomic_compare_exchange_n(q, &ob, nb, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-            uint64_t r; std::memcpy(&r, &ob, 8); return r;
+            double o = vgre::common::atomicAddF64(p, fAdd);
+            uint64_t r; std::memcpy(&r, &o, 8); return r;
         }
-        auto* q = static_cast<int32_t*>(p);
-        int32_t ob = __atomic_load_n(q, __ATOMIC_RELAXED), nb;
-        float o;
-        do { std::memcpy(&o, &ob, 4); float n = o + static_cast<float>(fAdd); std::memcpy(&nb, &n, 4); }
-        while (!__atomic_compare_exchange_n(q, &ob, nb, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-        return static_cast<uint64_t>(static_cast<uint32_t>(ob));
+        float o = vgre::common::atomicAddF32(p, static_cast<float>(fAdd));
+        uint32_t r; std::memcpy(&r, &o, 4); return static_cast<uint64_t>(r);
     }
-    if (size == 8)
-        return static_cast<uint64_t>(__atomic_fetch_add(static_cast<int64_t*>(p), static_cast<int64_t>(intBits), __ATOMIC_RELAXED));
-    return static_cast<uint64_t>(static_cast<uint32_t>(
-        __atomic_fetch_add(static_cast<int32_t*>(p), static_cast<int32_t>(intBits), __ATOMIC_RELAXED)));
-#else
-    static std::mutex m;
-    std::lock_guard<std::mutex> lk(m);
-    if (isF) {
-        if (size == 8) { double o; std::memcpy(&o, p, 8); double n = o + fAdd; std::memcpy(p, &n, 8); uint64_t r; std::memcpy(&r, &o, 8); return r; }
-        float o; std::memcpy(&o, p, 4); float n = o + static_cast<float>(fAdd); std::memcpy(p, &n, 4); uint32_t r; std::memcpy(&r, &o, 4); return r;
-    }
-    if (size == 8) { int64_t o; std::memcpy(&o, p, 8); int64_t n = o + static_cast<int64_t>(intBits); std::memcpy(p, &n, 8); return static_cast<uint64_t>(o); }
-    int32_t o; std::memcpy(&o, p, 4); int32_t n = o + static_cast<int32_t>(intBits); std::memcpy(p, &n, 4); return static_cast<uint64_t>(static_cast<uint32_t>(o));
-#endif
+    if (size == 8) return vgre::common::atomicAddU64(p, intBits);
+    return static_cast<uint64_t>(vgre::common::atomicAddU32(p, static_cast<uint32_t>(intBits)));
 }
 }  // namespace
 
