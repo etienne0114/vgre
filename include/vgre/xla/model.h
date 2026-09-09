@@ -98,6 +98,14 @@ public:
     void set_int4_kv_cache(bool on) { int4_kv_cache_ = on; }
     bool int4_kv_cache() const { return int4_kv_cache_; }
 
+    // Batched prompt prefill (process the whole prompt through one GEMM per
+    // projection instead of a per-token GEMV) — on by default; the result is
+    // bit-identical to sequential prefill. Turn off for strict per-token
+    // determinism checks or debugging. Ignored when a quantized KV cache is set
+    // (those always prefill sequentially).
+    void set_batched_prefill(bool on) { batched_prefill_ = on; }
+    bool batched_prefill() const { return batched_prefill_; }
+
     // Free the fp32 master copies of the big weights after quantizing, so the
     // resident footprint actually drops to the bf16 (½×) / int8 (¼×) size.
     // Requires set_bf16_inference / set_int8_inference first. The model becomes
@@ -135,6 +143,7 @@ private:
     bool                  int8_inference_ = false;
     bool                  int8_kv_cache_  = false;
     bool                  int4_kv_cache_  = false;
+    bool                  batched_prefill_ = true;
     bool                  fp32_dropped_   = false;
     std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
     // int8 caches. tok_emb is quantized PER ROW (per token): the row scale serves

@@ -3,6 +3,7 @@
 #include "vgre/xla/model.h"
 #include "vgre/xla/intree_gemm.h"
 #include "vgre/xla/half.h"
+#include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
 #include <cmath>
@@ -150,6 +151,41 @@ inline void gemv_int8(const float* x, const int8_t* W8, const float* scale,
         for (int n = 0; n < N; ++n) acc[n] += xk * (float)row[n];
     }
     for (int n = 0; n < N; ++n) y[n] = acc[n] * scale[n];
+}
+
+// Weight-only int8 BATCHED GEMM: Y[P,N] = (X[P,K]·W8[K,N]) · per-column scale.
+// k-outer so each int8 weight row W8[k,:] is read once and reused across all P
+// rows (the weights stream through cache once instead of P times) — the per-
+// (p,n) reduction stays k=0..K-1, so it is bit-identical to P separate
+// gemv_int8 calls. `acc` is caller scratch of length P*N.
+inline void gemm_int8_rows(const float* X, int P, const int8_t* W8, const float* scale,
+                           float* Y, int K, int N, std::vector<float>& acc) {
+    acc.assign((size_t)P * N, 0.0f);
+    // Parallelise over the P rows (each row's reduction is independent, so the
+    // per-(p,n) k=0..K-1 order is preserved → still bit-identical to gemv_int8).
+    // k-outer per row keeps each int8 weight row contiguous for the inner n-loop.
+    auto rows = [&](int64_t p0, int64_t p1) {
+        for (int k = 0; k < K; ++k) {
+            const int8_t* row = W8 + (size_t)k * N;
+            for (int64_t p = p0; p < p1; ++p) {
+                const float xk = X[(size_t)p * K + k];
+                float* ap = acc.data() + (size_t)p * N;
+                for (int n = 0; n < N; ++n) ap[n] += xk * (float)row[n];
+            }
+        }
+        for (int64_t p = p0; p < p1; ++p) {
+            const float* ap = acc.data() + (size_t)p * N;
+            float* yp = Y + (size_t)p * N;
+            for (int n = 0; n < N; ++n) yp[n] = ap[n] * scale[n];
+        }
+    };
+    auto& pool = vgre::xla::ThreadPool::global();
+    if (P >= 4 && pool.concurrency() > 1) {
+        const int64_t grain = std::max<int64_t>(1, (int64_t)P / (int64_t)(pool.concurrency() * 4));
+        pool.parallelFor(P, grain, [&](int64_t p) { rows(p, p + 1); });
+    } else {
+        rows(0, P);
+    }
 }
 
 // Pick the next token from logits[V] given the sampling controls and history.
@@ -304,9 +340,12 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     // independent of the K-blocking), so this is bit-identical to P separate `mv`
     // calls while loading each weight once. Used by the batched prefill.
     std::vector<uint16_t> xbfB;   // bf16 activation scratch [P*K]
+    std::vector<float> i8accB;    // int8 accumulator scratch [P*N]
     auto mvB = [&](const float* Xf, int P, const float* Wf, const uint16_t* Wb,
-                   float* Y, int K, int N) {
-        if (bf16) {
+                   const Q8* q8, float* Y, int K, int N) {
+        if (int8) {
+            gemm_int8_rows(Xf, P, q8->w.data(), q8->scale.data(), Y, K, N, i8accB);
+        } else if (bf16) {
             xbfB.resize((size_t)P * K);
             for (int i = 0; i < P * K; ++i) xbfB[i] = f32_to_bf16(Xf[i]);
             intree::gemm_bf16_rows(false, false, P, N, K, xbfB.data(), Wb, Y, 0, P);
@@ -452,19 +491,23 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         std::vector<float> Ao((size_t)P * D), Pj((size_t)P * D);
         std::vector<float> Gt((size_t)P * F), Up2((size_t)P * F), Fb((size_t)P * D);
         std::vector<float> sc2(cfg_.max_seq);
-        for (int p = 0; p < P; ++p) {                        // embed
+        for (int p = 0; p < P; ++p) {                        // embed (match decode)
             float* xr = &Xb[(size_t)p * D];
-            if (bf16) { const uint16_t* row = &tok_emb_bf16_[(int64_t)toks[p] * D];
+            const int token = toks[p];
+            if (int8) { const int8_t* row = &tok_emb_q8_.w[(int64_t)token * D];
+                        const float s = tok_emb_q8_.scale[token];
+                        for (int d = 0; d < D; ++d) xr[d] = (float)row[d] * s; }
+            else if (bf16) { const uint16_t* row = &tok_emb_bf16_[(int64_t)token * D];
                         for (int d = 0; d < D; ++d) xr[d] = bf16_to_f32(row[d]); }
-            else      { std::memcpy(xr, &tok_emb_->data[(int64_t)toks[p] * D], sizeof(float) * D); }
+            else      { std::memcpy(xr, &tok_emb_->data[(int64_t)token * D], sizeof(float) * D); }
         }
         for (int l = 0; l < L; ++l) {
             const Layer& Ly = layers_[l];
             for (int p = 0; p < P; ++p)
                 rmsNormVec(&Xb[(size_t)p * D], Ly.ln1_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
-            mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), Qb.data(), D, D);
-            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), Kb.data(), D, D);
-            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), Vb.data(), D, D);
+            mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, Qb.data(), D, D);
+            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, D);
+            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, D);
             for (int p = 0; p < P; ++p) {
                 ropeVec(&Qb[(size_t)p * D], H, Dh, p, invFreq.data(), rcos.data(), rsin.data());
                 ropeVec(&Kb[(size_t)p * D], H, Dh, p, invFreq.data(), rcos.data(), rsin.data());
@@ -492,14 +535,14 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     }
                 }
             }
-            mvB(Ao.data(), P, Ly.Wo->data.data(), Ly.Wo_bf16.data(), Pj.data(), D, D);
+            mvB(Ao.data(), P, Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, Pj.data(), D, D);
             for (int i = 0; i < P * D; ++i) Xb[i] += Pj[i];  // residual
             for (int p = 0; p < P; ++p)
                 rmsNormVec(&Xb[(size_t)p * D], Ly.ln2_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
-            mvB(Hn.data(), P, Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), Gt.data(),  D, F);
-            mvB(Hn.data(), P, Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   Up2.data(), D, F);
+            mvB(Hn.data(), P, Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, Gt.data(),  D, F);
+            mvB(Hn.data(), P, Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   Up2.data(), D, F);
             for (int i = 0; i < P * F; ++i) Gt[i] = siluf(Gt[i]) * Up2[i];   // SwiGLU
-            mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), Fb.data(), F, D);
+            mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, Fb.data(), F, D);
             for (int i = 0; i < P * D; ++i) Xb[i] += Fb[i];  // residual
         }
         emitLogits(&Xb[(size_t)(P - 1) * D]);                // only the last token's logits
@@ -507,7 +550,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
 
     if (prompt.empty()) return prompt;
     int pos = 0;
-    const bool canBatch = !int8 && !kv4 && !kv8 &&
+    const bool canBatch = batched_prefill_ && !kv4 && !kv8 &&
                           prompt.size() > 1 && (int64_t)prompt.size() <= cfg_.max_seq;
     if (canBatch) {
         prefill_batched(prompt);

@@ -918,6 +918,12 @@ target_link_libraries(test_model PRIVATE vgre Threads::Threads)
 add_test(NAME XlaModel COMMAND test_model)
 set_tests_properties(XlaModel PROPERTIES TIMEOUT 240)
 
+# Batched prefill == sequential prefill, bit-identical (fp32/bf16/int8).
+add_executable(test_batched_prefill xla/test_batched_prefill.cpp)
+target_link_libraries(test_batched_prefill PRIVATE vgre Threads::Threads)
+add_test(NAME XlaBatchedPrefill COMMAND test_batched_prefill)
+set_tests_properties(XlaBatchedPrefill PROPERTIES TIMEOUT 60)
+
 # VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
 # generate + decode (all offline, embedded public-domain corpus).
 add_executable(test_lm_pipeline xla/test_lm_pipeline.cpp)
