@@ -1,20 +1,25 @@
-// Track Z (Zero-Burden Engine): double-precision kernels. The compiled tier runs
-// them at full f64 precision; the PTX-interpreter codegen tier cleanly REJECTS
-// double (rather than silently truncating to f32), so such kernels fall back to
-// the compiled tier or the JIT. Verifies both — nothing left behind.
+// Track Z (Zero-Burden Engine): 64-bit scalar types (double / long). The
+// from-scratch front-end now emits real f64/i64 PTX (.f64/.s64 ops, cvt, 64-bit
+// literals), so double- and long-precision kernels run on the Tier-0 interpreter
+// at full width — not just the compiled tier / JIT. Verified against references
+// on BOTH tiers; nothing left behind.
 //
 // Tests build in Release (-DNDEBUG); asserts must stay real.
 #undef NDEBUG
 
+#include "vgre/compiler/backend/backend_registry.h"
+#include "vgre/compiler/backend/execution_backend.h"
 #include "vgre/compiler/frontend/codegen.h"
 #include "vgre/compiler/frontend/compiled_kernel.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 using namespace vgre::compiler::frontend;
+namespace be = vgre::compiler::backend;
 
 static int g_fail = 0;
 #define CHECK(cond, msg)                                                   \
@@ -25,43 +30,98 @@ static int g_fail = 0;
         }                                                                  \
     } while (0)
 
+static bool runInterp(const char* src, const char* name,
+                      int grid, int block, void* const* args, int numArgs) {
+    auto cg = compileToPtx(src, name);
+    if (!cg.ok) { std::printf("  codegen %s: %s\n", name, cg.error.c_str()); return false; }
+    auto beI = be::makeBackend("interpreter");
+    auto k = beI->preparePtx(cg.ptx, name);
+    if (!k) { std::printf("  prepare %s:\n%s\n", name, cg.ptx.c_str()); return false; }
+    be::LaunchConfig lc; lc.gridDim[0] = (uint32_t)grid; lc.blockDim[0] = (uint32_t)block;
+    return beI->launch(*k, lc, args, numArgs);
+}
+
+// c[i] = a[i]*b[i] + a[i], in true double precision (values need >f32 mantissa).
 static const char* kDadd = R"(
 extern "C" __global__ void dadd(const double* a, const double* b, double* c, int n) {
     int i = blockIdx.x*blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] * b[i] + a[i];
 })";
 
+// 64-bit integer math: out[i] = base*base + i (base ~ 3e9 overflows int32).
+static const char* kLmul = R"(
+extern "C" __global__ void lmul(long* out, const long* base, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i < n) {
+        long b = base[i];
+        out[i] = b * b + i;
+    }
+})";
+
 int main() {
     const int N = 100;
-    std::vector<double> a(N), b(N), c(N, -1), ref(N);
-    for (int i = 0; i < N; ++i) {
-        a[i] = 1.0 + i * 1e-9;              // values needing >f32 precision
-        b[i] = 3.0 - i * 1e-9;
-        ref[i] = a[i] * b[i] + a[i];
-    }
 
-    // ── compiled tier runs it at full double precision ────────────────────────
-    std::string err;
-    auto ck = CompiledKernel::compileSource(kDadd, "dadd", err);
-    CHECK(ck != nullptr, "double kernel compiles on the compiled tier");
-    if (ck) {
+    // ── double on both tiers ─────────────────────────────────────────────────
+    {
+        std::vector<double> a(N), b(N), c(N, -1), ref(N);
+        for (int i = 0; i < N; ++i) {
+            a[i] = 1.0 + i * 1e-9;              // needs >f32 precision
+            b[i] = 3.0 - i * 1e-9;
+            ref[i] = a[i] * b[i] + a[i];
+        }
         double* ap = a.data(); double* bp = b.data(); double* cp = c.data(); int n = N;
         void* args[] = {&ap, &bp, &cp, &n};
-        Extent g{(uint32_t)((N + 31) / 32), 1, 1}, b32{32, 1, 1};
-        CHECK(ck->launch(g, b32, args, 4), "compiled double kernel runs");
+
+        std::string err;
+        auto ck = CompiledKernel::compileSource(kDadd, "dadd", err);
+        CHECK(ck != nullptr, "double compiles on the compiled tier");
+        if (ck) {
+            Extent g{(uint32_t)((N + 31) / 32), 1, 1}, b32{32, 1, 1};
+            CHECK(ck->launch(g, b32, args, 4), "compiled double kernel runs");
+            double e = 0; for (int i = 0; i < N; ++i) e = std::fmax(e, std::fabs(c[i] - ref[i]));
+            CHECK(e < 1e-12, "compiled tier: true double precision");
+        }
+
+        std::fill(c.begin(), c.end(), -1);
+        CHECK(runInterp(kDadd, "dadd", (N + 31) / 32, 32, args, 4),
+              "double runs on the interpreter tier");
         double e = 0; for (int i = 0; i < N; ++i) e = std::fmax(e, std::fabs(c[i] - ref[i]));
-        CHECK(e < 1e-12, "compiled tier computes in true double precision");
-        std::printf("  compiled double max error = %.3e\n", e);
+        CHECK(e < 1e-12, "interpreter tier: true double precision");
+        std::printf("  interpreter double max error = %.3e\n", e);
     }
 
-    // ── PTX-interpreter codegen tier rejects double cleanly (no silent f32) ──
-    auto cg = compileToPtx(kDadd, "dadd");
-    CHECK(!cg.ok, "interpreter codegen rejects double (no silent truncation)");
-    CHECK(cg.error.find("double") != std::string::npos, "rejection error mentions 'double'");
-    std::printf("  codegen (expected) rejection: %s\n", cg.error.c_str());
+    // ── long (i64) on both tiers ─────────────────────────────────────────────
+    {
+        std::vector<int64_t> base(N), out(N, 0), ref(N);
+        for (int i = 0; i < N; ++i) {
+            base[i] = 3000000000LL + i;         // > INT32_MAX; b*b overflows int64? no: ~9e18 < 9.2e18
+            ref[i] = base[i] * base[i] + i;
+        }
+        int64_t* bp = base.data(); int64_t* op = out.data(); int n = N;
+        void* args[] = {&op, &bp, &n};
+
+        CHECK(runInterp(kLmul, "lmul", (N + 31) / 32, 32, args, 3),
+              "long runs on the interpreter tier");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) if (out[i] != ref[i]) {
+            ok = false; std::printf("  i=%d got=%lld want=%lld\n", i,
+                                    (long long)out[i], (long long)ref[i]); break; }
+        CHECK(ok, "interpreter tier: exact int64 arithmetic");
+
+        std::fill(out.begin(), out.end(), 0);
+        std::string err;
+        auto ck = CompiledKernel::compileSource(kLmul, "lmul", err);
+        CHECK(ck != nullptr, "long compiles on the compiled tier");
+        if (ck) {
+            Extent g{(uint32_t)((N + 31) / 32), 1, 1}, b32{32, 1, 1};
+            CHECK(ck->launch(g, b32, args, 3), "compiled long kernel runs");
+            bool ok2 = true; for (int i = 0; i < N; ++i) if (out[i] != ref[i]) { ok2 = false; break; }
+            CHECK(ok2, "compiled tier: exact int64 arithmetic");
+        }
+    }
 
     if (g_fail == 0)
-        std::printf("PASS: double kernels run on the compiled tier; codegen rejects cleanly\n");
+        std::printf("PASS: double + long (64-bit) on both tiers — full width, no truncation\n");
     else
         std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

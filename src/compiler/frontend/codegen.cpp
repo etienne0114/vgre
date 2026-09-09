@@ -43,12 +43,20 @@ struct Val {
 };
 
 // PTX register classes.
-enum class RC { R32, F32, RD64, Pred };
+enum class RC { R32, F32, RD64, F64, Pred };
+
+// A 64-bit scalar: `long`/`unsigned long` (int) or `double` (float). Pointers are
+// 64-bit too but handled via RD64 separately.
+inline bool is64BitScalar(const Type& t) {
+    return t.ptr == 0 && (t.base == Type::Long || t.base == Type::Double);
+}
 
 RC classOf(const Type& t) {
     if (t.isPointer()) return RC::RD64;
-    if (t.isFloating()) return RC::F32;
-    return RC::R32;  // bool/char/short/int/long collapse to 32-bit here
+    if (t.base == Type::Double) return RC::F64;
+    if (t.isFloating()) return RC::F32;              // float
+    if (t.base == Type::Long) return RC::RD64;       // 64-bit int
+    return RC::R32;  // bool/char/short/int collapse to 32-bit
 }
 
 struct Codegen {
@@ -56,7 +64,7 @@ struct Codegen {
     std::string body;                 // instruction stream (built first)
     std::string sharedDecls;          // .shared declarations (emitted in the decl section)
     std::string localDecls;           // .local declarations (emitted in the decl section)
-    int nR = 0, nF = 0, nRd = 0, nP = 0, nLbl = 0;
+    int nR = 0, nF = 0, nRd = 0, nFd = 0, nP = 0, nLbl = 0;
     std::unordered_map<std::string, Val> vars;  // name -> value (single mutable reg)
     std::unordered_map<std::string, std::vector<int>> arrayDims_;  // declared array -> dim sizes
     bool failed = false;
@@ -84,7 +92,10 @@ struct Codegen {
     }
 
     static const char* movFor(const Type& t) {
-        return t.isFloating() ? "mov.f32 " : (t.isPointer() ? "mov.u64 " : "mov.u32 ");
+        if (t.base == Type::Double) return "mov.f64 ";
+        if (t.isFloating()) return "mov.f32 ";
+        if (t.isPointer() || t.base == Type::Long) return "mov.u64 ";
+        return "mov.u32 ";
     }
 
     void fail(const std::string& m) {
@@ -98,6 +109,7 @@ struct Codegen {
             case RC::R32:  return "%r"  + std::to_string(nR++);
             case RC::F32:  return "%f"  + std::to_string(nF++);
             case RC::RD64: return "%rd" + std::to_string(nRd++);
+            case RC::F64:  return "%fd" + std::to_string(nFd++);
             case RC::Pred: return "%p"  + std::to_string(nP++);
         }
         return "%r0";
@@ -117,18 +129,29 @@ struct Codegen {
 
     static Type intType() { Type t; t.base = Type::Int; return t; }
     static Type floatType() { Type t; t.base = Type::Float; return t; }
+    static Type longType() { Type t; t.base = Type::Long; return t; }
+    static Type doubleType() { Type t; t.base = Type::Double; return t; }
 
-    // The PTX-interpreter codegen tier is 32-bit int / f32 float. Reject 64-bit
-    // scalar types (double/long) rather than silently truncating them — such
-    // kernels correctly use the compiled tier (int64/double) or the JIT.
-    bool ensureSupported(const Type& t) {
-        if (t.base == Type::Double) { fail("'double' unsupported by the interpreter codegen tier — use the compiled tier or the JIT"); return false; }
-        if (t.base == Type::Long)   { fail("'long'/64-bit int unsupported by the interpreter codegen tier — use the compiled tier or the JIT"); return false; }
-        return true;
+    // 64-bit int/double and 32-bit int/float are all supported now; nothing to
+    // reject here (kept as a hook for genuinely unsupported types).
+    bool ensureSupported(const Type&) { return true; }
+
+    // PTX ld/st/param type suffix for a scalar (pointee) type — width-aware.
+    static std::string memSuffix(const Type& t) {
+        if (t.base == Type::Double) return "f64";
+        if (t.isFloating()) return "f32";
+        if (t.base == Type::Long) return "u64";
+        return "u32";
     }
 
-    // PTX ld/st/param type suffix for a scalar (pointee) type.
-    static const char* memSuffix(const Type& t) { return t.isFloating() ? "f32" : "u32"; }
+    // Signed-int PTX suffix for cvt / arithmetic (s32 or s64).
+    static std::string intSuffix(const Type& t) { return is64BitScalar(t) || t.base == Type::Long ? "s64" : "s32"; }
+    // Float PTX suffix (f32 or f64).
+    static std::string floatSuffix(const Type& t) { return t.base == Type::Double ? "f64" : "f32"; }
+    // Arithmetic op suffix: f64/f32 for floats, s64/s32 for ints.
+    static std::string arithSuffix(const Type& t) { return t.isFloating() ? floatSuffix(t) : intSuffix(t); }
+    // Bitwise op suffix: b64 for 64-bit ints, else b32.
+    static std::string bitSuffix(const Type& t) { return t.base == Type::Long ? "b64" : "b32"; }
 
     // Format a float32 immediate as PTX hex (0f%08X) — the interpreter's format.
     static std::string f32imm(double d) {
@@ -139,22 +162,35 @@ struct Codegen {
         std::snprintf(buf, sizeof(buf), "0f%08X", bits);
         return buf;
     }
+    // Format a float64 immediate as PTX hex (0d%016llX).
+    static std::string f64imm(double d) {
+        uint64_t bits;
+        std::memcpy(&bits, &d, 8);
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "0d%016llX", static_cast<unsigned long long>(bits));
+        return buf;
+    }
 
-    // Coerce `v` to `want` (int<->float only). Returns the coerced Val.
+    // Coerce `v` to `want`, emitting the right cvt for any int/float/width change
+    // (int32/int64/f32/f64). Pointers pass through unchanged.
     Val coerce(const Val& v, const Type& want) {
-        if (v.type.isFloating() == want.isFloating() && v.type.isPointer() == want.isPointer())
-            return v;
-        if (want.isFloating() && !v.type.isFloating()) {          // int -> float
-            std::string d = fresh(RC::F32);
-            emit("cvt.rn.f32.s32 " + d + ", " + v.reg + ";");
-            return {d, floatType()};
+        if (want.isPointer() || v.type.isPointer()) { Val r = v; r.type = want; return r; }
+        const bool vf = v.type.isFloating(), wf = want.isFloating();
+        const bool v64 = is64BitScalar(v.type), w64 = is64BitScalar(want);
+        if (vf == wf && v64 == w64) { Val r = v; r.type = want; return r; }  // same kind+width
+        std::string d = fresh(classOf(want));
+        if (!vf && !wf) {                                         // int -> int (width)
+            emit("cvt." + intSuffix(want) + "." + intSuffix(v.type) + " " + d + ", " + v.reg + ";");
+        } else if (!vf && wf) {                                   // int -> float
+            emit("cvt.rn." + floatSuffix(want) + "." + intSuffix(v.type) + " " + d + ", " + v.reg + ";");
+        } else if (vf && !wf) {                                   // float -> int
+            emit("cvt.rzi." + intSuffix(want) + "." + floatSuffix(v.type) + " " + d + ", " + v.reg + ";");
+        } else {                                                  // float -> float (width)
+            // Widening f32->f64 is exact; narrowing f64->f32 needs a rounding mode.
+            const std::string rnd = w64 ? "" : "rn.";
+            emit("cvt." + rnd + floatSuffix(want) + "." + floatSuffix(v.type) + " " + d + ", " + v.reg + ";");
         }
-        if (!want.isFloating() && v.type.isFloating()) {          // float -> int
-            std::string d = fresh(RC::R32);
-            emit("cvt.rzi.s32.f32 " + d + ", " + v.reg + ";");
-            return {d, intType()};
-        }
-        return v;
+        return {d, want};
     }
 
     // ── Expressions ─────────────────────────────────────────────────────────────
@@ -172,11 +208,21 @@ struct Codegen {
         line = e.line; col = e.col;
         switch (e.kind) {
             case Expr::IntLit: {
+                if (e.wide || e.ival > 2147483647LL || e.ival < -2147483648LL) {
+                    std::string d = fresh(RC::RD64);
+                    emit("mov.u64 " + d + ", " + std::to_string(e.ival) + ";");
+                    return {d, longType()};
+                }
                 std::string d = fresh(RC::R32);
                 emit("mov.u32 " + d + ", " + std::to_string(e.ival) + ";");
                 return {d, intType()};
             }
             case Expr::FloatLit: {
+                if (e.wide) {
+                    std::string d = fresh(RC::F64);
+                    emit("mov.f64 " + d + ", " + f64imm(e.fval) + ";");
+                    return {d, doubleType()};
+                }
                 std::string d = fresh(RC::F32);
                 emit("mov.f32 " + d + ", " + f32imm(e.fval) + ";");
                 return {d, floatType()};
@@ -223,34 +269,50 @@ struct Codegen {
         return {};
     }
 
-    // Static "is this expression floating-typed?" — needed to pick the result
-    // register class for a ternary before emitting its branches.
-    bool isFloatExpr(const Expr& e) {
+    // Statically estimate an expression's type (kind + width) without emitting —
+    // needed to pick the result register class for a ternary before emitting its
+    // branches, and to know a value's width for promotion.
+    Type estimateType(const Expr& e) {
         switch (e.kind) {
-            case Expr::FloatLit: return true;
-            case Expr::IntLit:   return false;
-            case Expr::Ident: { auto it = vars.find(e.str); return it != vars.end() && it->second.type.isFloating(); }
-            case Expr::Member:   return false;  // threadIdx/blockIdx/… are integers
-            case Expr::Index:    return const_cast<Codegen*>(this)->indexPointee(e).isFloating();
-            case Expr::Cast:     return e.castType.isFloating();
-            case Expr::Unary:    return e.str == "!" ? false : isFloatExpr(*e.args[0]);
+            case Expr::FloatLit: return e.wide ? doubleType() : floatType();
+            case Expr::IntLit:
+                return (e.wide || e.ival > 2147483647LL || e.ival < -2147483648LL) ? longType() : intType();
+            case Expr::Ident: { auto it = vars.find(e.str); return it != vars.end() ? it->second.type : intType(); }
+            case Expr::Member: {
+                const Expr& obj = *e.args[0];
+                if (obj.kind == Expr::Ident) {
+                    auto it = vars.find(obj.str);
+                    if (it != vars.end() && it->second.space == Space::ParamStruct) {
+                        const StructDef* def = mod_ ? mod_->findStruct(it->second.type.structName) : nullptr;
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (m) return m->type;
+                    }
+                }
+                return intType();  // threadIdx/blockIdx/… are integers
+            }
+            case Expr::Index: return indexPointee(e);
+            case Expr::Cast:  return e.castType;
+            case Expr::Unary: return e.str == "!" ? intType() : estimateType(*e.args[0]);
             case Expr::Binary: {
                 const std::string& o = e.str;
                 if (o == "<" || o == "<=" || o == ">" || o == ">=" || o == "==" || o == "!=" ||
-                    o == "&&" || o == "||" || o == "&" || o == "|" || o == "^" ||
-                    o == "<<" || o == ">>" || o == "%") return false;
-                return isFloatExpr(*e.args[0]) || isFloatExpr(*e.args[1]);
+                    o == "&&" || o == "||") return intType();
+                return promote(estimateType(*e.args[0]), estimateType(*e.args[1]));
             }
-            case Expr::Assign:   return isFloatExpr(*e.args[1]);
-            case Expr::Ternary:  return isFloatExpr(*e.args[1]) || isFloatExpr(*e.args[2]);
+            case Expr::Assign:  return estimateType(*e.args[0]);
+            case Expr::Ternary: return promote(estimateType(*e.args[1]), estimateType(*e.args[2]));
             case Expr::Call: {
                 const std::string& fn = e.str;
-                if (fn == "min" || fn == "max") return !e.args.empty() && isFloatExpr(*e.args[0]);
-                return true;  // the float math intrinsics (sqrtf, fmaf, …) return float
+                if (fn == "min" || fn == "max" || fn == "abs")
+                    return e.args.empty() ? intType() : estimateType(*e.args[0]);
+                if (fn == "atomicAdd")
+                    return e.args.size() < 2 ? intType() : estimateType(*e.args[1]);
+                return floatType();  // sqrtf/expf/fmaf/… return float
             }
         }
-        return false;
+        return intType();
     }
+    bool isFloatExpr(const Expr& e) { return estimateType(e).isFloating(); }
 
     Val emitCast(const Expr& e) {
         if (!ensureSupported(e.castType)) return {};
@@ -263,19 +325,19 @@ struct Codegen {
     }
 
     Val emitTernary(const Expr& e) {
-        Type rt = (isFloatExpr(*e.args[1]) || isFloatExpr(*e.args[2])) ? floatType() : intType();
+        Type rt = promote(estimateType(*e.args[1]), estimateType(*e.args[2]));
         std::string res = fresh(classOf(rt));
         std::string elseL = label(), endL = label();
         emitCondBranchFalse(*e.args[0], elseL);
         if (failed) return {};
         Val t = coerce(emitExpr(*e.args[1]), rt);
         if (failed) return {};
-        emit(std::string(rt.isFloating() ? "mov.f32 " : "mov.u32 ") + res + ", " + t.reg + ";");
+        emit(std::string(movFor(rt)) + res + ", " + t.reg + ";");
         emit("bra " + endL + ";");
         emitLabel(elseL);
         Val f = coerce(emitExpr(*e.args[2]), rt);
         if (failed) return {};
-        emit(std::string(rt.isFloating() ? "mov.f32 " : "mov.u32 ") + res + ", " + f.reg + ";");
+        emit(std::string(movFor(rt)) + res + ", " + f.reg + ";");
         emitLabel(endL);
         return {res, rt};
     }
@@ -412,12 +474,12 @@ struct Codegen {
         if (!pre) {  // postfix: capture the value before the update
             old.type = var.type;
             old.reg = fresh(classOf(var.type));
-            emit(std::string(var.type.isFloating() ? "mov.f32 " : "mov.u32 ") + old.reg + ", " + var.reg + ";");
+            emit(std::string(movFor(var.type)) + old.reg + ", " + var.reg + ";");
         }
-        if (var.type.isFloating())
-            emit(std::string(inc ? "add.f32 " : "sub.f32 ") + var.reg + ", " + var.reg + ", 0f3F800000;");
-        else
-            emit(std::string(inc ? "add.s32 " : "sub.s32 ") + var.reg + ", " + var.reg + ", 1;");
+        const std::string one = !var.type.isFloating() ? "1"
+                              : (var.type.base == Type::Double ? f64imm(1.0) : "0f3F800000");
+        emit(std::string(inc ? "add." : "sub.") + arithSuffix(var.type) + " " +
+             var.reg + ", " + var.reg + ", " + one + ";");
         return pre ? var : old;
     }
 
@@ -429,12 +491,14 @@ struct Codegen {
         if (failed) return {};
         if (e.str == "-") {
             std::string d = fresh(classOf(v.type));
-            emit(std::string("neg.") + (v.type.isFloating() ? "f32 " : "s32 ") + d + ", " + v.reg + ";");
+            emit("neg." + arithSuffix(v.type) + " " + d + ", " + v.reg + ";");
             return {d, v.type};
         }
         if (e.str == "!") {
             std::string p = fresh(RC::Pred), d = fresh(RC::R32);
-            emit("setp.eq.s32 " + p + ", " + v.reg + ", 0;");
+            std::string zero = !v.type.isFloating() ? "0"
+                             : (v.type.base == Type::Double ? f64imm(0.0) : f32imm(0.0));
+            emit("setp.eq." + arithSuffix(v.type) + " " + p + ", " + v.reg + ", " + zero + ";");
             emit("mov.u32 " + d + ", 0;");
             emit("@" + p + " mov.u32 " + d + ", 1;");
             return {d, intType()};
@@ -443,15 +507,49 @@ struct Codegen {
         return {};
     }
 
+    // C-style usual arithmetic conversions across the supported scalar types.
+    static Type promote(const Type& a, const Type& b) {
+        if (a.base == Type::Double || b.base == Type::Double) return doubleType();
+        if (a.isFloating() || b.isFloating()) return floatType();
+        if (a.base == Type::Long || b.base == Type::Long) return longType();
+        return intType();
+    }
+
+    // Emit a binary arithmetic/bitwise op, promoting both operands to their
+    // common type (width-aware: f64/f32/s64/s32/b64/b32). Shared by emitBinary
+    // and compound assignment so the op-suffix logic lives in one place.
+    Val emitArith(const std::string& op, Val a, Val b) {
+        Type ct = promote(a.type, b.type);
+        const bool fp = ct.isFloating();
+        a = coerce(a, ct); b = coerce(b, ct);
+        if (failed) return {};
+        const std::string suf = arithSuffix(ct);
+        std::string ins;
+        if (op == "+") ins = "add." + suf;
+        else if (op == "-") ins = "sub." + suf;
+        else if (op == "*") ins = fp ? ("mul." + suf) : ("mul.lo." + suf);
+        else if (op == "/") ins = fp ? ("div.rn." + suf) : ("div." + suf);
+        else if (op == "%") { if (fp) { fail("'%' on a floating type"); return {}; } ins = "rem." + suf; }
+        else if (op == "&") ins = "and." + bitSuffix(ct);
+        else if (op == "|") ins = "or." + bitSuffix(ct);
+        else if (op == "^") ins = "xor." + bitSuffix(ct);
+        else if (op == "<<") ins = "shl." + bitSuffix(ct);
+        else if (op == ">>") ins = std::string("shr.") + (ct.base == Type::Long ? "s64" : "s32");
+        else { fail("unsupported binary operator '" + op + "'"); return {}; }
+        std::string d = fresh(classOf(ct));
+        emit(ins + " " + d + ", " + a.reg + ", " + b.reg + ";");
+        return {d, ct};
+    }
+
     // Materialize a comparison as an int 0/1 (predicated mov, no selp needed).
     Val emitCompare(const std::string& op, Val a, Val b) {
-        bool fp = a.type.isFloating() || b.type.isFloating();
-        Type ct = fp ? floatType() : intType();
+        Type ct = promote(a.type, b.type);
         a = coerce(a, ct); b = coerce(b, ct);
+        if (failed) return {};
         const char* cc = op == "<" ? "lt" : op == "<=" ? "le" : op == ">" ? "gt" :
                          op == ">=" ? "ge" : op == "==" ? "eq" : "ne";
         std::string p = fresh(RC::Pred), d = fresh(RC::R32);
-        emit(std::string("setp.") + cc + (fp ? ".f32 " : ".s32 ") + p + ", " + a.reg + ", " + b.reg + ";");
+        emit("setp." + std::string(cc) + "." + arithSuffix(ct) + " " + p + ", " + a.reg + ", " + b.reg + ";");
         emit("mov.u32 " + d + ", 0;");
         emit("@" + p + " mov.u32 " + d + ", 1;");
         return {d, intType()};
@@ -468,31 +566,14 @@ struct Codegen {
         Val b = emitExpr(*e.args[1]); if (failed) return {};
 
         if (op == "&&" || op == "||") {
-            // Non-short-circuit (subset is side-effect-free in conditions).
+            // Non-short-circuit (subset is side-effect-free in conditions); the
+            // comparison operands are already int 0/1, so a 32-bit op is right.
             const char* ins = op == "&&" ? "and.b32 " : "or.b32 ";
             std::string d = fresh(RC::R32);
             emit(std::string(ins) + d + ", " + a.reg + ", " + b.reg + ";");
             return {d, intType()};
         }
-
-        bool fp = a.type.isFloating() || b.type.isFloating();
-        Type ct = fp ? floatType() : intType();
-        a = coerce(a, ct); b = coerce(b, ct);
-        std::string d = fresh(classOf(ct));
-        std::string ins;
-        if (op == "+") ins = fp ? "add.f32 " : "add.s32 ";
-        else if (op == "-") ins = fp ? "sub.f32 " : "sub.s32 ";
-        else if (op == "*") ins = fp ? "mul.f32 " : "mul.lo.s32 ";
-        else if (op == "/") ins = fp ? "div.rn.f32 " : "div.s32 ";
-        else if (op == "%") { if (fp) { fail("'%' on floating type"); return {}; } ins = "rem.s32 "; }
-        else if (op == "&") ins = "and.b32 ";
-        else if (op == "|") ins = "or.b32 ";
-        else if (op == "^") ins = "xor.b32 ";
-        else if (op == "<<") ins = "shl.b32 ";
-        else if (op == ">>") ins = "shr.s32 ";
-        else { fail("unsupported binary operator '" + op + "'"); return {}; }
-        emit(ins + d + ", " + a.reg + ", " + b.reg + ";");
-        return {d, ct};
+        return emitArith(op, a, b);
     }
 
     Val emitAssign(const Expr& e) {
@@ -505,19 +586,7 @@ struct Codegen {
             if (failed) return {};
             if (op == "=") return rhs;
             std::string bop(1, op[0]);  // "+=" -> "+"
-            Expr fake; fake.kind = Expr::Binary; fake.str = bop;
-            // Reuse emitBinary's arithmetic by hand to avoid re-emitting lhs load.
-            bool fp = lhsVal.type.isFloating() || rhs.type.isFloating();
-            Type ct = fp ? floatType() : intType();
-            Val a = coerce(lhsVal, ct), b = coerce(rhs, ct);
-            std::string d = fresh(classOf(ct)), ins;
-            if (bop == "+") ins = fp ? "add.f32 " : "add.s32 ";
-            else if (bop == "-") ins = fp ? "sub.f32 " : "sub.s32 ";
-            else if (bop == "*") ins = fp ? "mul.f32 " : "mul.lo.s32 ";
-            else if (bop == "/") ins = fp ? "div.rn.f32 " : "div.s32 ";
-            else { ins = "rem.s32 "; }
-            emit(ins + d + ", " + a.reg + ", " + b.reg + ";");
-            return {d, ct};
+            return emitArith(bop, lhsVal, rhs);   // shared width-aware arithmetic
         };
 
         if (lhs.kind == Expr::Ident) {
@@ -572,7 +641,7 @@ struct Codegen {
             // to the thread. Either way a plain ld/add/st is already atomic.
             std::string sum = fresh(classOf(pt));
             emit("ld." + spacePrefix(addr) + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
-            emit(std::string(pt.isFloating() ? "add.f32 " : "add.s32 ") + sum + ", " + oldv + ", " + val.reg + ";");
+            emit("add." + arithSuffix(pt) + " " + sum + ", " + oldv + ", " + val.reg + ";");
             emit("st." + spacePrefix(addr) + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
         } else {
             emit(std::string("atom.global.add.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "], " + val.reg + ";");
@@ -832,10 +901,8 @@ struct Codegen {
     }
 
     // ── Assembly ────────────────────────────────────────────────────────────────
-    static const char* paramSuffix(const Type& t) {
-        if (t.isPointer()) return "u64";
-        if (t.isFloating()) return "f32";
-        return "u32";
+    static std::string paramSuffix(const Type& t) {
+        return t.isPointer() ? "u64" : memSuffix(t);
     }
 
     std::string run() {
@@ -852,13 +919,10 @@ struct Codegen {
                 emit("ld.param.u64 " + raw + ", [" + p.name + "];");
                 emit("cvta.to.global.u64 " + gbl + ", " + raw + ";");
                 vars[p.name] = {gbl, p.type, Space::Global, ""};
-            } else if (p.type.isFloating()) {
-                std::string r = fresh(RC::F32);
-                emit("ld.param.f32 " + r + ", [" + p.name + "];");
-                vars[p.name] = {r, p.type};
             } else {
-                std::string r = fresh(RC::R32);
-                emit("ld.param.u32 " + r + ", [" + p.name + "];");
+                // Scalar param (int/long/float/double): load into its register class.
+                std::string r = fresh(classOf(p.type));
+                emit("ld.param." + memSuffix(p.type) + " " + r + ", [" + p.name + "];");
                 vars[p.name] = {r, p.type};
             }
         }
@@ -888,6 +952,7 @@ struct Codegen {
         if (nR  > 0) out += "\t.reg .b32 %r<"  + std::to_string(nR)  + ">;\n";
         if (nF  > 0) out += "\t.reg .f32 %f<"  + std::to_string(nF)  + ">;\n";
         if (nRd > 0) out += "\t.reg .b64 %rd<" + std::to_string(nRd) + ">;\n";
+        if (nFd > 0) out += "\t.reg .f64 %fd<" + std::to_string(nFd) + ">;\n";
         out += sharedDecls;
         out += localDecls;
         out += body;

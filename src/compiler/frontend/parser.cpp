@@ -293,12 +293,19 @@ struct Parser {
         switch (kind()) {
             case TokenKind::IntLiteral: {
                 auto e = mkExpr(Expr::IntLit);
-                e->ival = static_cast<int64_t>(std::strtoll(advance().text.c_str(), nullptr, 0));
+                const std::string txt = advance().text;
+                e->ival = static_cast<int64_t>(std::strtoll(txt.c_str(), nullptr, 0));
+                // `long` if it carries an l/L suffix or doesn't fit in 32 bits.
+                e->wide = txt.find_first_of("lL") != std::string::npos ||
+                          e->ival > 2147483647LL || e->ival < -2147483648LL;
                 return e;
             }
             case TokenKind::FloatLiteral: {
                 auto e = mkExpr(Expr::FloatLit);
-                e->fval = std::strtod(advance().text.c_str(), nullptr);
+                const std::string txt = advance().text;
+                e->fval = std::strtod(txt.c_str(), nullptr);
+                // `double` unless it has an f/F suffix (C default is double).
+                e->wide = txt.find_first_of("fF") == std::string::npos;
                 return e;
             }
             case TokenKind::Identifier: {

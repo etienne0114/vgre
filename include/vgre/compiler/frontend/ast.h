@@ -62,6 +62,7 @@ struct Expr {
 
     int64_t     ival = 0;   // IntLit
     double      fval = 0;   // FloatLit
+    bool        wide = false;  // IntLit: 64-bit (long); FloatLit: 64-bit (double)
     std::string str;        // Ident name / Member field / Call callee / operator spelling
     Type        castType;   // Cast: the target type
     std::vector<std::unique_ptr<Expr>> args;

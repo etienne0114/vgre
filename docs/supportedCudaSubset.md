@@ -37,7 +37,7 @@ an 8-worker pool, both bit-identical to the serial result.
 |---|---|---|
 | `int`, `unsigned`, `bool`, `char`, `short` (32-bit) | ✅ | ✅ |
 | `float` | ✅ | ✅ |
-| `double`, `long` (64-bit) | ⛔ rejected cleanly (use compiled tier / JIT) | ✅ full f64 / i64 |
+| `double`, `long` (64-bit) | ✅ full f64 / i64 (real `.f64`/`.s64` PTX, `cvt`, 64-bit literals) | ✅ full f64 / i64 |
 | pointers (`T*`, `const T* __restrict__`) | ✅ | ✅ |
 | by-value `struct` params (scalar members, `.member` reads) | ✅ | defers to interpreter |
 
@@ -94,7 +94,6 @@ workload runs on the from-scratch front-end.
 ## Not yet supported (returns an error, falls back to JIT when available)
 - templates, recursion
 - texture/surface and warp-shuffle intrinsics
-- `double`/`long` on the interpreter tier (compiled tier + JIT cover them)
 
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
