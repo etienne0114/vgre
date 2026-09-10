@@ -930,6 +930,12 @@ target_link_libraries(test_lm_c_api PRIVATE vgre Threads::Threads)
 add_test(NAME XlaLmCApi COMMAND test_lm_c_api)
 set_tests_properties(XlaLmCApi PROPERTIES TIMEOUT 60)
 
+# HF Llama safetensors loader: verified against a self-contained HF reference.
+add_executable(test_hf_loader xla/test_hf_loader.cpp)
+target_link_libraries(test_hf_loader PRIVATE vgre Threads::Threads)
+add_test(NAME XlaHfLoader COMMAND test_hf_loader)
+set_tests_properties(XlaHfLoader PROPERTIES TIMEOUT 60)
+
 # VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
 # generate + decode (all offline, embedded public-domain corpus).
 add_executable(test_lm_pipeline xla/test_lm_pipeline.cpp)

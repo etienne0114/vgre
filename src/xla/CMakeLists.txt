@@ -11,6 +11,7 @@ add_library(vgre_xla OBJECT
     autograd/optim.cpp
     model/transformer.cpp
     model/checkpoint.cpp
+    model/hf_loader.cpp
     model_c_api.cpp
     autograd_c_api.cpp
     safetensors.cpp
@@ -86,6 +87,7 @@ if(VGRE_BUILD_NN_LIB)
         autograd/optim.cpp
         model/transformer.cpp
         model/checkpoint.cpp
+        model/hf_loader.cpp
         model_c_api.cpp
         autograd_c_api.cpp
         safetensors.cpp

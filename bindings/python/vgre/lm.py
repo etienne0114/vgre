@@ -63,6 +63,8 @@ def _bind() -> None:
     _lib.vgre_lm_save.restype = c.c_int
     _lib.vgre_lm_load.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_load.restype = c.c_int
+    _lib.vgre_lm_load_llama.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_lm_load_llama.restype = c.c_int
 
     _lib.vgre_cosine_lr.argtypes = [c.c_longlong, c.c_longlong, c.c_longlong, c.c_float, c.c_float]
     _lib.vgre_cosine_lr.restype = c.c_float
@@ -300,6 +302,14 @@ class LanguageModel:
     def load(self, path: str) -> None:
         if not _lib.vgre_lm_load(self._h, str(path).encode("utf-8")):
             raise RuntimeError("load failed (config must match the checkpoint)")
+
+    def load_llama(self, path: str) -> None:
+        """Load a Hugging Face Llama-family safetensors checkpoint. Create this
+        model with the checkpoint's dims first (vocab, n_layer, d_model, n_head,
+        d_ff, tie_embeddings — from its config.json). Handles the HF weight
+        transpose, RoPE convention, and grouped-query attention."""
+        if not _lib.vgre_lm_load_llama(self._h, str(path).encode("utf-8")):
+            raise RuntimeError("load_llama failed (config mismatch or missing tensor)")
 
     def close(self) -> None:
         if getattr(self, "_h", None):

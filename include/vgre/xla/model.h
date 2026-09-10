@@ -180,6 +180,13 @@ bool save_checkpoint(GPT& model, const std::string& path);
 // Loads parameters by name into a model whose Config matches the checkpoint.
 bool load_checkpoint(GPT& model, const std::string& path);
 
+// Load a Hugging Face Llama-family safetensors checkpoint into a GPT whose Config
+// matches it (n_layer/d_model/n_head/d_ff/vocab/tie_embeddings). Handles the
+// [out,in]→[in,out] transpose, the HF↔VGRE RoPE convention (per-head q/k row
+// permute), and grouped-query attention (KV-head replication). Returns false on a
+// missing tensor or shape/GQA mismatch (no partial/incorrect load).
+bool load_llama_safetensors(GPT& model, const std::string& path);
+
 // ── Data pipeline ────────────────────────────────────────────────────────────
 // A flat token stream that yields random (input, target) windows for training;
 // targets are the inputs shifted by one (next-token prediction).

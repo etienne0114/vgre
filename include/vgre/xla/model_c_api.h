@@ -86,6 +86,12 @@ VGRE_PUBLIC_API int vgre_lm_generate_speculative(vgre_lm* m, const int* prompt,
 VGRE_PUBLIC_API int vgre_lm_save(vgre_lm* m, const char* path);
 VGRE_PUBLIC_API int vgre_lm_load(vgre_lm* m, const char* path);
 
+// Load a Hugging Face Llama-family safetensors checkpoint into a model whose
+// dims already match it (create with the checkpoint's vocab/n_layer/d_model/
+// n_head/d_ff and tie_embeddings). Handles the HF transpose, RoPE convention, and
+// grouped-query attention. Returns 1 on success, 0 on failure.
+VGRE_PUBLIC_API int vgre_lm_load_llama(vgre_lm* m, const char* path);
+
 // ── BPE tokenizer ────────────────────────────────────────────────────────────
 typedef struct vgre_bpe vgre_bpe;
 
