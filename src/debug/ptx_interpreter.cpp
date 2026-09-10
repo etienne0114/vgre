@@ -108,6 +108,12 @@ PtxInterpreter::PtxInterpreter(const std::string& ptx, const std::string& entry)
 }
 
 void PtxInterpreter::parse(const std::string& ptx, const std::string& entry) {
+    std::string err;
+    if (!tryParse(ptx, entry, err)) throw std::runtime_error(err);
+}
+
+bool PtxInterpreter::tryParse(const std::string& ptx, const std::string& entry,
+                              std::string& err) {
     // Locate ".entry <name>" (with or without .visible).
     size_t ep = std::string::npos;
     for (size_t at = ptx.find(".entry"); at != std::string::npos;
@@ -118,14 +124,16 @@ void PtxInterpreter::parse(const std::string& ptx, const std::string& entry) {
             if (!std::isalnum((unsigned char)after) && after != '_') { ep = ns; break; }
         }
     }
-    if (ep == std::string::npos)
-        throw std::runtime_error("PTX kernel not found: " + entry);
+    if (ep == std::string::npos) {
+        err = "PTX kernel not found: " + entry;
+        return false;
+    }
     kernel_.name = entry;
 
     // Parameters: "(.param .u64 name, .param .f32 name, …)".
     size_t po = ptx.find('(', ep);
     size_t body = ptx.find('{', ep);
-    if (body == std::string::npos) throw std::runtime_error("PTX: missing kernel body");
+    if (body == std::string::npos) { err = "PTX: missing kernel body"; return false; }
     int paramOff = 0;
     if (po != std::string::npos && po < body) {
         size_t pc = ptx.find(')', po);
@@ -144,7 +152,7 @@ void PtxInterpreter::parse(const std::string& ptx, const std::string& entry) {
                 sz *= std::atoi(name.c_str() + br + 1);
                 name = name.substr(0, br);
             }
-            if (name.empty() || sz <= 0) throw std::runtime_error("PTX: bad param: " + p);
+            if (name.empty() || sz <= 0) { err = "PTX: bad param: " + p; return false; }
             paramOff = (paramOff + sz - 1) / sz * sz;    // natural alignment
             kernel_.params.push_back({name, sz, paramOff});
             paramOff += sz;
@@ -264,7 +272,8 @@ void PtxInterpreter::parse(const std::string& ptx, const std::string& entry) {
             kernel_.code.push_back(std::move(ins));
         }
     }
-    if (kernel_.code.empty()) throw std::runtime_error("PTX: empty kernel body");
+    if (kernel_.code.empty()) { err = "PTX: empty kernel body"; return false; }
+    return true;
 }
 
 // ── Launch / scheduling ───────────────────────────────────────────────────────
@@ -301,11 +310,17 @@ void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* ar
 
 // ── Non-throwing entry points (all exceptions handled in this TU) ────────────
 bool PtxInterpreter::canParse(const std::string& ptx, const std::string& entry) noexcept {
+    // Parse into a throwaway probe. tryParse reports malformed PTX by return
+    // value (no exception), so nothing is ever thrown here — which is what makes
+    // this safe on macOS: a thrown-and-caught std::runtime_error aborts the
+    // process there when two libc++abi runtimes are loaded (catch(...) included).
     try {
-        PtxInterpreter probe(ptx, entry);   // ctor parses; throws on malformed PTX
-        (void)probe;
-        return true;
+        PtxInterpreter probe;
+        std::string err;
+        return probe.tryParse(ptx, entry, err);
     } catch (...) {
+        // Belt-and-suspenders for a truly exceptional failure (e.g. bad_alloc);
+        // the normal malformed-PTX path returns false above without throwing.
         return false;
     }
 }

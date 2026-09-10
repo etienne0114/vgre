@@ -79,6 +79,11 @@ public:
     // std::runtime_error on parse failure or if the kernel is absent.
     PtxInterpreter(const std::string& ptx, const std::string& entry);
 
+    // Default-constructed: no kernel yet. Used by the non-throwing canParse(),
+    // which parses into a probe via tryParse() without going through the
+    // throwing constructor (see the macOS note on the static entry points).
+    PtxInterpreter() = default;
+
     // Launch configuration + kernel arguments (CUDA-style: one pointer per
     // .param, dereferenced to the param's size). Resets all execution state.
     // The 1D overload is a convenience for {gridX,1,1} × {blockX,1,1}; the 3D
@@ -162,6 +167,14 @@ private:
     // parked at a barrier or a warp-shuffle rendezvous).
     static bool runnable(const Thread& t) { return !t.done && !t.atBarrier && !t.atShfl; }
 
+    // Non-throwing parse: fills kernel_/regNames_ and returns true, or leaves a
+    // human-readable reason in `err` and returns false. Reports every malformed
+    // -PTX condition by return value rather than by throwing, so the parse path
+    // never raises an exception that must unwind to a caller — the mechanism the
+    // static canParse() relies on (a thrown-then-caught exception aborts the
+    // process on macOS when two libc++abi runtimes are present, defeating even
+    // catch(...)). parse() is the throwing wrapper kept for the debugger API.
+    bool tryParse(const std::string& ptx, const std::string& entry, std::string& err);
     void parse(const std::string& ptx, const std::string& entry);
     // Validate the config and load grid/block extents + the packed param block.
     // Shared by launch() (debugger entry) and runCtaRange() (parallel backend).
