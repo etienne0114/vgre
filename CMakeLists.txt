@@ -204,6 +204,16 @@ endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    # VS 2022's MSVC STL (<yvals_core.h>) hard-errors (STL1000) unless the
+    # compiler is Clang 19+, but VGRE pins clang/LLVM 18 (its ORC JIT API changed
+    # in 19+). The gate is a conservative version check, not a real
+    # incompatibility, so opt in with MSVC's documented escape-hatch macro when
+    # building with clang-cl. add_compile_definitions APPENDS — it does not
+    # clobber CMake's default /EHsc (needed: VGRE uses C++ exceptions), unlike
+    # passing -DCMAKE_CXX_FLAGS on the command line.
+    if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_compile_definitions(_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH)
+    endif()
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────

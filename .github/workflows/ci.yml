@@ -214,20 +214,17 @@ jobs:
         # VGRE_ENABLE_OPENMP=OFF: clang-cl on Windows ships no libomp, so
         # find_package(OpenMP REQUIRED) failed at configure. VGRE's in-tree
         # work-stealing thread pool is the OpenMP-free path — use it on Windows.
-        # _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH: VS 2022's MSVC 14.44 STL
-        # (<yvals_core.h>) hard-errors (STL1000) unless the compiler is Clang 19+,
-        # but VGRE pins LLVM/clang 18 (its ORC JIT API changed in 19+, see the
-        # Linux/macOS notes). The check is a conservative version gate, not a real
-        # incompatibility — clang 18 compiles this STL fine — so we opt in to the
-        # mismatch with MSVC's documented escape-hatch macro rather than bump LLVM.
+        # The MSVC-STL-vs-clang18 version gate (STL1000) is handled inside
+        # CMakeLists.txt (_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH, added via
+        # add_compile_definitions so it does not clobber CMake's default /EHsc —
+        # passing -DCMAKE_CXX_FLAGS here previously wiped /EHsc and disabled
+        # exceptions, which VGRE uses).
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER="C:/llvm/bin/clang-cl.exe"
           -DCMAKE_CXX_COMPILER="C:/llvm/bin/clang-cl.exe"
           -DLLVM_DIR="C:/llvm/lib/cmake/llvm"
           -DVGRE_ENABLE_OPENMP=OFF
-          -DCMAKE_CXX_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
-          -DCMAKE_C_FLAGS="-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
           -DVGRE_WARNINGS_AS_ERRORS=OFF
 
       - name: Build
