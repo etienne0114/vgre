@@ -100,3 +100,14 @@ if(APPLE)
         target_link_libraries(vgre_api PUBLIC ${_vgre_api_iokit} ${_vgre_api_cf})
     endif()
 endif()
+
+# Propagate SIMD compile options so the AVX/AVX2 intrinsics in cublas_level1/3
+# and nccl_core compile with the right ISA flags (required for clang-cl's
+# __AVX__-gated <immintrin.h> to declare __m256/__m256i — see the note in
+# src/core/CMakeLists). vgre_cudart_shims has no SIMD, so it is left untouched.
+if(VGRE_SIMD_COMPILE_OPTIONS)
+    target_compile_options(vgre_api PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+endif()
+if(VGRE_SIMD_COMPILE_DEFS)
+    target_compile_definitions(vgre_api PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+endif()

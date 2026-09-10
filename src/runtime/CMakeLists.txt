@@ -35,3 +35,13 @@ target_include_directories(vgre_runtime PUBLIC
 
 target_link_libraries(vgre_runtime PRIVATE
 )
+
+# Propagate SIMD compile options so the AVX/AVX2 kernels in vector_engine*.cpp
+# compile with the right ISA flags (required for clang-cl's __AVX__-gated
+# <immintrin.h> to declare __m256/__m256i — see the note in src/core/CMakeLists).
+if(VGRE_SIMD_COMPILE_OPTIONS)
+    target_compile_options(vgre_runtime PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+endif()
+if(VGRE_SIMD_COMPILE_DEFS)
+    target_compile_definitions(vgre_runtime PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+endif()
