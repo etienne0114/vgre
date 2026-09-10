@@ -190,8 +190,16 @@ jobs:
           if (-not (Test-Path 'C:\llvm\bin\clang++.exe')) {
             $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
             curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
+            # Windows' bundled `tar` (bsdtar) stalls for HOURS decompressing this
+            # ~936 MB .tar.xz — the job then hit GitHub's 6 h cap and the C:\llvm
+            # cache never saved, so every run re-hung. 7-Zip (preinstalled) does it
+            # in ~a minute. Two-step (.tar.xz → .tar → tree) then strip the single
+            # top-level clang+llvm-*/ directory (the old --strip-components=1).
+            7z x "$env:RUNNER_TEMP\llvm.tar.xz" -o"$env:RUNNER_TEMP" -y | Out-Null
+            7z x "$env:RUNNER_TEMP\llvm.tar" -o"$env:RUNNER_TEMP\llvm_x" -y | Out-Null
+            $top = (Get-ChildItem "$env:RUNNER_TEMP\llvm_x" -Directory | Select-Object -First 1).FullName
             New-Item -ItemType Directory -Force -Path C:\llvm | Out-Null
-            tar -xf "$env:RUNNER_TEMP\llvm.tar.xz" -C C:\llvm --strip-components=1
+            Move-Item -Path "$top\*" -Destination C:\llvm\
           } else {
             Write-Host "LLVM restored from cache"
           }

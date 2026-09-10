@@ -46,6 +46,13 @@ std::unique_ptr<PreparedKernel> InterpreterBackend::preparePtx(
         VGRE_LOG_ERROR("InterpreterBackend",
                        std::string("preparePtx failed: ") + e.what());
         return nullptr;
+    } catch (...) {
+        // PtxInterpreter lives in a separate component; on macOS a std:: exception
+        // thrown across that boundary can miss the typed catch above (RTTI is not
+        // unified across libraries). A malformed kernel must still fail cleanly,
+        // not std::terminate — so catch anything and report it as unpreparable.
+        VGRE_LOG_ERROR("InterpreterBackend", "preparePtx failed (malformed PTX)");
+        return nullptr;
     }
     return std::unique_ptr<PreparedKernel>(new InterpreterKernel(ptx, entry));
 }
@@ -79,6 +86,9 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
             VGRE_LOG_ERROR("InterpreterBackend",
                            std::string("launch failed: ") + e.what());
             return false;
+        } catch (...) {                                  // cross-library RTTI safety (see preparePtx)
+            VGRE_LOG_ERROR("InterpreterBackend", "launch failed (interpreter error)");
+            return false;
         }
     }
 
@@ -100,6 +110,9 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
             ok.store(false, std::memory_order_relaxed);
             VGRE_LOG_ERROR("InterpreterBackend",
                            std::string("launch failed: ") + e.what());
+        } catch (...) {                                  // cross-library RTTI safety
+            ok.store(false, std::memory_order_relaxed);
+            VGRE_LOG_ERROR("InterpreterBackend", "launch failed (interpreter error)");
         }
     });
     return ok.load(std::memory_order_relaxed);
