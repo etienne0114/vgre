@@ -211,11 +211,15 @@ jobs:
         # Build with LLVM-18's clang-cl driver so the MSVC-ABI runtime (VS 2022 on
         # the runner) and the LLVM-18 libraries agree. VS provides the Windows SDK
         # + STL; clang-cl picks them up via the standard registry probe.
+        # VGRE_ENABLE_OPENMP=OFF: clang-cl on Windows ships no libomp, so
+        # find_package(OpenMP REQUIRED) failed at configure. VGRE's in-tree
+        # work-stealing thread pool is the OpenMP-free path — use it on Windows.
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER="C:/llvm/bin/clang-cl.exe"
           -DCMAKE_CXX_COMPILER="C:/llvm/bin/clang-cl.exe"
           -DLLVM_DIR="C:/llvm/lib/cmake/llvm"
+          -DVGRE_ENABLE_OPENMP=OFF
           -DVGRE_WARNINGS_AS_ERRORS=OFF
 
       - name: Build

@@ -37,21 +37,12 @@ private:
 
 std::unique_ptr<PreparedKernel> InterpreterBackend::preparePtx(
     const std::string& ptx, const std::string& entry) {
-    try {
-        // Constructing the interpreter parses the PTX and resolves the entry, so
-        // a malformed kernel fails here (at prepare) rather than at launch.
-        vgre::debug::PtxInterpreter probe(ptx, entry);
-        (void)probe;
-    } catch (const std::exception& e) {
-        VGRE_LOG_ERROR("InterpreterBackend",
-                       std::string("preparePtx failed: ") + e.what());
-        return nullptr;
-    } catch (...) {
-        // PtxInterpreter lives in a separate component; on macOS a std:: exception
-        // thrown across that boundary can miss the typed catch above (RTTI is not
-        // unified across libraries). A malformed kernel must still fail cleanly,
-        // not std::terminate — so catch anything and report it as unpreparable.
-        VGRE_LOG_ERROR("InterpreterBackend", "preparePtx failed (malformed PTX)");
+    // canParse constructs+parses the interpreter and handles any exception INSIDE
+    // the debug component (returning bool), so a malformed kernel is rejected here
+    // without an exception crossing the library boundary — which on macOS fails to
+    // unwind at all and would std::terminate the process.
+    if (!vgre::debug::PtxInterpreter::canParse(ptx, entry)) {
+        VGRE_LOG_ERROR("InterpreterBackend", "preparePtx failed (malformed PTX): " + entry);
         return nullptr;
     }
     return std::unique_ptr<PreparedKernel>(new InterpreterKernel(ptx, entry));
@@ -75,21 +66,15 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
     auto& pool = vgre::xla::ThreadPool::global();
     const int workers = static_cast<int>(pool.concurrency());
 
-    // Small grids / single-core: keep the plain single-instance path (also the
-    // one the debugger uses), avoiding any pool overhead.
+    // Small grids / single-core: run the whole grid in one interpreter. The
+    // debug component swallows any exception internally and returns a bool, so
+    // nothing crosses the library boundary (see PtxInterpreter::runKernel).
     if (gridTotal <= 1 || workers <= 1) {
-        try {
-            vgre::debug::PtxInterpreter in(k->ptx(), k->entry());
-            in.launch(grid, block, args, numArgs);
-            return in.resume() == vgre::debug::StopReason::Exited;
-        } catch (const std::exception& e) {
-            VGRE_LOG_ERROR("InterpreterBackend",
-                           std::string("launch failed: ") + e.what());
-            return false;
-        } catch (...) {                                  // cross-library RTTI safety (see preparePtx)
-            VGRE_LOG_ERROR("InterpreterBackend", "launch failed (interpreter error)");
+        if (!vgre::debug::PtxInterpreter::runKernel(k->ptx(), k->entry(), grid, block, args, numArgs)) {
+            VGRE_LOG_ERROR("InterpreterBackend", "launch failed");
             return false;
         }
+        return true;
     }
 
     // Parallel: partition the grid into `chunks` contiguous CTA ranges, each run
@@ -102,15 +87,8 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
         const int begin = static_cast<int>(c * gridTotal / chunks);
         const int end   = static_cast<int>((c + 1) * gridTotal / chunks);
         if (begin >= end) return;
-        try {
-            vgre::debug::PtxInterpreter in(k->ptx(), k->entry());
-            if (!in.runCtaRange(grid, block, args, numArgs, begin, end))
-                ok.store(false, std::memory_order_relaxed);
-        } catch (const std::exception& e) {
-            ok.store(false, std::memory_order_relaxed);
-            VGRE_LOG_ERROR("InterpreterBackend",
-                           std::string("launch failed: ") + e.what());
-        } catch (...) {                                  // cross-library RTTI safety
+        if (!vgre::debug::PtxInterpreter::runKernelRange(k->ptx(), k->entry(), grid, block,
+                                                         args, numArgs, begin, end)) {
             ok.store(false, std::memory_order_relaxed);
             VGRE_LOG_ERROR("InterpreterBackend", "launch failed (interpreter error)");
         }

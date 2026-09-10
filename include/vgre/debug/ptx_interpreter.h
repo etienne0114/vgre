@@ -86,6 +86,25 @@ public:
     void launch(int gridX, int blockX, void* const* args, int numArgs);
     void launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs);
 
+    // ── Non-throwing entry points for other components ───────────────────────
+    // These handle every exception INSIDE this translation unit (returning a
+    // bool) so nothing propagates across the library boundary to a caller in
+    // another component. That matters on macOS, where an exception thrown here
+    // and caught in a different library fails to unwind at all (even catch(...)),
+    // aborting the process — so the backend calls these instead of constructing a
+    // PtxInterpreter + catching.
+    //   canParse:       is `entry` a parseable kernel in `ptx`? (used at prepare)
+    //   runKernel:      launch + run the whole grid to exit; true on success
+    //   runKernelRange: run CTAs [begin,end) to exit (the parallel backend path)
+    static bool canParse(const std::string& ptx, const std::string& entry) noexcept;
+    static bool runKernel(const std::string& ptx, const std::string& entry,
+                          const Dim3& grid, const Dim3& block,
+                          void* const* args, int numArgs) noexcept;
+    static bool runKernelRange(const std::string& ptx, const std::string& entry,
+                               const Dim3& grid, const Dim3& block,
+                               void* const* args, int numArgs,
+                               int ctaBegin, int ctaEnd) noexcept;
+
     // ── Bulk (non-debug) execution ───────────────────────────────────────────
     // Set up launch state, then run the CTA sub-range [ctaBegin, ctaEnd) to
     // completion (no breakpoints). Distinct CTAs are independent, so several

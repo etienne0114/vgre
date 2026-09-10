@@ -299,6 +299,41 @@ void PtxInterpreter::launch(const Dim3& grid, const Dim3& block, void* const* ar
     startCta(0);
 }
 
+// ── Non-throwing entry points (all exceptions handled in this TU) ────────────
+bool PtxInterpreter::canParse(const std::string& ptx, const std::string& entry) noexcept {
+    try {
+        PtxInterpreter probe(ptx, entry);   // ctor parses; throws on malformed PTX
+        (void)probe;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool PtxInterpreter::runKernel(const std::string& ptx, const std::string& entry,
+                               const Dim3& grid, const Dim3& block,
+                               void* const* args, int numArgs) noexcept {
+    try {
+        PtxInterpreter in(ptx, entry);
+        in.launch(grid, block, args, numArgs);
+        return in.resume() == StopReason::Exited;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool PtxInterpreter::runKernelRange(const std::string& ptx, const std::string& entry,
+                                    const Dim3& grid, const Dim3& block,
+                                    void* const* args, int numArgs,
+                                    int ctaBegin, int ctaEnd) noexcept {
+    try {
+        PtxInterpreter in(ptx, entry);
+        return in.runCtaRange(grid, block, args, numArgs, ctaBegin, ctaEnd);
+    } catch (...) {
+        return false;
+    }
+}
+
 bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* const* args,
                                  int numArgs, int ctaBegin, int ctaEnd) {
     setupLaunch(grid, block, args, numArgs);
