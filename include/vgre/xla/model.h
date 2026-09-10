@@ -27,6 +27,7 @@ struct Config {
     int   n_layer  = 4;
     int   d_model  = 256;
     int   n_head   = 4;
+    int   n_kv_head = 0;         // 0 → == n_head (MHA); < n_head → grouped-query attention
     int   d_ff     = 0;          // 0 → defaults to 4 * d_model
     int   max_seq  = 256;
     float rope_base = 10000.0f;
@@ -37,6 +38,8 @@ struct Config {
 
     int ff() const { return d_ff > 0 ? d_ff : 4 * d_model; }
     int head_dim() const { return d_model / n_head; }
+    int kv_heads() const { return n_kv_head > 0 ? n_kv_head : n_head; }  // KV heads (== n_head for MHA)
+    int kv_dim() const { return kv_heads() * head_dim(); }              // K/V projection width
 };
 
 class GPT {

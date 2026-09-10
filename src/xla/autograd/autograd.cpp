@@ -788,6 +788,38 @@ Var selective_scan(const Var& a, const Var& b) {
     return out;
 }
 
+Var repeat_kv(const Var& x, int n_kv_head, int n_head) {
+    // Expand grouped-query K/V heads: x is [T, n_kv*hd] → [T, n_head*hd], where
+    // each KV head's hd-block is repeated (n_head/n_kv) times contiguously so that
+    // query head qh reads KV head qh/(n_head/n_kv). Backward sums each group's
+    // grads back into the one KV head. Identity when n_kv == n_head.
+    if (x->shape.size() != 2) throw std::runtime_error("repeat_kv: x must be [T, n_kv*hd]");
+    if (n_kv_head <= 0 || n_head % n_kv_head != 0) throw std::runtime_error("repeat_kv: n_head must be a multiple of n_kv_head");
+    if (n_kv_head == n_head) return x;
+    const int64_t T = x->shape[0], KVW = x->shape[1];
+    const int hd = (int)(KVW / n_kv_head);
+    const int group = n_head / n_kv_head;
+    const int64_t OW = (int64_t)n_head * hd;
+    Var out = newNode({T, OW}, {x}, x->requires_grad);
+    for (int64_t t = 0; t < T; ++t)
+        for (int kv = 0; kv < n_kv_head; ++kv)
+            for (int rep = 0; rep < group; ++rep)
+                std::memcpy(&out->data[t * OW + (int64_t)(kv * group + rep) * hd],
+                            &x->data[t * KVW + (int64_t)kv * hd], sizeof(float) * hd);
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, T, KVW, OW, hd, n_kv_head, group]() {
+        if (!X->requires_grad) return;
+        for (int64_t t = 0; t < T; ++t)
+            for (int kv = 0; kv < n_kv_head; ++kv)
+                for (int rep = 0; rep < group; ++rep) {
+                    const float* g = &op->grad[t * OW + (int64_t)(kv * group + rep) * hd];
+                    float* d = &X->grad[t * KVW + (int64_t)kv * hd];
+                    for (int j = 0; j < hd; ++j) d[j] += g[j];
+                }
+    };
+    return out;
+}
+
 Var index_select(const Var& x, const std::vector<int>& idx) {
     // Gather rows: out[i] = x[idx[i]]. Backward scatter-adds into x's grad.
     if (x->shape.size() != 2) throw std::runtime_error("index_select: x must be [N,D]");

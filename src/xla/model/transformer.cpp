@@ -50,6 +50,7 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
 
     std::mt19937 rng(seed);
     const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff();
+    const int KVD = cfg_.kv_dim();          // == D for MHA; smaller for GQA
     const float s_attn = 1.0f / std::sqrt((float)D);
     const float s_ff   = 1.0f / std::sqrt((float)D);
     const float s_proj = 1.0f / std::sqrt((float)F);
@@ -58,10 +59,10 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
     layers_.resize(cfg_.n_layer);
     for (auto& L : layers_) {
         L.ln1_g = initOnes(D, params_);
-        L.Wq    = initParam({D, D}, s_attn, rng, params_);
-        L.Wk    = initParam({D, D}, s_attn, rng, params_);
-        L.Wv    = initParam({D, D}, s_attn, rng, params_);
-        L.Wo    = initParam({D, D}, s_attn, rng, params_);
+        L.Wq    = initParam({D, D},   s_attn, rng, params_);
+        L.Wk    = initParam({D, KVD}, s_attn, rng, params_);   // GQA: fewer KV heads
+        L.Wv    = initParam({D, KVD}, s_attn, rng, params_);
+        L.Wo    = initParam({D, D},   s_attn, rng, params_);
         L.ln2_g = initOnes(D, params_);
         L.Wgate = initParam({D, F}, s_ff, rng, params_);
         L.Wup   = initParam({D, F}, s_ff, rng, params_);
@@ -86,9 +87,11 @@ Var GPT::forward(const std::vector<int>& ids) {
     for (auto& L : layers_) {
         // Pre-norm attention with RoPE on Q,K.
         Var h = rms_norm(x, L.ln1_g, cfg_.norm_eps);
+        const int KVH = cfg_.kv_heads();
         Var q = rope(matmul(h, L.Wq), H, cfg_.rope_base);
-        Var k = rope(matmul(h, L.Wk), H, cfg_.rope_base);
-        Var v = matmul(h, L.Wv);
+        // GQA: project K/V with KVH heads, then expand to H heads (no-op for MHA).
+        Var k = rope(repeat_kv(matmul(h, L.Wk), KVH, H), H, cfg_.rope_base);
+        Var v = repeat_kv(matmul(h, L.Wv), KVH, H);
         Var a = cfg_.flash_attention ? flash_attention(q, k, v, H, /*causal=*/true)
                                      : attention(q, k, v, H, /*causal=*/true);
         x = add(x, dropout(matmul(a, L.Wo), cfg_.dropout));     // residual (+dropout)
@@ -289,6 +292,9 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                                       const SampleConfig& sc, int specDraftK) {
     const int D = cfg_.d_model, H = cfg_.n_head, Dh = cfg_.head_dim();
     const int F = cfg_.ff(), V = cfg_.vocab, L = cfg_.n_layer;
+    // Grouped-query attention: K/V have KVH heads (KVD wide); query head hd reads
+    // KV head hd/group. group==1 (KVH==H, KVD==D) is plain MHA — byte-identical.
+    const int KVH = cfg_.kv_heads(), KVD = cfg_.kv_dim(), group = H / KVH;
     const float scale = 1.0f / std::sqrt((float)Dh);
     std::mt19937 rng(sc.seed);
 
@@ -307,13 +313,13 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     std::vector<std::vector<float>>   Ks(L), Vs(L);      // per-(pos,head) scales
     for (int l = 0; l < L; ++l) {
         if (kv4) {
-            Kp4[l].resize((size_t)cfg_.max_seq * (D / 2)); Vp4[l].resize((size_t)cfg_.max_seq * (D / 2));
-            Ks[l].resize((size_t)cfg_.max_seq * H); Vs[l].resize((size_t)cfg_.max_seq * H);
+            Kp4[l].resize((size_t)cfg_.max_seq * (KVD / 2)); Vp4[l].resize((size_t)cfg_.max_seq * (KVD / 2));
+            Ks[l].resize((size_t)cfg_.max_seq * KVH); Vs[l].resize((size_t)cfg_.max_seq * KVH);
         } else if (kv8) {
-            Kq[l].resize((size_t)cfg_.max_seq * D); Vq[l].resize((size_t)cfg_.max_seq * D);
-            Ks[l].resize((size_t)cfg_.max_seq * H); Vs[l].resize((size_t)cfg_.max_seq * H);
+            Kq[l].resize((size_t)cfg_.max_seq * KVD); Vq[l].resize((size_t)cfg_.max_seq * KVD);
+            Ks[l].resize((size_t)cfg_.max_seq * KVH); Vs[l].resize((size_t)cfg_.max_seq * KVH);
         } else {
-            Kc[l].resize((size_t)cfg_.max_seq * D); Vc[l].resize((size_t)cfg_.max_seq * D);
+            Kc[l].resize((size_t)cfg_.max_seq * KVD); Vc[l].resize((size_t)cfg_.max_seq * KVD);
         }
     }
     // Quantize one head-slice [Dh] to int8 with an absmax scale (symmetric).
@@ -360,7 +366,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     for (int i = 0; i < Dh / 2; ++i)
         invFreq[i] = std::pow(cfg_.rope_base, -2.0f * (float)i / (float)Dh);
 
-    std::vector<float> x(D), h(D), q(D), k(D), v(D), attnOut(D), proj(D);
+    std::vector<float> x(D), h(D), q(D), k(KVD), v(KVD), attnOut(D), proj(D);
     std::vector<float> h2(D), gate(F), up(F), ff(D), logits(V);
     std::vector<float> scores(cfg_.max_seq);
 
@@ -445,43 +451,45 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             const Layer& Ly = layers_[l];
             rmsNormVec(x.data(), Ly.ln1_g->data.data(), h.data(), D, cfg_.norm_eps);
             mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D);
-            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, D);
-            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, D);
-            ropeVec(q.data(), H, Dh, pos, invFreq.data(), rcos.data(), rsin.data());
-            ropeVec(k.data(), H, Dh, pos, invFreq.data(), rcos.data(), rsin.data());
-            if (kv4) {                                   // 4-bit packed per head
-                for (int hd = 0; hd < H; ++hd) {
-                    const int off = hd * Dh;
-                    quant_head4(&k[off], &Kp4[l][(size_t)pos * (D / 2)], Ks[l][(size_t)pos * H + hd], off, Dh);
-                    quant_head4(&v[off], &Vp4[l][(size_t)pos * (D / 2)], Vs[l][(size_t)pos * H + hd], off, Dh);
+            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, KVD);
+            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, KVD);
+            ropeVec(q.data(), H,   Dh, pos, invFreq.data(), rcos.data(), rsin.data());
+            ropeVec(k.data(), KVH, Dh, pos, invFreq.data(), rcos.data(), rsin.data());
+            if (kv4) {                                   // 4-bit packed per KV head
+                for (int hh = 0; hh < KVH; ++hh) {
+                    const int off = hh * Dh;
+                    quant_head4(&k[off], &Kp4[l][(size_t)pos * (KVD / 2)], Ks[l][(size_t)pos * KVH + hh], off, Dh);
+                    quant_head4(&v[off], &Vp4[l][(size_t)pos * (KVD / 2)], Vs[l][(size_t)pos * KVH + hh], off, Dh);
                 }
-            } else if (kv8) {                            // quantize this position's K/V per head
-                for (int hd = 0; hd < H; ++hd) {
-                    const int off = hd * Dh;
-                    quant_head(&k[off], &Kq[l][(size_t)pos * D + off], Ks[l][(size_t)pos * H + hd], Dh);
-                    quant_head(&v[off], &Vq[l][(size_t)pos * D + off], Vs[l][(size_t)pos * H + hd], Dh);
+            } else if (kv8) {                            // quantize this position's K/V per KV head
+                for (int hh = 0; hh < KVH; ++hh) {
+                    const int off = hh * Dh;
+                    quant_head(&k[off], &Kq[l][(size_t)pos * KVD + off], Ks[l][(size_t)pos * KVH + hh], Dh);
+                    quant_head(&v[off], &Vq[l][(size_t)pos * KVD + off], Vs[l][(size_t)pos * KVH + hh], Dh);
                 }
             } else {
-                std::memcpy(&Kc[l][(size_t)pos * D], k.data(), sizeof(float) * D);
-                std::memcpy(&Vc[l][(size_t)pos * D], v.data(), sizeof(float) * D);
+                std::memcpy(&Kc[l][(size_t)pos * KVD], k.data(), sizeof(float) * KVD);
+                std::memcpy(&Vc[l][(size_t)pos * KVD], v.data(), sizeof(float) * KVD);
             }
             // Per-head attention over cached positions 0..pos. The kv4/kv8
             // branches sit outside the innermost loops so the hot path stays tight.
             for (int hd = 0; hd < H; ++hd) {
-                const int off = hd * Dh;
+                const int off  = hd * Dh;               // query-head offset (in D)
+                const int koff = (hd / group) * Dh;     // KV-head offset (in KVD)
+                const int ksc  = (hd / group);          // KV-head scale index
                 float mx = -1e30f;
                 for (int j = 0; j <= pos; ++j) {
                     float s = 0.0f;
                     if (kv4) {
-                        const uint8_t* kp = &Kp4[l][(size_t)j * (D / 2)];
-                        const float ks = Ks[l][(size_t)j * H + hd];
-                        for (int d = 0; d < Dh; ++d) s += q[off + d] * deq4(kp, off + d, ks);
+                        const uint8_t* kp = &Kp4[l][(size_t)j * (KVD / 2)];
+                        const float ks = Ks[l][(size_t)j * KVH + ksc];
+                        for (int d = 0; d < Dh; ++d) s += q[off + d] * deq4(kp, koff + d, ks);
                     } else if (kv8) {
-                        const int8_t* kj = &Kq[l][(size_t)j * D + off];
-                        const float ks = Ks[l][(size_t)j * H + hd];
+                        const int8_t* kj = &Kq[l][(size_t)j * KVD + koff];
+                        const float ks = Ks[l][(size_t)j * KVH + ksc];
                         for (int d = 0; d < Dh; ++d) s += q[off + d] * ((float)kj[d] * ks);
                     } else {
-                        const float* kj = &Kc[l][(size_t)j * D + off];
+                        const float* kj = &Kc[l][(size_t)j * KVD + koff];
                         for (int d = 0; d < Dh; ++d) s += q[off + d] * kj[d];
                     }
                     s *= scale; scores[j] = s; if (s > mx) mx = s;
@@ -493,21 +501,21 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     for (int d = 0; d < Dh; ++d) {
                         float acc = 0.0f;
                         for (int j = 0; j <= pos; ++j)
-                            acc += scores[j] * inv * deq4(&Vp4[l][(size_t)j * (D / 2)], off + d, Vs[l][(size_t)j * H + hd]);
+                            acc += scores[j] * inv * deq4(&Vp4[l][(size_t)j * (KVD / 2)], koff + d, Vs[l][(size_t)j * KVH + ksc]);
                         attnOut[off + d] = acc;
                     }
                 } else if (kv8) {
                     for (int d = 0; d < Dh; ++d) {
                         float acc = 0.0f;
                         for (int j = 0; j <= pos; ++j)
-                            acc += scores[j] * inv * ((float)Vq[l][(size_t)j * D + off + d]
-                                                     * Vs[l][(size_t)j * H + hd]);
+                            acc += scores[j] * inv * ((float)Vq[l][(size_t)j * KVD + koff + d]
+                                                     * Vs[l][(size_t)j * KVH + ksc]);
                         attnOut[off + d] = acc;
                     }
                 } else {
                     for (int d = 0; d < Dh; ++d) {
                         float acc = 0.0f;
-                        for (int j = 0; j <= pos; ++j) acc += scores[j] * inv * Vc[l][(size_t)j * D + off + d];
+                        for (int j = 0; j <= pos; ++j) acc += scores[j] * inv * Vc[l][(size_t)j * KVD + koff + d];
                         attnOut[off + d] = acc;
                     }
                 }
@@ -543,7 +551,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     auto run_chunk = [&](const std::vector<int>& toks, int startPos, std::vector<float>& Xb) {
         const int P = (int)toks.size();
         std::vector<float> Hn((size_t)P * D);
-        std::vector<float> Qb((size_t)P * D), Kb((size_t)P * D), Vb((size_t)P * D);
+        std::vector<float> Qb((size_t)P * D), Kb((size_t)P * KVD), Vb((size_t)P * KVD);
         std::vector<float> Ao((size_t)P * D), Pj((size_t)P * D);
         std::vector<float> Gt((size_t)P * F), Up2((size_t)P * F), Fb((size_t)P * D);
         std::vector<float> sc2(cfg_.max_seq);
@@ -562,24 +570,25 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             for (int p = 0; p < P; ++p)
                 rmsNormVec(&Xb[(size_t)p * D], Ly.ln1_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
             mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, Qb.data(), D, D);
-            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, D);
-            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, D);
+            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, KVD);
+            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, KVD);
             for (int p = 0; p < P; ++p) {
                 const int ap = startPos + p;                 // absolute position
-                ropeVec(&Qb[(size_t)p * D], H, Dh, ap, invFreq.data(), rcos.data(), rsin.data());
-                ropeVec(&Kb[(size_t)p * D], H, Dh, ap, invFreq.data(), rcos.data(), rsin.data());
-                std::memcpy(&Kc[l][(size_t)ap * D], &Kb[(size_t)p * D], sizeof(float) * D);
-                std::memcpy(&Vc[l][(size_t)ap * D], &Vb[(size_t)p * D], sizeof(float) * D);
+                ropeVec(&Qb[(size_t)p * D],   H,   Dh, ap, invFreq.data(), rcos.data(), rsin.data());
+                ropeVec(&Kb[(size_t)p * KVD], KVH, Dh, ap, invFreq.data(), rcos.data(), rsin.data());
+                std::memcpy(&Kc[l][(size_t)ap * KVD], &Kb[(size_t)p * KVD], sizeof(float) * KVD);
+                std::memcpy(&Vc[l][(size_t)ap * KVD], &Vb[(size_t)p * KVD], sizeof(float) * KVD);
             }
             for (int p = 0; p < P; ++p) {                    // per-row causal attention over 0..startPos+p
                 const int ap = startPos + p;
                 const float* qr = &Qb[(size_t)p * D];
                 float* aor = &Ao[(size_t)p * D];
                 for (int hd = 0; hd < H; ++hd) {
-                    const int off = hd * Dh;
+                    const int off  = hd * Dh;
+                    const int koff = (hd / group) * Dh;      // KV head for this query head
                     float mx = -1e30f;
                     for (int j = 0; j <= ap; ++j) {
-                        const float* kj = &Kc[l][(size_t)j * D + off];
+                        const float* kj = &Kc[l][(size_t)j * KVD + koff];
                         float s = 0.0f; for (int d = 0; d < Dh; ++d) s += qr[off + d] * kj[d];
                         s *= scale; sc2[j] = s; if (s > mx) mx = s;
                     }
@@ -588,7 +597,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     const float inv = 1.0f / sum;
                     for (int d = 0; d < Dh; ++d) {
                         float acc = 0.0f;
-                        for (int j = 0; j <= ap; ++j) acc += sc2[j] * inv * Vc[l][(size_t)j * D + off + d];
+                        for (int j = 0; j <= ap; ++j) acc += sc2[j] * inv * Vc[l][(size_t)j * KVD + koff + d];
                         aor[off + d] = acc;
                     }
                 }
@@ -713,7 +722,7 @@ void GPT::set_int8_inference(bool on) {
     int8_inference_ = on;
     if (on) bf16_inference_ = false;   // mutually exclusive
     if (!on) return;
-    const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff();
+    const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff(), KVD = cfg_.kv_dim();
     // Per-ROW symmetric int8 quantization of a [R,C] table (one scale per row).
     auto quantRows = [](const std::vector<float>& W, int R, int C, Q8& q) {
         if ((int64_t)q.w.size() == (int64_t)R * C) return;
@@ -751,8 +760,8 @@ void GPT::set_int8_inference(bool on) {
         }
     };
     for (auto& L : layers_) {
-        quant(L.Wq->data, D, D, L.Wq_q8); quant(L.Wk->data, D, D, L.Wk_q8);
-        quant(L.Wv->data, D, D, L.Wv_q8); quant(L.Wo->data, D, D, L.Wo_q8);
+        quant(L.Wq->data, D, D, L.Wq_q8);        quant(L.Wk->data, D, KVD, L.Wk_q8);
+        quant(L.Wv->data, D, KVD, L.Wv_q8);      quant(L.Wo->data, D, D, L.Wo_q8);
         quant(L.Wgate->data, D, F, L.Wgate_q8); quant(L.Wup->data, D, F, L.Wup_q8);
         quant(L.Wdown->data, F, D, L.Wdown_q8);
     }

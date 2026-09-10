@@ -139,7 +139,7 @@ static void hf_rope(std::vector<float>& q, int M, int Hh) {
 static float siluf(float x) { return x / (1.0f + std::exp(-x)); }
 
 // Run the whole round-trip for one head config + file format (safetensors/gguf).
-static void run_case(bool tied, bool gguf) {
+static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
     std::mt19937 rng((tied ? 321 : 123) + (gguf ? 1000 : 0));
     std::normal_distribution<float> nd(0.0f, 0.08f);
     auto rand_t = [&](std::vector<int64_t> shape) {
@@ -235,6 +235,7 @@ static void run_case(bool tied, bool gguf) {
     // ── load into VGRE + compare ────────────────────────────────────────────
     Config cfg; cfg.vocab=V; cfg.n_layer=Ln; cfg.d_model=D; cfg.n_head=Hn; cfg.d_ff=Ff;
     cfg.max_seq=64; cfg.rope_base=ROPE; cfg.norm_eps=EPS; cfg.tie_embeddings=tied;
+    if (nativeGqa) cfg.n_kv_head = NKV;   // load GQA natively (n_kv KV heads, no replication)
     GPT gpt(cfg, /*seed=*/1);
     bool loaded = gguf ? model::load_gguf_llama(gpt, path) : model::load_llama_safetensors(gpt, path);
     CHECK(loaded, "loader succeeds");
@@ -242,8 +243,8 @@ static void run_case(bool tied, bool gguf) {
     autograd::Var out = gpt.forward(ids);                // [T, V]
     double maxErr = 0;
     for (int i = 0; i < T * V; ++i) maxErr = std::max(maxErr, (double)std::fabs(out->data[i] - refLogits[i]));
-    std::printf("llama-loader [%s%s] max logit error = %.3e\n",
-                gguf ? "gguf" : "safetensors", tied ? ",tied" : "", maxErr);
+    std::printf("llama-loader [%s%s%s] max logit error = %.3e\n",
+                gguf ? "gguf" : "safetensors", tied ? ",tied" : "", nativeGqa ? ",nativeGQA" : "", maxErr);
     CHECK(maxErr < 2e-3, "VGRE forward after load matches the HF reference");
 }
 
@@ -252,6 +253,8 @@ int main() {
     run_case(/*tied=*/true,  /*gguf=*/false);   // safetensors, GQA, tied
     run_case(/*tied=*/false, /*gguf=*/true);    // GGUF (pre-permuted q/k), GQA, separate output
     run_case(/*tied=*/true,  /*gguf=*/true);    // GGUF, GQA, tied
+    run_case(/*tied=*/false, /*gguf=*/false, /*nativeGqa=*/true);  // safetensors → native n_kv (no replication)
+    run_case(/*tied=*/false, /*gguf=*/true,  /*nativeGqa=*/true);  // GGUF → native n_kv
     if (g_fail == 0) std::printf("PASS: Llama loader — safetensors + GGUF, transpose/RoPE/GQA, tied & untied\n");
     return g_fail ? 1 : 0;
 }

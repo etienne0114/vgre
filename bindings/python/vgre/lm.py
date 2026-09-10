@@ -36,6 +36,9 @@ def _bind() -> None:
 
     _lib.vgre_lm_create.argtypes = [c.c_int] * 6 + [c.c_float, c.c_int, c.c_uint]
     _lib.vgre_lm_create.restype = c.c_void_p
+    _lib.vgre_lm_create_gqa.argtypes = [c.c_int] * 7 + [c.c_float, c.c_int, c.c_uint]
+    _lib.vgre_lm_create_gqa.restype = c.c_void_p
+    _lib.vgre_lm_create.restype = c.c_void_p
     _lib.vgre_lm_free.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.restype = c.c_longlong
@@ -167,12 +170,14 @@ class LanguageModel:
     def __init__(self, vocab: int, n_layer: int = 4, d_model: int = 256,
                  n_head: int = 8, d_ff: int = 0, max_seq: int = 256,
                  dropout: float = 0.0, tie_embeddings: bool = False,
-                 seed: int = 1234) -> None:
+                 seed: int = 1234, n_kv_head: int = 0) -> None:
         _require()
-        self._h = _lib.vgre_lm_create(int(vocab), int(n_layer), int(d_model),
-                                      int(n_head), int(d_ff), int(max_seq),
-                                      float(dropout), 1 if tie_embeddings else 0,
-                                      int(seed) & 0xFFFFFFFF)
+        # n_kv_head < n_head → grouped-query attention (smaller K/V + KV cache);
+        # 0 or == n_head → plain multi-head attention.
+        self._h = _lib.vgre_lm_create_gqa(int(vocab), int(n_layer), int(d_model),
+                                          int(n_head), int(n_kv_head), int(d_ff), int(max_seq),
+                                          float(dropout), 1 if tie_embeddings else 0,
+                                          int(seed) & 0xFFFFFFFF)
         if not self._h:
             raise RuntimeError("vgre_lm_create failed (check d_model % n_head == 0 and head_dim even)")
 

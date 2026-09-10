@@ -936,6 +936,12 @@ target_link_libraries(test_hf_loader PRIVATE vgre Threads::Threads)
 add_test(NAME XlaHfLoader COMMAND test_hf_loader)
 set_tests_properties(XlaHfLoader PROPERTIES TIMEOUT 60)
 
+# Grouped-query attention: repeat_kv gradient + native-GQA == replicated-MHA.
+add_executable(test_gqa xla/test_gqa.cpp)
+target_link_libraries(test_gqa PRIVATE vgre Threads::Threads)
+add_test(NAME XlaGqa COMMAND test_gqa)
+set_tests_properties(XlaGqa PROPERTIES TIMEOUT 30)
+
 # VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
 # generate + decode (all offline, embedded public-domain corpus).
 add_executable(test_lm_pipeline xla/test_lm_pipeline.cpp)

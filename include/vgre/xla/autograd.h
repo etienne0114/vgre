@@ -115,6 +115,11 @@ Var concat(const Var& a, const Var& b, int axis);
 // the dual: out is [rows, D] zeros with out[idx[i]] += src[i]; its backward
 // gathers. idx values must be in [0, N).
 Var index_select(const Var& x, const std::vector<int>& idx);
+
+// Expand grouped-query K/V heads [T, n_kv*hd] → [T, n_head*hd] (each KV head
+// repeated n_head/n_kv times). Identity when n_kv == n_head. Backward sums each
+// group's gradients into its KV head.
+Var repeat_kv(const Var& x, int n_kv_head, int n_head);
 Var index_add(int64_t rows, const Var& src, const std::vector<int>& idx);
 // Selective scan — the state-space-model (Mamba) recurrence over a length-T
 // sequence: h_t = a[t] ⊙ h_{t-1} + b[t], with h_{-1}=0. a and b are [T, D]

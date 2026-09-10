@@ -103,17 +103,21 @@ bool loadLlamaCore(GPT& model, Reader& rd, const LlamaNames& nm, bool ropePermut
     };
     auto src = [&](int i, const std::string& suf) { return nm.prefix + std::to_string(i) + "." + suf; };
     auto vp  = [&](int i, const std::string& suf) { return "layers." + std::to_string(i) + "." + suf; };
-    // Load a q/k weight [H*hd, D]: (GQA-expand,) optional RoPE permute, transpose.
-    auto loadQK = [&](const std::string& hfName, const std::string& vgreName, bool isKV) {
+    const int KVH = c.kv_heads();   // target K/V heads: == H for MHA, < H for GQA
+    // Load a q/k weight [n_ckpt*hd, D] into `targetHeads` heads: expand KV heads
+    // from the checkpoint's count to the target (replicate for an MHA model,
+    // no-op for a matching GQA model), optional RoPE permute, transpose to [D, *].
+    auto loadHeads = [&](const std::string& hfName, const std::string& vgreName,
+                         int targetHeads, bool doPermute) {
         int64_t R, C; auto w = loadMat(hfName, R, C);
         if (!ok) return;
         int nkv = (int)(R / hd);
-        if (nkv <= 0 || (int64_t)nkv * hd != R || C != D || (isKV ? (H % nkv != 0) : (nkv != H))) {
+        if (nkv <= 0 || (int64_t)nkv * hd != R || C != D || targetHeads % nkv != 0) {
             VGRE_LOG_ERROR("llama_loader", "shape/GQA for " + hfName); ok = false; return;
         }
-        if (isKV) w = expandKvHeads(w, nkv, hd, D, H / nkv);     // → [H*hd, D]
-        if (ropePermute) w = ropePermuteRows(w, H, hd, D);
-        put(vgreName, transpose(w, (int64_t)H * hd, D));
+        if (targetHeads != nkv) w = expandKvHeads(w, nkv, hd, D, targetHeads / nkv);
+        if (doPermute) w = ropePermuteRows(w, targetHeads, hd, D);
+        put(vgreName, transpose(w, (int64_t)targetHeads * hd, D));
     };
 
     { int64_t R, C; auto w = loadMat(nm.embed, R, C);
@@ -129,13 +133,9 @@ bool loadLlamaCore(GPT& model, Reader& rd, const LlamaNames& nm, bool ropePermut
         int64_t R, C;
         put(vp(l, "ln1_g"), loadMat(src(l, nm.attn_norm), R, C));
         put(vp(l, "ln2_g"), loadMat(src(l, nm.ffn_norm), R, C));
-        loadQK(src(l, nm.q), vp(l, "Wq"), /*isKV=*/false);
-        loadQK(src(l, nm.k), vp(l, "Wk"), /*isKV=*/true);
-        // v: GQA-expand + transpose, no RoPE permute.
-        { auto w = loadMat(src(l, nm.v), R, C);
-          int nkv = ok ? (int)(R / hd) : 0;
-          if (ok && (nkv <= 0 || H % nkv != 0 || C != D)) { VGRE_LOG_ERROR("llama_loader", "v shape/GQA"); ok = false; }
-          if (ok) put(vp(l, "Wv"), transpose(expandKvHeads(w, nkv, hd, D, H / nkv), (int64_t)H * hd, D)); }
+        loadHeads(src(l, nm.q), vp(l, "Wq"), H,   ropePermute);   // query: H heads
+        loadHeads(src(l, nm.k), vp(l, "Wk"), KVH, ropePermute);   // key:   KVH heads (RoPE)
+        loadHeads(src(l, nm.v), vp(l, "Wv"), KVH, false);         // value: KVH heads (no RoPE)
         { auto w = loadMat(src(l, nm.o),    R, C); if (ok) put(vp(l, "Wo"),    transpose(w, R, C)); }
         { auto w = loadMat(src(l, nm.gate), R, C); if (ok) put(vp(l, "Wgate"), transpose(w, R, C)); }
         { auto w = loadMat(src(l, nm.up),   R, C); if (ok) put(vp(l, "Wup"),   transpose(w, R, C)); }
