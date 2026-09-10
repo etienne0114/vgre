@@ -192,6 +192,11 @@ int vgre_lm_load_llama(vgre_lm* m, const char* path) {
     try { return model::load_llama_safetensors(*m->gpt, path) ? 1 : 0; } LM_CATCH(return 0)
 }
 
+int vgre_lm_load_gguf(vgre_lm* m, const char* path) {
+    if (!m || !path) return 0;
+    try { return model::load_gguf_llama(*m->gpt, path) ? 1 : 0; } LM_CATCH(return 0)
+}
+
 vgre_bpe* vgre_bpe_create(void) { try { return new vgre_bpe(); } LM_CATCH(return nullptr) }
 void      vgre_bpe_free(vgre_bpe* t) { delete t; }
 

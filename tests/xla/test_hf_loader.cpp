@@ -57,6 +57,51 @@ static void write_safetensors(const std::string& path, const std::vector<Tensor>
     for (const auto& t : ts) f.write(reinterpret_cast<const char*>(t.data.data()), t.data.size() * sizeof(float));
 }
 
+// A minimal GGUF v3 writer: magic, version, tensor+kv counts (0 kv), per-tensor
+// info (name, dims as ne fastest-first, F32 type, blob offset), 32-align, blob.
+static void write_gguf(const std::string& path, const std::vector<Tensor>& ts) {
+    auto put = [](std::string& b, const void* p, size_t n) { b.append((const char*)p, n); };
+    auto u32 = [&](std::string& b, uint32_t v) { put(b, &v, 4); };
+    auto u64 = [&](std::string& b, uint64_t v) { put(b, &v, 8); };
+    auto str = [&](std::string& b, const std::string& s) { u64(b, s.size()); b += s; };
+    std::string hdr;
+    hdr += "GGUF"; u32(hdr, 3); u64(hdr, ts.size()); u64(hdr, 0);   // 0 metadata KVs
+    uint64_t off = 0;
+    std::vector<uint64_t> offs;
+    for (const auto& t : ts) {
+        str(hdr, t.name);
+        u32(hdr, (uint32_t)t.shape.size());
+        for (auto it = t.shape.rbegin(); it != t.shape.rend(); ++it) u64(hdr, (uint64_t)*it);  // ne fastest-first
+        u32(hdr, 0);                                   // ggml type 0 = F32
+        u64(hdr, off);
+        offs.push_back(off);
+        uint64_t bytes = t.data.size() * sizeof(float);
+        off += (bytes + 31) / 32 * 32;                 // 32-align each tensor
+    }
+    while (hdr.size() % 32 != 0) hdr.push_back('\0');   // align blob start
+    std::ofstream f(path, std::ios::binary);
+    f.write(hdr.data(), hdr.size());
+    uint64_t written = 0;
+    for (size_t i = 0; i < ts.size(); ++i) {
+        while (written < offs[i]) { char z = 0; f.write(&z, 1); ++written; }
+        f.write(reinterpret_cast<const char*>(ts[i].data.data()), ts[i].data.size() * sizeof(float));
+        written += ts[i].data.size() * sizeof(float);
+    }
+}
+
+// Per-head RoPE permute (HF → interleaved), applied to q/k rows for GGUF: within
+// each head, HF row i → position 2i, i+hd/2 → 2i+1. `rows` = [Hh*hd, cols].
+static std::vector<float> permute_qk(const std::vector<float>& in, int Hh, int hdim, int cols) {
+    std::vector<float> out(in.size());
+    const int half = hdim / 2;
+    for (int h = 0; h < Hh; ++h)
+        for (int i = 0; i < half; ++i) {
+            std::memcpy(&out[((size_t)h*hdim + 2*i)  *cols], &in[((size_t)h*hdim + i)     *cols], sizeof(float)*cols);
+            std::memcpy(&out[((size_t)h*hdim + 2*i+1)*cols], &in[((size_t)h*hdim + i+half)*cols], sizeof(float)*cols);
+        }
+    return out;
+}
+
 // y[M,N] = x[M,K] · Wᵀ  (HF weight W is [N,K] = [out,in]).
 static std::vector<float> linear(const std::vector<float>& x, int M, int K,
                                  const std::vector<float>& W, int N) {
@@ -93,9 +138,9 @@ static void hf_rope(std::vector<float>& q, int M, int Hh) {
 }
 static float siluf(float x) { return x / (1.0f + std::exp(-x)); }
 
-// Run the whole round-trip for one head configuration (tied vs untied output).
-static void run_case(bool tied) {
-    std::mt19937 rng(tied ? 321 : 123);
+// Run the whole round-trip for one head config + file format (safetensors/gguf).
+static void run_case(bool tied, bool gguf) {
+    std::mt19937 rng((tied ? 321 : 123) + (gguf ? 1000 : 0));
     std::normal_distribution<float> nd(0.0f, 0.08f);
     auto rand_t = [&](std::vector<int64_t> shape) {
         int64_t n = 1; for (auto d : shape) n *= d;
@@ -103,28 +148,48 @@ static void run_case(bool tied) {
         return v;
     };
 
-    // ── generate HF-layout weights ──────────────────────────────────────────
-    std::vector<Tensor> ts;
-    auto emb   = rand_t({V, D});                         ts.push_back({"model.embed_tokens.weight", {V, D}, emb});
-    auto nrm   = rand_t({D});                            ts.push_back({"model.norm.weight", {D}, nrm});
-    auto lmh   = tied ? emb : rand_t({V, D});            // tied → output projection == embedding
-    if (!tied) ts.push_back({"lm_head.weight", {V, D}, lmh});
+    // ── generate raw HF-layout weights (the reference forward uses these) ────
+    auto emb = rand_t({V, D});
+    auto nrm = rand_t({D});
+    auto lmh = tied ? emb : rand_t({V, D});              // tied → output projection == embedding
     struct LW { std::vector<float> ln1, q, k, v, o, ln2, gate, up, down; };
     std::vector<LW> lw(Ln);
     for (int l = 0; l < Ln; ++l) {
-        std::string hp = "model.layers." + std::to_string(l) + ".";
-        lw[l].ln1  = rand_t({D});                        ts.push_back({hp+"input_layernorm.weight", {D}, lw[l].ln1});
-        lw[l].q    = rand_t({Hn*hd, D});                 ts.push_back({hp+"self_attn.q_proj.weight", {Hn*hd, D}, lw[l].q});
-        lw[l].k    = rand_t({NKV*hd, D});                ts.push_back({hp+"self_attn.k_proj.weight", {NKV*hd, D}, lw[l].k});
-        lw[l].v    = rand_t({NKV*hd, D});                ts.push_back({hp+"self_attn.v_proj.weight", {NKV*hd, D}, lw[l].v});
-        lw[l].o    = rand_t({D, Hn*hd});                 ts.push_back({hp+"self_attn.o_proj.weight", {D, Hn*hd}, lw[l].o});
-        lw[l].ln2  = rand_t({D});                        ts.push_back({hp+"post_attention_layernorm.weight", {D}, lw[l].ln2});
-        lw[l].gate = rand_t({Ff, D});                    ts.push_back({hp+"mlp.gate_proj.weight", {Ff, D}, lw[l].gate});
-        lw[l].up   = rand_t({Ff, D});                    ts.push_back({hp+"mlp.up_proj.weight", {Ff, D}, lw[l].up});
-        lw[l].down = rand_t({D, Ff});                    ts.push_back({hp+"mlp.down_proj.weight", {D, Ff}, lw[l].down});
+        lw[l].ln1  = rand_t({D});
+        lw[l].q    = rand_t({Hn*hd, D});
+        lw[l].k    = rand_t({NKV*hd, D});
+        lw[l].v    = rand_t({NKV*hd, D});
+        lw[l].o    = rand_t({D, Hn*hd});
+        lw[l].ln2  = rand_t({D});
+        lw[l].gate = rand_t({Ff, D});
+        lw[l].up   = rand_t({Ff, D});
+        lw[l].down = rand_t({D, Ff});
     }
-    const std::string path = std::string("/tmp/vgre_hf_llama_test") + (tied ? "_tied" : "") + ".safetensors";
-    write_safetensors(path, ts);
+
+    // ── serialize in the chosen format ──────────────────────────────────────
+    // GGUF stores q/k already RoPE-permuted (interleaved) with llama.cpp names;
+    // safetensors stores raw HF layout/names. Everything else is identical.
+    std::vector<Tensor> ts;
+    auto Q = [&](const std::vector<float>& w) { return gguf ? permute_qk(w, Hn, hd, D) : w; };
+    auto K = [&](const std::vector<float>& w) { return gguf ? permute_qk(w, NKV, hd, D) : w; };
+    ts.push_back({gguf ? "token_embd.weight" : "model.embed_tokens.weight", {V, D}, emb});
+    ts.push_back({gguf ? "output_norm.weight" : "model.norm.weight", {D}, nrm});
+    if (!tied) ts.push_back({gguf ? "output.weight" : "lm_head.weight", {V, D}, lmh});
+    for (int l = 0; l < Ln; ++l) {
+        std::string p = gguf ? ("blk." + std::to_string(l) + ".") : ("model.layers." + std::to_string(l) + ".");
+        auto nm = [&](const char* hf, const char* gg) { return p + (gguf ? gg : hf); };
+        ts.push_back({nm("input_layernorm.weight","attn_norm.weight"), {D}, lw[l].ln1});
+        ts.push_back({nm("self_attn.q_proj.weight","attn_q.weight"), {Hn*hd, D}, Q(lw[l].q)});
+        ts.push_back({nm("self_attn.k_proj.weight","attn_k.weight"), {NKV*hd, D}, K(lw[l].k)});
+        ts.push_back({nm("self_attn.v_proj.weight","attn_v.weight"), {NKV*hd, D}, lw[l].v});
+        ts.push_back({nm("self_attn.o_proj.weight","attn_output.weight"), {D, Hn*hd}, lw[l].o});
+        ts.push_back({nm("post_attention_layernorm.weight","ffn_norm.weight"), {D}, lw[l].ln2});
+        ts.push_back({nm("mlp.gate_proj.weight","ffn_gate.weight"), {Ff, D}, lw[l].gate});
+        ts.push_back({nm("mlp.up_proj.weight","ffn_up.weight"), {Ff, D}, lw[l].up});
+        ts.push_back({nm("mlp.down_proj.weight","ffn_down.weight"), {D, Ff}, lw[l].down});
+    }
+    const std::string path = std::string("/tmp/vgre_llama_test") + (tied ? "_tied" : "") + (gguf ? ".gguf" : ".safetensors");
+    if (gguf) write_gguf(path, ts); else write_safetensors(path, ts);
 
     // ── reference HF forward for a token sequence ───────────────────────────
     std::vector<int> ids(T); for (int t = 0; t < T; ++t) ids[t] = (t * 7 + 3) % V;
@@ -171,18 +236,22 @@ static void run_case(bool tied) {
     Config cfg; cfg.vocab=V; cfg.n_layer=Ln; cfg.d_model=D; cfg.n_head=Hn; cfg.d_ff=Ff;
     cfg.max_seq=64; cfg.rope_base=ROPE; cfg.norm_eps=EPS; cfg.tie_embeddings=tied;
     GPT gpt(cfg, /*seed=*/1);
-    CHECK(model::load_llama_safetensors(gpt, path), "load_llama_safetensors succeeds");
+    bool loaded = gguf ? model::load_gguf_llama(gpt, path) : model::load_llama_safetensors(gpt, path);
+    CHECK(loaded, "loader succeeds");
 
     autograd::Var out = gpt.forward(ids);                // [T, V]
     double maxErr = 0;
     for (int i = 0; i < T * V; ++i) maxErr = std::max(maxErr, (double)std::fabs(out->data[i] - refLogits[i]));
-    std::printf("HF-loader (%s) max logit error = %.3e\n", tied ? "tied" : "untied", maxErr);
-    CHECK(maxErr < 2e-3, "VGRE forward after HF load matches the HF reference");
+    std::printf("llama-loader [%s%s] max logit error = %.3e\n",
+                gguf ? "gguf" : "safetensors", tied ? ",tied" : "", maxErr);
+    CHECK(maxErr < 2e-3, "VGRE forward after load matches the HF reference");
 }
 
 int main() {
-    run_case(/*tied=*/false);   // GQA + separate lm_head
-    run_case(/*tied=*/true);    // GQA + tied embeddings (no lm_head tensor)
-    if (g_fail == 0) std::printf("PASS: HF Llama loader — transpose + RoPE permute + GQA, tied & untied\n");
+    run_case(/*tied=*/false, /*gguf=*/false);   // safetensors, GQA, separate lm_head
+    run_case(/*tied=*/true,  /*gguf=*/false);   // safetensors, GQA, tied
+    run_case(/*tied=*/false, /*gguf=*/true);    // GGUF (pre-permuted q/k), GQA, separate output
+    run_case(/*tied=*/true,  /*gguf=*/true);    // GGUF, GQA, tied
+    if (g_fail == 0) std::printf("PASS: Llama loader — safetensors + GGUF, transpose/RoPE/GQA, tied & untied\n");
     return g_fail ? 1 : 0;
 }

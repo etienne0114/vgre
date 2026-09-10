@@ -56,6 +56,17 @@ LLVM-free `libvgre_nn` with a real from-scratch TCP all-reduce, and a hardened C
 channel. Verified end-to-end on **real GPT-2 (124M)** matching Hugging Face, and on **real
 multi-process distributed training** (data-, tensor-, pipeline-parallel).
 
+**Real Llama-family checkpoints run through the optimized `libvgre_nn` GPT.**
+`load_llama_safetensors` / `load_gguf_llama` map a Hugging Face safetensors or a
+llama.cpp GGUF Llama checkpoint into the GPT — handling the `[out,in]→[in,out]`
+transpose, the HF↔VGRE RoPE convention (a per-head q/k permute for safetensors;
+GGUF already bakes it in), and grouped-query attention (KV-head replication).
+Exposed on the C ABI (`vgre_lm_load_llama`/`vgre_lm_load_gguf`) and Python
+(`LanguageModel.load_llama`/`.load_gguf`). Verified without any download: a
+self-contained HF reference forward is reproduced to ~2e-8 across
+{safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
+CPU path (batched prefill, unified int8 kernel, speculative decode).
+
 **Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite: 303/303.**
 
 The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:

@@ -92,6 +92,10 @@ VGRE_PUBLIC_API int vgre_lm_load(vgre_lm* m, const char* path);
 // grouped-query attention. Returns 1 on success, 0 on failure.
 VGRE_PUBLIC_API int vgre_lm_load_llama(vgre_lm* m, const char* path);
 
+// Load a llama.cpp GGUF checkpoint (quantized tensors dequantized to f32) into a
+// model whose dims already match it. Returns 1 on success, 0 on failure.
+VGRE_PUBLIC_API int vgre_lm_load_gguf(vgre_lm* m, const char* path);
+
 // ── BPE tokenizer ────────────────────────────────────────────────────────────
 typedef struct vgre_bpe vgre_bpe;
 

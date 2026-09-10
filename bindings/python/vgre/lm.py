@@ -65,6 +65,8 @@ def _bind() -> None:
     _lib.vgre_lm_load.restype = c.c_int
     _lib.vgre_lm_load_llama.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_load_llama.restype = c.c_int
+    _lib.vgre_lm_load_gguf.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_lm_load_gguf.restype = c.c_int
 
     _lib.vgre_cosine_lr.argtypes = [c.c_longlong, c.c_longlong, c.c_longlong, c.c_float, c.c_float]
     _lib.vgre_cosine_lr.restype = c.c_float
@@ -310,6 +312,14 @@ class LanguageModel:
         transpose, RoPE convention, and grouped-query attention."""
         if not _lib.vgre_lm_load_llama(self._h, str(path).encode("utf-8")):
             raise RuntimeError("load_llama failed (config mismatch or missing tensor)")
+
+    def load_gguf(self, path: str) -> None:
+        """Load a llama.cpp GGUF checkpoint (quantized tensors are dequantized to
+        f32). Create this model with the checkpoint's dims first. Handles the GGUF
+        transpose and grouped-query attention (GGUF already bakes in the RoPE
+        permute)."""
+        if not _lib.vgre_lm_load_gguf(self._h, str(path).encode("utf-8")):
+            raise RuntimeError("load_gguf failed (config mismatch or missing tensor)")
 
     def close(self) -> None:
         if getattr(self, "_h", None):

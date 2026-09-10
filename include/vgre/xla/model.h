@@ -187,6 +187,11 @@ bool load_checkpoint(GPT& model, const std::string& path);
 // missing tensor or shape/GQA mismatch (no partial/incorrect load).
 bool load_llama_safetensors(GPT& model, const std::string& path);
 
+// Same, from a llama.cpp GGUF checkpoint (quantized tensors are dequantized to
+// f32 by the reader). GGUF already bakes in the RoPE permute, so q/k load without
+// it; the transpose and GQA replication still apply.
+bool load_gguf_llama(GPT& model, const std::string& path);
+
 // ── Data pipeline ────────────────────────────────────────────────────────────
 // A flat token stream that yields random (input, target) windows for training;
 // targets are the inputs shifted by one (next-token prediction).
