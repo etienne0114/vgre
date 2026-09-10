@@ -32,6 +32,7 @@ VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
 VGRE_PUBLIC_API void      vgre_lm_set_int8_inference(vgre_lm* m, int on);
 VGRE_PUBLIC_API void      vgre_lm_set_int8_kv_cache(vgre_lm* m, int on);  // int8 KV cache
 VGRE_PUBLIC_API void      vgre_lm_set_int4_kv_cache(vgre_lm* m, int on);  // int4 packed KV cache
+VGRE_PUBLIC_API void      vgre_lm_set_batched_prefill(vgre_lm* m, int on); // batched prompt prefill (default on)
 
 // Free the fp32 master weights after quantizing so the resident footprint truly
 // drops to ½× (bf16) / ¼× (int8). Serve-only afterwards (training will fail).
@@ -71,6 +72,15 @@ VGRE_PUBLIC_API int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_l
                                      int n_new, float temperature, int top_k,
                                      float top_p, float repetition_penalty,
                                      unsigned seed, int* out, int max_out);
+
+// Lossless greedy speculative decoding: a prompt-lookup drafter proposes up to
+// `spec_draft_k` tokens and one batched forward verifies them, so a run of
+// correct guesses costs a single forward pass. The output is identical to
+// vgre_lm_generate with greedy sampling — only faster on repetitive output.
+// Writes up to max_out ids (prompt + generated); returns the count (or -1).
+VGRE_PUBLIC_API int vgre_lm_generate_speculative(vgre_lm* m, const int* prompt,
+                                                 int prompt_len, int n_new, int spec_draft_k,
+                                                 unsigned seed, int* out, int max_out);
 
 // Checkpoint I/O (standard safetensors). Return 1 on success, 0 on failure.
 VGRE_PUBLIC_API int vgre_lm_save(vgre_lm* m, const char* path);

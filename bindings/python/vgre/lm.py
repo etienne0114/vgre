@@ -43,6 +43,7 @@ def _bind() -> None:
     _lib.vgre_lm_set_int8_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_kv_cache.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int4_kv_cache.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_batched_prefill.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_drop_fp32_weights.argtypes = [c.c_void_p]
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
@@ -55,6 +56,9 @@ def _bind() -> None:
                                       c.c_float, c.c_int, c.c_float, c.c_float,
                                       c.c_uint, P(c.c_int), c.c_int]
     _lib.vgre_lm_generate.restype = c.c_int
+    _lib.vgre_lm_generate_speculative.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_int,
+                                                  c.c_int, c.c_uint, P(c.c_int), c.c_int]
+    _lib.vgre_lm_generate_speculative.restype = c.c_int
     _lib.vgre_lm_save.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_save.restype = c.c_int
     _lib.vgre_lm_load.argtypes = [c.c_void_p, c.c_char_p]
@@ -197,6 +201,12 @@ class LanguageModel:
         (takes precedence over int8 when both are enabled)."""
         _lib.vgre_lm_set_int4_kv_cache(self._h, 1 if on else 0)
 
+    def set_batched_prefill(self, on: bool = True) -> None:
+        """Batched prompt prefill (one GEMM per projection over the whole prompt
+        instead of a per-token GEMV) — on by default; bit-identical to sequential
+        prefill. Turn off for strict per-token determinism/debugging."""
+        _lib.vgre_lm_set_batched_prefill(self._h, 1 if on else 0)
+
     def drop_fp32_weights(self) -> None:
         """Free the fp32 master weights after enabling bf16/int8 inference, so the
         resident footprint truly drops to ½×/¼×. SERVE-ONLY afterwards (no more
@@ -265,6 +275,22 @@ class LanguageModel:
                                   float(repetition_penalty), int(seed) & 0xFFFFFFFF, out, cap)
         if n < 0:
             raise RuntimeError("generate failed")
+        return list(out[:n])
+
+    def generate_speculative(self, prompt: List[int], n_new: int = 32,
+                             draft_k: int = 8, seed: int = 0) -> List[int]:
+        """Lossless greedy speculative decoding: a prompt-lookup drafter proposes
+        up to ``draft_k`` tokens and one batched forward verifies them, so a run
+        of correct guesses costs a single forward pass. The output is identical to
+        ``generate(...)`` with greedy sampling — only faster on repetitive output.
+        """
+        cap = len(prompt) + n_new + 8
+        p = (ctypes.c_int * len(prompt))(*prompt)
+        out = (ctypes.c_int * cap)()
+        n = _lib.vgre_lm_generate_speculative(self._h, p, len(prompt), int(n_new),
+                                              int(draft_k), int(seed) & 0xFFFFFFFF, out, cap)
+        if n < 0:
+            raise RuntimeError("generate_speculative failed")
         return list(out[:n])
 
     def save(self, path: str) -> None:

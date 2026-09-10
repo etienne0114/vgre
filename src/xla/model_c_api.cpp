@@ -85,6 +85,9 @@ void vgre_lm_set_int4_kv_cache(vgre_lm* m, int on) {
 void vgre_lm_set_int8_kv_cache(vgre_lm* m, int on) {
     if (m) m->gpt->set_int8_kv_cache(on != 0);
 }
+void vgre_lm_set_batched_prefill(vgre_lm* m, int on) {
+    if (m) m->gpt->set_batched_prefill(on != 0);
+}
 
 void vgre_lm_drop_fp32_weights(vgre_lm* m) {
     if (m) try { m->gpt->drop_fp32_weights(); } LM_CATCH()
@@ -154,6 +157,20 @@ int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
         sc.repetition_penalty = repetition_penalty; sc.seed = seed;
         // KV-cached path: O(T) per token.
         std::vector<int> g = m->gpt->generate_cached(p, n_new, sc);
+        const int n = (int)std::min<size_t>(g.size(), (size_t)max_out);
+        std::memcpy(out, g.data(), sizeof(int) * (size_t)n);
+        return n;
+    } LM_CATCH(return -1)
+}
+
+int vgre_lm_generate_speculative(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
+                                 int spec_draft_k, unsigned seed, int* out, int max_out) {
+    if (!m || !prompt || prompt_len <= 0 || !out || max_out <= 0) return -1;
+    try {
+        std::vector<int> p(prompt, prompt + prompt_len);
+        model::GPT::SampleConfig sc;  // greedy (temperature 0) — spec-decode is greedy/lossless
+        sc.seed = seed;
+        std::vector<int> g = m->gpt->generate_speculative(p, n_new, spec_draft_k, sc);
         const int n = (int)std::min<size_t>(g.size(), (size_t)max_out);
         std::memcpy(out, g.data(), sizeof(int) * (size_t)n);
         return n;

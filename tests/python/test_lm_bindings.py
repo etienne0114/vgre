@@ -74,6 +74,11 @@ def main() -> int:
     print(f"[4] generated: {decoded!r}")
     assert "summer" in decoded, "greedy generation should reproduce learned text"
 
+    # Speculative decoding is lossless: identical tokens to greedy.
+    spec = lm.generate_speculative(tok.encode("Shall I compare"), n_new=12, draft_k=6)
+    assert spec == gen, "generate_speculative must equal greedy generate"
+    print("[4b] speculative decode == greedy (lossless)")
+
     ckpt = "/tmp/vgre_lm_bindings.safetensors"
     lm.save(ckpt)
     lm2 = vgre.LanguageModel(vocab=V, n_layer=2, d_model=64, n_head=4,

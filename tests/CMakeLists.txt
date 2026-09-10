@@ -924,6 +924,12 @@ target_link_libraries(test_batched_prefill PRIVATE vgre Threads::Threads)
 add_test(NAME XlaBatchedPrefill COMMAND test_batched_prefill)
 set_tests_properties(XlaBatchedPrefill PROPERTIES TIMEOUT 60)
 
+# vgre_lm C ABI: speculative decode lossless + batched-prefill toggle.
+add_executable(test_lm_c_api xla/test_lm_c_api.cpp)
+target_link_libraries(test_lm_c_api PRIVATE vgre Threads::Threads)
+add_test(NAME XlaLmCApi COMMAND test_lm_c_api)
+set_tests_properties(XlaLmCApi PROPERTIES TIMEOUT 60)
+
 # VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
 # generate + decode (all offline, embedded public-domain corpus).
 add_executable(test_lm_pipeline xla/test_lm_pipeline.cpp)
