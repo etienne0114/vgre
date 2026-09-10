@@ -13,14 +13,13 @@ name: Deploy inference server (Hugging Face Spaces)
 #      <your-username>/vgre-server).
 # Then it deploys on push; the Space serves at https://<username>-vgre-server.hf.space
 
+# NOTE: Hugging Face now requires a PRO subscription to host Gradio/Docker Spaces
+# on the free cpu-basic tier — pushing a Space returns HTTP 402 Payment Required.
+# The live card-free demo moved to Streamlit Community Cloud (see deploy/streamlit
+# + the "Publish libvgre_nn.so" workflow), so this deploy is MANUAL-ONLY: it no
+# longer runs on push (which failed every time), but stays available via the
+# Actions tab / `gh workflow run` for anyone with an HF PRO account + HF_TOKEN.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "deploy/hf/**"
-      - "bindings/python/vgre/**"
-      - "server/**"
-      - ".github/workflows/deploy-hf.yml"
   workflow_dispatch:
 
 jobs:

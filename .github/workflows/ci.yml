@@ -98,6 +98,9 @@ jobs:
     name: macos-arm64
     runs-on: macos-14
     continue-on-error: true
+    # Bound the informational job so a stuck build/test can't run to GitHub's 6-hour
+    # per-job cap and drag the whole workflow to a 6 h "cancelled" (linux is ~6 min).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -156,6 +159,11 @@ jobs:
     name: windows-x86_64
     runs-on: windows-2022
     continue-on-error: true
+    # Windows has been hanging to GitHub's 6-hour per-job cap (which then cancels
+    # the whole run). Bound it: on a hang it now bails at 75 min and — being
+    # continue-on-error — leaves the workflow's conclusion to the required linux
+    # job. Generous enough for a cold LLVM-18 build (the ~500 MB tarball is cached).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
