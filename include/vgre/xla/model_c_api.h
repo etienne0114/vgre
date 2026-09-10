@@ -22,10 +22,12 @@ VGRE_PUBLIC_API vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model,
                                         unsigned seed);
 // Grouped-query-attention variant: n_kv_head < n_head shrinks the K/V projections
 // and the KV cache (n_head/n_kv× less). n_kv_head=0 or ==n_head is plain MHA.
+// attn_bias != 0 adds a learned bias to Q/K/V projections (Qwen2-style).
 VGRE_PUBLIC_API vgre_lm* vgre_lm_create_gqa(int vocab, int n_layer, int d_model,
                                             int n_head, int n_kv_head, int d_ff,
                                             int max_seq, float dropout,
-                                            int tie_embeddings, unsigned seed);
+                                            int tie_embeddings, unsigned seed,
+                                            int attn_bias);
 VGRE_PUBLIC_API void      vgre_lm_free(vgre_lm* m);
 VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);
 

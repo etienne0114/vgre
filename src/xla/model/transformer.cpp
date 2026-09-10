@@ -63,6 +63,11 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
         L.Wk    = initParam({D, KVD}, s_attn, rng, params_);   // GQA: fewer KV heads
         L.Wv    = initParam({D, KVD}, s_attn, rng, params_);
         L.Wo    = initParam({D, D},   s_attn, rng, params_);
+        if (cfg_.attn_bias) {                                  // Q/K/V biases (Qwen2), zero-init
+            L.bq = make({D},   std::vector<float>((size_t)D, 0.0f), true); params_.push_back(L.bq);
+            L.bk = make({KVD}, std::vector<float>((size_t)KVD, 0.0f), true); params_.push_back(L.bk);
+            L.bv = make({KVD}, std::vector<float>((size_t)KVD, 0.0f), true); params_.push_back(L.bv);
+        }
         L.ln2_g = initOnes(D, params_);
         L.Wgate = initParam({D, F}, s_ff, rng, params_);
         L.Wup   = initParam({D, F}, s_ff, rng, params_);
@@ -88,10 +93,13 @@ Var GPT::forward(const std::vector<int>& ids) {
         // Pre-norm attention with RoPE on Q,K.
         Var h = rms_norm(x, L.ln1_g, cfg_.norm_eps);
         const int KVH = cfg_.kv_heads();
-        Var q = rope(matmul(h, L.Wq), H, cfg_.rope_base);
-        // GQA: project K/V with KVH heads, then expand to H heads (no-op for MHA).
-        Var k = rope(repeat_kv(matmul(h, L.Wk), KVH, H), H, cfg_.rope_base);
-        Var v = repeat_kv(matmul(h, L.Wv), KVH, H);
+        // Q/K/V projections (+ optional bias, e.g. Qwen2), then RoPE on Q/K.
+        Var pq = matmul(h, L.Wq), pk = matmul(h, L.Wk), pv = matmul(h, L.Wv);
+        if (L.bq) { pq = add(pq, L.bq); pk = add(pk, L.bk); pv = add(pv, L.bv); }
+        Var q = rope(pq, H, cfg_.rope_base);
+        // GQA: K/V have KVH heads, expanded to H heads for attention (no-op for MHA).
+        Var k = rope(repeat_kv(pk, KVH, H), H, cfg_.rope_base);
+        Var v = repeat_kv(pv, KVH, H);
         Var a = cfg_.flash_attention ? flash_attention(q, k, v, H, /*causal=*/true)
                                      : attention(q, k, v, H, /*causal=*/true);
         x = add(x, dropout(matmul(a, L.Wo), cfg_.dropout));     // residual (+dropout)
@@ -453,6 +461,10 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D);
             mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, KVD);
             mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, KVD);
+            if (Ly.bq) {                                 // Q/K/V bias (Qwen2), before RoPE
+                for (int i = 0; i < D;   ++i) q[i] += Ly.bq->data[i];
+                for (int i = 0; i < KVD; ++i) { k[i] += Ly.bk->data[i]; v[i] += Ly.bv->data[i]; }
+            }
             ropeVec(q.data(), H,   Dh, pos, invFreq.data(), rcos.data(), rsin.data());
             ropeVec(k.data(), KVH, Dh, pos, invFreq.data(), rcos.data(), rsin.data());
             if (kv4) {                                   // 4-bit packed per KV head
@@ -572,6 +584,13 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, Qb.data(), D, D);
             mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, KVD);
             mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, KVD);
+            if (Ly.bq) {                                 // Q/K/V bias (Qwen2), before RoPE
+                for (int p = 0; p < P; ++p) {
+                    float* qq = &Qb[(size_t)p * D]; float* kk = &Kb[(size_t)p * KVD]; float* vv = &Vb[(size_t)p * KVD];
+                    for (int i = 0; i < D;   ++i) qq[i] += Ly.bq->data[i];
+                    for (int i = 0; i < KVD; ++i) { kk[i] += Ly.bk->data[i]; vv[i] += Ly.bv->data[i]; }
+                }
+            }
             for (int p = 0; p < P; ++p) {
                 const int ap = startPos + p;                 // absolute position
                 ropeVec(&Qb[(size_t)p * D],   H,   Dh, ap, invFreq.data(), rcos.data(), rsin.data());
@@ -811,6 +830,9 @@ std::vector<std::pair<std::string, Var>> GPT::named_parameters() {
         out.emplace_back(pre + "Wk",    L.Wk);
         out.emplace_back(pre + "Wv",    L.Wv);
         out.emplace_back(pre + "Wo",    L.Wo);
+        if (L.bq) { out.emplace_back(pre + "bq", L.bq);
+                    out.emplace_back(pre + "bk", L.bk);
+                    out.emplace_back(pre + "bv", L.bv); }
         out.emplace_back(pre + "ln2_g", L.ln2_g);
         out.emplace_back(pre + "Wgate", L.Wgate);
         out.emplace_back(pre + "Wup",   L.Wup);

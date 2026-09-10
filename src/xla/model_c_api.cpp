@@ -52,12 +52,13 @@ extern "C" {
 
 vgre_lm* vgre_lm_create_gqa(int vocab, int n_layer, int d_model, int n_head, int n_kv_head,
                             int d_ff, int max_seq, float dropout, int tie_embeddings,
-                            unsigned seed) {
+                            unsigned seed, int attn_bias) {
     try {
         model::Config c;
         c.vocab = vocab; c.n_layer = n_layer; c.d_model = d_model;
         c.n_head = n_head; c.n_kv_head = n_kv_head; c.d_ff = d_ff; c.max_seq = max_seq;
         c.dropout = dropout; c.tie_embeddings = (tie_embeddings != 0);
+        c.attn_bias = (attn_bias != 0);
         auto h = new vgre_lm();
         h->gpt = std::make_unique<model::GPT>(c, seed);
         h->opt = std::make_unique<optim::AdamW>(h->gpt->parameters(), 3e-3f);
@@ -68,9 +69,9 @@ vgre_lm* vgre_lm_create_gqa(int vocab, int n_layer, int d_model, int n_head, int
 vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model, int n_head,
                         int d_ff, int max_seq, float dropout, int tie_embeddings,
                         unsigned seed) {
-    // n_kv_head = 0 → multi-head attention (n_kv == n_head).
+    // n_kv_head = 0 → multi-head attention (n_kv == n_head); no attention bias.
     return vgre_lm_create_gqa(vocab, n_layer, d_model, n_head, 0, d_ff, max_seq,
-                              dropout, tie_embeddings, seed);
+                              dropout, tie_embeddings, seed, /*attn_bias=*/0);
 }
 
 void vgre_lm_free(vgre_lm* m) { delete m; }

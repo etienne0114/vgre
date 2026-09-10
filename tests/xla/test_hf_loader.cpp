@@ -139,7 +139,7 @@ static void hf_rope(std::vector<float>& q, int M, int Hh) {
 static float siluf(float x) { return x / (1.0f + std::exp(-x)); }
 
 // Run the whole round-trip for one head config + file format (safetensors/gguf).
-static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
+static void run_case(bool tied, bool gguf, bool nativeGqa = false, bool bias = false) {
     std::mt19937 rng((tied ? 321 : 123) + (gguf ? 1000 : 0));
     std::normal_distribution<float> nd(0.0f, 0.08f);
     auto rand_t = [&](std::vector<int64_t> shape) {
@@ -152,7 +152,7 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
     auto emb = rand_t({V, D});
     auto nrm = rand_t({D});
     auto lmh = tied ? emb : rand_t({V, D});              // tied → output projection == embedding
-    struct LW { std::vector<float> ln1, q, k, v, o, ln2, gate, up, down; };
+    struct LW { std::vector<float> ln1, q, k, v, o, ln2, gate, up, down, bq, bk, bv; };
     std::vector<LW> lw(Ln);
     for (int l = 0; l < Ln; ++l) {
         lw[l].ln1  = rand_t({D});
@@ -164,6 +164,7 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
         lw[l].gate = rand_t({Ff, D});
         lw[l].up   = rand_t({Ff, D});
         lw[l].down = rand_t({D, Ff});
+        if (bias) { lw[l].bq = rand_t({Hn*hd}); lw[l].bk = rand_t({NKV*hd}); lw[l].bv = rand_t({NKV*hd}); }
     }
 
     // ── serialize in the chosen format ──────────────────────────────────────
@@ -187,6 +188,11 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
         ts.push_back({nm("mlp.gate_proj.weight","ffn_gate.weight"), {Ff, D}, lw[l].gate});
         ts.push_back({nm("mlp.up_proj.weight","ffn_up.weight"), {Ff, D}, lw[l].up});
         ts.push_back({nm("mlp.down_proj.weight","ffn_down.weight"), {D, Ff}, lw[l].down});
+        if (bias) {   // Qwen2-style Q/K/V bias — GGUF stores q/k bias permuted too
+            ts.push_back({nm("self_attn.q_proj.bias","attn_q.bias"), {Hn*hd},  gguf ? permute_qk(lw[l].bq, Hn, hd, 1) : lw[l].bq});
+            ts.push_back({nm("self_attn.k_proj.bias","attn_k.bias"), {NKV*hd}, gguf ? permute_qk(lw[l].bk, NKV, hd, 1) : lw[l].bk});
+            ts.push_back({nm("self_attn.v_proj.bias","attn_v.bias"), {NKV*hd}, lw[l].bv});
+        }
     }
     const std::string path = std::string("/tmp/vgre_llama_test") + (tied ? "_tied" : "") + (gguf ? ".gguf" : ".safetensors");
     if (gguf) write_gguf(path, ts); else write_safetensors(path, ts);
@@ -198,9 +204,16 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
     const int group = Hn / NKV;
     for (int l = 0; l < Ln; ++l) {
         std::vector<float> h = x; rmsnorm(h, T, D, lw[l].ln1);
-        auto q = linear(h, T, D, lw[l].q, Hn*hd);    hf_rope(q, T, Hn);
-        auto k = linear(h, T, D, lw[l].k, NKV*hd);   hf_rope(k, T, NKV);
+        auto q = linear(h, T, D, lw[l].q, Hn*hd);
+        auto k = linear(h, T, D, lw[l].k, NKV*hd);
         auto v = linear(h, T, D, lw[l].v, NKV*hd);
+        if (bias) for (int t = 0; t < T; ++t) {          // add Q/K/V bias before RoPE
+            for (int n = 0; n < Hn*hd;  ++n) q[(size_t)t*Hn*hd  + n] += lw[l].bq[n];
+            for (int n = 0; n < NKV*hd; ++n) { k[(size_t)t*NKV*hd + n] += lw[l].bk[n];
+                                               v[(size_t)t*NKV*hd + n] += lw[l].bv[n]; }
+        }
+        hf_rope(q, T, Hn);
+        hf_rope(k, T, NKV);
         std::vector<float> attn((size_t)T * Hn*hd, 0.0f);
         const float scale = 1.0f / std::sqrt((float)hd);
         for (int qh = 0; qh < Hn; ++qh) {
@@ -236,6 +249,7 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
     Config cfg; cfg.vocab=V; cfg.n_layer=Ln; cfg.d_model=D; cfg.n_head=Hn; cfg.d_ff=Ff;
     cfg.max_seq=64; cfg.rope_base=ROPE; cfg.norm_eps=EPS; cfg.tie_embeddings=tied;
     if (nativeGqa) cfg.n_kv_head = NKV;   // load GQA natively (n_kv KV heads, no replication)
+    cfg.attn_bias = bias;                 // Qwen2-style Q/K/V bias
     GPT gpt(cfg, /*seed=*/1);
     bool loaded = gguf ? model::load_gguf_llama(gpt, path) : model::load_llama_safetensors(gpt, path);
     CHECK(loaded, "loader succeeds");
@@ -246,6 +260,13 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false) {
     std::printf("llama-loader [%s%s%s] max logit error = %.3e\n",
                 gguf ? "gguf" : "safetensors", tied ? ",tied" : "", nativeGqa ? ",nativeGQA" : "", maxErr);
     CHECK(maxErr < 2e-3, "VGRE forward after load matches the HF reference");
+
+    if (bias) {   // a bias-bearing checkpoint must NOT silently load into a bias-less model
+        Config nb = cfg; nb.attn_bias = false;
+        GPT plain(nb, /*seed=*/1);
+        bool loadedNb = gguf ? model::load_gguf_llama(plain, path) : model::load_llama_safetensors(plain, path);
+        CHECK(!loadedNb, "bias checkpoint into a bias-less model fails cleanly");
+    }
 }
 
 int main() {
@@ -255,6 +276,9 @@ int main() {
     run_case(/*tied=*/true,  /*gguf=*/true);    // GGUF, GQA, tied
     run_case(/*tied=*/false, /*gguf=*/false, /*nativeGqa=*/true);  // safetensors → native n_kv (no replication)
     run_case(/*tied=*/false, /*gguf=*/true,  /*nativeGqa=*/true);  // GGUF → native n_kv
+    // Qwen2-style: GQA + Q/K/V bias, both formats.
+    run_case(/*tied=*/false, /*gguf=*/false, /*nativeGqa=*/true, /*bias=*/true);
+    run_case(/*tied=*/false, /*gguf=*/true,  /*nativeGqa=*/true, /*bias=*/true);
     if (g_fail == 0) std::printf("PASS: Llama loader — safetensors + GGUF, transpose/RoPE/GQA, tied & untied\n");
     return g_fail ? 1 : 0;
 }

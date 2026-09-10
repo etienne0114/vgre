@@ -74,6 +74,7 @@ std::vector<float> ropePermuteRows(const std::vector<float>& in, int H, int hd, 
 struct LlamaNames {
     std::string embed, norm, lmhead, prefix;
     std::string attn_norm, q, k, v, o, ffn_norm, gate, up, down;
+    std::string qb, kb, vb;   // optional Q/K/V bias suffixes (Qwen2)
 };
 
 // Reader is SafeTensors or GGUF — both expose info(name)->shape and load(name, Literal&).
@@ -119,6 +120,20 @@ bool loadLlamaCore(GPT& model, Reader& rd, const LlamaNames& nm, bool ropePermut
         if (doPermute) w = ropePermuteRows(w, targetHeads, hd, D);
         put(vgreName, transpose(w, (int64_t)targetHeads * hd, D));
     };
+    // Load a 1-D Q/K/V bias [n_ckpt*hd] into `targetHeads` heads: same GQA-expand
+    // and RoPE permute as the weight, but no transpose (it's a vector).
+    auto loadBias = [&](const std::string& hfName, const std::string& vgreName,
+                        int targetHeads, bool doPermute) {
+        int64_t R, C; auto w = loadMat(hfName, R, C);        // 1-D: R = n_ckpt*hd, C = 1
+        if (!ok) return;
+        int nkv = (int)(R / hd);
+        if (nkv <= 0 || (int64_t)nkv * hd != R || C != 1 || targetHeads % nkv != 0) {
+            VGRE_LOG_ERROR("llama_loader", "bias shape/GQA for " + hfName); ok = false; return;
+        }
+        if (targetHeads != nkv) w = expandKvHeads(w, nkv, hd, 1, targetHeads / nkv);
+        if (doPermute) w = ropePermuteRows(w, targetHeads, hd, 1);
+        put(vgreName, w);
+    };
 
     { int64_t R, C; auto w = loadMat(nm.embed, R, C);
       if (ok && (R != V || C != D)) { VGRE_LOG_ERROR("llama_loader", "embed shape"); ok = false; }
@@ -137,6 +152,18 @@ bool loadLlamaCore(GPT& model, Reader& rd, const LlamaNames& nm, bool ropePermut
         loadHeads(src(l, nm.k), vp(l, "Wk"), KVH, ropePermute);   // key:   KVH heads (RoPE)
         loadHeads(src(l, nm.v), vp(l, "Wv"), KVH, false);         // value: KVH heads (no RoPE)
         { auto w = loadMat(src(l, nm.o),    R, C); if (ok) put(vp(l, "Wo"),    transpose(w, R, C)); }
+        // Q/K/V bias (Qwen2): load iff the model was built with attn_bias; a
+        // bias-bearing checkpoint loaded into a bias-less model fails clearly.
+        const bool ckptHasBias = rd.info(src(l, nm.qb)) != nullptr;
+        if (ckptHasBias && !c.attn_bias) {
+            VGRE_LOG_ERROR("llama_loader", "checkpoint has attention bias — construct the model with attn_bias=true");
+            ok = false;
+        } else if (c.attn_bias) {
+            if (!ckptHasBias) { VGRE_LOG_ERROR("llama_loader", "attn_bias set but checkpoint has no q bias"); ok = false; }
+            else { loadBias(src(l, nm.qb), vp(l, "bq"), H,   ropePermute);
+                   loadBias(src(l, nm.kb), vp(l, "bk"), KVH, ropePermute);
+                   loadBias(src(l, nm.vb), vp(l, "bv"), KVH, false); }
+        }
         { auto w = loadMat(src(l, nm.gate), R, C); if (ok) put(vp(l, "Wgate"), transpose(w, R, C)); }
         { auto w = loadMat(src(l, nm.up),   R, C); if (ok) put(vp(l, "Wup"),   transpose(w, R, C)); }
         { auto w = loadMat(src(l, nm.down), R, C); if (ok) put(vp(l, "Wdown"), transpose(w, R, C)); }
@@ -153,7 +180,8 @@ bool load_llama_safetensors(GPT& model, const std::string& path) {
         "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight", "model.layers.",
         "input_layernorm.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight",
         "self_attn.v_proj.weight", "self_attn.o_proj.weight", "post_attention_layernorm.weight",
-        "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"};
+        "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight",
+        "self_attn.q_proj.bias", "self_attn.k_proj.bias", "self_attn.v_proj.bias"};
     return loadLlamaCore(model, *st, nm, /*ropePermute=*/true);
 }
 
@@ -165,7 +193,8 @@ bool load_gguf_llama(GPT& model, const std::string& path) {
     LlamaNames nm{
         "token_embd.weight", "output_norm.weight", "output.weight", "blk.",
         "attn_norm.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight",
-        "attn_output.weight", "ffn_norm.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight"};
+        "attn_output.weight", "ffn_norm.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+        "attn_q.bias", "attn_k.bias", "attn_v.bias"};
     return loadLlamaCore(model, *g, nm, /*ropePermute=*/false);
 }
 

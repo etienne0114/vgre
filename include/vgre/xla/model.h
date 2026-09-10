@@ -35,6 +35,7 @@ struct Config {
     float dropout   = 0.0f;      // residual dropout during training (0 = off)
     bool  tie_embeddings = false; // share the token embedding as the output projection
     bool  flash_attention = false; // O(T)-memory online-softmax attention in training forward
+    bool  attn_bias = false;      // add a learned bias to Q/K/V projections (e.g. Qwen2)
 
     int ff() const { return d_ff > 0 ? d_ff : 4 * d_model; }
     int head_dim() const { return d_model / n_head; }
@@ -144,6 +145,7 @@ private:
     struct Q8 { std::vector<int8_t> w; std::vector<float> scale; };
     struct Layer {
         Var ln1_g, Wq, Wk, Wv, Wo, ln2_g, Wgate, Wup, Wdown;
+        Var bq, bk, bv;   // optional Q/K/V projection biases (null unless attn_bias)
         // bf16 (uint16) caches of the big matmul weights, built on demand.
         std::vector<uint16_t> Wq_bf16, Wk_bf16, Wv_bf16, Wo_bf16,
                               Wgate_bf16, Wup_bf16, Wdown_bf16;
