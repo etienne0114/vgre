@@ -10,7 +10,6 @@
 #include <cstring>
 #include <random>
 #include <stdexcept>
-#include <unordered_map>
 
 // AVX2 int8→fp32 accumulate for the batched int8 prefill, dispatched at runtime
 // via __builtin_cpu_supports (scalar fallback everywhere else). Same pattern as
@@ -630,28 +629,40 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     auto argmaxV = [](const float* p, int n) { int b = 0; for (int j = 1; j < n; ++j) if (p[j] > p[b]) b = j; return b; };
     const bool greedySpec = (sc.temperature <= 0.0f) && (sc.top_k <= 0) && (sc.top_p >= 1.0f);
     if (specDraftK > 0 && greedySpec && canBatch) {
-        std::unordered_map<int, int> bigram;                 // last token → the token that followed it
-        for (size_t i = 1; i < prompt.size(); ++i) bigram[prompt[i - 1]] = prompt[i];
+        // Prompt-lookup drafter: to guess the continuation after the current
+        // token, find the most recent earlier occurrence of the last few tokens
+        // (longest context first) in the running sequence and copy what followed
+        // it. No draft model — cheap and very effective on repetitive output
+        // (code, structured text, summaries that echo the prompt).
+        auto draftLookup = [&](const std::vector<int>& seq, int room) {
+            std::vector<int> d;
+            const int S = (int)seq.size();
+            const int maxNg = std::min(3, S - 1);
+            for (int ng = maxNg; ng >= 1 && d.empty(); --ng) {
+                for (int j = S - ng - 1; j >= 0; --j) {       // most recent match first
+                    bool ok = true;
+                    for (int t = 0; t < ng; ++t)
+                        if (seq[j + t] != seq[S - ng + t]) { ok = false; break; }
+                    if (!ok) continue;
+                    for (int t = 0; t < room && j + ng + t < S; ++t) d.push_back(seq[j + ng + t]);
+                    break;
+                }
+            }
+            return d;
+        };
         int produced = 0;
         std::vector<float> Lrow, Xv;
         while (produced < n_new && pos < cfg_.max_seq) {
             // `logits` predicts position `pos`. Emit its greedy token and cache it.
             const int cur = argmaxV(logits.data(), V);
-            if (!prompt.empty()) bigram[prompt.back()] = cur;
             prompt.push_back(cur);
             decode(cur, pos++); ++produced;                  // updates `logits` to predict the new `pos`
             if (produced >= n_new || pos >= cfg_.max_seq) break;
 
-            // Draft a run by chasing the bigram map from `cur`.
-            std::vector<int> drafts;
+            // Draft the likely continuation by looking it up in the sequence.
             const int room = std::min(specDraftK, cfg_.max_seq - pos);
-            for (int i = 0, look = cur; i < room; ++i) {
-                auto it = bigram.find(look);
-                if (it == bigram.end()) break;
-                drafts.push_back(it->second);
-                look = it->second;
-            }
-            if (drafts.empty()) continue;                    // nothing to verify → next iteration
+            std::vector<int> drafts = draftLookup(prompt, room);
+            if (drafts.empty()) continue;                    // no match → next iteration
 
             // The dist predicting position `pos` (before the verify pass clobbers
             // the `logits` member via emitLogits) — the acceptance test for the
@@ -679,7 +690,6 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             // Accepted drafts: KV already correct in the cache (written by run_chunk
             // at pos..pos+acc-1) → reuse, just record + advance.
             for (int i = 0; i < acc && produced < n_new && pos < cfg_.max_seq; ++i) {
-                bigram[prompt.back()] = drafts[i];
                 prompt.push_back(drafts[i]);
                 ++pos; ++produced;
             }
