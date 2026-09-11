@@ -112,6 +112,13 @@ if(VGRE_BUILD_NN_LIB)
         target_include_directories(vgre_nn PRIVATE "${_VGRE_XLA_BLAS_INCLUDE}")
     endif()
     set_target_properties(vgre_nn PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(WIN32)
+        # Symbols are no longer __declspec(dllexport)'d in source (VGRE_PUBLIC_API
+        # is empty on Windows — see include/vgre/common/platform.h); export them
+        # from the DLL the same way vgre / vgre_cudart do, so tests and tools can
+        # link vgre_nn by name.
+        set_target_properties(vgre_nn PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    endif()
     if(NOT CMAKE_CXX_FLAGS MATCHES "fsanitize")
         set_source_files_properties(gemm/intree_gemm_f32.cpp autograd/autograd.cpp
             model/transformer.cpp PROPERTIES COMPILE_OPTIONS

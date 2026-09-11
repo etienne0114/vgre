@@ -51,14 +51,18 @@ target_link_libraries(vgre_core PRIVATE
     vgre_common
 )
 
-# Propagate SIMD compile options so the AVX streaming-memcpy / SIMD math in
-# memory/*.cpp and math/*.cpp compile with the right ISA flags. This matters on
-# clang-cl: its <immintrin.h> gates <avxintrin.h> (which declares __m256i) behind
-# __AVX__ when _MSC_VER is defined, so without /arch:AVX(2) the intrinsic TYPES
-# are never declared and __attribute__((target("avx"))) cannot recover them.
-if(VGRE_SIMD_COMPILE_OPTIONS)
-    target_compile_options(vgre_core PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
-endif()
-if(VGRE_SIMD_COMPILE_DEFS)
-    target_compile_definitions(vgre_core PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+# clang-cl only: its <immintrin.h> gates <avxintrin.h> (which declares __m256i)
+# behind __AVX__ when _MSC_VER is defined, so without /arch:AVX(2) the intrinsic
+# TYPES are never declared and __attribute__((target("avx"))) in memory/*.cpp and
+# math/*.cpp cannot recover them. GCC/Clang on Linux/macOS include the header
+# unconditionally, so they must NOT get these flags: -mfma would let the compiler
+# contract a*b+c into an FMA in the scalar reference paths, changing float
+# rounding and breaking exact-comparison tests. So this is MSVC-scoped only.
+if(MSVC)
+    if(VGRE_SIMD_COMPILE_OPTIONS)
+        target_compile_options(vgre_core PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+    endif()
+    if(VGRE_SIMD_COMPILE_DEFS)
+        target_compile_definitions(vgre_core PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+    endif()
 endif()
