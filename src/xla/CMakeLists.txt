@@ -41,6 +41,23 @@ endif()
 
 set_target_properties(vgre_xla PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# clang-cl only: the SIMD GEMM/autograd kernels (gemm/*.cpp, model/transformer.cpp)
+# select AVX2/FMA per-function via __attribute__((target(...))) and need no global
+# -march on GCC/Clang, whose <immintrin.h> declares __m256/__m256i unconditionally.
+# clang-cl's <immintrin.h> instead gates <avx*intrin.h> behind __AVX__ under
+# _MSC_VER, so those TYPES are undeclared without /arch:AVX2 and the target
+# attribute cannot recover them. Apply the ISA flags on MSVC only — GCC/Clang must
+# stay flag-free here (a global -mfma would change scalar float rounding and break
+# exact-comparison GEMM tests), matching src/core/api/runtime.
+if(MSVC)
+    if(VGRE_SIMD_COMPILE_OPTIONS)
+        target_compile_options(vgre_xla PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+    endif()
+    if(VGRE_SIMD_COMPILE_DEFS)
+        target_compile_definitions(vgre_xla PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+    endif()
+endif()
+
 # Always optimize the compute kernels, even in Debug builds. A numerical GEMM /
 # autograd path at -O0 is ~10-15× slower (the packing, accumulation and threading
 # scaffolding around the SIMD micro-kernel go unvectorized), which makes the
@@ -118,6 +135,17 @@ if(VGRE_BUILD_NN_LIB)
         # from the DLL the same way vgre / vgre_cudart do, so tests and tools can
         # link vgre_nn by name.
         set_target_properties(vgre_nn PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    endif()
+    # clang-cl only: same __AVX__-gated <immintrin.h> issue as vgre_xla — the SIMD
+    # GEMM/transformer kernels need /arch:AVX2 to see __m256/__m256i. MSVC-scoped so
+    # GCC/Clang keep the flag-free per-function target-attribute path.
+    if(MSVC)
+        if(VGRE_SIMD_COMPILE_OPTIONS)
+            target_compile_options(vgre_nn PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+        endif()
+        if(VGRE_SIMD_COMPILE_DEFS)
+            target_compile_definitions(vgre_nn PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+        endif()
     endif()
     if(NOT CMAKE_CXX_FLAGS MATCHES "fsanitize")
         set_source_files_properties(gemm/intree_gemm_f32.cpp autograd/autograd.cpp
