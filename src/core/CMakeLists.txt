@@ -15,6 +15,7 @@ add_library(vgre_core OBJECT
     event.cpp
     runtime_engine.cpp
     runtime_engine_launch.cpp
+    runtime_engine_backend.cpp  # no-LLVM backend routing (#ifndef VGRE_ENABLE_JIT)
     kv_cache.cpp
     runtime_engine_graph.cpp
     runtime_engine_graph_extended.cpp
@@ -49,3 +50,19 @@ target_link_libraries(vgre_core PRIVATE
     Threads::Threads
     vgre_common
 )
+
+# clang-cl only: its <immintrin.h> gates <avxintrin.h> (which declares __m256i)
+# behind __AVX__ when _MSC_VER is defined, so without /arch:AVX(2) the intrinsic
+# TYPES are never declared and __attribute__((target("avx"))) in memory/*.cpp and
+# math/*.cpp cannot recover them. GCC/Clang on Linux/macOS include the header
+# unconditionally, so they must NOT get these flags: -mfma would let the compiler
+# contract a*b+c into an FMA in the scalar reference paths, changing float
+# rounding and breaking exact-comparison tests. So this is MSVC-scoped only.
+if(MSVC)
+    if(VGRE_SIMD_COMPILE_OPTIONS)
+        target_compile_options(vgre_core PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+    endif()
+    if(VGRE_SIMD_COMPILE_DEFS)
+        target_compile_definitions(vgre_core PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+    endif()
+endif()

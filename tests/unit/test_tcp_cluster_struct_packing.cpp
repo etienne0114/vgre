@@ -8,9 +8,15 @@
  * memory alignment issues that cause ACCESS_VIOLATION crashes on Windows.
  */
 
-#include <iostream>
+// This test's guarantees live in asserts; keep them under the Release -DNDEBUG.
+#undef NDEBUG
 #include <cassert>
+#include <cstddef>
+#include <cstring>
+#include <iostream>
+#include <vector>
 #include "vgre/advanced/tcp_cluster.h"
+#include "vgre/advanced/tcp_cluster_protocol.h"
 #include "vgre/advanced/secure_channel.h"
 
 using namespace vgre::advanced;
@@ -61,6 +67,57 @@ void test_capability_packet_packing() {
     assert(actual_size > 0);
     
     std::cout << "[PASS] CapabilityPacket size is consistent" << std::endl;
+}
+
+// The v2 node-identity fields (platform_name/arch_name/hostname) were APPENDED,
+// so a legacy worker sends only the v1 prefix. The master must accept that
+// short payload and interoperate. This reproduces the exact receiver logic
+// (offsetof gate + min-size copy into a zero-initialized struct).
+void test_capability_packet_backward_compat() {
+    std::cout << "Testing CapabilityPacket v1/v2 backward compatibility..." << std::endl;
+
+    const size_t kV1Size = offsetof(CapabilityPacket, platform_name);
+    // v2 fields really are appended after the v1 body.
+    assert(kV1Size == offsetof(CapabilityPacket, platform_name));
+    assert(kV1Size < sizeof(CapabilityPacket));
+    assert(offsetof(CapabilityPacket, gpu_sm_count) < kV1Size);
+
+    // ── A v2 worker → v2 master: identity round-trips exactly. ──
+    CapabilityPacket sent{};
+    sent.cpu_cores = 12;
+    sent.cpu_memory = 16ull * 1024 * 1024 * 1024;
+    std::snprintf(sent.platform_name, sizeof(sent.platform_name), "macOS");
+    std::snprintf(sent.arch_name, sizeof(sent.arch_name), "arm64");
+    std::snprintf(sent.hostname, sizeof(sent.hostname), "mac-studio.local");
+
+    std::vector<uint8_t> wire(sizeof(CapabilityPacket));
+    std::memcpy(wire.data(), &sent, sizeof(CapabilityPacket));
+
+    auto parse = [&](size_t payloadSize) {
+        assert(payloadSize >= kV1Size);                 // receiver's gate
+        CapabilityPacket got{};                          // zero-init
+        size_t copyLen = std::min(payloadSize, sizeof(CapabilityPacket));
+        std::memcpy(&got, wire.data(), copyLen);
+        got.platform_name[sizeof(got.platform_name) - 1] = '\0';
+        got.hostname[sizeof(got.hostname) - 1] = '\0';
+        return got;
+    };
+
+    CapabilityPacket full = parse(sizeof(CapabilityPacket));
+    assert(full.cpu_cores == 12);
+    assert(std::strcmp(full.platform_name, "macOS") == 0);
+    assert(std::strcmp(full.arch_name, "arm64") == 0);
+    assert(std::strcmp(full.hostname, "mac-studio.local") == 0);
+
+    // ── A legacy (v1) worker → v2 master: short payload, CPU/mem still read,
+    //    identity fields safely empty (no over-read, no garbage). ──
+    CapabilityPacket legacy = parse(kV1Size);
+    assert(legacy.cpu_cores == 12);
+    assert(legacy.cpu_memory == sent.cpu_memory);
+    assert(legacy.platform_name[0] == '\0');
+    assert(legacy.hostname[0] == '\0');
+
+    std::cout << "[PASS] v1 and v2 CapabilityPacket peers interoperate" << std::endl;
 }
 
 void test_handshake_packet_packing() {
@@ -181,6 +238,7 @@ int main() {
         test_vsbp_header_packing();
         test_secure_packet_header_packing();
         test_capability_packet_packing();
+        test_capability_packet_backward_compat();
         test_handshake_packet_packing();
         test_command_packet_packing();
         test_data_packet_packing();

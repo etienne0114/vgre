@@ -1,0 +1,38 @@
+# fly.io deployment for the VGRE inference server.
+#
+# First time (once, from your machine with flyctl installed and logged in):
+#     fly apps create vgre-server          # or edit `app` below to a free name
+#     fly deploy --config fly.toml
+# After that, CI redeploys automatically on push to main when the FLY_API_TOKEN
+# repo secret is set (see .github/workflows/deploy.yml).
+#
+# Machines auto-stop when idle and auto-start on the next request, so an idle
+# server costs (almost) nothing — important on the free tier.
+
+app = "vgre-server"
+primary_region = "jnb"          # Johannesburg — closest fly region to Rwanda
+
+[build]
+  dockerfile = "server/Dockerfile"
+
+[env]
+  VGRE_PORT = "8080"
+  VGRE_DEMO_STEPS = "400"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "90s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

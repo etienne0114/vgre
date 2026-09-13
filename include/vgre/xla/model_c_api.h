@@ -20,6 +20,14 @@ VGRE_PUBLIC_API vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model,
                                         int n_head, int d_ff, int max_seq,
                                         float dropout, int tie_embeddings,
                                         unsigned seed);
+// Grouped-query-attention variant: n_kv_head < n_head shrinks the K/V projections
+// and the KV cache (n_head/n_kv× less). n_kv_head=0 or ==n_head is plain MHA.
+// attn_bias != 0 adds a learned bias to Q/K/V projections (Qwen2-style).
+VGRE_PUBLIC_API vgre_lm* vgre_lm_create_gqa(int vocab, int n_layer, int d_model,
+                                            int n_head, int n_kv_head, int d_ff,
+                                            int max_seq, float dropout,
+                                            int tie_embeddings, unsigned seed,
+                                            int attn_bias);
 VGRE_PUBLIC_API void      vgre_lm_free(vgre_lm* m);
 VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);
 
@@ -30,6 +38,9 @@ VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
 // Enable weight-only int8 inference (~4× smaller matmul weights, per-channel
 // scale, fp32 accumulation). Mutually exclusive with bf16. on=0 disables.
 VGRE_PUBLIC_API void      vgre_lm_set_int8_inference(vgre_lm* m, int on);
+VGRE_PUBLIC_API void      vgre_lm_set_int8_kv_cache(vgre_lm* m, int on);  // int8 KV cache
+VGRE_PUBLIC_API void      vgre_lm_set_int4_kv_cache(vgre_lm* m, int on);  // int4 packed KV cache
+VGRE_PUBLIC_API void      vgre_lm_set_batched_prefill(vgre_lm* m, int on); // batched prompt prefill (default on)
 
 // Free the fp32 master weights after quantizing so the resident footprint truly
 // drops to ½× (bf16) / ¼× (int8). Serve-only afterwards (training will fail).
@@ -70,9 +81,28 @@ VGRE_PUBLIC_API int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_l
                                      float top_p, float repetition_penalty,
                                      unsigned seed, int* out, int max_out);
 
+// Lossless greedy speculative decoding: a prompt-lookup drafter proposes up to
+// `spec_draft_k` tokens and one batched forward verifies them, so a run of
+// correct guesses costs a single forward pass. The output is identical to
+// vgre_lm_generate with greedy sampling — only faster on repetitive output.
+// Writes up to max_out ids (prompt + generated); returns the count (or -1).
+VGRE_PUBLIC_API int vgre_lm_generate_speculative(vgre_lm* m, const int* prompt,
+                                                 int prompt_len, int n_new, int spec_draft_k,
+                                                 unsigned seed, int* out, int max_out);
+
 // Checkpoint I/O (standard safetensors). Return 1 on success, 0 on failure.
 VGRE_PUBLIC_API int vgre_lm_save(vgre_lm* m, const char* path);
 VGRE_PUBLIC_API int vgre_lm_load(vgre_lm* m, const char* path);
+
+// Load a Hugging Face Llama-family safetensors checkpoint into a model whose
+// dims already match it (create with the checkpoint's vocab/n_layer/d_model/
+// n_head/d_ff and tie_embeddings). Handles the HF transpose, RoPE convention, and
+// grouped-query attention. Returns 1 on success, 0 on failure.
+VGRE_PUBLIC_API int vgre_lm_load_llama(vgre_lm* m, const char* path);
+
+// Load a llama.cpp GGUF checkpoint (quantized tensors dequantized to f32) into a
+// model whose dims already match it. Returns 1 on success, 0 on failure.
+VGRE_PUBLIC_API int vgre_lm_load_gguf(vgre_lm* m, const char* path);
 
 // ── BPE tokenizer ────────────────────────────────────────────────────────────
 typedef struct vgre_bpe vgre_bpe;
@@ -81,6 +111,16 @@ VGRE_PUBLIC_API vgre_bpe* vgre_bpe_create(void);
 VGRE_PUBLIC_API void      vgre_bpe_free(vgre_bpe* t);
 VGRE_PUBLIC_API void      vgre_bpe_train(vgre_bpe* t, const char* corpus, int num_merges);
 VGRE_PUBLIC_API int       vgre_bpe_vocab_size(const vgre_bpe* t);
+// Load a Hugging Face `tokenizer.json` (byte-level BPE family: GPT-2/Whisper,
+// Llama-3, Qwen, Phi, DeepSeek, …) including special tokens. After a successful
+// load, vgre_bpe_encode/decode emit/consume that model's exact ids. Returns 1
+// on success, 0 on failure (unsupported model type is a failure, not a guess).
+VGRE_PUBLIC_API int       vgre_bpe_load_hf(vgre_bpe* t, const char* tokenizer_json_path);
+// Load the two-file GPT-2 form (vocab.json + merges.txt). Returns 1/0.
+VGRE_PUBLIC_API int       vgre_bpe_load_gpt2(vgre_bpe* t, const char* vocab_json_path,
+                                             const char* merges_txt_path);
+// Id of an added/special token (e.g. "<|im_end|>") after load_hf; -1 if absent.
+VGRE_PUBLIC_API int       vgre_bpe_special_id(const vgre_bpe* t, const char* content);
 // Encode `text` to token ids; writes up to max_out ids; returns count (or -1).
 VGRE_PUBLIC_API int       vgre_bpe_encode(const vgre_bpe* t, const char* text,
                                           int* out, int max_out);

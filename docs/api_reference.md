@@ -255,7 +255,7 @@ The VGRE Dashboard uses an isolate-based background thread to poll the C API eve
 | `memoryBandwidthGbps` | MemoryManager | Measured h2d/d2h/d2d transfer bandwidth |
 | `pageFaultRate` | UVM Handler | SIGSEGV-triggered page migrations per second |
 | `uvmMap` | MemoryManager | bitset represented as `uint8_t[1024]` residency map |
-| `deviceTemperature` | AdaptiveExecutionEngine | Real-time thermal sensor reading (Linux/TPM) or calibrated heuristic |
+| `deviceTemperature` | AdaptiveExecutionEngine | `/sys/class/thermal` (Linux), IOKit SMC keys (macOS), WMI (Windows) — real sensor reads; returns an error when no sensor is available |
 | `activeKernels` | RuntimeEngine | Number of kernels currently executing in the BlockWorkerPool |
 | `kernelLaunches` | RuntimeProfiler | Cumulative kernel invocation count |
 | `totalBytesTransferred` | MemoryManager | Cumulative bytes across all memcpy operations |

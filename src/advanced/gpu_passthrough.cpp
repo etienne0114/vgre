@@ -69,10 +69,20 @@ bool GPUPassthrough::loadDriverAPI() {
 #if defined(_WIN32)
     libLoader_ = vgre::common::LibraryLoader::tryLoad({"nvcuda.dll"});
 #elif defined(__APPLE__)
-    libLoader_ = vgre::common::LibraryLoader::tryLoad({
-        "libcuda.dylib",
-        "/usr/local/cuda/lib/libcuda.dylib"
-    });
+    libLoader_ = vgre::common::LibraryLoader::tryLoad({"libcuda.dylib"});
+    if (!libLoader_.isLoaded()) {
+        std::string cudaLib;
+        for (const char* env : {"CUDA_HOME", "CUDA_PATH"}) {
+            if (const char* root = std::getenv(env)) {
+                for (const char* sub : {"/lib/libcuda.dylib", "/lib64/libcuda.dylib"}) {
+                    cudaLib = std::string(root) + sub;
+                    libLoader_ = vgre::common::LibraryLoader::tryLoad({cudaLib.c_str()});
+                    if (libLoader_.isLoaded()) break;
+                }
+            }
+            if (libLoader_.isLoaded()) break;
+        }
+    }
 #else
     libLoader_ = vgre::common::LibraryLoader::tryLoad({
         "libcuda.so.1",
@@ -81,6 +91,16 @@ bool GPUPassthrough::loadDriverAPI() {
         "/usr/local/cuda/lib/libcuda.so.1",
         "/opt/cuda/lib64/libcuda.so.1"
     });
+    if (!libLoader_.isLoaded()) {
+        std::string cudaLib;
+        if (const char* cudaHome = std::getenv("CUDA_HOME")) {
+            for (const char* sub : {"/lib64/libcuda.so.1", "/lib/libcuda.so.1"}) {
+                cudaLib = std::string(cudaHome) + sub;
+                libLoader_ = vgre::common::LibraryLoader::tryLoad({cudaLib.c_str()});
+                if (libLoader_.isLoaded()) break;
+            }
+        }
+    }
 #endif
 
     if (!libLoader_.isLoaded()) {

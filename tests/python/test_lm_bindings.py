@@ -74,6 +74,11 @@ def main() -> int:
     print(f"[4] generated: {decoded!r}")
     assert "summer" in decoded, "greedy generation should reproduce learned text"
 
+    # Speculative decoding is lossless: identical tokens to greedy.
+    spec = lm.generate_speculative(tok.encode("Shall I compare"), n_new=12, draft_k=6)
+    assert spec == gen, "generate_speculative must equal greedy generate"
+    print("[4b] speculative decode == greedy (lossless)")
+
     ckpt = "/tmp/vgre_lm_bindings.safetensors"
     lm.save(ckpt)
     lm2 = vgre.LanguageModel(vocab=V, n_layer=2, d_model=64, n_head=4,
@@ -82,6 +87,58 @@ def main() -> int:
     g2 = lm2.generate(tok.encode("Shall I compare"), n_new=12, temperature=0.0)
     assert gen == g2, "checkpoint reload must reproduce generation"
     print("[5] checkpoint round-trip OK")
+
+    # HF tokenizer.json binding (byte-level BPE family): exact ids vs the
+    # checked-in HF `tokenizers` reference, if the real fixture is present.
+    hf = os.path.expanduser("~/.vgre_cache/hf_gpt2/tokenizer.json")
+    if os.path.exists(hf):
+        import json
+        t2 = vgre.Tokenizer().load_hf(hf)
+        assert t2.vocab_size == 50257, "gpt2 vocab size via load_hf"
+        assert t2.special_id("<|endoftext|>") == 50256, "gpt2 special id"
+        with open(os.path.join(ROOT, "tests", "data",
+                               "hf_tokenizer_ref_gpt2.json")) as f:
+            ref = json.load(f)
+        for case in ref["cases"]:
+            got = t2.encode(case["text"])
+            assert got == case["ids"], f"HF id mismatch on {case['text']!r}"
+            assert t2.decode(got) == case["text"], "HF decode roundtrip"
+        print(f"[6] load_hf: {len(ref['cases'])} GPT-2 reference cases exact")
+    else:
+        print("[6] load_hf fixture absent — skipped")
+
+    # int8 KV cache: at long context the KV cache dominates memory. Storing it as
+    # int8 + a per-(position, head) absmax scale must not change greedy decoding
+    # (quantization is lossy but the perturbation is far below the argmax margin),
+    # and must cut KV bytes by 4·Dh/(Dh+4).
+    prompt = ids[:6]
+    g_fp = lm.generate(prompt, n_new=16, temperature=0.0, seed=1)
+    lm.set_int8_kv_cache(True)
+    g_q8 = lm.generate(prompt, n_new=16, temperature=0.0, seed=1)
+    D, H = 64, 4
+    Dh = D // H
+    fp_bytes, q8_bytes = 2 * 4 * D, 2 * (D + 4 * H)   # K+V per position per layer
+    print(f"[7] int8 KV cache: greedy identical={g_fp == g_q8}  "
+          f"KV bytes/pos/layer {fp_bytes} -> {q8_bytes} ({fp_bytes / q8_bytes:.2f}x)")
+    assert g_fp == g_q8, "int8 KV cache must not change greedy decoding"
+    assert q8_bytes * 3 < fp_bytes, "int8 KV must be >3x smaller"
+    lm.set_int8_kv_cache(False)
+
+    # int4 KV cache: 4-bit packed (2 codes/byte) + the same per-head scale — a
+    # further ~2x over int8. Coarser than int8, so unlike int8 it is NOT
+    # guaranteed greedy-identical; it is a memory/quality tradeoff. Verify the
+    # memory win and that quality stays high (agreement with fp near 1 here,
+    # since the argmax margins exceed the 4-bit perturbation).
+    lm.set_int4_kv_cache(True)
+    g_q4 = lm.generate(prompt, n_new=16, temperature=0.0, seed=1)
+    lm.set_int4_kv_cache(False)
+    q4_bytes = 2 * (D // 2 + 4 * H)                     # K+V per position per layer
+    agree4 = sum(int(a == b) for a, b in zip(g_q4, g_fp)) / max(1, len(g_fp))
+    print(f"[8] int4 KV cache: greedy agreement vs fp={agree4:.2f}  "
+          f"KV bytes/pos/layer {fp_bytes} -> {q4_bytes} ({fp_bytes / q4_bytes:.2f}x, "
+          f"{q8_bytes / q4_bytes:.2f}x over int8)")
+    assert q4_bytes < q8_bytes, "int4 KV must be smaller than int8"
+    assert agree4 >= 0.75, "int4 KV greedy output must stay close to fp"
 
     print("PASS — VGRE-LM Python bindings train, generate, and checkpoint")
     return 0

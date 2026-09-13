@@ -534,17 +534,22 @@ VGREResult KernelParser::parse(const std::string& name,
     outIR.usesDynamicParallelism = (source.find("cudaLaunchDevice") != std::string::npos
                                  || source.find("cudaGetParameterBuffer") != std::string::npos);
 
+#ifdef VGRE_ENABLE_JIT
     // Use ClangKernelParser for accurate instruction and memory analysis
-    // This replaces the old heuristic token-counting approach
+    // This replaces the old heuristic token-counting approach.
+    // (Guarded: ClangKernelParser is Clang-backed and only present with the JIT;
+    // the from-scratch build has no Clang, and this analysis is advisory
+    // profiling metadata — not required to compile/execute the kernel.
+    // Calling the JIT-off stub here would recurse back into KernelParser::parse.)
     ClangKernelParser clangParser;
     EnhancedKernelIR enhancedIR;
     VGREResult clangResult = clangParser.parseEnhanced(outIR.name, source, enhancedIR);
-    
+
     if (clangResult == VGREResult::SUCCESS) {
         // Use accurate AST-based analysis from ClangKernelParser
         outIR.estimatedInstructionCount = enhancedIR.instructionProfile.totalInstructions;
         outIR.estimatedMemoryAccessCount = enhancedIR.estimatedMemoryAccesses;
-        
+
         VGRE_LOG_INFO("KernelParser",
                       "Using ClangKernelParser analysis: " +
                       std::to_string(outIR.estimatedInstructionCount) + " instructions, " +
@@ -553,11 +558,12 @@ VGREResult KernelParser::parse(const std::string& name,
         // ClangKernelParser failed — this is a critical error that should not happen
         // in production. Reject the kernel rather than using unreliable heuristics.
         VGRE_LOG_ERROR("KernelParser",
-                       "ClangKernelParser failed for kernel '" + outIR.name + 
+                       "ClangKernelParser failed for kernel '" + outIR.name +
                        "' — cannot proceed without accurate instruction analysis. "
                        "Ensure Clang/LLVM is properly installed and configured.");
         return VGREResult::ERR_INVALID_VALUE;
     }
+#endif  // VGRE_ENABLE_JIT
 
     auto builtins = findBuiltinVars(body);
     VGRE_LOG_INFO("KernelParser",
@@ -606,28 +612,32 @@ size_t KernelParser::computeStructSize(const std::string& typeName,
                       "Cannot find struct definition for '" + typeName +
                       "', attempting ClangKernelParser AST-based analysis");
         
-        // Use ClangKernelParser to get accurate struct size from AST
+#ifdef VGRE_ENABLE_JIT
+        // Use ClangKernelParser to get accurate struct size from AST. Guarded:
+        // the JIT-off build has no Clang, and calling the stub here would recurse
+        // back into KernelParser::parse — fall through to the heuristic estimate.
         ClangKernelParser clangParser;
         KernelIR dummyIR;
-        
+
         // Create a dummy kernel that uses the struct to trigger AST analysis
-        std::string testSource = fullSource + "\n__global__ void __vgre_struct_test__(" + 
+        std::string testSource = fullSource + "\n__global__ void __vgre_struct_test__(" +
                                 typeName + "* ptr) { }";
-        
+
         VGREResult result = clangParser.parse("__vgre_struct_test__", testSource, dummyIR);
-        
+
         if (result == VGREResult::SUCCESS) {
             // Check if struct size was computed
             for (size_t i = 0; i < dummyIR.argTypes.size(); i++) {
                 if (dummyIR.argTypes[i] == ArgType::STRUCT && dummyIR.argSizes[i] > 0) {
                     VGRE_LOG_INFO("KernelParser",
-                                  "ClangKernelParser computed struct '" + typeName + 
+                                  "ClangKernelParser computed struct '" + typeName +
                                   "' size: " + std::to_string(dummyIR.argSizes[i]) + " bytes");
                     return dummyIR.argSizes[i];
                 }
             }
         }
-        
+#endif  // VGRE_ENABLE_JIT
+
         // If ClangKernelParser also fails, use sizeof-based estimation
         // This is more sophisticated than a hardcoded value
         size_t estimatedSize = 0;

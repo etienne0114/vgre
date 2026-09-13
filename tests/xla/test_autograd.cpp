@@ -114,6 +114,59 @@ int main() {
         });
     }
 
+    // 5b1. soft-target cross entropy: distillation loss primitive.
+    {
+        Var target = make({3, 4}, {
+            0.70f, 0.20f, 0.05f, 0.05f,
+            0.10f, 0.55f, 0.25f, 0.10f,
+            0.05f, 0.10f, 0.15f, 0.70f,
+        }, false);
+        checkGrads("soft_sce", {
+            make({3, 4}, randn(12, 31), true),
+        }, [target](const std::vector<Var>& p) {
+            return softmax_cross_entropy_soft(p[0], target);
+        });
+    }
+
+    // 5b2. batched matmul (bmm): a[B,M,K] · b[B,K,N]
+    checkGrads("bmm", {
+        make({2, 3, 4}, randn(24, 61), true),
+        make({2, 4, 3}, randn(24, 62), true),
+    }, [](const std::vector<Var>& p) {
+        Var c = bmm(p[0], p[1]);       // [2,3,3]
+        return mean(mul(c, c));
+    });
+
+    // 5c. softmax / transpose / concat
+    checkGrads("softmax", {
+        make({3, 5}, randn(15, 51), true),
+    }, [](const std::vector<Var>& p) { return mean(mul(softmax(p[0]), softmax(p[0]))); });
+    checkGrads("transpose", {
+        make({3, 4}, randn(12, 52), true),
+    }, [](const std::vector<Var>& p) {
+        return mean(mul(transpose(p[0]), transpose(p[0])));
+    });
+    checkGrads("concat", {
+        make({2, 3}, randn(6, 53), true),
+        make({2, 4}, randn(8, 54), true),
+    }, [](const std::vector<Var>& p) {
+        Var c = concat(p[0], p[1], /*axis=*/1);   // [2,7]
+        return mean(mul(c, c));
+    });
+    // rank-3 transpose (swap last two dims) + rank-3 softmax (over last dim)
+    checkGrads("transpose3d", {
+        make({2, 3, 4}, randn(24, 55), true),
+    }, [](const std::vector<Var>& p) {
+        Var t = transpose(p[0]);                  // [2,4,3]
+        return mean(mul(t, t));
+    });
+    checkGrads("softmax3d", {
+        make({2, 3, 4}, randn(24, 56), true),
+    }, [](const std::vector<Var>& p) {
+        Var s = softmax(p[0]);                     // softmax over last dim
+        return mean(mul(s, s));
+    });
+
     // 6. LayerNorm with learnable weight + bias
     checkGrads("layer_norm", {
         make({3, 5}, randn(15, 11), true),    // x
@@ -137,6 +190,16 @@ int main() {
         make({4, 6}, randn(24, 15), true),    // Q
         make({4, 6}, randn(24, 16), true),    // K
         make({4, 6}, randn(24, 17), true),    // V
+    }, [](const std::vector<Var>& p) {
+        Var o = attention(p[0], p[1], p[2], /*num_heads=*/2, /*causal=*/true);
+        return mean(mul(o, o));
+    });
+
+    // 8a2. Batched multi-head causal attention (Q,K,V [B=2,T=4,H*Dh=6], H=2)
+    checkGrads("attention(batched)", {
+        make({2, 4, 6}, randn(48, 28), true),
+        make({2, 4, 6}, randn(48, 29), true),
+        make({2, 4, 6}, randn(48, 30), true),
     }, [](const std::vector<Var>& p) {
         Var o = attention(p[0], p[1], p[2], /*num_heads=*/2, /*causal=*/true);
         return mean(mul(o, o));
@@ -213,6 +276,68 @@ int main() {
         bool ok = identity && std::abs(frac - p) < 0.03 && std::abs(mean_ratio - 1.0) < 0.05 && bwd_ok;
         std::printf("%s dropout: identity@p0=%d dropfrac=%.3f mean_ratio=%.3f bwd=%d\n",
                     ok ? "[PASS]" : "[FAIL]", (int)identity, frac, mean_ratio, (int)bwd_ok);
+        if (!ok) ++g_fail;
+    }
+
+    // 10. Gradient checkpointing: grads identical to the non-checkpointed graph.
+    {
+        Var x  = make({3, 4}, randn(12, 73), true);
+        Var W1 = make({4, 6}, randn(24, 71), true);
+        Var W2 = make({6, 4}, randn(24, 72), true);
+        // segment: z = relu(x·W1)·W2  (intermediate relu/matmul activations are
+        // what checkpointing drops + recomputes).
+        auto seg = [](const std::vector<Var>& p) {
+            return matmul(relu(matmul(p[0], p[1])), p[2]);
+        };
+        std::vector<Var> inp = {x, W1, W2};
+
+        zero_grad(inp);
+        Var z = seg(inp);
+        backward(mean(mul(z, z)));
+        std::vector<std::vector<float>> ref = {x->grad, W1->grad, W2->grad};
+
+        zero_grad(inp);
+        Var zc = checkpoint(seg, inp);
+        backward(mean(mul(zc, zc)));
+        std::vector<std::vector<float>> got = {x->grad, W1->grad, W2->grad};
+
+        double worst = 0.0;
+        for (size_t p = 0; p < ref.size(); ++p)
+            for (size_t i = 0; i < ref[p].size(); ++i)
+                worst = std::max(worst, (double)std::fabs(ref[p][i] - got[p][i]));
+        // Output value must also match.
+        double outDiff = 0.0;
+        for (size_t i = 0; i < z->data.size(); ++i)
+            outDiff = std::max(outDiff, (double)std::fabs(z->data[i] - zc->data[i]));
+        bool ok = worst < 1e-6 && outDiff < 1e-6;
+        std::printf("%s checkpoint: grad max|diff|=%.2e out max|diff|=%.2e\n",
+                    ok ? "[PASS]" : "[FAIL]", worst, outDiff);
+        if (!ok) ++g_fail;
+    }
+
+    // 11. all_reduce gradient (single-node → identity, so backward is identity).
+    checkGrads("all_reduce", {
+        make({3, 4}, randn(12, 81), true),
+    }, [](const std::vector<Var>& p) {
+        Var a = all_reduce(p[0]);
+        return mean(mul(a, a));
+    });
+
+    // 12. Tensor-parallel (row-parallel) matmul identity: each rank computes
+    //     x_shard·W_shard over its contraction shard; summing the partials (what
+    //     all_reduce does across nodes) equals the full matmul. So a layer whose
+    //     weight is sharded across nodes produces the correct full output.
+    {
+        Var x0 = make({2, 3}, randn(6, 82), true), x1 = make({2, 3}, randn(6, 83), true);
+        Var W0 = make({3, 4}, randn(12, 84), true), W1 = make({3, 4}, randn(12, 85), true);
+        Var partials = add(matmul(x0, W0), matmul(x1, W1));         // Σ_shards
+        Var full = matmul(concat(x0, x1, 1), concat(W0, W1, 0));    // unsharded
+        double d = 0.0;
+        for (size_t i = 0; i < full->data.size(); ++i)
+            d = std::max(d, (double)std::fabs(partials->data[i] - full->data[i]));
+        bool ok = d < 1e-5;
+        std::printf("%s tensor-parallel row-matmul: shard-sum vs full max|diff|=%.2e\n",
+                    ok ? "[PASS]" : "[FAIL]", d);
         if (!ok) ++g_fail;
     }
 

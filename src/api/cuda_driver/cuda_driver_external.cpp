@@ -8,6 +8,7 @@
 #include "vgre/common/logger.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -16,6 +17,8 @@
 #include "vgre/common/os_backend.h"
 #if defined(__linux__)
 #include <sys/eventfd.h>  // eventfd() — POSIX opaque FD semaphore
+#elif defined(__APPLE__)
+#include <dispatch/dispatch.h>
 #endif
 
 extern "C" {
@@ -201,6 +204,8 @@ struct CUextSem_st {
   int type = 0;
 #if defined(__linux__)
   int efd = -1;
+#elif defined(__APPLE__)
+  dispatch_semaphore_t dsem = nullptr;
 #elif defined(_WIN32)
   void *hEvent = nullptr;
 #endif
@@ -252,6 +257,9 @@ CUresult cuImportExternalSemaphore(CUexternalSemaphore *extSemOut,
   }
 #elif defined(_WIN32)
   s->hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+#elif defined(__APPLE__)
+  s->dsem = dispatch_semaphore_create(0);
+  if (!s->dsem) { delete s; return CUDA_ERROR_INVALID_VALUE; }
 #endif
 
   uint64_t h = g_cuNextExtSemHandle.fetch_add(1, std::memory_order_relaxed);
@@ -272,6 +280,8 @@ CUresult cuDestroyExternalSemaphore(CUexternalSemaphore extSem) {
   if (s->efd >= 0) close(s->efd);
 #elif defined(_WIN32)
   if (s->hEvent) CloseHandle(static_cast<HANDLE>(s->hEvent));
+#elif defined(__APPLE__)
+  if (s->dsem) dispatch_release(s->dsem);
 #endif
   delete s;
   g_cuExtSems.erase(it);
@@ -297,6 +307,8 @@ CUresult cuSignalExternalSemaphoresAsync(const CUexternalSemaphore *extSems,
     }
 #elif defined(_WIN32)
     if (s->hEvent) SetEvent(static_cast<HANDLE>(s->hEvent));
+#elif defined(__APPLE__)
+    if (s->dsem) dispatch_semaphore_signal(s->dsem);
 #endif
     if (paramsArray) s->timelineValue.store(paramsArray[i].fence.value);
   }
@@ -318,7 +330,7 @@ CUresult cuWaitExternalSemaphoresAsync(const CUexternalSemaphore *extSems,
     }
     if (!s) continue;
 
-    uint64_t waitVal = paramsArray ? paramsArray[i].fence.value : 1ULL;
+    [[maybe_unused]] uint64_t waitVal = paramsArray ? paramsArray[i].fence.value : 1ULL;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
 
 #if defined(__linux__)
@@ -336,6 +348,14 @@ CUresult cuWaitExternalSemaphoresAsync(const CUexternalSemaphore *extSems,
     }
 #elif defined(_WIN32)
     if (s->hEvent) WaitForSingleObject(static_cast<HANDLE>(s->hEvent), 30000);
+#elif defined(__APPLE__)
+    if (s->dsem) {
+      while (std::chrono::steady_clock::now() < deadline) {
+        if (dispatch_semaphore_wait(s->dsem,
+                dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_MSEC)) == 0)
+          break;
+      }
+    }
 #endif
   }
   return CUDA_SUCCESS;

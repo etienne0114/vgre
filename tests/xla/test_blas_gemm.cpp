@@ -140,10 +140,18 @@ int main() {
         double naive_band_ms = std::chrono::duration<double, std::milli>(n1 - n0).count();
         double naive_full_ms = naive_band_ms * ((double)M / Mb);
 
+        // Consume Cb (and C) AFTER timing so the optimizer cannot dead-code-
+        // eliminate the naive reference loop (its result would otherwise be
+        // unused, collapsing the measurement to ~0 ms and the speedup to 0).
+        volatile float sink = 0.0f;
+        for (float v : Cb) sink += v;
+        sink += C[(size_t)(M - 1) * N + (N - 1)];
+        (void)sink;
+
         double speedup = naive_full_ms / real_ms;
         std::printf("4096^3 GEMM: real=%.1f ms, naive(est)=%.0f ms, speedup=%.1fx\n",
                     real_ms, naive_full_ms, speedup);
-        CHECK(speedup >= 10.0, "GEMM >=10x naive triple loop (milestone L2)");
+        CHECK(naive_band_ms > 0.0 && speedup >= 10.0, "GEMM >=10x naive triple loop (milestone L2)");
     }
 
     if (g_fail == 0) {

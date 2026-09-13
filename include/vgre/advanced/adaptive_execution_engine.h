@@ -64,6 +64,13 @@ public:
   void recordRealFlops(uint64_t flops);
   void recordRealMemoryAccess(uint64_t bytes);
 
+  // Kernel-launch accounting (called by RuntimeEngine around each execution):
+  // maintains the live in-flight count behind getActiveKernelCount() and the
+  // cumulative launch total behind getTotalKernelsLaunched().
+  void kernelLaunchBegin();
+  void kernelLaunchEnd();
+  uint64_t getTotalKernelsLaunched() const;
+
   // Get optimal parameters for a kernel
   int getOptimalThreadCount(const std::string &kernelName) const;
   int getOptimalVectorWidth(const std::string &kernelName) const;
@@ -134,7 +141,8 @@ private:
   double maxMemoryBandwidth_ = 64.0;
   double totalLatencyMs_ = 0.0;
   uint64_t totalExecutions_ = 0;
-  int activeKernels_ = 0;
+  std::atomic<int> activeKernels_{0};
+  std::atomic<uint64_t> totalKernelsLaunched_{0};
   std::atomic<uint64_t> realFlopsAcct_{0};
   std::atomic<uint64_t> realBytesAcct_{0};
   

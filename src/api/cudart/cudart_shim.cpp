@@ -125,6 +125,21 @@ static std::string extractPTXFromImage(const void *image, size_t sizeHint = 0) {
       }
     }
   }
+
+  // ── 5. CUDA/HIP C++ kernel source (VGRE extension) ───────────────────────
+  // Plain text containing a __global__ definition: accepted so that
+  // cuModuleLoadData / hipModuleLoadData can take kernel source directly and
+  // cuModuleGetFunction JIT-compiles it through the standard pipeline.
+  {
+    size_t textLen = strnlen(data, scanSize);
+    if (textLen >= 16) {
+      std::string text(data, textLen);
+      if (text.find("__global__") != std::string::npos) {
+        VGRE_LOG_INFO("CUDART", "Detected CUDA/HIP C++ kernel source module");
+        return text;
+      }
+    }
+  }
   return "";
 }
 

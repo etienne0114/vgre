@@ -215,6 +215,28 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
 
     on<ToggleClusterSecurity>((event, emit) {
       if (!_clusterSecuritySupported) return;
+      // Drive the real backend: vgre_cluster_set_security enables/disables the
+      // per-connection secure channel (HMAC handshake + AEAD). Returns 0 on
+      // success. Reflect the request optimistically; the next telemetry poll
+      // overwrites clusterSecurityActive from the actual securityInfo.
+      final rc = bridge.clusterSetSecurity(event.enabled);
+      if (state is TelemetryActive) {
+        final s = state as TelemetryActive;
+        emit(
+          TelemetryActive(
+            telemetry: s.telemetry.copyWith(clusterSecurityActive: event.enabled),
+            history: s.history,
+            deviceName: s.deviceName,
+            backendVersion: s.backendVersion,
+            deviceCount: s.deviceCount,
+            selectedKernelName: s.selectedKernelName,
+            lastUpdated: s.lastUpdated,
+          ),
+        );
+      }
+      if (rc != 0) {
+        debugPrint('vgre_cluster_set_security(${event.enabled}) failed: rc=$rc');
+      }
     });
 
     on<ResetCredits>((event, emit) {
@@ -370,6 +392,39 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
         final logs = bridge.getLogs();
         final clusterData = bridge.getClusterNodes();
 
+        // Live memory allocations + pools from the real MemoryManager
+        // (vgre_get_memory_info_json). Empty lists mean "nothing allocated
+        // right now", never "not wired".
+        List<MemoryAllocation> allocations = const [];
+        List<MemoryPool> memoryPools = const [];
+        try {
+          final memJson = bridge.getMemoryInfoJson();
+          if (memJson != null && memJson.isNotEmpty) {
+            final parsed = jsonDecode(memJson) as Map<String, dynamic>;
+            allocations = ((parsed['allocations'] as List?) ?? [])
+                .map((a) => MemoryAllocation(
+                      ptr: (a['ptr'] ?? '') as String,
+                      size: (a['size'] ?? 0) as int,
+                      isManaged: (a['managed'] ?? false) as bool,
+                      isResident: (a['resident'] ?? false) as bool,
+                      deviceId: (a['device'] ?? 0) as int,
+                    ))
+                .toList();
+            memoryPools = ((parsed['pools'] as List?) ?? [])
+                .map((p) => MemoryPool(
+                      id: (p['id'] ?? 0) as int,
+                      blockSize: (p['blockSize'] ?? 0) as int,
+                      totalAllocated: (p['total'] ?? 0) as int,
+                      peakAllocated: (p['peak'] ?? 0) as int,
+                      activeCount: (p['active'] ?? 0) as int,
+                      freeCount: (p['free'] ?? 0) as int,
+                    ))
+                .toList();
+          }
+        } catch (e) {
+          debugPrint('Memory info parse error: $e');
+        }
+
         SecurityInfo? securityInfo;
         try {
           final s = bridge.getSecurityInfo();
@@ -429,6 +484,11 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
             latencyMs: m['latencyMs'] as double,
             available: isAvailable,
             igpuName: m['igpuName'] as String,
+            platform: (m['platform'] ?? '') as String,
+            arch: (m['arch'] ?? '') as String,
+            hostname: (m['hostname'] ?? '') as String,
+            inFlightKernels: (m['inFlightKernels'] ?? 0) as int,
+            kernelsCompleted: (m['kernelsCompleted'] ?? 0) as int,
             totalCredits: (cred['totalCredits'] ?? 0.0) as double,
             totalDebits: (cred['totalDebits'] ?? 0.0) as double,
             balance: (cred['balance'] ?? 0.0) as double,
@@ -561,6 +621,8 @@ class TelemetryBloc extends Bloc<TelemetryEvent, TelemetryState> {
           logs: logs,
           topKernels: topKernels,
           clusterNodes: clusterNodes,
+          allocations: allocations,
+          memoryPools: memoryPools,
           securityInfo: securityInfo,
           profilerEnabled: true,
           backendVersion: versionString,

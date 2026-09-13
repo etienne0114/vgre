@@ -154,6 +154,15 @@ VGREResult TCPClusterManager::initialize(bool is_master,
   VGRE_LOG_DEBUG("TCPCluster", "initialize: enabled=true host='" + host +
       "' port=" + std::to_string(port));
 
+  // Load auth token early so UDP HMAC verification and secure handshakes work
+  // on workers that only receive VGRE_TCP_AUTH_TOKEN_FILE from the launcher.
+  if (loadAuthToken()) {
+    VGRE_LOG_DEBUG("TCPCluster", "initialize: cluster auth token loaded");
+  } else {
+    VGRE_LOG_WARN("TCPCluster",
+        "initialize: no cluster auth token configured (secure mode unavailable)");
+  }
+
   if (is_master_) {
     VGRE_LOG_DEBUG("TCPCluster", "initialize: MASTER path, creating server socket");
     server_fd_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -182,6 +191,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
       return VGREResult::ERR_IO;
     }
     VGRE_LOG_DEBUG("TCPCluster", "initialize: bind/listen OK");
+
+    // Auto-enable secure cluster when an auth token is available.
+    if (security_manager_->loadAuthToken(false)) {
+      if (security_manager_->enableSecurity(true) == VGREResult::SUCCESS) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Secure cluster channel auto-enabled (auth token configured)");
+      }
+    }
 
     const char* advAddr = vgre_get_config("VGRE_CLUSTER_ADVERTISED_ADDRESS");
     if (advAddr && advAddr[0] != '\0') {
@@ -241,6 +258,10 @@ VGREResult TCPClusterManager::initialize(bool is_master,
     // Only attempt when the caller provided a real host address.
     // An empty host means "use LAN UDP broadcast discovery only".
     if (!effectiveHost.empty() && effectiveHost != "0.0.0.0") {
+      explicit_master_connect_ = true;
+      if (loadAuthToken()) {
+        security_enabled_.store(true, std::memory_order_release);
+      }
       int tSec = getConnectTimeoutSec();
       auto sock = connectWithTimeout(effectiveHost, effectivePort, tSec);
       if (sock != vgre::common::VGRE_INVALID_SOCKET) {
@@ -257,13 +278,14 @@ VGREResult TCPClusterManager::initialize(bool is_master,
             std::to_string(tSec) + "s) — falling back to discovery");
       }
 
-      // Register master address for proactive reconnection with exponential
-      // backoff so the worker rejoins automatically after a master restart.
-      std::string masterAddr = effectiveHost + ":" + std::to_string(effectivePort);
-      bool found = false;
-      for (const auto& a : proactive_worker_addresses_)
-        if (a == masterAddr) { found = true; break; }
-      if (!found) proactive_worker_addresses_.push_back(masterAddr);
+      // The master is deliberately NOT registered for proactive reconnection.
+      // clientLoop owns the worker's single master connection AND its reconnect
+      // (see "Worker: reconnected to master" in client_loop.cpp, which retries
+      // on its own). Adding the master to the proactive list made a second loop
+      // dial it concurrently, running a competing security handshake that
+      // installed a second secure channel with a different key — desyncing the
+      // stream ("Invalid secure packet magic") and dropping the worker with
+      // ERR_IO (12). A worker only ever holds one connection to its master.
     }
 
     VGRE_LOG_DEBUG("TCPCluster", "initialize: starting data_processor_thread");

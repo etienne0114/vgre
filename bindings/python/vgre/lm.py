@@ -36,11 +36,17 @@ def _bind() -> None:
 
     _lib.vgre_lm_create.argtypes = [c.c_int] * 6 + [c.c_float, c.c_int, c.c_uint]
     _lib.vgre_lm_create.restype = c.c_void_p
+    _lib.vgre_lm_create_gqa.argtypes = [c.c_int] * 7 + [c.c_float, c.c_int, c.c_uint, c.c_int]
+    _lib.vgre_lm_create_gqa.restype = c.c_void_p
+    _lib.vgre_lm_create.restype = c.c_void_p
     _lib.vgre_lm_free.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.restype = c.c_longlong
     _lib.vgre_lm_set_bf16_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_inference.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_int8_kv_cache.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_int4_kv_cache.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_batched_prefill.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_drop_fp32_weights.argtypes = [c.c_void_p]
     _lib.vgre_lm_train_step.argtypes = [c.c_void_p, P(c.c_int), P(c.c_int), c.c_int, c.c_float]
     _lib.vgre_lm_train_step.restype = c.c_float
@@ -53,10 +59,17 @@ def _bind() -> None:
                                       c.c_float, c.c_int, c.c_float, c.c_float,
                                       c.c_uint, P(c.c_int), c.c_int]
     _lib.vgre_lm_generate.restype = c.c_int
+    _lib.vgre_lm_generate_speculative.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_int,
+                                                  c.c_int, c.c_uint, P(c.c_int), c.c_int]
+    _lib.vgre_lm_generate_speculative.restype = c.c_int
     _lib.vgre_lm_save.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_save.restype = c.c_int
     _lib.vgre_lm_load.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_load.restype = c.c_int
+    _lib.vgre_lm_load_llama.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_lm_load_llama.restype = c.c_int
+    _lib.vgre_lm_load_gguf.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_lm_load_gguf.restype = c.c_int
 
     _lib.vgre_cosine_lr.argtypes = [c.c_longlong, c.c_longlong, c.c_longlong, c.c_float, c.c_float]
     _lib.vgre_cosine_lr.restype = c.c_float
@@ -70,6 +83,12 @@ def _bind() -> None:
     _lib.vgre_bpe_encode.restype = c.c_int
     _lib.vgre_bpe_decode.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_char_p, c.c_int]
     _lib.vgre_bpe_decode.restype = c.c_int
+    _lib.vgre_bpe_load_hf.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_bpe_load_hf.restype = c.c_int
+    _lib.vgre_bpe_load_gpt2.argtypes = [c.c_void_p, c.c_char_p, c.c_char_p]
+    _lib.vgre_bpe_load_gpt2.restype = c.c_int
+    _lib.vgre_bpe_special_id.argtypes = [c.c_void_p, c.c_char_p]
+    _lib.vgre_bpe_special_id.restype = c.c_int
     _bound = True
 
 
@@ -97,6 +116,25 @@ class Tokenizer:
     def train(self, corpus: str, num_merges: int = 512) -> "Tokenizer":
         _lib.vgre_bpe_train(self._h, corpus.encode("utf-8"), int(num_merges))
         return self
+
+    def load_hf(self, tokenizer_json_path: str) -> "Tokenizer":
+        """Load a Hugging Face `tokenizer.json` (byte-level BPE family: GPT-2/
+        Whisper, Llama-3, Qwen, Phi, DeepSeek, …) incl. special tokens; encode/
+        decode then emit/consume that model's exact ids."""
+        if not _lib.vgre_bpe_load_hf(self._h, tokenizer_json_path.encode("utf-8")):
+            raise RuntimeError(f"could not load tokenizer.json from {tokenizer_json_path}")
+        return self
+
+    def load_gpt2(self, vocab_json_path: str, merges_txt_path: str) -> "Tokenizer":
+        """Load the two-file GPT-2 tokenizer form (vocab.json + merges.txt)."""
+        if not _lib.vgre_bpe_load_gpt2(self._h, vocab_json_path.encode("utf-8"),
+                                       merges_txt_path.encode("utf-8")):
+            raise RuntimeError("could not load GPT-2 vocab.json/merges.txt")
+        return self
+
+    def special_id(self, content: str) -> int:
+        """Id of an added/special token (e.g. '<|im_end|>'); -1 if absent."""
+        return int(_lib.vgre_bpe_special_id(self._h, content.encode("utf-8")))
 
     @property
     def vocab_size(self) -> int:
@@ -132,12 +170,15 @@ class LanguageModel:
     def __init__(self, vocab: int, n_layer: int = 4, d_model: int = 256,
                  n_head: int = 8, d_ff: int = 0, max_seq: int = 256,
                  dropout: float = 0.0, tie_embeddings: bool = False,
-                 seed: int = 1234) -> None:
+                 seed: int = 1234, n_kv_head: int = 0, attn_bias: bool = False) -> None:
         _require()
-        self._h = _lib.vgre_lm_create(int(vocab), int(n_layer), int(d_model),
-                                      int(n_head), int(d_ff), int(max_seq),
-                                      float(dropout), 1 if tie_embeddings else 0,
-                                      int(seed) & 0xFFFFFFFF)
+        # n_kv_head < n_head → grouped-query attention (smaller K/V + KV cache);
+        # 0 or == n_head → plain multi-head attention. attn_bias → Qwen2-style
+        # Q/K/V projection biases.
+        self._h = _lib.vgre_lm_create_gqa(int(vocab), int(n_layer), int(d_model),
+                                          int(n_head), int(n_kv_head), int(d_ff), int(max_seq),
+                                          float(dropout), 1 if tie_embeddings else 0,
+                                          int(seed) & 0xFFFFFFFF, 1 if attn_bias else 0)
         if not self._h:
             raise RuntimeError("vgre_lm_create failed (check d_model % n_head == 0 and head_dim even)")
 
@@ -155,6 +196,26 @@ class LanguageModel:
         scale, fp32 accumulation). Mutually exclusive with bf16; training stays
         fp32."""
         _lib.vgre_lm_set_int8_inference(self._h, 1 if on else 0)
+
+    def set_int8_kv_cache(self, on: bool = True) -> None:
+        """Store the generation KV cache as int8 with a per-(position, head)
+        absmax scale instead of fp32 (~3.8x less KV memory at Dh=64). At long
+        context the KV cache, not the weights, dominates footprint. Affects
+        generation only; weights and activations are untouched."""
+        _lib.vgre_lm_set_int8_kv_cache(self._h, 1 if on else 0)
+
+    def set_int4_kv_cache(self, on: bool = True) -> None:
+        """Store the generation KV cache as 4-bit packed (2 codes/byte) with a
+        per-(position, head) absmax scale — ~7x less KV memory than fp32, a
+        further ~2x over int8. Coarser than int8: a memory/quality tradeoff
+        (takes precedence over int8 when both are enabled)."""
+        _lib.vgre_lm_set_int4_kv_cache(self._h, 1 if on else 0)
+
+    def set_batched_prefill(self, on: bool = True) -> None:
+        """Batched prompt prefill (one GEMM per projection over the whole prompt
+        instead of a per-token GEMV) — on by default; bit-identical to sequential
+        prefill. Turn off for strict per-token determinism/debugging."""
+        _lib.vgre_lm_set_batched_prefill(self._h, 1 if on else 0)
 
     def drop_fp32_weights(self) -> None:
         """Free the fp32 master weights after enabling bf16/int8 inference, so the
@@ -226,6 +287,22 @@ class LanguageModel:
             raise RuntimeError("generate failed")
         return list(out[:n])
 
+    def generate_speculative(self, prompt: List[int], n_new: int = 32,
+                             draft_k: int = 8, seed: int = 0) -> List[int]:
+        """Lossless greedy speculative decoding: a prompt-lookup drafter proposes
+        up to ``draft_k`` tokens and one batched forward verifies them, so a run
+        of correct guesses costs a single forward pass. The output is identical to
+        ``generate(...)`` with greedy sampling — only faster on repetitive output.
+        """
+        cap = len(prompt) + n_new + 8
+        p = (ctypes.c_int * len(prompt))(*prompt)
+        out = (ctypes.c_int * cap)()
+        n = _lib.vgre_lm_generate_speculative(self._h, p, len(prompt), int(n_new),
+                                              int(draft_k), int(seed) & 0xFFFFFFFF, out, cap)
+        if n < 0:
+            raise RuntimeError("generate_speculative failed")
+        return list(out[:n])
+
     def save(self, path: str) -> None:
         if not _lib.vgre_lm_save(self._h, str(path).encode("utf-8")):
             raise RuntimeError("save failed")
@@ -233,6 +310,22 @@ class LanguageModel:
     def load(self, path: str) -> None:
         if not _lib.vgre_lm_load(self._h, str(path).encode("utf-8")):
             raise RuntimeError("load failed (config must match the checkpoint)")
+
+    def load_llama(self, path: str) -> None:
+        """Load a Hugging Face Llama-family safetensors checkpoint. Create this
+        model with the checkpoint's dims first (vocab, n_layer, d_model, n_head,
+        d_ff, tie_embeddings — from its config.json). Handles the HF weight
+        transpose, RoPE convention, and grouped-query attention."""
+        if not _lib.vgre_lm_load_llama(self._h, str(path).encode("utf-8")):
+            raise RuntimeError("load_llama failed (config mismatch or missing tensor)")
+
+    def load_gguf(self, path: str) -> None:
+        """Load a llama.cpp GGUF checkpoint (quantized tensors are dequantized to
+        f32). Create this model with the checkpoint's dims first. Handles the GGUF
+        transpose and grouped-query attention (GGUF already bakes in the RoPE
+        permute)."""
+        if not _lib.vgre_lm_load_gguf(self._h, str(path).encode("utf-8")):
+            raise RuntimeError("load_gguf failed (config mismatch or missing tensor)")
 
     def close(self) -> None:
         if getattr(self, "_h", None):

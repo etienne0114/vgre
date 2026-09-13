@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed Clusters · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Distributed Clusters.">
+<link rel="canonical" href="https://vgre.dev/docs/cluster.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link active" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <main class="content">
+    <h1>Distributed Clusters</h1><p class="lead">Scale kernels across machines over LAN or WAN.</p><h2>Token setup</h2><p>Every node in a cluster shares one auth token. Generate it on the master and distribute it to workers:</p><pre><code class="lang-bash"># On the MASTER
+vgre-token generate            # writes ~/.vgre/token, prints SHA-256 fingerprint
+
+# On every WORKER (choose one)
+scp master:~/.vgre/token ~/.vgre/token
+vgre-token set &lt;paste-token-here&gt;
+
+# Verify both sides match
+vgre-token fingerprint</code></pre><h2>Start the cluster</h2><pre><code class="lang-bash"># Master (LAN auto-discovery on)
+vgre-start --master
+
+# Workers on the same LAN
+vgre-start --worker
+
+# Workers over WAN (explicit master address)
+vgre-start --worker --master-address 78.45.12.99:7777</code></pre><h2>WAN connectivity</h2><p>For NAT traversal, the master advertises its public address in UDP pings. <code>vgre-discover</code> finds your public IP and registers it:</p><pre><code class="lang-bash">vgre-discover --set-master     # master: publish public IP
+vgre-discover --register       # cross-LAN token-keyed discovery</code></pre><p>Channels are authenticated with HMAC-SHA256 and encrypted with AES-256-CTR; transfers use LZ4 compression. Tuning knobs are in <a href="env-vars.html">Environment Variables</a>.</p>
+    <div class="page-nav"><a href="running-cuda.html"><div class="dir">← Previous</div><div class="ttl">Running CUDA Apps</div></a><a class="next" href="dashboard.html"><div class="dir">Next →</div><div class="ttl">The Dashboard</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js"></script>
+<script src="assets/docs.js"></script>
+</body>
+</html>

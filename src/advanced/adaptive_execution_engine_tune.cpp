@@ -1,6 +1,7 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/cpu_features.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
 
@@ -185,16 +186,16 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
       bool hasFMA = false;
       
 #if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
-      // x86 GCC/Clang: __builtin_cpu_supports is an x86-only target builtin.
-      if (__builtin_cpu_supports("avx512f")) {
+      // x86 GCC/Clang: vgre::cpu::supports is an x86-only target builtin.
+      if (vgre::cpu::supports("avx512f")) {
           simdLanes = 16;
           hasFMA = true;  // AVX-512F includes FMA
-      } else if (__builtin_cpu_supports("avx2")) {
+      } else if (vgre::cpu::supports("avx2")) {
           simdLanes = 8;
-          hasFMA = __builtin_cpu_supports("fma");
-      } else if (__builtin_cpu_supports("sse4.1")) {
+          hasFMA = vgre::cpu::supports("fma");
+      } else if (vgre::cpu::supports("sse4.1")) {
           simdLanes = 4;
-          hasFMA = __builtin_cpu_supports("fma");
+          hasFMA = vgre::cpu::supports("fma");
       }
 #elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
       // ARM64 (Apple Silicon, etc.): 128-bit NEON → 4 fp32 lanes, with FMA (FMLA).
@@ -343,9 +344,9 @@ void AdaptiveExecutionEngine::runBenchmark() {
             int simdWidth = 1;
             bool hasFMA = false;
 #if defined(__GNUC__) || defined(__clang__)
-            if (__builtin_cpu_supports("avx512f")) { simdWidth = 16; hasFMA = true; }
-            else if (__builtin_cpu_supports("avx2"))    { simdWidth = 8; hasFMA = __builtin_cpu_supports("fma"); }
-            else if (__builtin_cpu_supports("sse4.1"))  { simdWidth = 4; hasFMA = __builtin_cpu_supports("fma"); }
+            if (vgre::cpu::supports("avx512f")) { simdWidth = 16; hasFMA = true; }
+            else if (vgre::cpu::supports("avx2"))    { simdWidth = 8; hasFMA = vgre::cpu::supports("fma"); }
+            else if (vgre::cpu::supports("sse4.1"))  { simdWidth = 4; hasFMA = vgre::cpu::supports("fma"); }
 #else
             // Non-GCC/Clang (e.g. MSVC): use __cpuid for feature detection
             int regs[4];
@@ -415,14 +416,23 @@ void AdaptiveExecutionEngine::runBenchmark() {
                 }
 #elif defined(__APPLE__)
                 {
-                    // macOS: try sysctlbyname for CPU frequency
                     uint64_t freq = 0;
                     size_t sz = sizeof(freq);
-                    if (sysctlbyname("hw.cpufrequency_max", &freq, &sz, nullptr, 0) == 0 && freq > 0)
+                    if (sysctlbyname("hw.perflevel0.cpufrequency_max", &freq, &sz, nullptr, 0) == 0
+                        && freq > 0) {
                         freqHz = freq;
+                    } else {
+                        sz = sizeof(freq);
+                        if (sysctlbyname("hw.cpufrequency_max", &freq, &sz, nullptr, 0) == 0
+                            && freq > 0)
+                            freqHz = freq;
+                    }
                 }
 #endif
-                if (freqHz == 0) freqHz = 2'000'000'000ULL; // 2 GHz safe default
+                // When the OS does not expose a CPU frequency (common on Apple Silicon),
+                // derive effective throughput from the timed calibration loop instead of
+                // assuming a magic GHz constant.
+                const bool freqFromOs = (freqHz > 0);
 
                 auto t0 = std::chrono::steady_clock::now();
                 for (int i = 0; i < kCalibN; ++i) {
@@ -438,23 +448,32 @@ void AdaptiveExecutionEngine::runBenchmark() {
                     VGRE_LOG_DEBUG("AdaptiveExecutionEngine", "non-x86 calib sink");
 
                 double ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
-                double cycles = ns * static_cast<double>(freqHz) / 1e9;
-                // Modern OoO CPUs (ARM Cortex-A72+, Apple M-series): measure actual IPC
-                // by timing the FMA loop and comparing to known FLOP count.
-                // Conservative: use measured IPC from timing, not hardcoded constant.
-                double measuredIPC = cycles > 0 ? (kKnownFlops / cycles) : 1.5;
-                measuredIPC = std::max(0.5, std::min(6.0, measuredIPC));  // Clamp to reasonable range
-                double estInstrs = cycles / measuredIPC;
-                double ratio = std::max(0.05, std::min(64.0,
-                    kKnownFlops / estInstrs));
+                double ratio = 1.0;
+                if (freqFromOs && ns > 0.0) {
+                    double cycles = ns * static_cast<double>(freqHz) / 1e9;
+                    double measuredIPC = cycles > 0 ? (kKnownFlops / cycles) : 1.5;
+                    measuredIPC = std::max(0.5, std::min(6.0, measuredIPC));
+                    double estInstrs = cycles / measuredIPC;
+                    ratio = std::max(0.05, std::min(64.0, kKnownFlops / estInstrs));
+                    VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                                  "non-x86 timing calibration: freq=" +
+                                  std::to_string(freqHz / 1'000'000) + " MHz, elapsed=" +
+                                  std::to_string(ns / 1e6) + " ms, measured_ipc=" +
+                                  std::to_string(measuredIPC) + ", est_instr=" +
+                                  std::to_string(static_cast<uint64_t>(estInstrs)) +
+                                  " → " + std::to_string(ratio) + " FLOP/instruction");
+                } else if (ns > 0.0) {
+                    // No OS-reported frequency (typical Apple Silicon): calibrate from
+                    // measured wall-clock throughput only — no assumed GHz constant.
+                    const double flopPerSec = kKnownFlops / (ns / 1e9);
+                    ratio = std::max(0.05, std::min(64.0, flopPerSec / 1e9));
+                    VGRE_LOG_INFO("AdaptiveExecutionEngine",
+                                  "non-x86 timing calibration (no OS freq): elapsed=" +
+                                  std::to_string(ns / 1e6) + " ms, throughput=" +
+                                  std::to_string(flopPerSec / 1e9) + " GFLOP/s → " +
+                                  std::to_string(ratio) + " FLOP/instruction");
+                }
                 flopPerInstruction_.store(ratio);
-                VGRE_LOG_INFO("AdaptiveExecutionEngine",
-                              "non-x86 timing calibration: freq=" +
-                              std::to_string(freqHz / 1'000'000) + " MHz, elapsed=" +
-                              std::to_string(ns / 1e6) + " ms, measured_ipc=" +
-                              std::to_string(measuredIPC) + ", est_instr=" +
-                              std::to_string(static_cast<uint64_t>(estInstrs)) +
-                              " → " + std::to_string(ratio) + " FLOP/instruction");
             }
 #endif
         }

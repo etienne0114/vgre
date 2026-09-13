@@ -60,8 +60,8 @@ static std::string extractLabel(const nvtxEventAttributes_t* attr) {
     return "(nvtx)";
 }
 
-// Push a range start into RuntimeProfiler as a zero-duration marker for now;
-// the full duration is recorded when the range ends.
+// Push a range start into RuntimeProfiler as a zero-duration marker; the
+// full duration is recorded by recordRangeEnd() when the range ends.
 static void recordRangeStart(const std::string& label) {
     vgre::advanced::ProfileEvent ev;
     ev.kernelName  = "[NVTX] " + label;

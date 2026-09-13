@@ -11,7 +11,10 @@ This script loads libvgre.so through ctypes and exercises:
   - Result verification
 
 Usage:
+    # Linux
     LD_LIBRARY_PATH=build python3 test_cuda_on_cpu.py
+    # macOS
+    DYLD_LIBRARY_PATH=build python3 test_cuda_on_cpu.py
 """
 
 import ctypes
@@ -25,20 +28,69 @@ except ImportError:
     sys.exit(77)  # CTest SKIP_RETURN_CODE
 
 # ---------------------------------------------------------------------------
-# Locate libvgre.so
+# Locate libvgre (platform-specific shared-library name)
 # ---------------------------------------------------------------------------
 BUILD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
-LIB_PATH = os.path.join(BUILD_DIR, "libvgre.so")
+
+def _vgre_library_path():
+    if sys.platform == "darwin":
+        candidates = ("libvgre.dylib", "libvgre.so")
+    elif sys.platform == "win32":
+        candidates = ("vgre.dll", "libvgre.dll")
+    else:
+        candidates = ("libvgre.so",)
+    for name in candidates:
+        path = os.path.join(BUILD_DIR, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(BUILD_DIR, candidates[0])
+
+LIB_PATH = _vgre_library_path()
 
 if not os.path.exists(LIB_PATH):
     print(f"ERROR: {LIB_PATH} not found. Build first: cmake --build build")
     sys.exit(1)
 
-# Prepend build dir so the dynamic linker finds libvgre_cudart.so as well.
-if BUILD_DIR not in os.environ.get("LD_LIBRARY_PATH", ""):
-    os.environ["LD_LIBRARY_PATH"] = BUILD_DIR + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+# Prepend build dir so the dynamic linker finds libvgre_cudart as well.
+_lib_env = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+if BUILD_DIR not in os.environ.get(_lib_env, ""):
+    os.environ[_lib_env] = BUILD_DIR + os.pathsep + os.environ.get(_lib_env, "")
 
 lib = ctypes.CDLL(LIB_PATH)
+
+# ---------------------------------------------------------------------------
+# ctypes signatures — REQUIRED for correctness on 64-bit ABIs.
+# Without these, ctypes assumes every argument/return is a 32-bit int, which
+# silently truncates 64-bit handles and pointers. On x86-64 that often limps
+# along by luck; on arm64 (Apple Silicon) the stricter calling convention turns
+# it into a hard segfault — e.g. the uint64 kernel_id truncated to 32 bits makes
+# vgre_launch_kernel look up a garbage kernel. Declaring the real prototypes
+# fixes it on every platform.
+# ---------------------------------------------------------------------------
+_c = ctypes
+lib.vgre_init.restype = _c.c_int; lib.vgre_init.argtypes = []
+lib.vgre_shutdown.restype = _c.c_int; lib.vgre_shutdown.argtypes = []
+lib.vgre_synchronize.restype = _c.c_int; lib.vgre_synchronize.argtypes = []
+lib.vgre_get_device_count.restype = _c.c_int
+lib.vgre_get_device_count.argtypes = [_c.POINTER(_c.c_int)]
+lib.vgre_malloc.restype = _c.c_int
+lib.vgre_malloc.argtypes = [_c.POINTER(_c.c_void_p), _c.c_size_t]
+lib.vgre_free.restype = _c.c_int
+lib.vgre_free.argtypes = [_c.c_void_p]
+lib.vgre_memcpy.restype = _c.c_int
+lib.vgre_memcpy.argtypes = [_c.c_void_p, _c.c_void_p, _c.c_size_t, _c.c_int]
+lib.vgre_register_kernel.restype = _c.c_int
+lib.vgre_register_kernel.argtypes = [_c.c_char_p, _c.c_char_p, _c.POINTER(_c.c_uint64)]
+lib.vgre_launch_kernel.restype = _c.c_int
+lib.vgre_launch_kernel.argtypes = [
+    _c.c_uint64,                 # kernel_id (64-bit handle — the arm64 crash)
+    _c.POINTER(_c.c_uint32),     # grid_dim[3]
+    _c.POINTER(_c.c_uint32),     # block_dim[3]
+    _c.POINTER(_c.c_void_p),     # args (void**)
+    _c.c_int,                    # num_args
+    _c.c_size_t,                 # shared_mem
+    _c.c_uint64,                 # stream_id
+]
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -2,6 +2,8 @@
 
 #include "vgre/xla/autograd.h"
 #include "vgre/xla/intree_gemm.h"
+#include "vgre/xla/ternary_gemm.h"
+#include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
 #include <cmath>
@@ -115,6 +117,48 @@ Var linear_tied(const Var& x, const Var& w) {
     return out;
 }
 
+// ── bmm: batched matmul a[B,M,K] · b[B,K,N] -> [B,M,N] ───────────────────────
+Var bmm(const Var& a, const Var& b) {
+    if (a->shape.size() != 3 || b->shape.size() != 3)
+        throw std::runtime_error("bmm: operands must be rank-3 [B,M,K]·[B,K,N]");
+    const int64_t B = a->shape[0], M = a->shape[1], K = a->shape[2];
+    const int64_t N = b->shape[2];
+    if (b->shape[0] != B || b->shape[1] != K)
+        throw std::runtime_error("bmm: batch/inner dim mismatch");
+
+    Var out = newNode({B, M, N}, {a, b}, anyReq({&a, &b}));
+    for (int64_t bi = 0; bi < B; ++bi)
+        intree::gemm_f32_threaded(false, false, M, N, K,
+                                  a->data.data() + bi * M * K,
+                                  b->data.data() + bi * K * N,
+                                  out->data.data() + bi * M * N);
+
+    Node* op = out.get();
+    Var A = a, Bv = b;
+    out->backward_fn = [op, A, Bv, B, M, N, K]() {
+        for (int64_t bi = 0; bi < B; ++bi) {
+            const float* dC = op->grad.data() + bi * M * N;
+            if (A->requires_grad) {
+                // dA[M,K] += dC[M,N] · Bᵀ  → gemm(F, T, M, K, N, dC, B)
+                std::vector<float> dA((size_t)M * K, 0.0f);
+                intree::gemm_f32_threaded(false, true, M, K, N, dC,
+                                          Bv->data.data() + bi * K * N, dA.data());
+                float* g = A->grad.data() + bi * M * K;
+                for (size_t i = 0; i < dA.size(); ++i) g[i] += dA[i];
+            }
+            if (Bv->requires_grad) {
+                // dB[K,N] += Aᵀ · dC[M,N]  → gemm(T, F, K, N, M, A, dC)
+                std::vector<float> dB((size_t)K * N, 0.0f);
+                intree::gemm_f32_threaded(true, false, K, N, M,
+                                          A->data.data() + bi * M * K, dC, dB.data());
+                float* g = Bv->grad.data() + bi * K * N;
+                for (size_t i = 0; i < dB.size(); ++i) g[i] += dB[i];
+            }
+        }
+    };
+    return out;
+}
+
 // ── add: same-shape, or 1-D bias [N] broadcast over rows of a[M,N] ───────────
 Var add(const Var& a, const Var& b) {
     Var out = newNode(a->shape, {a, b}, anyReq({&a, &b}));
@@ -177,6 +221,35 @@ Var relu(const Var& x) {
     out->backward_fn = [op, X, n]() {
         if (X->requires_grad)
             for (int64_t i = 0; i < n; ++i) X->grad[i] += (X->data[i] > 0.0f) ? op->grad[i] : 0.0f;
+    };
+    return out;
+}
+
+Var exp_(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    for (int64_t i = 0; i < n; ++i) out->data[i] = std::exp(x->data[i]);
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {                 // d/dx e^x = e^x = out
+        if (X->requires_grad)
+            for (int64_t i = 0; i < n; ++i) X->grad[i] += op->grad[i] * op->data[i];
+    };
+    return out;
+}
+
+Var softplus(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    const int64_t n = x->size();
+    // Numerically-stable log(1+e^x) = max(x,0) + log1p(e^-|x|).
+    for (int64_t i = 0; i < n; ++i) {
+        const float v = x->data[i];
+        out->data[i] = std::max(v, 0.0f) + std::log1p(std::exp(-std::fabs(v)));
+    }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, n]() {                 // d/dx softplus = sigmoid(x)
+        if (X->requires_grad)
+            for (int64_t i = 0; i < n; ++i)
+                X->grad[i] += op->grad[i] * (1.0f / (1.0f + std::exp(-X->data[i])));
     };
     return out;
 }
@@ -250,11 +323,13 @@ Var tanh_(const Var& x) {
 
 // ── RMSNorm over last dim of x[M,D]; y = x / rms(x) * weight ──────────────────
 Var rms_norm(const Var& x, const Var& weight, float eps) {
-    if (x->shape.size() != 2) throw std::runtime_error("rms_norm: x must be [M,D]");
-    const int64_t M = x->shape[0], D = x->shape[1];
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("rms_norm: x must be rank-2 [M,D] or rank-3 [B,T,D]");
+    const int64_t D = x->shape.back();          // normalize over the last dim
+    const int64_t M = x->size() / D;            // leading dims fold into rows
     if (weight->shape.size() != 1 || weight->shape[0] != D)
         throw std::runtime_error("rms_norm: weight must be [D]");
-    Var out = newNode({M, D}, {x, weight}, anyReq({&x, &weight}));
+    Var out = newNode(x->shape, {x, weight}, anyReq({&x, &weight}));
     std::vector<float> inv(M);  // 1/rms per row
     for (int64_t i = 0; i < M; ++i) {
         float ss = 0.0f;
@@ -289,12 +364,14 @@ Var rms_norm(const Var& x, const Var& weight, float eps) {
 
 // ── LayerNorm over last dim of x[M,D]; y = (x-µ)/√(σ²+eps) * w + b ────────────
 Var layer_norm(const Var& x, const Var& weight, const Var& bias, float eps) {
-    if (x->shape.size() != 2) throw std::runtime_error("layer_norm: x must be [M,D]");
-    const int64_t M = x->shape[0], D = x->shape[1];
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("layer_norm: x must be rank-2 [M,D] or rank-3 [B,T,D]");
+    const int64_t D = x->shape.back();
+    const int64_t M = x->size() / D;
     if (weight->shape.size() != 1 || weight->shape[0] != D ||
         bias->shape.size() != 1 || bias->shape[0] != D)
         throw std::runtime_error("layer_norm: weight/bias must be [D]");
-    Var out = newNode({M, D}, {x, weight, bias}, anyReq({&x, &weight, &bias}));
+    Var out = newNode(x->shape, {x, weight, bias}, anyReq({&x, &weight, &bias}));
     std::vector<float> mu(M), inv(M);                  // mean, 1/√(var+eps) per row
     std::vector<float> xhat((size_t)M * D);            // normalized, cached
     for (int64_t i = 0; i < M; ++i) {
@@ -336,31 +413,37 @@ Var layer_norm(const Var& x, const Var& weight, const Var& bias, float eps) {
     return out;
 }
 
-// ── RoPE on x[T, H*Dh]: rotate dim-pairs by angle (pos · base^(-2i/Dh)) ───────
+// ── RoPE on x[T,H*Dh] or [B,T,H*Dh]: rotate dim-pairs by angle pos·base^(-2i/Dh)
 Var rope(const Var& x, int num_heads, float base) {
-    if (x->shape.size() != 2) throw std::runtime_error("rope: x must be [T, H*Dh]");
-    const int64_t T = x->shape[0], D = x->shape[1];
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("rope: x must be [T,H*Dh] or [B,T,H*Dh]");
+    const bool batched = x->shape.size() == 3;
+    const int64_t B = batched ? x->shape[0] : 1;
+    const int64_t T = x->shape[batched ? 1 : 0];
+    const int64_t D = x->shape[batched ? 2 : 1];
     const int64_t Dh = D / num_heads;
     if (Dh * num_heads != D || (Dh & 1)) throw std::runtime_error("rope: bad head_dim");
-    Var out = newNode({T, D}, {x}, x->requires_grad);
+    Var out = newNode(x->shape, {x}, x->requires_grad);
     const int64_t half = Dh / 2;
-    for (int64_t t = 0; t < T; ++t)
-        for (int h = 0; h < num_heads; ++h) {
-            const int64_t off = t * D + (int64_t)h * Dh;
-            for (int64_t i = 0; i < half; ++i) {
-                const float theta = (float)t * std::pow(base, -2.0f * (float)i / (float)Dh);
-                const float cs = std::cos(theta), sn = std::sin(theta);
-                const float a = x->data[off + 2 * i], b = x->data[off + 2 * i + 1];
-                out->data[off + 2 * i]     = a * cs - b * sn;
-                out->data[off + 2 * i + 1] = a * sn + b * cs;
-            }
-        }
-    Node* op = out.get(); Var X = x;
-    out->backward_fn = [op, X, T, D, Dh, num_heads, half, base]() {
-        if (!X->requires_grad) return;
+    for (int64_t b = 0; b < B; ++b)
         for (int64_t t = 0; t < T; ++t)
             for (int h = 0; h < num_heads; ++h) {
-                const int64_t off = t * D + (int64_t)h * Dh;
+                const int64_t off = (b * T + t) * D + (int64_t)h * Dh;
+                for (int64_t i = 0; i < half; ++i) {
+                    const float theta = (float)t * std::pow(base, -2.0f * (float)i / (float)Dh);
+                    const float cs = std::cos(theta), sn = std::sin(theta);
+                    const float a = x->data[off + 2 * i], bb = x->data[off + 2 * i + 1];
+                    out->data[off + 2 * i]     = a * cs - bb * sn;
+                    out->data[off + 2 * i + 1] = a * sn + bb * cs;
+                }
+            }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, B, T, D, Dh, num_heads, half, base]() {
+        if (!X->requires_grad) return;
+        for (int64_t b = 0; b < B; ++b)
+        for (int64_t t = 0; t < T; ++t)
+            for (int h = 0; h < num_heads; ++h) {
+                const int64_t off = (b * T + t) * D + (int64_t)h * Dh;
                 for (int64_t i = 0; i < half; ++i) {
                     const float theta = (float)t * std::pow(base, -2.0f * (float)i / (float)Dh);
                     const float cs = std::cos(theta), sn = std::sin(theta);
@@ -375,30 +458,35 @@ Var rope(const Var& x, int num_heads, float base) {
 }
 
 // ── Multi-head scaled-dot-product attention (optionally causal) ──────────────
+// Accepts rank-2 [T, H*Dh] (single sequence) or rank-3 [B, T, H*Dh] (batched);
+// the batch dim folds into an outer loop so the per-(batch,head) math is shared.
 Var attention(const Var& q, const Var& k, const Var& v, int num_heads, bool causal) {
-    if (q->shape.size() != 2 || q->shape != k->shape || q->shape != v->shape)
-        throw std::runtime_error("attention: Q/K/V must share shape [T, H*Dh]");
-    const int64_t T = q->shape[0], D = q->shape[1];
+    if ((q->shape.size() != 2 && q->shape.size() != 3) || q->shape != k->shape || q->shape != v->shape)
+        throw std::runtime_error("attention: Q/K/V must share shape [T,H*Dh] or [B,T,H*Dh]");
+    const bool batched = q->shape.size() == 3;
+    const int64_t B  = batched ? q->shape[0] : 1;
+    const int64_t T  = q->shape[batched ? 1 : 0];
+    const int64_t D  = q->shape[batched ? 2 : 1];
     const int64_t Dh = D / num_heads;
     if (Dh * num_heads != D) throw std::runtime_error("attention: bad head_dim");
     const float scale = 1.0f / std::sqrt((float)Dh);
 
-    Var out = newNode({T, D}, {q, k, v}, anyReq({&q, &k, &v}));
-    // Cache the per-head softmax probs P[h][T*T] for backward.
-    auto P = std::make_shared<std::vector<float>>((size_t)num_heads * T * T, 0.0f);
+    Var out = newNode(q->shape, {q, k, v}, anyReq({&q, &k, &v}));
+    // Per (batch,head) softmax probs cached for backward.
+    auto P = std::make_shared<std::vector<float>>((size_t)B * num_heads * T * T, 0.0f);
 
     std::vector<float> Qh(T * Dh), Kh(T * Dh), Vh(T * Dh), S(T * T), Oh(T * Dh);
+    for (int64_t b = 0; b < B; ++b)
     for (int h = 0; h < num_heads; ++h) {
-        const int64_t col = (int64_t)h * Dh;
+        const int64_t col = b * T * D + (int64_t)h * Dh;     // base offset into [B,T,D]
         for (int64_t t = 0; t < T; ++t)
             for (int64_t d = 0; d < Dh; ++d) {
-                Qh[t * Dh + d] = q->data[t * D + col + d];
-                Kh[t * Dh + d] = k->data[t * D + col + d];
-                Vh[t * Dh + d] = v->data[t * D + col + d];
+                Qh[t * Dh + d] = q->data[col + t * D + d];
+                Kh[t * Dh + d] = k->data[col + t * D + d];
+                Vh[t * Dh + d] = v->data[col + t * D + d];
             }
-        // S = scale * Qh · Khᵀ
         intree::gemm_f32_rows(false, true, T, T, Dh, Qh.data(), Kh.data(), S.data(), 0, T);
-        float* Ph = P->data() + (size_t)h * T * T;
+        float* Ph = P->data() + ((size_t)b * num_heads + h) * T * T;
         for (int64_t i = 0; i < T; ++i) {
             const int64_t lim = causal ? i : (T - 1);
             float mx = -1e30f;
@@ -407,47 +495,43 @@ Var attention(const Var& q, const Var& k, const Var& v, int num_heads, bool caus
             for (int64_t j = 0; j <= lim; ++j) { float e = std::exp(S[i * T + j] - mx); Ph[i * T + j] = e; sum += e; }
             const float invs = 1.0f / sum;
             for (int64_t j = 0; j <= lim; ++j) Ph[i * T + j] *= invs;
-            for (int64_t j = lim + 1; j < T; ++j) Ph[i * T + j] = 0.0f;  // masked
+            for (int64_t j = lim + 1; j < T; ++j) Ph[i * T + j] = 0.0f;
         }
-        // Oh = Ph · Vh
         intree::gemm_f32_rows(false, false, T, Dh, T, Ph, Vh.data(), Oh.data(), 0, T);
         for (int64_t t = 0; t < T; ++t)
-            for (int64_t d = 0; d < Dh; ++d) out->data[t * D + col + d] = Oh[t * Dh + d];
+            for (int64_t d = 0; d < Dh; ++d) out->data[col + t * D + d] = Oh[t * Dh + d];
     }
 
     Node* op = out.get(); Var Q = q, K = k, V = v;
-    out->backward_fn = [op, Q, K, V, P, T, D, Dh, num_heads, scale]() {
+    out->backward_fn = [op, Q, K, V, P, B, T, D, Dh, num_heads, scale]() {
         std::vector<float> Qh(T * Dh), Kh(T * Dh), Vh(T * Dh), dO(T * Dh);
         std::vector<float> dV(T * Dh), dP(T * T), dS(T * T), dQ(T * Dh), dK(T * Dh);
+        for (int64_t b = 0; b < B; ++b)
         for (int h = 0; h < num_heads; ++h) {
-            const int64_t col = (int64_t)h * Dh;
-            const float* Ph = P->data() + (size_t)h * T * T;
+            const int64_t col = b * T * D + (int64_t)h * Dh;
+            const float* Ph = P->data() + ((size_t)b * num_heads + h) * T * T;
             for (int64_t t = 0; t < T; ++t)
                 for (int64_t d = 0; d < Dh; ++d) {
-                    Qh[t * Dh + d] = Q->data[t * D + col + d];
-                    Kh[t * Dh + d] = K->data[t * D + col + d];
-                    Vh[t * Dh + d] = V->data[t * D + col + d];
-                    dO[t * Dh + d] = op->grad[t * D + col + d];
+                    Qh[t * Dh + d] = Q->data[col + t * D + d];
+                    Kh[t * Dh + d] = K->data[col + t * D + d];
+                    Vh[t * Dh + d] = V->data[col + t * D + d];
+                    dO[t * Dh + d] = op->grad[col + t * D + d];
                 }
-            // dV = Pᵀ · dO
             intree::gemm_f32_rows(true, false, T, Dh, T, Ph, dO.data(), dV.data(), 0, T);
-            // dP = dO · Vhᵀ
             intree::gemm_f32_rows(false, true, T, T, Dh, dO.data(), Vh.data(), dP.data(), 0, T);
-            // dS = softmax-backward(P, dP), row-wise: dS_ij = P_ij(dP_ij - Σ_k P_ik dP_ik)
             for (int64_t i = 0; i < T; ++i) {
                 float dot = 0.0f;
                 for (int64_t j = 0; j < T; ++j) dot += Ph[i * T + j] * dP[i * T + j];
                 for (int64_t j = 0; j < T; ++j)
                     dS[i * T + j] = Ph[i * T + j] * (dP[i * T + j] - dot) * scale;
             }
-            // dQ = dS · K ; dK = dSᵀ · Q  (scale already folded into dS)
             intree::gemm_f32_rows(false, false, T, Dh, T, dS.data(), Kh.data(), dQ.data(), 0, T);
             intree::gemm_f32_rows(true, false, T, Dh, T, dS.data(), Qh.data(), dK.data(), 0, T);
             for (int64_t t = 0; t < T; ++t)
                 for (int64_t d = 0; d < Dh; ++d) {
-                    if (Q->requires_grad) Q->grad[t * D + col + d] += dQ[t * Dh + d];
-                    if (K->requires_grad) K->grad[t * D + col + d] += dK[t * Dh + d];
-                    if (V->requires_grad) V->grad[t * D + col + d] += dV[t * Dh + d];
+                    if (Q->requires_grad) Q->grad[col + t * D + d] += dQ[t * Dh + d];
+                    if (K->requires_grad) K->grad[col + t * D + d] += dK[t * Dh + d];
+                    if (V->requires_grad) V->grad[col + t * D + d] += dV[t * Dh + d];
                 }
         }
     };
@@ -596,6 +680,222 @@ Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets) {
     return out;
 }
 
+// ── Fused softmax + cross-entropy over rows against soft targets[M,V] ────────
+Var softmax_cross_entropy_soft(const Var& logits, const Var& soft_targets) {
+    if (logits->shape.size() != 2) throw std::runtime_error("soft_sce: logits must be [M,V]");
+    if (soft_targets->shape != logits->shape)
+        throw std::runtime_error("soft_sce: soft target shape must match logits");
+    const int64_t M = logits->shape[0], V = logits->shape[1];
+    Var out = newNode({1}, {logits}, logits->requires_grad);
+
+    std::vector<float> probs((size_t)M * V);
+    std::vector<float> targets((size_t)M * V);
+    double loss = 0.0;
+    for (int64_t i = 0; i < M; ++i) {
+        const float* row = &logits->data[i * V];
+        float mx = row[0];
+        for (int64_t j = 1; j < V; ++j) mx = std::max(mx, row[j]);
+        float sum = 0.0f;
+        for (int64_t j = 0; j < V; ++j) {
+            const float e = std::exp(row[j] - mx);
+            probs[i * V + j] = e;
+            sum += e;
+        }
+        const float inv = 1.0f / sum;
+        for (int64_t j = 0; j < V; ++j) probs[i * V + j] *= inv;
+
+        const float* target_row = &soft_targets->data[i * V];
+        float target_sum = 0.0f;
+        for (int64_t j = 0; j < V; ++j) {
+            const float t = target_row[j];
+            if (!std::isfinite(t) || t < 0.0f)
+                throw std::runtime_error("soft_sce: soft targets must be finite and non-negative");
+            target_sum += t;
+        }
+        if (!(target_sum > 0.0f))
+            throw std::runtime_error("soft_sce: each soft-target row must have positive mass");
+        const float target_inv = 1.0f / target_sum;
+        for (int64_t j = 0; j < V; ++j) {
+            const float t = target_row[j] * target_inv;
+            targets[i * V + j] = t;
+            loss += -(double)t * std::log(std::max(probs[i * V + j], 1e-30f));
+        }
+    }
+    out->data[0] = (float)(loss / (double)M);
+
+    Node* op = out.get(); Var L = logits;
+    out->backward_fn = [op, L, probs, targets, M, V]() {
+        if (!L->requires_grad) return;
+        const float g = op->grad[0] / (float)M;
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < V; ++j)
+                L->grad[i * V + j] += g * (probs[i * V + j] - targets[i * V + j]);
+    };
+    return out;
+}
+
+Var selective_scan(const Var& a, const Var& b) {
+    // Forward linear recurrence h_t = a_t ⊙ h_{t-1} + b_t (h_{-1}=0), a,b [T,D].
+    // The D state channels are independent, so both the forward scan and the
+    // adjoint backward parallelize over D across the thread pool (each channel is
+    // a private sequential recurrence — no cross-channel sharing, bit-identical
+    // to the serial version). This is the "parallel selective scan" that makes
+    // long-sequence SSM inference/training fast on a multicore CPU.
+    if (a->shape.size() != 2 || b->shape.size() != 2 || a->shape != b->shape)
+        throw std::runtime_error("selective_scan: a and b must be equal 2-D [T,D]");
+    const int64_t T = a->shape[0], D = a->shape[1];
+    Var out = newNode({T, D}, {a, b}, a->requires_grad || b->requires_grad);
+
+    const float* ad = a->data.data();
+    const float* bd = b->data.data();
+    float* od = out->data.data();
+    auto fwd = [ad, bd, od, T, D](int64_t d) {
+        float h = 0.0f;
+        for (int64_t t = 0; t < T; ++t) {
+            h = ad[t * D + d] * h + bd[t * D + d];
+            od[t * D + d] = h;
+        }
+    };
+    // Only fan out when there is enough work to amortize the scheduling.
+    if (D * T >= 8192)
+        ThreadPool::global().parallelFor(D, std::max<int64_t>(1, 8192 / std::max<int64_t>(T, 1)), fwd);
+    else
+        for (int64_t d = 0; d < D; ++d) fwd(d);
+
+    Node* op = out.get(); Var A = a, B = b;
+    out->backward_fn = [op, A, B, T, D]() {
+        const bool ga = A->requires_grad, gb = B->requires_grad;
+        if (!ga && !gb) return;
+        // Adjoint: total grad G_t = g_t + a_{t+1}·G_{t+1} (reverse recurrence);
+        // dL/db_t = G_t; dL/da_t = G_t · h_{t-1}.
+        auto bwd = [op, &A, &B, T, D, ga, gb](int64_t d) {
+            float carry = 0.0f;                       // a_{t+1}·G_{t+1}
+            for (int64_t t = T - 1; t >= 0; --t) {
+                const float G = op->grad[t * D + d] + carry;
+                if (gb) B->grad[t * D + d] += G;
+                if (ga) {
+                    const float h_prev = (t > 0) ? op->data[(t - 1) * D + d] : 0.0f;
+                    A->grad[t * D + d] += G * h_prev;
+                }
+                carry = A->data[t * D + d] * G;
+            }
+        };
+        if (D * T >= 8192)
+            ThreadPool::global().parallelFor(D, std::max<int64_t>(1, 8192 / std::max<int64_t>(T, 1)), bwd);
+        else
+            for (int64_t d = 0; d < D; ++d) bwd(d);
+    };
+    return out;
+}
+
+Var repeat_kv(const Var& x, int n_kv_head, int n_head) {
+    // Expand grouped-query K/V heads: x is [T, n_kv*hd] → [T, n_head*hd], where
+    // each KV head's hd-block is repeated (n_head/n_kv) times contiguously so that
+    // query head qh reads KV head qh/(n_head/n_kv). Backward sums each group's
+    // grads back into the one KV head. Identity when n_kv == n_head.
+    if (x->shape.size() != 2) throw std::runtime_error("repeat_kv: x must be [T, n_kv*hd]");
+    if (n_kv_head <= 0 || n_head % n_kv_head != 0) throw std::runtime_error("repeat_kv: n_head must be a multiple of n_kv_head");
+    if (n_kv_head == n_head) return x;
+    const int64_t T = x->shape[0], KVW = x->shape[1];
+    const int hd = (int)(KVW / n_kv_head);
+    const int group = n_head / n_kv_head;
+    const int64_t OW = (int64_t)n_head * hd;
+    Var out = newNode({T, OW}, {x}, x->requires_grad);
+    for (int64_t t = 0; t < T; ++t)
+        for (int kv = 0; kv < n_kv_head; ++kv)
+            for (int rep = 0; rep < group; ++rep)
+                std::memcpy(&out->data[t * OW + (int64_t)(kv * group + rep) * hd],
+                            &x->data[t * KVW + (int64_t)kv * hd], sizeof(float) * hd);
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, T, KVW, OW, hd, n_kv_head, group]() {
+        if (!X->requires_grad) return;
+        for (int64_t t = 0; t < T; ++t)
+            for (int kv = 0; kv < n_kv_head; ++kv)
+                for (int rep = 0; rep < group; ++rep) {
+                    const float* g = &op->grad[t * OW + (int64_t)(kv * group + rep) * hd];
+                    float* d = &X->grad[t * KVW + (int64_t)kv * hd];
+                    for (int j = 0; j < hd; ++j) d[j] += g[j];
+                }
+    };
+    return out;
+}
+
+Var index_select(const Var& x, const std::vector<int>& idx) {
+    // Gather rows: out[i] = x[idx[i]]. Backward scatter-adds into x's grad.
+    if (x->shape.size() != 2) throw std::runtime_error("index_select: x must be [N,D]");
+    const int64_t N = x->shape[0], D = x->shape[1];
+    const int64_t M = (int64_t)idx.size();
+    Var out = newNode({M, D}, {x}, x->requires_grad);
+    for (int64_t i = 0; i < M; ++i) {
+        const int r = idx[i];
+        if (r < 0 || r >= N) throw std::runtime_error("index_select: index out of range");
+        std::memcpy(&out->data[i * D], &x->data[(int64_t)r * D], sizeof(float) * D);
+    }
+    Node* op = out.get(); Var X = x;
+    std::vector<int> ix = idx;
+    out->backward_fn = [op, X, ix, M, D]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i) {
+            float* dst = &X->grad[(int64_t)ix[i] * D];
+            const float* src = &op->grad[i * D];
+            for (int64_t j = 0; j < D; ++j) dst[j] += src[j];
+        }
+    };
+    return out;
+}
+
+Var index_add(int64_t rows, const Var& src, const std::vector<int>& idx) {
+    // Scatter-add: out[idx[i]] += src[i], out is [rows, D] (zeros elsewhere).
+    // Backward gathers: src->grad[i] += out->grad[idx[i]]. Dual of index_select.
+    if (src->shape.size() != 2) throw std::runtime_error("index_add: src must be [M,D]");
+    const int64_t M = src->shape[0], D = src->shape[1];
+    if ((int64_t)idx.size() != M) throw std::runtime_error("index_add: idx size != rows of src");
+    Var out = newNode({rows, D}, {src}, src->requires_grad);
+    std::fill(out->data.begin(), out->data.end(), 0.0f);
+    for (int64_t i = 0; i < M; ++i) {
+        const int r = idx[i];
+        if (r < 0 || r >= rows) throw std::runtime_error("index_add: index out of range");
+        float* dst = &out->data[(int64_t)r * D];
+        const float* s = &src->data[i * D];
+        for (int64_t j = 0; j < D; ++j) dst[j] += s[j];
+    }
+    Node* op = out.get(); Var S = src;
+    std::vector<int> ix = idx;
+    out->backward_fn = [op, S, ix, M, D]() {
+        if (!S->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i) {
+            const float* g = &op->grad[(int64_t)ix[i] * D];
+            float* dst = &S->grad[i * D];
+            for (int64_t j = 0; j < D; ++j) dst[j] += g[j];
+        }
+    };
+    return out;
+}
+
+Var ternary_quantize(const Var& w) {
+    // BitNet b1.58 straight-through ternary quantization of a 2-D weight [K,N].
+    // Forward: per-column absmean quantize to {-1,0,+1} then dequantize, using
+    // the exact same codec as the inference ternary GEMM — so a trained model's
+    // forward matches what the multiplication-free kernel computes. Backward:
+    // identity (straight-through estimator), so gradients update the fp master
+    // weight through the non-differentiable rounding.
+    if (w->shape.size() != 2)
+        throw std::runtime_error("ternary_quantize: expected a 2-D weight [K,N]");
+    const int64_t K = w->shape[0], N = w->shape[1];
+    Var out = newNode(w->shape, {w}, w->requires_grad);
+    std::vector<int8_t> codes((size_t)(K * N));
+    std::vector<float>  scale((size_t)N);
+    ternary::quantize(K, N, w->data.data(), codes.data(), scale.data());
+    ternary::dequantize(K, N, codes.data(), scale.data(), out->data.data());
+    Node* op = out.get(); Var W = w;
+    out->backward_fn = [op, W]() {
+        if (!W->requires_grad) return;
+        const int64_t n = W->size();
+        for (int64_t i = 0; i < n; ++i) W->grad[i] += op->grad[i];   // STE
+    };
+    return out;
+}
+
 Var dropout(const Var& x, float p) {
     if (p <= 0.0f) return x;                 // identity (no node added)
     if (p >= 1.0f) p = 0.999f;               // guard against div-by-zero
@@ -632,6 +932,105 @@ Var mean(const Var& x) {
         for (int64_t i = 0; i < n; ++i) X->grad[i] += g;
     };
     return out;
+}
+
+// ── softmax / transpose / concat ─────────────────────────────────────────────
+Var softmax(const Var& x) {
+    // Softmax over the LAST dim; accepts rank-2 [M,N] or rank-3 [B,M,N] (the
+    // leading dims fold into the row count M since each row of N is contiguous).
+    if (x->shape.size() != 2 && x->shape.size() != 3)
+        throw std::runtime_error("softmax: x must be rank-2 [M,N] or rank-3 [B,M,N]");
+    const int64_t N = x->shape.back();
+    const int64_t M = x->size() / N;
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    for (int64_t i = 0; i < M; ++i) {
+        const float* r = &x->data[i * N];
+        float mx = r[0]; for (int64_t j = 1; j < N; ++j) mx = std::max(mx, r[j]);
+        float s = 0.0f;
+        for (int64_t j = 0; j < N; ++j) { float e = std::exp(r[j] - mx); out->data[i * N + j] = e; s += e; }
+        const float inv = 1.0f / s;
+        for (int64_t j = 0; j < N; ++j) out->data[i * N + j] *= inv;
+    }
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X, M, N]() {
+        if (!X->requires_grad) return;
+        for (int64_t i = 0; i < M; ++i) {
+            const float* p = &op->data[i * N];
+            const float* dy = &op->grad[i * N];
+            float dot = 0.0f; for (int64_t j = 0; j < N; ++j) dot += p[j] * dy[j];
+            for (int64_t j = 0; j < N; ++j) X->grad[i * N + j] += p[j] * (dy[j] - dot);
+        }
+    };
+    return out;
+}
+
+Var transpose(const Var& x) {
+    // rank-2: [M,N] -> [N,M].  rank-3: [B,M,N] -> [B,N,M] (swap the last two dims,
+    // per batch — what batched bilinear / attention need).
+    if (x->shape.size() == 2) {
+        const int64_t M = x->shape[0], N = x->shape[1];
+        Var out = newNode({N, M}, {x}, x->requires_grad);
+        for (int64_t i = 0; i < M; ++i)
+            for (int64_t j = 0; j < N; ++j) out->data[j * M + i] = x->data[i * N + j];
+        Node* op = out.get(); Var X = x;
+        out->backward_fn = [op, X, M, N]() {
+            if (!X->requires_grad) return;
+            for (int64_t i = 0; i < M; ++i)
+                for (int64_t j = 0; j < N; ++j) X->grad[i * N + j] += op->grad[j * M + i];
+        };
+        return out;
+    }
+    if (x->shape.size() == 3) {
+        const int64_t B = x->shape[0], M = x->shape[1], N = x->shape[2];
+        Var out = newNode({B, N, M}, {x}, x->requires_grad);
+        for (int64_t b = 0; b < B; ++b)
+            for (int64_t i = 0; i < M; ++i)
+                for (int64_t j = 0; j < N; ++j)
+                    out->data[(b * N + j) * M + i] = x->data[(b * M + i) * N + j];
+        Node* op = out.get(); Var X = x;
+        out->backward_fn = [op, X, B, M, N]() {
+            if (!X->requires_grad) return;
+            for (int64_t b = 0; b < B; ++b)
+                for (int64_t i = 0; i < M; ++i)
+                    for (int64_t j = 0; j < N; ++j)
+                        X->grad[(b * M + i) * N + j] += op->grad[(b * N + j) * M + i];
+        };
+        return out;
+    }
+    throw std::runtime_error("transpose: x must be rank-2 [M,N] or rank-3 [B,M,N]");
+}
+
+Var concat(const Var& a, const Var& b, int axis) {
+    if (a->shape.size() != 2 || b->shape.size() != 2) throw std::runtime_error("concat: rank-2 only");
+    const int64_t Ma = a->shape[0], Na = a->shape[1], Mb = b->shape[0], Nb = b->shape[1];
+    if (axis == 0) {
+        if (Na != Nb) throw std::runtime_error("concat axis 0: col mismatch");
+        Var out = newNode({Ma + Mb, Na}, {a, b}, anyReq({&a, &b}));
+        std::copy(a->data.begin(), a->data.end(), out->data.begin());
+        std::copy(b->data.begin(), b->data.end(), out->data.begin() + a->data.size());
+        Node* op = out.get(); Var A = a, B = b;
+        out->backward_fn = [op, A, B]() {
+            if (A->requires_grad) for (size_t i = 0; i < A->grad.size(); ++i) A->grad[i] += op->grad[i];
+            if (B->requires_grad) for (size_t i = 0; i < B->grad.size(); ++i) B->grad[i] += op->grad[A->grad.size() + i];
+        };
+        return out;
+    } else {  // axis 1 (columns)
+        if (Ma != Mb) throw std::runtime_error("concat axis 1: row mismatch");
+        const int64_t M = Ma, N = Na + Nb;
+        Var out = newNode({M, N}, {a, b}, anyReq({&a, &b}));
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t j = 0; j < Na; ++j) out->data[i * N + j] = a->data[i * Na + j];
+            for (int64_t j = 0; j < Nb; ++j) out->data[i * N + Na + j] = b->data[i * Nb + j];
+        }
+        Node* op = out.get(); Var A = a, B = b;
+        out->backward_fn = [op, A, B, M, N, Na, Nb]() {
+            for (int64_t i = 0; i < M; ++i) {
+                if (A->requires_grad) for (int64_t j = 0; j < Na; ++j) A->grad[i * Na + j] += op->grad[i * N + j];
+                if (B->requires_grad) for (int64_t j = 0; j < Nb; ++j) B->grad[i * Nb + j] += op->grad[i * N + Na + j];
+            }
+        };
+        return out;
+    }
 }
 
 // ── Vision: conv2d (im2col + GEMM), max_pool2d, reshape ──────────────────────
@@ -914,19 +1313,43 @@ Var reshape(const Var& x, std::vector<int64_t> shape) {
     return out;
 }
 
-// ── Reverse-mode engine ──────────────────────────────────────────────────────
-void backward(const Var& loss) {
-    if (loss->size() != 1) throw std::runtime_error("backward: loss must be scalar");
+// ── Tensor/model parallelism: differentiable all-reduce ──────────────────────
+namespace {
+AllReduceHook g_all_reduce_hook = nullptr;   // injected by the runtime (cluster)
+}
+void set_all_reduce_hook(AllReduceHook fn) { g_all_reduce_hook = fn; }
 
-    // Reverse-topological order via iterative post-order DFS over parents.
+Var all_reduce(const Var& x) {
+    Var out = newNode(x->shape, {x}, x->requires_grad);
+    out->data = x->data;
+    if (g_all_reduce_hook) g_all_reduce_hook(out->data.data(), (int64_t)out->data.size());
+    // else: world=1, identity.
+    Node* op = out.get(); Var X = x;
+    out->backward_fn = [op, X]() {
+        if (!X->requires_grad) return;
+        // d(Σ_r x_r)/dx_r = 1; the summed output's grad is replicated to each rank.
+        for (size_t i = 0; i < X->grad.size(); ++i) X->grad[i] += op->grad[i];
+    };
+    return out;
+}
+
+// ── Reverse-mode engine ──────────────────────────────────────────────────────
+namespace {
+// Run backprop from `root` (its grad already seeded) in reverse-topo order.
+// Traversal does not descend into `stops` and does not call their backward_fn —
+// they are treated as the segment's leaves (gradients accumulate INTO them).
+// This backs both the full backward() (empty stops) and checkpoint's bounded
+// recompute (stops = the checkpointed segment's inputs).
+void runBackward(Node* root, const std::unordered_set<Node*>& stops) {
     std::vector<Node*> order;
     std::unordered_set<Node*> visited;
     std::vector<std::pair<Node*, size_t>> stack;
-    stack.push_back({loss.get(), 0});
-    visited.insert(loss.get());
+    stack.push_back({root, 0});
+    visited.insert(root);
     while (!stack.empty()) {
         auto& [node, idx] = stack.back();
-        if (idx < node->parents.size()) {
+        const bool isStop = (node != root) && stops.count(node);
+        if (!isStop && idx < node->parents.size()) {
             Node* p = node->parents[idx].get();
             ++idx;
             if (p && visited.insert(p).second) stack.push_back({p, 0});
@@ -935,10 +1358,44 @@ void backward(const Var& loss) {
             stack.pop_back();
         }
     }
-
-    loss->grad.assign(1, 1.0f);
     for (auto it = order.rbegin(); it != order.rend(); ++it)
-        if ((*it)->backward_fn) (*it)->backward_fn();
+        if (!stops.count(*it) && (*it)->backward_fn) (*it)->backward_fn();
+}
+}  // namespace
+
+void backward(const Var& loss) {
+    if (loss->size() != 1) throw std::runtime_error("backward: loss must be scalar");
+    loss->grad.assign(1, 1.0f);
+    runBackward(loss.get(), /*stops=*/{});
+}
+
+// ── Gradient checkpointing ───────────────────────────────────────────────────
+// Run `fn(inputs)` but DROP the segment's intermediate activations after forward;
+// recompute them in backward (trading compute for memory). Output matches
+// fn(inputs) exactly; gradients are identical. The recompute backprops only
+// within the segment, accumulating into the real `inputs`' grads.
+Var checkpoint(const std::function<Var(const std::vector<Var>&)>& fn,
+               const std::vector<Var>& inputs) {
+    Var fwd = fn(inputs);                 // forward value; this tape is discarded below
+    // The output must require grad so upstream ops fill its grad: the recompute
+    // back-props into ALL leaves that require grad inside fn — including params
+    // captured by fn that are not in `inputs` (each leaf still gates on its own
+    // requires_grad, so non-grad leaves are unaffected).
+    Var out = newNode(fwd->shape, inputs, /*requires_grad=*/true);
+    out->data = fwd->data;                // keep ONLY the output activation
+    // `fwd` (and the segment's intermediates) are released when this returns.
+
+    Node* op = out.get();
+    std::vector<Var> ins = inputs;
+    auto fnCopy = fn;
+    out->backward_fn = [op, fnCopy, ins]() {
+        Var re = fnCopy(ins);             // recompute the segment (fresh tape)
+        re->grad = op->grad;              // seed with the incoming gradient
+        std::unordered_set<Node*> stops;
+        for (auto& in : ins) stops.insert(in.get());
+        runBackward(re.get(), stops);     // backprop within the segment → ins' grads
+    };
+    return out;
 }
 
 void zero_grad(const std::vector<Var>& params) {

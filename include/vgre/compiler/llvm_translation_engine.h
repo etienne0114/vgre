@@ -13,6 +13,7 @@
 #include <atomic>
 #include <thread>
 #include <future>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm {
@@ -112,6 +113,9 @@ private:
   // Internal translation used by prepare(); compiles on the calling thread.
   VGREResult doTranslate(KernelIR &ir, CompiledKernelFn &outFn);
 
+  // True iff `module` was created by loadBitcodeModule and not yet unloaded.
+  bool isValidModuleHandle(ModuleHandle module) const;
+
   // Cache: kernel name → compiled function
   std::unordered_map<std::string, CompiledKernelFn> cache_;
   mutable std::recursive_mutex mutex_;
@@ -119,11 +123,15 @@ private:
   // Global symbol size tracking: ModuleHandle -> SymbolName -> SizeInBytes
   std::unordered_map<ModuleHandle, std::unordered_map<std::string, size_t>> symbolSizes_;
 
+  // Handles created by loadBitcodeModule (JITDylib*). Foreign pointers (e.g.
+  // CUDAModuleRegistry wrappers that fell through the driver shim) must be
+  // rejected here — blindly casting them to JITDylib* walks garbage memory
+  // and aborts the process inside ORC.
+  std::unordered_set<ModuleHandle> validModules_;
+  mutable std::mutex modulesMutex_;
+
   // LLVM JIT state (PIMPL to avoid massive include leakage)
   std::unique_ptr<LLVMState> llvmState_;
-  
-  // High-performance JIT configuration flags
-  bool blockThreadsEnabled_ = false;
 };
 
 } // namespace compiler

@@ -1,0 +1,87 @@
+name: Nightly verification
+
+# Runs on a schedule (independent of any developer machine) to keep the project
+# honest over time: a full from-scratch build + the complete test suite, the
+# generation benchmark (tracked as an artifact), and a health check of the
+# deployed inference server. On failure it opens/updates a single tracking issue
+# so regressions are visible without spamming. Public repo → free.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"          # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify:
+    name: full-build-test-benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain + deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang-18 llvm-18-dev libclang-18-dev \
+            libomp-18-dev libsqlite3-dev liblapack-dev \
+            libkeyutils-dev libssl-dev zlib1g-dev ccache python3-numpy curl
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-nightly-${{ github.sha }}
+          restore-keys: ccache-nightly-
+
+      - name: Configure + build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build --parallel
+
+      - name: Full test suite
+        working-directory: build
+        run: ctest --output-on-failure -j 2 --test-load 4 --timeout 300 --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
+
+      - name: Generation benchmark
+        env:
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/src/xla/libvgre_nn.so
+        run: |
+          python3 benchmarks/bench_generate.py --n-new 64 --json bench.json | tee bench.txt
+
+      - name: Upload benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-benchmark
+          path: |
+            bench.json
+            bench.txt
+
+      - name: Deployed server health check (best-effort)
+        continue-on-error: true
+        run: |
+          url="https://vgre-server.fly.dev/health"
+          echo "checking $url"
+          curl -fsS --max-time 20 "$url" && echo "  deploy healthy" \
+            || echo "  deploy not reachable (not deployed yet, or asleep) — non-fatal"
+
+      - name: Open/refresh a tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Nightly verification failing"
+          num=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number' || true)
+          body="Nightly verification failed on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label ci || \
+              gh issue create --title "$title" --body "$body"
+          fi

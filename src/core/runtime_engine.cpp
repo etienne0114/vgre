@@ -441,9 +441,25 @@ VGREResult RuntimeEngine::registerKernel(const std::string &name,
   }
   kernelIRCache_[id] = ir;
 
+#ifdef VGRE_ENABLE_JIT
   // v0.1.2 Extraordinary Sophistication: Asynchronous JIT Pipelining
   // We trigger translation in the background immediately during registration.
   pendingKernels_[id] = translator_->prepare(kernelIRCache_[id]);
+#else
+  // Zero-Burden build: no LLVM JIT. Compile with the from-scratch CUDA-C
+  // front-end and keep a backend kernel for launchKernel to run. A kernel
+  // outside the supported subset has no fallback here.
+  {
+    auto bk = makeBackendKernel(name, source);
+    if (!bk) {
+      VGRE_LOG_ERROR("RuntimeEngine",
+          "kernel '" + name + "' is outside the supported CUDA-C subset "
+          "(no LLVM JIT fallback in this build)");
+      return VGREResult::ERR_NOT_SUPPORTED;
+    }
+    backendKernels_[id] = std::move(bk);
+  }
+#endif
 
   outId = id;
   kernelIRCache_[id] = ir;

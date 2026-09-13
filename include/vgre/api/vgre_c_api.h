@@ -79,6 +79,11 @@ typedef struct {
   double latency_ms;
   int available;
   char igpu_name[64];
+  char platform_name[32];   /* node OS: "Linux"/"macOS"/"Windows" ("" if unknown) */
+  char arch_name[16];       /* node CPU arch: "x86_64"/"arm64" */
+  char hostname[64];        /* node hostname */
+  uint32_t in_flight_kernels; /* kernels dispatched to this node, not yet returned */
+  uint64_t kernels_completed; /* cumulative kernels this node has executed (proof of use) */
 } vgre_cluster_node_t;
 
 #pragma pack(push, 8)
@@ -348,7 +353,9 @@ VGRE_EXPORT int vgre_set_service_mode(int is_master);
 
 /**
  * @brief Enables or disables per-block OS thread execution for __syncthreads correctness.
- * This toggles the VGRE_BLOCK_THREADS environment flag at runtime.
+ * Flips a process-wide runtime flag consulted by every kernel launch (initially
+ * seeded from the VGRE_BLOCK_THREADS configuration); takes effect immediately,
+ * including for kernels that were already JIT-compiled.
  */
 VGRE_EXPORT int vgre_set_block_threads(int enabled);
 
@@ -424,6 +431,12 @@ VGRE_EXPORT int vgre_credits_reset(void);
  * @param datatype Argument type (VGRE_ARG_FLOAT32, etc.)
  */
 VGRE_EXPORT int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
+
+/**
+ * @brief Number of nodes participating in collectives (self + active peers, >=1).
+ *        Use it to average all-reduced (summed) gradients in data-parallel training.
+ */
+VGRE_EXPORT int vgre_cluster_world_size(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

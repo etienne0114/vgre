@@ -205,6 +205,14 @@ def _load_library() -> Optional[ctypes.CDLL]:
     except OSError:
         return None
 
+    # The lightweight libvgre_nn ships only the ML/autograd + cluster C-ABI; it
+    # has no device/runtime layer (no vgre_init). Detect that and return the lib
+    # without the full-runtime signature setup, so `import vgre.nn` works against
+    # the minimal library too — vgre.nn binds the vgre_ag_* symbols it needs
+    # lazily. The full libvgre proceeds to declare every signature below.
+    if not hasattr(lib, "vgre_init"):
+        return lib
+
     # ── Declare function signatures ─────────────────────────────────────────
 
     # Init / shutdown

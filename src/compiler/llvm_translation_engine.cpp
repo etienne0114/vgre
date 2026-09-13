@@ -119,6 +119,8 @@ extern "C" {
   void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
   void vgre_jit_syncgrid();
   bool vgre_jit_in_threaded_context();
+  int  vgre_jit_block_threads_enabled();
+  void vgre_jit_set_block_threads(int enabled);
 
   // CDP (Dynamic Parallelism) — implemented in cdp_executor.cpp
   void* vgre_cdp_get_param_buffer(size_t bytes);
@@ -302,6 +304,10 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_in_threaded_context)),
         llvm::JITSymbolFlags::Exported
     };
+    Symbols[Mangle("vgre_jit_block_threads_enabled")] = {
+        llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_block_threads_enabled)),
+        llvm::JITSymbolFlags::Exported
+    };
     Symbols[Mangle("vgre_jit_report_flops")] = {
         llvm::orc::ExecutorAddr::fromPtr(reinterpret_cast<void*>(vgre_jit_report_flops)),
         llvm::JITSymbolFlags::Exported
@@ -405,12 +411,14 @@ LLVMTranslationEngine::LLVMTranslationEngine() {
     VGRE_LOG_INFO("LLVMTranslationEngine",
                   "Real LLVM JIT Engine with Clang pipeline initialized.");
     
-    // Cache configuration flags once at startup to avoid thread-unsafe getenv() calls in the hot path.
+    // Seed the runtime block-threading flag from configuration once at startup
+    // (avoids thread-unsafe getenv() in the hot path); mutable afterwards via
+    // vgre_set_block_threads().
     const char* vStatic = vgre_get_config("VGRE_BLOCK_THREADS");
     if (vStatic && (std::strcmp(vStatic, "1") == 0 || std::strcmp(vStatic, "true") == 0 ||
               std::strcmp(vStatic, "TRUE") == 0 || std::strcmp(vStatic, "yes") == 0 ||
               std::strcmp(vStatic, "YES") == 0)) {
-        blockThreadsEnabled_ = true;
+        vgre_jit_set_block_threads(1);
     }
   } else {
     VGRE_LOG_ERROR("LLVMTranslationEngine",
@@ -1212,7 +1220,16 @@ VGREResult LLVMTranslationEngine::loadBitcodeModule(const std::string &path,
   }
 
   outModule = static_cast<ModuleHandle>(&jd);
+  {
+    std::lock_guard<std::mutex> lk(modulesMutex_);
+    validModules_.insert(outModule);
+  }
   return VGREResult::SUCCESS;
+}
+
+bool LLVMTranslationEngine::isValidModuleHandle(ModuleHandle module) const {
+  std::lock_guard<std::mutex> lk(modulesMutex_);
+  return validModules_.count(module) != 0;
 }
 
 VGREResult LLVMTranslationEngine::getGlobalSymbol(ModuleHandle module,
@@ -1221,6 +1238,8 @@ VGREResult LLVMTranslationEngine::getGlobalSymbol(ModuleHandle module,
                                                  size_t &outSize) {
   if (!llvmState_ || !module)
     return VGREResult::ERR_NOT_INITIALIZED;
+  if (!isValidModuleHandle(module))
+    return VGREResult::ERR_INVALID_VALUE;
 
   auto &jd = *static_cast<llvm::orc::JITDylib *>(module);
   auto sym = llvmState_->jit->lookup(jd, name);
@@ -1249,6 +1268,8 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
     ModuleHandle module, const std::string &name, CompiledKernelFn &outFn) {
   if (!llvmState_ || !module)
     return VGREResult::ERR_NOT_INITIALIZED;
+  if (!isValidModuleHandle(module))
+    return VGREResult::ERR_INVALID_VALUE;
 
   auto &jd = *static_cast<llvm::orc::JITDylib *>(module);
   auto sym = llvmState_->jit->lookup(jd, name);
@@ -1277,6 +1298,13 @@ VGREResult LLVMTranslationEngine::getFunctionFromModule(
 VGREResult LLVMTranslationEngine::unloadModule(ModuleHandle module) {
   if (!llvmState_ || !module)
     return VGREResult::ERR_NOT_INITIALIZED;
+  if (!isValidModuleHandle(module))
+    return VGREResult::ERR_INVALID_VALUE;
+  {
+    std::lock_guard<std::mutex> lk(modulesMutex_);
+    validModules_.erase(module);
+  }
+  symbolSizes_.erase(module);
 
   auto *jd = static_cast<llvm::orc::JITDylib *>(module);
   auto err = llvmState_->jit->getExecutionSession().removeJITDylib(*jd);

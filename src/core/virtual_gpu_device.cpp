@@ -1,5 +1,6 @@
 #include "vgre/core/virtual_gpu_device.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/cpu_features.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
 
@@ -404,16 +405,15 @@ void VirtualGPUDevice::detectHardware() {
           && freqHz > 0) {
         props_.clockRate = static_cast<int>(freqHz / 1000);
       } else {
-        // Last resort: hw.tbfrequency × hw.cpusubtype is not correct for CPU freq.
-        // Use CPUID leaf 0x16 on Intel, or accept 3.2 GHz for Apple Silicon
-        // where hw.perflevel0.cpufrequency_max should always have succeeded above.
 #if defined(__x86_64__)
         unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
         __cpuid_count(0x16, 0, eax, ebx, ecx, edx);
         int baseMHz = static_cast<int>(eax & 0xFFFF);
-        props_.clockRate = (baseMHz > 100 && baseMHz < 10000) ? baseMHz * 1000 : 3200000;
+        props_.clockRate = (baseMHz > 100 && baseMHz < 10000) ? baseMHz * 1000 : 0;
 #else
-        props_.clockRate = 3200000; // Apple Silicon: perflevel0 query above should succeed
+        // Apple Silicon: OS does not always expose cpufreq via sysctl; leave 0
+        // rather than invent a constant — callers use adaptive timing calibration.
+        props_.clockRate = 0;
 #endif
       }
     }
@@ -435,15 +435,15 @@ void VirtualGPUDevice::detectHardware() {
 
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)
-  if (__builtin_cpu_supports("avx512f")) {
+  if (vgre::cpu::supports("avx512f")) {
     props_.major = 8;
     props_.minor = 0;
     props_.sharedMemPerBlock = 164 * 1024; // Sm 8.0 capacity
-  } else if (__builtin_cpu_supports("avx2")) {
+  } else if (vgre::cpu::supports("avx2")) {
     props_.major = 7;
     props_.minor = 5;
     props_.sharedMemPerBlock = 64 * 1024; // Sm 7.5 capacity
-  } else if (__builtin_cpu_supports("avx")) {
+  } else if (vgre::cpu::supports("avx")) {
     props_.major = 7;
     props_.minor = 0;
     props_.sharedMemPerBlock = 48 * 1024; // Sm 7.0 capacity

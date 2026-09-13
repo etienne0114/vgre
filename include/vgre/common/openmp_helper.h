@@ -5,6 +5,15 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#else
+// Built without OpenMP (no -fopenmp → _OPENMP undefined): provide serial
+// fallbacks so the few omp_* runtime calls compile and behave single-threaded.
+// #pragma omp directives are ignored by the compiler in this mode. This is what
+// lets VGRE build with just a C++ compiler (VGRE_ENABLE_OPENMP=OFF).
+static inline int  omp_get_thread_num()  { return 0; }
+static inline int  omp_get_num_threads() { return 1; }
+static inline int  omp_get_max_threads() { return 1; }
+static inline void omp_set_num_threads(int) {}
 #endif
 
 // MSVC ships OpenMP 2.0 which does not implement the collapse() clause

@@ -17,6 +17,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
+
+#if !defined(_WIN32)
+#include <ifaddrs.h>
+#include <net/if.h>
+#endif
 
 namespace vgre {
 namespace advanced {
@@ -35,6 +41,42 @@ using vgre::common::vgre_set_nosigpipe;
 using vgre::common::VgreSocketGuard;
 
 // HMAC helpers moved to CryptoUtils in shared_utilities.h
+
+namespace {
+
+// Send a UDP datagram to 255.255.255.255 and every interface broadcast address.
+// macOS and some routers drop global broadcast; subnet-directed broadcast is required.
+void sendUdpBroadcast(vgre_socket_t sock, const char* msg, size_t len, int port) {
+  int opt = 1;
+  vgre_setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+
+  auto sendOne = [&](uint32_t addr) {
+    if (addr == 0) return;
+    struct sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = addr;
+    dest.sin_port = htons(static_cast<uint16_t>(port));
+    sendto(sock, msg, len, 0, reinterpret_cast<struct sockaddr*>(&dest), sizeof(dest));
+  };
+
+  sendOne(INADDR_BROADCAST);
+
+#if !defined(_WIN32)
+  struct ifaddrs* ifap = nullptr;
+  if (getifaddrs(&ifap) == 0) {
+    for (struct ifaddrs* ifa = ifap; ifa; ifa = ifa->ifa_next) {
+      if (!ifa->ifa_broadaddr || ifa->ifa_broadaddr->sa_family != AF_INET) continue;
+      if (!(ifa->ifa_flags & IFF_UP) || (ifa->ifa_flags & IFF_LOOPBACK)) continue;
+      auto* bcast = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_broadaddr);
+      if (bcast->sin_addr.s_addr != INADDR_BROADCAST)
+        sendOne(bcast->sin_addr.s_addr);
+    }
+    freeifaddrs(ifap);
+  }
+#endif
+}
+
+} // anonymous namespace
 
 // ── UDP Port Configuration ────────────────────────────────────────────────
 // Both ports are configurable via env vars so operators can avoid conflicts
@@ -162,10 +204,7 @@ void DiscoveryManager::udpAnnouncerLoop() {
   int opt = 1;
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 
-  struct sockaddr_in broadcast_addr{};
-  broadcast_addr.sin_family = AF_INET;
-  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpAnnouncePort()));
+  const int announcePort = DiscoveryManager::getUdpAnnouncePort();
 
   VGRE_LOG_INFO("TCPCluster", "Master: UDP Announcer active (broadcasting master presence)...");
 
@@ -188,12 +227,12 @@ void DiscoveryManager::udpAnnouncerLoop() {
     if (advAddr && advAddr[0] != '\0')
         ping_msg += ':' + std::string(advAddr);
 
+    parent_->loadAuthToken();
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
 
-    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
-           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    sendUdpBroadcast(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), announcePort);
     std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
     parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(2), [this]() { return !parent_->enabled_; });
   }
@@ -281,20 +320,20 @@ void DiscoveryManager::udpMasterDiscoveryLoop() {
             }
         }
 
-        std::string worker_addr = std::string(ip) + ":" + std::to_string(worker_port);
-        
-        // Add to proactive connection list if not already there
-        bool exists = false;
-        {
-          std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
-          for(const auto& s : parent_->proactive_worker_addresses_) {
-            if (s == worker_addr) { exists = true; break; }
-          }
-          if (!exists) {
-            VGRE_LOG_INFO("TCPCluster", "Master: Automatically discovered worker at " + worker_addr);
-            parent_->proactive_worker_addresses_.push_back(worker_addr);
-          }
-        }
+        // The master must NOT auto-dial a worker it heard announce. In the
+        // standard model workers connect TO the master (this loop's HMAC check
+        // above still authenticates the announce). Auto-adding the worker to
+        // proactive_worker_addresses_ made the master's proactive loop dial the
+        // worker back — on top of the worker's own inbound connection — creating
+        // BIDIRECTIONAL connections that the dedup dropped and whose handshake
+        // roles collided, so secure mode failed with ERR_IO (12) in a permanent
+        // reconnect storm. Worse, a worker announces every local interface
+        // (LAN + Docker bridges), and each "<iface-ip>:<port>" the master dials
+        // can loop back to the master's OWN listener on a single host. The
+        // master learns worker addresses from the connections they open; it
+        // never needs to dial them. Admins who genuinely want the master to dial
+        // workers still set VGRE_CLUSTER_NODES explicitly.
+        (void)worker_port;
       }
     }
   }
@@ -312,21 +351,18 @@ void DiscoveryManager::udpWorkerAnnouncerLoop() {
   int opt = 1;
   vgre_setsockopt(udp_guard.get(), SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 
-  struct sockaddr_in broadcast_addr{};
-  broadcast_addr.sin_family = AF_INET;
-  broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-  broadcast_addr.sin_port = htons(static_cast<uint16_t>(DiscoveryManager::getUdpWorkerPort())); // Master scans this port
+  const int workerUdpPort = DiscoveryManager::getUdpWorkerPort();
 
   VGRE_LOG_INFO("TCPCluster", "Worker: Proactive Announcer active (seeking master)...");
 
   while (parent_ && parent_->enabled_ && !parent_->is_master_) {
     // Recompute each iteration in case the auth token changes after start.
+    parent_->loadAuthToken();
     std::string ping_msg = "VGRE_WORKER_PING:" + std::to_string(parent_->port_);
     std::string token;
     { std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
     if (!token.empty()) ping_msg += ':' + CryptoUtils::computeHmacHex(token, ping_msg);
-    sendto(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), 0,
-           (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    sendUdpBroadcast(udp_guard.get(), ping_msg.c_str(), ping_msg.length(), workerUdpPort);
     std::unique_lock<std::mutex> lock(parent_->shutdown_mutex_);
     parent_->shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return !parent_->enabled_ || parent_->is_master_; });
   }

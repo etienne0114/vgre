@@ -1,4 +1,6 @@
 #include "vgre/advanced/tcp_cluster/internal/security_manager.h"
+#include "vgre/advanced/tcp_cluster/internal/security_manager_detail.h"
+#include "vgre/advanced/tcp_cluster/internal/network_utilities.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
 #include "vgre/advanced/hardware_token_manager.h"
@@ -22,15 +24,10 @@
 namespace vgre {
 namespace advanced {
 
-namespace {
-  struct SecurityMetrics {
-    std::atomic<uint64_t> handshakes_attempted{0}, handshakes_successful{0}, handshakes_failed{0};
-    std::atomic<uint64_t> auth_failures{0}, network_errors{0}, timeout_failures{0};
-    std::mutex violation_mutex;
-    std::unordered_map<std::string, uint32_t> violation_counts;
-    std::unordered_map<std::string, uint64_t> last_violation_time;
-  };
-  SecurityMetrics g_metrics;
+// Shared security helpers (declared in security_manager_detail.h) — defined here
+// once and used by both security_manager.cpp and security_manager_handshake.cpp.
+namespace secmgr_detail {
+  SecurityMetrics g_metrics;   // struct defined in security_manager_detail.h
 
   // Per-IP exponential backoff for auth failures.
   // Penalty after k-th failure: min(2^(k-1), MAX_BACKOFF_SEC) seconds.
@@ -72,7 +69,7 @@ namespace {
     g_ratelimit.fail_count.erase(ip);
     g_ratelimit.backoff_until.erase(ip);
   }
-  const int HANDSHAKE_TIMEOUT_SEC = []() { const char* e = vgre_get_config("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC"); return (e && std::atoi(e) > 0) ? std::atoi(e) : 5; }();
+  extern const int HANDSHAKE_TIMEOUT_SEC = []() { const char* e = vgre_get_config("VGRE_CLUSTER_HANDSHAKE_TIMEOUT_SEC"); return (e && std::atoi(e) > 0) ? std::atoi(e) : 5; }();
   void logSecurityEvent(const std::string& event, const std::string& ip, const std::string& details) {
     VGRE_LOG_INFO("TCPCluster.Security", "[" + event + "] " + ip + ": " + details);
     detail::mirror_security_event_to_audit(event, ip, details);
@@ -86,16 +83,18 @@ namespace {
     if (count >= 5) { VGRE_LOG_ERROR("TCPCluster.Security", "IP " + ip + " exceeded violation limit: " + type); return true; }
     return false;
   }
-}
 
 // Production key verification - real HMAC implementation
-static void computeKeyVerification(const std::string& token, const char* label, const uint8_t nonce[crypto::kNonceLen], uint8_t out[crypto::kSHA256DigestLen]) {
+void computeKeyVerification(const std::string& token, const char* label, const uint8_t* nonce, uint8_t* out) {
   if (!label || !nonce || !out || token.empty()) return;
   size_t labelLen = strlen(label);
   std::vector<uint8_t> data(labelLen + crypto::kNonceLen);
   memcpy(data.data(), label, labelLen); memcpy(data.data() + labelLen, nonce, crypto::kNonceLen);
   crypto::hmac_sha256(reinterpret_cast<const uint8_t*>(token.data()), token.size(), data.data(), data.size(), out);
 }
+}  // namespace secmgr_detail
+
+using namespace secmgr_detail;
 
 SecurityManager::SecurityManager(TCPClusterManager* parent) : parent_(parent) {
   // Production policy: strict authentication only. No runtime fallback modes.
@@ -131,80 +130,139 @@ void scrubAuthTokenFromEnvironment() {
 }
 } // namespace
 
-VGREResult SecurityManager::enableSecurity(bool enabled) {
-  // Remove the raw token from the environment as early as the security path runs.
+namespace {
+
+std::string defaultClusterTokenFilePath() {
+  const char* env = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
+  if (env && env[0] != '\0') return std::string(env);
+#if defined(_WIN32)
+  const char* home = vgre_get_config("USERPROFILE");
+  if (!home || !home[0]) home = std::getenv("USERPROFILE");
+#else
+  const char* home = vgre_get_config("HOME");
+  if (!home || !home[0]) home = std::getenv("HOME");
+#endif
+  if (home && home[0] != '\0') return std::string(home) + "/.vgre/token";
+  return {};
+}
+
+bool readClusterTokenFile(std::string& out) {
+  const std::string path = defaultClusterTokenFilePath();
+  if (path.empty()) return false;
+  std::ifstream f(path);
+  if (!f) return false;
+  std::getline(f, out);
+  out.erase(std::remove_if(out.begin(), out.end(),
+                           [](unsigned char c) { return std::isspace(c); }),
+            out.end());
+  return !out.empty();
+}
+
+} // namespace
+
+bool SecurityManager::loadAuthToken(bool allow_auto_generate) {
   scrubAuthTokenFromEnvironment();
-  std::string token;
-  { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-  // If auth_token_str_ is not set, try reading from config store (avoids setenv/getenv race)
-  if (token.empty()) {
-    const char* env_token = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
-    if (env_token && env_token[0] != '\0') {
-      token = env_token;
-      { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-      // Zeroize the local copy; the stored auth_token_str_ holds the canonical value.
-      if (!token.empty()) vgre::common::vgre_secure_zero(&token[0], token.size());
-      token.clear();
-    }
-  }
-  // Try reading from configured auth token file path if still empty
-  if (token.empty()) {
-    const char* env_token_file = vgre_get_config("VGRE_TCP_AUTH_TOKEN_FILE");
-    if (env_token_file && env_token_file[0] != '\0') {
-      std::ifstream f(env_token_file);
-      if (f) {
-        std::string file_token;
-        std::getline(f, file_token);
-        file_token.erase(std::remove_if(file_token.begin(), file_token.end(), [](unsigned char c) { return std::isspace(c); }), file_token.end());
-        if (!file_token.empty()) {
-          token = file_token;
-          { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-          if (!file_token.empty()) vgre::common::vgre_secure_zero(&file_token[0], file_token.size());
-          if (!token.empty()) vgre::common::vgre_secure_zero(&token[0], token.size());
-          token.clear();
-        }
+
+  // Always re-read the token file when it exists so `vgre-token set` on disk
+  // takes effect without restarting master/worker processes.
+  {
+    std::string fileToken;
+    if (readClusterTokenFile(fileToken)) {
+      std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+      if (parent_->auth_token_str_ != fileToken) {
+        const bool had = !parent_->auth_token_str_.empty();
+        parent_->auth_token_str_ = std::move(fileToken);
+        const std::string fp = computeTokenHash(parent_->auth_token_str_);
+        VGRE_LOG_INFO("TCPCluster",
+            std::string(had ? "Cluster auth token reloaded from file"
+                            : "Cluster auth token loaded") +
+            " (SHA256: " + (fp.size() >= 16 ? fp.substr(0, 16) : fp) + "...)");
       }
+      return true;
     }
   }
-  // If still empty, resolve from the sealed secret store when configured
-  // (VGRE_SECRETS_STORE → rotatable, policy-guarded, audited "cluster-auth-token").
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+    if (!parent_->auth_token_str_.empty()) return true;
+  }
+
+  std::string token;
+  const char* env_token = vgre_get_config("VGRE_TCP_AUTH_TOKEN");
+  if (env_token && env_token[0] != '\0') {
+    token = env_token;
+  }
   if (token.empty()) {
     std::string s_token;
     if (detail::resolve_auth_token_from_secret_store(s_token)) {
-      token = s_token;
-      { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-      vgre::common::vgre_secure_zero(&s_token[0], s_token.size());
+      token = std::move(s_token);
     }
   }
-  // If still empty, try to get from HardwareTokenManager
   if (token.empty()) {
     std::string hw_token;
-    if (HardwareTokenManager::instance().getAuthToken(hw_token) == VGREResult::SUCCESS && !hw_token.empty()) {
-      token = hw_token;
-      { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
+    if (HardwareTokenManager::instance().getAuthToken(hw_token) == VGREResult::SUCCESS &&
+        !hw_token.empty()) {
+      token = std::move(hw_token);
     }
   }
-  // Production policy: auto-generate a secure token if none is configured.
-  // This guarantees clusters are secure out-of-the-box without requiring
-  // manual token setup.
-  if (enabled && token.empty()) {
+  if (token.empty() && allow_auto_generate) {
     token = CryptoUtils::generateSecureToken(32);
-    { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); parent_->auth_token_str_ = token; }
-    VGRE_LOG_INFO("TCPCluster", "Auto-generated secure auth token (length=" + std::to_string(token.size()) + ")");
+    VGRE_LOG_INFO("TCPCluster",
+        "Auto-generated secure auth token (length=" + std::to_string(token.size()) + ")");
   }
-  if (enabled && token != "VGRE_CLUSTER_DEFAULT_NOAUTH_v1" && token.size() < 16) { VGRE_LOG_WARN("TCPCluster", "Auth token too short - use 16+ characters for production"); }
+
+  if (token.empty()) return false;
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_);
+    parent_->auth_token_str_ = std::move(token);
+  }
+  const std::string fp = computeTokenHash(parent_->auth_token_str_);
+  VGRE_LOG_INFO("TCPCluster",
+      "Cluster auth token loaded (SHA256: " +
+      (fp.size() >= 16 ? fp.substr(0, 16) : fp) + "...)");
+  return true;
+}
+
+VGREResult SecurityManager::enableSecurity(bool enabled) {
+  if (enabled && !loadAuthToken(false)) {
+    VGRE_LOG_ERROR("TCPCluster",
+        "Cannot enable secure cluster: no auth token. Configure "
+        "VGRE_TCP_AUTH_TOKEN_FILE (e.g. ~/.vgre/token) on master and all workers.");
+    return VGREResult::ERR_AUTH_FAILED;
+  }
+  if (!enabled) {
+    loadAuthToken(false);
+  }
+  std::string token;
+  { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
+  if (enabled && token != "VGRE_CLUSTER_DEFAULT_NOAUTH_v1" && token.size() < 16) {
+    VGRE_LOG_WARN("TCPCluster", "Auth token too short - use 16+ characters for production");
+  }
   parent_->security_enabled_ = enabled;
   VGRE_LOG_INFO("TCPCluster", std::string("Security ") + (enabled ? "enabled" : "disabled"));
   
   // Clear backoff when security changes
   { std::lock_guard<std::mutex> lock(parent_->proactive_backoff_mutex_); parent_->proactive_fail_counts_.clear(); parent_->proactive_backoff_until_.clear(); }
-  // Force reconnect of plaintext connections when enabling security
-  if (enabled && parent_->is_master_) {
+  {
+    std::lock_guard<std::mutex> lk(g_ratelimit.mu);
+    g_ratelimit.fail_count.clear();
+    g_ratelimit.backoff_until.clear();
+  }
+  // Force all workers to reconnect so both sides negotiate the new mode cleanly.
+  if (parent_->is_master_) {
     std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
     for (auto& c : parent_->clients_) {
-      if (c && c->active && !(c->secure_channel && c->secure_channel->isInitialized())) {
-        VGRE_LOG_INFO("TCPCluster", "Disconnecting plaintext node " + c->ip_address + " for security");
-        c->active = false; vgre::common::vgre_close_socket(c->socket_fd); c->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
+      if (c && c->socket_fd != vgre::common::VGRE_INVALID_SOCKET &&
+          (c->active || c->is_authenticating)) {
+        VGRE_LOG_INFO("TCPCluster",
+            "Disconnecting " + c->ip_address + " (cluster security mode changed)");
+        c->active = false;
+        c->is_authenticating = false;
+        c->security_established = false;
+        c->secure_channel.reset();
+        vgre::common::vgre_close_socket(c->socket_fd);
+        c->socket_fd = vgre::common::VGRE_INVALID_SOCKET;
       }
     }
     parent_->syncToIPC();
@@ -264,214 +322,9 @@ std::string SecurityManager::getAuthModeDescription() const {
   return std::string("Authentication mode: ") + (strict_auth_mode_ ? "STRICT" : "FALLBACK") + " (" + (strict_auth_mode_ ? "rejects mismatches" : "retries with default") + ")";
 }
 
-VGREResult SecurityManager::performServerHandshake(std::shared_ptr<TCPClusterManager::ClientConnection> clientPtr) {
-  if (!clientPtr) return VGREResult::ERR_INVALID_VALUE;
-  auto& client = *clientPtr; g_metrics.handshakes_attempted++;
-  
-  if (!client.security_enabled || !parent_->security_enabled_) { logSecurityEvent("HANDSHAKE_SKIPPED", client.ip_address, "security_disabled"); return VGREResult::SUCCESS; }
-  // Rate-limit: reject immediately if this IP is within its exponential backoff window.
-  if (isRateLimited(client.ip_address)) {
-    g_metrics.auth_failures++; g_metrics.handshakes_failed++;
-    VGRE_LOG_WARN("TCPCluster.Security", "Handshake rejected (rate-limited): " + client.ip_address);
-    return VGREResult::ERR_AUTH_FAILED;
-  }
-  logSecurityEvent("HANDSHAKE_START", client.ip_address, "server_mode");
-  
-  // Get token
-  std::string token = client.effective_auth_token.empty() ? [this]() { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); return parent_->auth_token_str_; }() : client.effective_auth_token;
-  if (token.empty()) { g_metrics.auth_failures++; g_metrics.handshakes_failed++; recordViolation(client.ip_address, "MISSING_TOKEN"); VGRE_LOG_ERROR("TCPCluster", "Master: No auth token configured"); return VGREResult::ERR_AUTH_FAILED; }
-  
-  // Generate and send master nonce
-  SecureHandshakePacket shpkt{}; SecureChannel::generateNonce(shpkt.nonce);
-  computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", shpkt.nonce, shpkt.key_verification);
-  if (parent_->send_packet_direct(client.socket_fd, PacketType::SECURE_HANDSHAKE, &shpkt, sizeof(SecureHandshakePacket), client.secure_channel.get()) != VGREResult::SUCCESS) {
-    g_metrics.network_errors++; g_metrics.handshakes_failed++; recordViolation(client.ip_address, "SEND_FAILED"); return VGREResult::ERR_IO;
-  }
-  
-  // Receive response with timeout
-  const size_t expectedLen = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket);
-  std::vector<uint8_t> rx; rx.reserve(expectedLen);
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(HANDSHAKE_TIMEOUT_SEC);
-  
-  while (rx.size() < expectedLen) {
-    if (std::chrono::steady_clock::now() > deadline) { g_metrics.timeout_failures++; g_metrics.handshakes_failed++; recordViolation(client.ip_address, "TIMEOUT"); return VGREResult::ERR_TIMEOUT; }
-    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count());
-    if (remaining_ms <= 0) break;
-    VGREResult wr = parent_->waitForData(client.socket_fd, remaining_ms);
-    if (wr == VGREResult::ERR_TIMEOUT) continue;
-    if (wr != VGREResult::SUCCESS) { g_metrics.network_errors++; g_metrics.handshakes_failed++; return VGREResult::ERR_IO; }
-    
-    uint8_t buf[256]; size_t toRead = std::min(sizeof(buf), expectedLen - rx.size());
-    int n = recv(client.socket_fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
-    if (n > 0) { rx.insert(rx.end(), buf, buf + n); }
-    else if (n == 0) { g_metrics.network_errors++; g_metrics.handshakes_failed++; recordViolation(client.ip_address, "CONNECTION_CLOSED"); return VGREResult::ERR_IO; }
-    else { g_metrics.network_errors++; g_metrics.handshakes_failed++; return VGREResult::ERR_IO; }
-  }
-  
-  // Validate packet
-  if (rx.size() < sizeof(VSBPHeader)) return VGREResult::ERR_IO;
-  VSBPHeader* header = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (header->magic != VSBP_MAGIC || header->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE_ACK)) {
-    vgre::common::vgre_close_socket(client.socket_fd); client.socket_fd = vgre::common::VGRE_INVALID_SOCKET; client.active = false; return VGREResult::ERR_AUTH_FAILED;
-  }
-  if (rx.size() < expectedLen) return VGREResult::ERR_IO;
-  
-  SecureHandshakePacket clientHs{}; memcpy(&clientHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
-  
-  // Verify key
-  uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", clientHs.nonce, expectedKV);
-  if (!crypto::secure_compare(clientHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) {
-    // Production policy: always fail closed on auth mismatch.
-    vgre::common::vgre_close_socket(client.socket_fd);
-    client.socket_fd = vgre::common::VGRE_INVALID_SOCKET;
-    client.active = false;
-    g_metrics.auth_failures++; g_metrics.handshakes_failed++;
-    recordAuthFailure(client.ip_address);  // exponential backoff penalty
-    return VGREResult::ERR_AUTH_FAILED;
-  }
-  
-  // Create secure channel
-  client.secure_channel = std::make_unique<SecureChannel>();
-  VGREResult r = client.secure_channel->initializeFromSecret(token, shpkt.nonce, clientHs.nonce);
-  if (r != VGREResult::SUCCESS) return r;
-  client.security_established = true; g_metrics.handshakes_successful++;
-  clearAuthPenalty(client.ip_address);  // reset backoff on successful auth
-  logSecurityEvent("HANDSHAKE_SUCCESS", client.ip_address, "server_completed"); return VGREResult::SUCCESS;
-}
-
-VGREResult SecurityManager::performClientHandshake() {
-  vgre_socket_t fd; { std::lock_guard<std::mutex> lock(parent_->client_mutex_); fd = parent_->client_fd_; }
-  
-  // Auto-detect security
-  if (!parent_->security_enabled_) {
-    if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
-    VGREResult wr = parent_->waitForData(fd, 5000);
-    if (wr == VGREResult::ERR_TIMEOUT) return VGREResult::SUCCESS;
-    if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
-    parent_->security_enabled_ = true;
-  }
-  
-  std::string token; { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-  if (token.empty()) {
-    std::lock_guard<std::mutex> lock(parent_->client_mutex_);
-    vgre::common::vgre_close_socket(parent_->client_fd_); parent_->client_fd_ = vgre::common::VGRE_INVALID_SOCKET; parent_->has_master_fd_.store(false, std::memory_order_release);
-    return VGREResult::ERR_AUTH_FAILED;
-  }
-  
-  // Receive handshake
-  std::vector<uint8_t> rx; const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket); rx.reserve(expected);
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(HANDSHAKE_TIMEOUT_SEC);
-  
-  while (rx.size() < expected) {
-    if (std::chrono::steady_clock::now() > deadline) return VGREResult::ERR_TIMEOUT;
-    int remaining_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count());
-    VGREResult wr = parent_->waitForData(fd, remaining_ms);
-    if (wr == VGREResult::ERR_TIMEOUT) continue;
-    if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
-    
-    uint8_t buf[256]; size_t toRead = std::min(sizeof(buf), expected - rx.size());
-    int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
-    if (n > 0) { rx.insert(rx.end(), buf, buf + n); }
-    else if (n == 0) { return VGREResult::ERR_IO; }
-    else { if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) continue; return VGREResult::ERR_IO; }
-  }
-  
-  if (rx.size() < sizeof(VSBPHeader)) return VGREResult::ERR_IO;
-  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (phdr->magic != VSBP_MAGIC ||
-      phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) {
-    // Production policy: do not silently downgrade to plaintext. If security
-    // is enabled and we didn't receive the expected handshake, treat it as a
-    // protocol/order violation.
-    return VGREResult::ERR_AUTH_FAILED;
-  }
-  
-  SecureHandshakePacket masterHs{}; if (rx.size() < expected) return VGREResult::ERR_IO;
-  memcpy(&masterHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
-  
-  // Verify master
-  uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", masterHs.nonce, expectedKV);
-  if (!crypto::secure_compare(masterHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) { return VGREResult::ERR_AUTH_FAILED; }
-  parent_->is_authenticating_ = true;
-  
-  // Send ACK
-  SecureHandshakePacket ack{}; SecureChannel::generateNonce(ack.nonce);
-  computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", ack.nonce, ack.key_verification);
-  if (parent_->send_packet_direct(fd, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), parent_->client_secure_channel_.get()) != VGREResult::SUCCESS) {
-    parent_->is_authenticating_ = false; return VGREResult::ERR_IO;
-  }
-  
-  // Create secure channel
-  parent_->client_secure_channel_ = std::make_unique<SecureChannel>();
-  VGREResult r = parent_->client_secure_channel_->initializeFromSecret(token, masterHs.nonce, ack.nonce);
-  if (r != VGREResult::SUCCESS) { parent_->is_authenticating_ = false; return r; }
-  parent_->client_security_established_ = true; parent_->is_authenticating_ = false; return VGREResult::SUCCESS;
-}
-
-VGREResult SecurityManager::performPeerClientHandshake(std::shared_ptr<TCPClusterManager::ClientConnection> peer) {
-  // Real mesh topology handshake implementation
-  vgre_socket_t fd = peer->socket_fd; if (fd == vgre::common::VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
-  std::string token; { std::lock_guard<std::recursive_mutex> lock(parent_->auth_token_mutex_); token = parent_->auth_token_str_; }
-  if (token.empty()) return VGREResult::ERR_AUTH_FAILED;
-  
-  // Receive peer handshake
-  std::vector<uint8_t> rx; const size_t expected = sizeof(VSBPHeader) + sizeof(SecureHandshakePacket); rx.reserve(expected);
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(HANDSHAKE_TIMEOUT_SEC);
-  
-  while (rx.size() < expected) {
-    if (std::chrono::steady_clock::now() > deadline) return VGREResult::ERR_TIMEOUT;
-    int rem_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count());
-    VGREResult wr = parent_->waitForData(fd, rem_ms);
-    if (wr == VGREResult::ERR_TIMEOUT) continue;
-    if (wr != VGREResult::SUCCESS) return VGREResult::ERR_IO;
-    
-    uint8_t buf[256]; size_t toRead = std::min(sizeof(buf), expected - rx.size());
-    int n = recv(fd, reinterpret_cast<char*>(buf), static_cast<int>(toRead), 0);
-    if (n > 0) { rx.insert(rx.end(), buf, buf + n); }
-    else if (n == 0) { return VGREResult::ERR_IO; }
-    else { if (vgre::common::vgre_is_would_block(vgre::common::vgre_get_last_socket_error())) continue; return VGREResult::ERR_IO; }
-  }
-  
-  if (rx.size() < sizeof(VSBPHeader)) return VGREResult::ERR_IO;
-  VSBPHeader* phdr = reinterpret_cast<VSBPHeader*>(rx.data());
-  if (phdr->magic != VSBP_MAGIC || phdr->type != static_cast<uint16_t>(PacketType::SECURE_HANDSHAKE)) { return VGREResult::ERR_AUTH_FAILED; }
-  
-  SecureHandshakePacket peerHs{}; if (rx.size() < expected) return VGREResult::ERR_IO;
-  memcpy(&peerHs, rx.data() + sizeof(VSBPHeader), sizeof(SecureHandshakePacket));
-  
-  // Verify peer
-  uint8_t expectedKV[crypto::kSHA256DigestLen]; computeKeyVerification(token, "VGRE_KEYVER_MASTER_v1", peerHs.nonce, expectedKV);
-  if (!crypto::secure_compare(peerHs.key_verification, expectedKV, crypto::kSHA256DigestLen)) {
-    vgre::common::vgre_close_socket(peer->socket_fd); peer->socket_fd = vgre::common::VGRE_INVALID_SOCKET; peer->active = false; return VGREResult::ERR_AUTH_FAILED;
-  }
-  
-  // Send ACK
-  SecureHandshakePacket ack{}; SecureChannel::generateNonce(ack.nonce);
-  computeKeyVerification(token, "VGRE_KEYVER_WORKER_v1", ack.nonce, ack.key_verification);
-  if (parent_->send_packet_direct(fd, PacketType::SECURE_HANDSHAKE_ACK, &ack, sizeof(SecureHandshakePacket), nullptr) != VGREResult::SUCCESS) { return VGREResult::ERR_IO; }
-  
-  // Create secure channel for mesh peer
-  peer->secure_channel = std::make_unique<SecureChannel>();
-  VGREResult r = peer->secure_channel->initializeFromSecret(token, peerHs.nonce, ack.nonce);
-  if (r != VGREResult::SUCCESS) return r;
-  peer->security_established = true;
-  logSecurityEvent("MESH_HANDSHAKE_SUCCESS", peer->ip_address, "peer_secured"); return VGREResult::SUCCESS;
-}
-
-VGREResult SecurityManager::rotateSessionKey(std::shared_ptr<TCPClusterManager::ClientConnection> client) {
-  if (!client || !client->secure_channel || !client->security_established) { return VGREResult::ERR_INVALID_VALUE; }
-  
-  // Real key rotation implementation
-  uint8_t nextNonce[crypto::kNonceLen]; SecureChannel::generateNonce(nextNonce);
-  struct RotateKeyPacket { uint8_t nonce[crypto::kNonceLen]; };
-  RotateKeyPacket rpkt; memcpy(rpkt.nonce, nextNonce, crypto::kNonceLen);
-  
-  VGREResult result = parent_->send_packet(client->socket_fd, PacketType::ROTATE_KEY, &rpkt, sizeof(RotateKeyPacket), client->secure_channel.get());
-  if (result != VGREResult::SUCCESS) return result;
-  result = client->secure_channel->rotateKey(nextNonce);
-  if (result != VGREResult::SUCCESS) return result;
-  logSecurityEvent("KEY_ROTATION", client->ip_address, "successful"); return VGREResult::SUCCESS;
-}
+// Server/client/peer handshakes + key rotation are implemented in
+// security_manager_handshake.cpp (kept separate for modularity; they share
+// the secmgr_detail helpers above).
 
 // ── Test hooks ────────────────────────────────────────────────────────────────
 int SecurityManager::authPenaltySec(int fail_count) {

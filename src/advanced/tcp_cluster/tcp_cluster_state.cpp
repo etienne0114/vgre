@@ -25,6 +25,11 @@ void TCPClusterManager::syncToIPC() {
           node.port = c->port; node.cpu_cores = c->cpu_cores; node.memory_bytes = c->cpu_memory;
           node.latency_ms = c->last_telemetry.avg_kernel_latency_ms; node.available = 1;
           strncpy(node.igpu_name, c->igpu_name, sizeof(node.igpu_name) - 1);
+          strncpy(node.platform_name, c->platform_name, sizeof(node.platform_name) - 1);
+          strncpy(node.arch_name, c->arch_name, sizeof(node.arch_name) - 1);
+          strncpy(node.hostname, c->node_hostname, sizeof(node.hostname) - 1);
+          node.in_flight_kernels = c->in_flight_kernels.load();
+          node.kernels_completed = c->kernels_completed.load();
           ipcNodes.push_back(node);
       }
   }

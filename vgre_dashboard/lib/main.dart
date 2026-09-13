@@ -151,6 +151,14 @@ class _VgreBootstrapAppState extends State<VgreBootstrapApp> {
         '${Platform.pathSeparator}$libName';
     if (File(bundlePath).existsSync()) return bundlePath;
 
+    // 2b. macOS .app bundle: Contents/Frameworks/
+    if (Platform.isMacOS) {
+      final frameworksPath =
+          '$executableDir${Platform.pathSeparator}..${Platform.pathSeparator}Frameworks'
+          '${Platform.pathSeparator}$libName';
+      if (File(frameworksPath).existsSync()) return frameworksPath;
+    }
+
     // 3. Next to the binary itself
     final localPath = '$executableDir${Platform.pathSeparator}$libName';
     if (File(localPath).existsSync()) return localPath;

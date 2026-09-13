@@ -27,6 +27,7 @@ struct Config {
     int   n_layer  = 4;
     int   d_model  = 256;
     int   n_head   = 4;
+    int   n_kv_head = 0;         // 0 → == n_head (MHA); < n_head → grouped-query attention
     int   d_ff     = 0;          // 0 → defaults to 4 * d_model
     int   max_seq  = 256;
     float rope_base = 10000.0f;
@@ -34,9 +35,12 @@ struct Config {
     float dropout   = 0.0f;      // residual dropout during training (0 = off)
     bool  tie_embeddings = false; // share the token embedding as the output projection
     bool  flash_attention = false; // O(T)-memory online-softmax attention in training forward
+    bool  attn_bias = false;      // add a learned bias to Q/K/V projections (e.g. Qwen2)
 
     int ff() const { return d_ff > 0 ? d_ff : 4 * d_model; }
     int head_dim() const { return d_model / n_head; }
+    int kv_heads() const { return n_kv_head > 0 ? n_kv_head : n_head; }  // KV heads (== n_head for MHA)
+    int kv_dim() const { return kv_heads() * head_dim(); }              // K/V projection width
 };
 
 class GPT {
@@ -59,10 +63,24 @@ public:
     // new token instead of re-running the full forward (which is O(T²) per step).
     // Pure raw-float inference (no autograd tape). The greedy 2-arg form is
     // token-identical to the reference generate() free function.
+    // `specDraftK > 0` enables lossless greedy speculative decoding: a bigram
+    // drafter proposes up to specDraftK tokens and one batched forward verifies
+    // them, so a run of correct guesses costs a single forward pass. The emitted
+    // tokens are identical to the plain greedy path (specDraftK == 0); the draft
+    // only changes how many forwards run. Active only for greedy sampling with
+    // fp32/bf16 weights + fp32 KV; otherwise it decodes normally.
     std::vector<int> generate_cached(std::vector<int> prompt, int n_new,
-                                     const SampleConfig& cfg);
+                                     const SampleConfig& cfg, int specDraftK = 0);
     std::vector<int> generate_cached(std::vector<int> prompt, int n_new) {
         return generate_cached(std::move(prompt), n_new, SampleConfig{});
+    }
+    // Greedy speculative decode with a draft window of `k` tokens (lossless).
+    std::vector<int> generate_speculative(std::vector<int> prompt, int n_new, int k,
+                                          const SampleConfig& cfg) {
+        return generate_cached(std::move(prompt), n_new, cfg, k);
+    }
+    std::vector<int> generate_speculative(std::vector<int> prompt, int n_new, int k) {
+        return generate_cached(std::move(prompt), n_new, SampleConfig{}, k);
     }
 
     // Enable bf16-weight inference: the big matmul weights are cached as bf16
@@ -79,6 +97,32 @@ public:
     // unaffected. Idempotent; pass false to disable.
     void set_int8_inference(bool on);
     bool int8_inference() const { return int8_inference_; }
+
+    // Store the generation KV cache as int8 with a per-(position, head) absmax
+    // scale instead of fp32. At long context the KV cache — not the weights —
+    // dominates memory. Per head this stores Dh bytes + one fp32 scale instead
+    // of 4·Dh bytes, a 4·Dh/(Dh+4) reduction — 3.2× at Dh=16, 3.8× at Dh=64,
+    // approaching 4× as the head dim grows. Quantization is lossy (symmetric
+    // absmax), but the perturbation is small enough that greedy decoding is
+    // typically unchanged. Affects generate_cached() only; weights and
+    // activations are untouched.
+    void set_int8_kv_cache(bool on) { int8_kv_cache_ = on; }
+    bool int8_kv_cache() const { return int8_kv_cache_; }
+
+    // int4 KV cache: 4-bit packed (2 codes/byte) with the same per-(position,
+    // head) absmax scale — ~7× smaller than fp32 (Dh/2 bytes + one scale per head
+    // vs 4·Dh), a further ~2× over int8. Coarser than int8, so this trades a
+    // little decode quality for memory; takes precedence over int8 when both set.
+    void set_int4_kv_cache(bool on) { int4_kv_cache_ = on; }
+    bool int4_kv_cache() const { return int4_kv_cache_; }
+
+    // Batched prompt prefill (process the whole prompt through one GEMM per
+    // projection instead of a per-token GEMV) — on by default; the result is
+    // bit-identical to sequential prefill. Turn off for strict per-token
+    // determinism checks or debugging. Ignored when a quantized KV cache is set
+    // (those always prefill sequentially).
+    void set_batched_prefill(bool on) { batched_prefill_ = on; }
+    bool batched_prefill() const { return batched_prefill_; }
 
     // Free the fp32 master copies of the big weights after quantizing, so the
     // resident footprint actually drops to the bf16 (½×) / int8 (¼×) size.
@@ -101,6 +145,7 @@ private:
     struct Q8 { std::vector<int8_t> w; std::vector<float> scale; };
     struct Layer {
         Var ln1_g, Wq, Wk, Wv, Wo, ln2_g, Wgate, Wup, Wdown;
+        Var bq, bk, bv;   // optional Q/K/V projection biases (null unless attn_bias)
         // bf16 (uint16) caches of the big matmul weights, built on demand.
         std::vector<uint16_t> Wq_bf16, Wk_bf16, Wv_bf16, Wo_bf16,
                               Wgate_bf16, Wup_bf16, Wdown_bf16;
@@ -115,6 +160,9 @@ private:
     std::vector<Var>  params_;
     bool                  bf16_inference_ = false;
     bool                  int8_inference_ = false;
+    bool                  int8_kv_cache_  = false;
+    bool                  int4_kv_cache_  = false;
+    bool                  batched_prefill_ = true;
     bool                  fp32_dropped_   = false;
     std::vector<uint16_t> tok_emb_bf16_, lm_head_bf16_;
     // int8 caches. tok_emb is quantized PER ROW (per token): the row scale serves
@@ -136,6 +184,18 @@ std::vector<int> generate(GPT& model, std::vector<int> prompt, int n_new,
 bool save_checkpoint(GPT& model, const std::string& path);
 // Loads parameters by name into a model whose Config matches the checkpoint.
 bool load_checkpoint(GPT& model, const std::string& path);
+
+// Load a Hugging Face Llama-family safetensors checkpoint into a GPT whose Config
+// matches it (n_layer/d_model/n_head/d_ff/vocab/tie_embeddings). Handles the
+// [out,in]→[in,out] transpose, the HF↔VGRE RoPE convention (per-head q/k row
+// permute), and grouped-query attention (KV-head replication). Returns false on a
+// missing tensor or shape/GQA mismatch (no partial/incorrect load).
+bool load_llama_safetensors(GPT& model, const std::string& path);
+
+// Same, from a llama.cpp GGUF checkpoint (quantized tensors are dequantized to
+// f32 by the reader). GGUF already bakes in the RoPE permute, so q/k load without
+// it; the transpose and GQA replication still apply.
+bool load_gguf_llama(GPT& model, const std::string& path);
 
 // ── Data pipeline ────────────────────────────────────────────────────────────
 // A flat token stream that yields random (input, target) windows for training;

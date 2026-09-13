@@ -30,7 +30,8 @@
 #include <condition_variable>
 #include <fstream>
 #include <sstream>
-#include <llvm/Support/JSON.h>
+// Zero-Burden (Track Z): in-tree JSON, not llvm::json — see configuration_manager_file_io.cpp.
+#include "vgre/common/json.h"
 
 #include "vgre/common/os_backend.h"
 #if defined(_WIN32)
@@ -209,25 +210,24 @@ VgreMPSPolicy loadMPSPolicy(const std::string& path) {
     ss << f.rdbuf();
     std::string content = ss.str();
 
-    llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(content);
-    if (!parsed) {
-        llvm::consumeError(parsed.takeError());
+    vgre::common::json::Value root;
+    if (!vgre::common::json::parse(content, root)) {
         VGRE_LOG_WARN("MPS", "VGRE_MPS_POLICY_FILE='" + path +
                               "' is not valid JSON — using default quotas.");
         return pol;
     }
-    const llvm::json::Object* obj = parsed->getAsObject();
-    if (!obj) {
+    if (!root.isObject()) {
         VGRE_LOG_WARN("MPS", "VGRE_MPS_POLICY_FILE='" + path +
                               "' is not a JSON object — using default quotas.");
         return pol;
     }
-    if (auto v = obj->getInteger("maxMemoryBytes"); v && *v >= 0)
-        pol.maxMemoryBytes = static_cast<uint64_t>(*v);
-    if (auto v = obj->getNumber("maxThreadFraction"); v && *v > 0.0)
-        pol.maxThreadFraction = static_cast<float>(*v);
-    if (auto v = obj->getInteger("maxQueueDepth"); v && *v > 0)
-        pol.maxQueueDepth = static_cast<uint32_t>(*v);
+    using vgre::common::json::Value;
+    if (const Value* v = root.find("maxMemoryBytes"); v && v->isNumber() && v->num >= 0)
+        pol.maxMemoryBytes = static_cast<uint64_t>(v->num);
+    if (const Value* v = root.find("maxThreadFraction"); v && v->isNumber() && v->num > 0.0)
+        pol.maxThreadFraction = static_cast<float>(v->num);
+    if (const Value* v = root.find("maxQueueDepth"); v && v->isNumber() && v->num > 0)
+        pol.maxQueueDepth = static_cast<uint32_t>(v->num);
 
     VGRE_LOG_INFO("MPS", "Loaded MPS policy: maxMemoryBytes=" +
         std::to_string(pol.maxMemoryBytes) + " maxThreadFraction=" +

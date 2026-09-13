@@ -5,11 +5,15 @@
 
 cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VGREPlatform.cmake)
+
 project(VGRE
     VERSION     0.1.0
     DESCRIPTION "Virtual GPU Runtime Engine — CPU-based CUDA API emulator"
     LANGUAGES   C CXX
 )
+
+vgre_apply_macos_link_flags()
 
 # Guard against in-source builds.
 if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
@@ -54,6 +58,16 @@ list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 # it forces every optional integration OFF (see the override block below), so the
 # image carries only the CUDA/cuBLAS/JIT core. Enable with -DVGRE_MINIMAL=ON.
 option(VGRE_MINIMAL           "Lean core runtime: disable all optional integrations" OFF)
+# Track Z (Zero-Burden Engine): when OFF, VGRE is built with NO LLVM/Clang at all
+# (no ~1 GB LLVM-18 dependency, fast Windows build). Kernels are compiled by the
+# from-scratch CUDA-C front-end and run on the interpreter/compiled execution
+# backends. ON keeps the LLVM ORC JIT as an additional/faster path.
+option(VGRE_ENABLE_JIT        "Compile the LLVM-18 ORC JIT kernel backend" ON)
+# Zero-Burden: when OFF, VGRE builds with NO OpenMP dependency (CPU loops run
+# serially via the ignored #pragma omp directives + serial omp_* fallbacks in
+# openmp_helper.h). With VGRE_ENABLE_JIT=OFF too, VGRE builds with just a C++17
+# compiler and nothing else.
+option(VGRE_ENABLE_OPENMP     "Use OpenMP for CPU parallelism (else serial)" ON)
 option(VGRE_BUILD_TESTS       "Build the VGRE CTest test suite"          ON)
 option(VGRE_BUILD_EXAMPLES    "Build the VGRE example programs"          ON)
 option(VGRE_BUILD_DASHBOARD   "Build the Flutter dashboard"              ON)
@@ -190,6 +204,16 @@ endif()
 if(WIN32)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    # VS 2022's MSVC STL (<yvals_core.h>) hard-errors (STL1000) unless the
+    # compiler is Clang 19+, but VGRE pins clang/LLVM 18 (its ORC JIT API changed
+    # in 19+). The gate is a conservative version check, not a real
+    # incompatibility, so opt in with MSVC's documented escape-hatch macro when
+    # building with clang-cl. add_compile_definitions APPENDS — it does not
+    # clobber CMake's default /EHsc (needed: VGRE uses C++ exceptions), unlike
+    # passing -DCMAKE_CXX_FLAGS on the command line.
+    if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_compile_definitions(_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH)
+    endif()
 endif()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -383,7 +407,7 @@ if(VGRE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(-fcf-protection=full)
         message(STATUS "Hardening: Intel CET (-fcf-protection=full) enabled")
     endif()
-    if(_cc_stackclash)
+    if(_cc_stackclash AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_compile_options(-fstack-clash-protection)
     endif()
     if(_cc_ssp)
@@ -401,6 +425,11 @@ if(APPLE)
     if(_brew)
         execute_process(COMMAND "${_brew}" --prefix libomp
             OUTPUT_VARIABLE _brew_libomp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    endif()
+    if(NOT _brew_libomp OR NOT EXISTS "${_brew_libomp}")
+        if(DEFINED ENV{OpenMP_ROOT} AND EXISTS "$ENV{OpenMP_ROOT}")
+            set(_brew_libomp "$ENV{OpenMP_ROOT}")
+        endif()
     endif()
     if(_brew_libomp AND EXISTS "${_brew_libomp}")
         set(OpenMP_CXX_FLAGS     "-Xpreprocessor -fopenmp -I${_brew_libomp}/include")
@@ -421,11 +450,15 @@ if(APPLE)
     endif()
 endif()
 
-find_package(OpenMP REQUIRED COMPONENTS CXX)
+if(VGRE_ENABLE_OPENMP)
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
+else()
+    message(STATUS "OpenMP: DISABLED (VGRE_ENABLE_OPENMP=OFF) — CPU loops run serially")
+endif()
 
 # Linux: prefer Clang's libomp over libgomp to avoid ABI conflicts with LLVM JIT.
 set(_VGRE_LIBOMP_EXTRA "")
-if(UNIX AND NOT APPLE)
+if(VGRE_ENABLE_OPENMP AND UNIX AND NOT APPLE)
     if(NOT DEFINED CACHE{LIBOMP_PATH})
         find_program(_llvm_cfg NAMES llvm-config-18 llvm-config)
         if(_llvm_cfg)
@@ -452,6 +485,15 @@ endif()
 # dynamic section even when no symbols are directly referenced — needed for
 # LD_PRELOAD scenarios where the loaded library initialises OpenMP lazily.
 function(vgre_target_link_openmp target_name visibility)
+    if(NOT VGRE_ENABLE_OPENMP)
+        # No OpenMP: don't pass -fopenmp (so _OPENMP stays undefined and the
+        # serial omp_* fallbacks apply). Silence the now-unknown #pragma omp
+        # directives so a -Werror build still succeeds.
+        if(NOT MSVC)
+            target_compile_options(${target_name} ${visibility} -Wno-unknown-pragmas)
+        endif()
+        return()
+    endif()
     if(MSVC)
         # MSVC (cl.exe / clang-cl with MSVC driver): use /openmp flag.
         # /openmp:llvm enables the Clang-compatible runtime on clang-cl.
@@ -462,9 +504,17 @@ function(vgre_target_link_openmp target_name visibility)
             target_compile_options(${target_name} ${visibility} /openmp)
         endif()
         # MSVC /openmp links the runtime automatically; no extra lib needed.
+    elseif(TARGET OpenMP::OpenMP_CXX)
+        # Propagates platform-correct flags (e.g. -Xpreprocessor -fopenmp on Apple Clang).
+        target_link_libraries(${target_name} ${visibility} OpenMP::OpenMP_CXX)
     else()
         # GCC and non-driver Clang: use -fopenmp compile flag.
-        target_compile_options(${target_name} ${visibility} "-fopenmp")
+        if(APPLE)
+            target_compile_options(${target_name} ${visibility}
+                "-Xpreprocessor" "-fopenmp")
+        else()
+            target_compile_options(${target_name} ${visibility} "-fopenmp")
+        endif()
 
         if(APPLE AND VGRE_APPLE_LIBOMP)
             # Homebrew libomp is keg-only: add its include dir (for <omp.h>) and
@@ -525,6 +575,10 @@ endif()
 # Version specifier in CONFIG mode is unreliable with distro-packaged LLVM
 # (LLVMConfigVersion.cmake may use EXACT compatibility). Find first, then
 # assert the minimum version explicitly — same effect, better portability.
+if(VGRE_ENABLE_JIT)
+# Track Z: the LLVM ORC JIT path. Compiled out entirely with -DVGRE_ENABLE_JIT=OFF,
+# in which case VGRE has NO LLVM/Clang dependency at all.
+add_compile_definitions(VGRE_ENABLE_JIT)
 find_package(LLVM REQUIRED CONFIG)
 if(LLVM_PACKAGE_VERSION VERSION_LESS "18")
     message(FATAL_ERROR
@@ -566,9 +620,18 @@ endif()
 # Likewise, subdirectory OBJECT libraries need the LLVM include path
 # so their #include <llvm/...> directives resolve during compilation.
 include_directories(${LLVM_INCLUDE_DIRS})
+else()
+    # ── Zero-Burden build: no LLVM/Clang ────────────────────────────────────
+    message(STATUS "LLVM: DISABLED (VGRE_ENABLE_JIT=OFF) — building with no LLVM/Clang; "
+                   "kernels compile via the from-scratch front-end and run on the "
+                   "interpreter/compiled execution backends")
+    set(llvm_libs "")
+    # An empty stand-in so consumers that link vgre_llvm_iface stay valid.
+    add_library(vgre_llvm_iface INTERFACE)
+endif()
 
 # ── Windows: DIA SDK discovery via vswhere + multi-edition/year enumeration ───
-if(WIN32)
+if(WIN32 AND VGRE_ENABLE_JIT)
     set(_dia_path "")
 
     # Strategy 1: vswhere (covers all editions atomically)
@@ -690,13 +753,19 @@ endif()
 # directly for cblas.h + a library exporting cblas_sgemm so it works with system
 # reference BLAS, OpenBLAS, or MKL.
 set(_VGRE_XLA_BLAS_FOUND FALSE)
-find_path(_VGRE_CBLAS_INCLUDE cblas.h
-    PATHS /usr/include /usr/include/x86_64-linux-gnu /usr/local/include
-          /opt/homebrew/opt/openblas/include /usr/local/opt/openblas/include)
+set(_VGRE_CBLAS_SEARCH_PATHS /usr/include /usr/include/x86_64-linux-gnu /usr/local/include)
+set(_VGRE_CBLAS_LIB_SEARCH /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib)
+if(APPLE)
+    vgre_brew_prefix(openblas _VGRE_OPENBLAS_PREFIX)
+    if(_VGRE_OPENBLAS_PREFIX)
+        list(APPEND _VGRE_CBLAS_SEARCH_PATHS "${_VGRE_OPENBLAS_PREFIX}/include")
+        list(APPEND _VGRE_CBLAS_LIB_SEARCH "${_VGRE_OPENBLAS_PREFIX}/lib")
+    endif()
+endif()
+find_path(_VGRE_CBLAS_INCLUDE cblas.h PATHS ${_VGRE_CBLAS_SEARCH_PATHS})
 find_library(_VGRE_CBLAS_LIB
     NAMES openblas cblas blas
-    PATHS /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib
-          /opt/homebrew/opt/openblas/lib /usr/local/opt/openblas/lib)
+    PATHS ${_VGRE_CBLAS_LIB_SEARCH})
 if(_VGRE_CBLAS_INCLUDE AND _VGRE_CBLAS_LIB)
     set(_VGRE_XLA_BLAS_FOUND TRUE)
     set(_VGRE_XLA_BLAS_INCLUDE "${_VGRE_CBLAS_INCLUDE}")
@@ -716,6 +785,13 @@ endif()
 find_library(SQLITE3_LIBRARY
     NAMES sqlite3 libsqlite3.so.0 libsqlite3.so
     PATHS /usr/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/local/lib)
+if(APPLE AND NOT SQLITE3_LIBRARY)
+    vgre_brew_prefix(sqlite3 _VGRE_SQLITE_PREFIX)
+    if(_VGRE_SQLITE_PREFIX)
+        find_library(SQLITE3_LIBRARY NAMES sqlite3
+            PATHS "${_VGRE_SQLITE_PREFIX}/lib" NO_DEFAULT_PATH)
+    endif()
+endif()
 if(NOT TARGET SQLite::SQLite3)
     add_library(SQLite::SQLite3 INTERFACE IMPORTED)
     if(SQLITE3_LIBRARY)
@@ -742,11 +818,17 @@ if(VGRE_USE_UMFPACK)
     endif()
     if(NOT _umfpack_found)
         # Fallback: manual header+lib search
-        find_path(UMFPACK_INCLUDE_DIR umfpack.h
-            PATHS /usr/include/suitesparse /usr/local/include/suitesparse
-                  /opt/homebrew/include/suitesparse /usr/include)
-        find_library(UMFPACK_LIBRARY NAMES umfpack
-            PATHS /usr/lib /usr/local/lib /opt/homebrew/lib)
+        set(_UMFPACK_INC_PATHS /usr/include/suitesparse /usr/local/include/suitesparse /usr/include)
+        set(_UMFPACK_LIB_PATHS /usr/lib /usr/local/lib)
+        if(APPLE)
+            vgre_brew_prefix(suite-sparse _VGRE_SUITESPARSE_PREFIX)
+            if(_VGRE_SUITESPARSE_PREFIX)
+                list(APPEND _UMFPACK_INC_PATHS "${_VGRE_SUITESPARSE_PREFIX}/include/suitesparse")
+                list(APPEND _UMFPACK_LIB_PATHS "${_VGRE_SUITESPARSE_PREFIX}/lib")
+            endif()
+        endif()
+        find_path(UMFPACK_INCLUDE_DIR umfpack.h PATHS ${_UMFPACK_INC_PATHS})
+        find_library(UMFPACK_LIBRARY NAMES umfpack PATHS ${_UMFPACK_LIB_PATHS})
         if(UMFPACK_INCLUDE_DIR AND UMFPACK_LIBRARY)
             if(NOT TARGET UMFPACK::UMFPACK)
                 add_library(UMFPACK::UMFPACK UNKNOWN IMPORTED)
@@ -1055,6 +1137,8 @@ endfunction()
 vgre_add_subdirectory(src/common)
 vgre_add_subdirectory(src/core)
 vgre_add_subdirectory(src/compiler)
+vgre_add_subdirectory(src/compiler/backend)   # Track Z: pluggable execution backends
+vgre_add_subdirectory(src/compiler/frontend)  # Track Z: from-scratch CUDA-C front-end
 vgre_add_subdirectory(src/api)
 vgre_add_subdirectory(src/runtime)
 vgre_add_subdirectory(src/advanced)
@@ -1064,6 +1148,7 @@ vgre_add_subdirectory(src/identity)
 vgre_add_subdirectory(src/backup)
 vgre_add_subdirectory(src/mig)
 vgre_add_subdirectory(src/pqc)
+vgre_add_subdirectory(src/debug)
 vgre_add_subdirectory(src/xla)
 
 
@@ -1074,6 +1159,8 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
     $<TARGET_OBJECTS:vgre_compiler>
+    $<TARGET_OBJECTS:vgre_backend>
+    $<TARGET_OBJECTS:vgre_frontend>
     $<TARGET_OBJECTS:vgre_api>
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
@@ -1083,6 +1170,7 @@ add_library(vgre SHARED
     $<TARGET_OBJECTS:vgre_backup>
     $<TARGET_OBJECTS:vgre_mig>
     $<TARGET_OBJECTS:vgre_pqc>
+    $<TARGET_OBJECTS:vgre_debug>
     $<TARGET_OBJECTS:vgre_xla>
 )
 set_target_properties(vgre PROPERTIES
@@ -1169,6 +1257,7 @@ set(_VGRE_CUDART_SOURCES
     src/api/vgre_c_api.cpp
     src/api/vgre_c_api_graphs.cpp
     src/api/vgre_c_api_telemetry.cpp
+    src/api/kernel_backend_dispatch.cpp  # Track Z: execution-backend register/launch routing
     src/api/metrics_server.cpp
     src/api/build_info.cpp
 )
@@ -1190,6 +1279,8 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_common>
     $<TARGET_OBJECTS:vgre_core>
     $<TARGET_OBJECTS:vgre_compiler>
+    $<TARGET_OBJECTS:vgre_backend>
+    $<TARGET_OBJECTS:vgre_frontend>
     $<TARGET_OBJECTS:vgre_runtime>
     $<TARGET_OBJECTS:vgre_advanced>
     $<TARGET_OBJECTS:vgre_compliance>
@@ -1198,6 +1289,7 @@ target_sources(vgre_cudart PRIVATE
     $<TARGET_OBJECTS:vgre_backup>
     $<TARGET_OBJECTS:vgre_mig>
     $<TARGET_OBJECTS:vgre_pqc>
+    $<TARGET_OBJECTS:vgre_debug>
     $<TARGET_OBJECTS:vgre_xla>
     $<TARGET_OBJECTS:vgre_cudart_shims>
 )

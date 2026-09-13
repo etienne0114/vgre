@@ -1,0 +1,6 @@
+# Streamlit Community Cloud installs these (it reads requirements.txt from the
+# entrypoint's directory). The vgre package itself is pure-ctypes over the
+# prebuilt libvgre_nn.so (downloaded at startup), so it needs no pip install —
+# only numpy, which vgre uses for host-side array marshalling.
+streamlit>=1.36
+numpy>=1.26

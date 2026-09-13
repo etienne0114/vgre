@@ -52,12 +52,22 @@ Var matmul(const Var& a, const Var& b);
 // Tied linear: x[M,D] · Wᵀ -> [M,V], where W is stored [V,D] (e.g. a shared
 // token-embedding table used as the output projection — weight tying).
 Var linear_tied(const Var& x, const Var& w);
+// Batched matmul: a[B,M,K] · b[B,K,N] -> [B,M,N] (independent matmul per batch).
+Var bmm(const Var& a, const Var& b);
 // Elementwise add. b is either the same shape as a, or a 1-D bias [N] broadcast
 // over the rows of a 2-D a[M,N].
 Var add(const Var& a, const Var& b);
 Var mul(const Var& a, const Var& b);            // elementwise, same shape
 Var scale(const Var& a, float s);               // a * scalar
+// Straight-through ternary quantization (BitNet b1.58) of a 2-D weight [K,N].
+// Forward returns the dequantized ternary weight (per-column absmean scale), so
+// matmul(x, ternary_quantize(W)) equals the inference-time multiplication-free
+// ternary GEMM; backward is the identity (STE), so gradients train the fp master
+// weight W. This is the quantization-aware-training primitive for BitLinear.
+Var ternary_quantize(const Var& w);
 Var relu(const Var& x);
+Var exp_(const Var& x);                          // elementwise e^x
+Var softplus(const Var& x);                      // log(1+e^x); d/dx = sigmoid(x)
 Var gelu(const Var& x);                          // exact: 0.5x(1+erf(x/√2))
 Var silu(const Var& x);                          // x * sigmoid(x)
 Var sigmoid(const Var& x);                       // 1/(1+e^-x)
@@ -86,8 +96,37 @@ Var embedding(const Var& weight, const std::vector<int>& ids);
 // Fused softmax + cross-entropy over rows of logits[M,V] against integer
 // targets (length M). Returns a scalar mean loss; numerically stable.
 Var softmax_cross_entropy(const Var& logits, const std::vector<int>& targets);
+// Fused softmax + cross-entropy against dense soft targets[M,V]. Target rows are
+// normalized internally and treated as constants; the backward path is the usual
+// (softmax(logits) - target) / M gradient into logits. This is the primitive for
+// framework-free distillation.
+Var softmax_cross_entropy_soft(const Var& logits, const Var& soft_targets);
 // Mean of all elements -> scalar.
 Var mean(const Var& x);
+// Row-wise softmax over the last dim of x[M,N].
+Var softmax(const Var& x);
+// 2-D transpose: x[M,N] -> [N,M].
+Var transpose(const Var& x);
+// Concatenate two rank-2 tensors along axis 0 (rows) or 1 (cols).
+Var concat(const Var& a, const Var& b, int axis);
+// Row gather / scatter over a 2-D [N,D] tensor (the primitives for sparse
+// Mixture-of-Experts dispatch). index_select picks rows: out[i] = x[idx[i]]
+// (shape [len(idx), D]); its backward scatter-adds gradients back. index_add is
+// the dual: out is [rows, D] zeros with out[idx[i]] += src[i]; its backward
+// gathers. idx values must be in [0, N).
+Var index_select(const Var& x, const std::vector<int>& idx);
+
+// Expand grouped-query K/V heads [T, n_kv*hd] → [T, n_head*hd] (each KV head
+// repeated n_head/n_kv times). Identity when n_kv == n_head. Backward sums each
+// group's gradients into its KV head.
+Var repeat_kv(const Var& x, int n_kv_head, int n_head);
+Var index_add(int64_t rows, const Var& src, const std::vector<int>& idx);
+// Selective scan — the state-space-model (Mamba) recurrence over a length-T
+// sequence: h_t = a[t] ⊙ h_{t-1} + b[t], with h_{-1}=0. a and b are [T, D]
+// (per-step, per-state-channel gate and input); returns the states h [T, D].
+// This is the core linear-recurrence primitive; the Mamba block builds the
+// input-dependent a/b/C around it. Backward is the exact adjoint recurrence.
+Var selective_scan(const Var& a, const Var& b);
 
 // ── Vision ops (so the engine trains CNNs, not only transformers) ────────────
 // 2-D convolution via im2col + GEMM. input[N,Ci,H,W], weight[Co,Ci,Kh,Kw],
@@ -116,6 +155,26 @@ Var dropout(const Var& x, float p);
 // ── Engine ───────────────────────────────────────────────────────────────────
 // Seed `loss` (must be scalar) with grad 1 and back-propagate through the tape.
 void backward(const Var& loss);
+
+// ── Tensor/model parallelism ─────────────────────────────────────────────────
+// Differentiable all-reduce (sum across cluster ranks): forward sums x in place
+// across nodes, backward is identity (each rank's input contributed with weight
+// 1, and the summed output's grad is replicated). With no cluster (world=1) it
+// is a no-op. The reduction is performed by an injected hook so the autograd
+// engine stays decoupled from the transport layer.
+using AllReduceHook = void (*)(float* data, int64_t count);
+void set_all_reduce_hook(AllReduceHook fn);   // installed by the C-ABI/runtime
+Var all_reduce(const Var& x);
+// This is the one collective tensor/pipeline parallelism is built from:
+//   row-parallel linear:  y = all_reduce(matmul(x_shard, W_shard))   (W sharded by
+//   its contraction dim across ranks, so a layer too large for one node fits).
+
+// Gradient checkpointing: evaluate fn(inputs) but discard the segment's
+// intermediate activations, recomputing them during backward (trades compute
+// for memory). Output and gradients are identical to calling fn(inputs)
+// directly. Use it to wrap memory-heavy sub-networks (e.g. a transformer block).
+Var checkpoint(const std::function<Var(const std::vector<Var>&)>& fn,
+               const std::vector<Var>& inputs);
 // Reset gradients of the given parameters to zero (call before each step).
 void zero_grad(const std::vector<Var>& params);
 

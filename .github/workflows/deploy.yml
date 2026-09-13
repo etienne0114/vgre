@@ -1,0 +1,38 @@
+name: Deploy inference server (fly.io)
+
+# Redeploys the VGRE inference server to fly.io on push to main when it touches
+# the server, its Dockerfile, the fly config, or the Python bindings. Safe no-op
+# until the FLY_API_TOKEN repo secret is set — so it never breaks CI before the
+# token exists. Add the secret: repo Settings → Secrets and variables → Actions
+# → new secret FLY_API_TOKEN (a fly.io *deploy* token, not your password).
+
+# Manual-only: fly.io requires a payment card even for its free allowances, so
+# this does not auto-run (it would fail on every push without a card / created
+# app). The card-free default is Hugging Face Spaces — see deploy-hf.yml. Trigger
+# this from the Actions tab if you have a fly.io card + the app created.
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: fly-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy (skips gracefully without a token)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "${FLY_API_TOKEN}" ]; then
+            echo "FLY_API_TOKEN is not set — skipping deploy."
+            echo "Add a fly.io deploy token as the FLY_API_TOKEN repo secret to enable auto-deploy."
+            exit 0
+          fi
+          # Try to create the app (works only if the token can create apps — an
+          # org-scoped token). A deploy-scoped token can't; in that case create it
+          # once from your machine: `fly apps create vgre-server`.
+          flyctl apps create vgre-server --org personal || \
+            echo "note: could not create the app with this token — create it once manually if it doesn't exist yet"
+          flyctl deploy --remote-only --config fly.toml

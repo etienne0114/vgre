@@ -7,11 +7,20 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
 
 using namespace vgre::xla;
+
+// Shared error sink with the autograd C-ABI (defined in autograd_c_api.cpp):
+// record exceptions instead of silently swallowing them, so a failed train step
+// is queryable via vgre_ag_last_error() rather than corrupting the model unseen.
+extern "C" void vgre_ag__set_error(const char* msg);
+#define LM_CATCH(stmt)                                                       \
+    catch (const std::exception& ex) { vgre_ag__set_error(ex.what()); stmt; } \
+    catch (...) { vgre_ag__set_error("unknown error"); stmt; }
 
 // Opaque handle: a model plus its persistent AdamW state (so train steps chain).
 struct vgre_lm {
@@ -23,21 +32,46 @@ struct vgre_bpe {
     BpeTokenizer tok;
 };
 
+// Cluster collectives (resolved within libvgre). When a cluster is connected
+// (world>1), average the model's gradients across nodes so the LanguageModel
+// trains data-parallel across a CPU cluster; single-node it is skipped.
+extern "C" int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
+extern "C" int vgre_cluster_world_size(void);
+static void all_reduce_lm_grads(model::GPT& g) {
+    const int world = vgre_cluster_world_size();
+    if (world <= 1) return;
+    const float inv = 1.0f / (float)world;
+    for (auto& p : g.parameters()) {
+        if (p->grad.empty()) continue;
+        vgre_cluster_all_reduce(p->grad.data(), p->grad.size(), 3 /*FLOAT32*/);
+        for (float& gr : p->grad) gr *= inv;
+    }
+}
+
 extern "C" {
 
-vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model, int n_head,
-                        int d_ff, int max_seq, float dropout, int tie_embeddings,
-                        unsigned seed) {
+vgre_lm* vgre_lm_create_gqa(int vocab, int n_layer, int d_model, int n_head, int n_kv_head,
+                            int d_ff, int max_seq, float dropout, int tie_embeddings,
+                            unsigned seed, int attn_bias) {
     try {
         model::Config c;
         c.vocab = vocab; c.n_layer = n_layer; c.d_model = d_model;
-        c.n_head = n_head; c.d_ff = d_ff; c.max_seq = max_seq;
+        c.n_head = n_head; c.n_kv_head = n_kv_head; c.d_ff = d_ff; c.max_seq = max_seq;
         c.dropout = dropout; c.tie_embeddings = (tie_embeddings != 0);
+        c.attn_bias = (attn_bias != 0);
         auto h = new vgre_lm();
         h->gpt = std::make_unique<model::GPT>(c, seed);
         h->opt = std::make_unique<optim::AdamW>(h->gpt->parameters(), 3e-3f);
         return h;
-    } catch (...) { return nullptr; }
+    } LM_CATCH(return nullptr)
+}
+
+vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model, int n_head,
+                        int d_ff, int max_seq, float dropout, int tie_embeddings,
+                        unsigned seed) {
+    // n_kv_head = 0 → multi-head attention (n_kv == n_head); no attention bias.
+    return vgre_lm_create_gqa(vocab, n_layer, d_model, n_head, 0, d_ff, max_seq,
+                              dropout, tie_embeddings, seed, /*attn_bias=*/0);
 }
 
 void vgre_lm_free(vgre_lm* m) { delete m; }
@@ -54,8 +88,18 @@ void vgre_lm_set_int8_inference(vgre_lm* m, int on) {
     if (m) m->gpt->set_int8_inference(on != 0);
 }
 
+void vgre_lm_set_int4_kv_cache(vgre_lm* m, int on) {
+    if (m) m->gpt->set_int4_kv_cache(on != 0);
+}
+void vgre_lm_set_int8_kv_cache(vgre_lm* m, int on) {
+    if (m) m->gpt->set_int8_kv_cache(on != 0);
+}
+void vgre_lm_set_batched_prefill(vgre_lm* m, int on) {
+    if (m) m->gpt->set_batched_prefill(on != 0);
+}
+
 void vgre_lm_drop_fp32_weights(vgre_lm* m) {
-    if (m) try { m->gpt->drop_fp32_weights(); } catch (...) {}
+    if (m) try { m->gpt->drop_fp32_weights(); } LM_CATCH()
 }
 
 float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, float lr) {
@@ -66,10 +110,11 @@ float vgre_lm_train_step(vgre_lm* m, const int* ids, const int* tgt, int T, floa
         m->opt->zero_grad();
         autograd::Var loss = autograd::softmax_cross_entropy(m->gpt->forward(v_ids), v_tgt);
         autograd::backward(loss);
+        all_reduce_lm_grads(*m->gpt);                 // cluster grad sync (no-op single-node)
         optim::clip_grad_norm(m->gpt->parameters(), 1.0f);
         m->opt->step();
         return loss->data[0];
-    } catch (...) { return -1.0f; }
+    } LM_CATCH(return -1.0f)
 }
 
 float vgre_lm_accumulate(vgre_lm* m, const int* ids, const int* tgt, int T, float loss_scale) {
@@ -81,17 +126,18 @@ float vgre_lm_accumulate(vgre_lm* m, const int* ids, const int* tgt, int T, floa
         autograd::Var seed = (loss_scale == 1.0f) ? loss : autograd::scale(loss, loss_scale);
         autograd::backward(seed);   // grads accumulate (+=) into the leaf params
         return loss->data[0];
-    } catch (...) { return -1.0f; }
+    } LM_CATCH(return -1.0f)
 }
 
 void vgre_lm_optim_step(vgre_lm* m, float lr, float clip) {
     if (!m) return;
     try {
         m->opt->set_lr(lr);
+        all_reduce_lm_grads(*m->gpt);                 // cluster grad sync (no-op single-node)
         if (clip > 0.0f) optim::clip_grad_norm(m->gpt->parameters(), clip);
         m->opt->step();
         m->opt->zero_grad();
-    } catch (...) {}
+    } LM_CATCH()
 }
 
 float vgre_cosine_lr(long long step, long long warmup, long long total,
@@ -106,7 +152,7 @@ float vgre_lm_loss(vgre_lm* m, const int* ids, const int* tgt, int T) {
         // Forward only — no backward(), no optimizer step.
         autograd::Var loss = autograd::softmax_cross_entropy(m->gpt->forward(v_ids), v_tgt);
         return loss->data[0];
-    } catch (...) { return -1.0f; }
+    } LM_CATCH(return -1.0f)
 }
 
 int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
@@ -123,48 +169,97 @@ int vgre_lm_generate(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
         const int n = (int)std::min<size_t>(g.size(), (size_t)max_out);
         std::memcpy(out, g.data(), sizeof(int) * (size_t)n);
         return n;
-    } catch (...) { return -1; }
+    } LM_CATCH(return -1)
+}
+
+int vgre_lm_generate_speculative(vgre_lm* m, const int* prompt, int prompt_len, int n_new,
+                                 int spec_draft_k, unsigned seed, int* out, int max_out) {
+    if (!m || !prompt || prompt_len <= 0 || !out || max_out <= 0) return -1;
+    try {
+        std::vector<int> p(prompt, prompt + prompt_len);
+        model::GPT::SampleConfig sc;  // greedy (temperature 0) — spec-decode is greedy/lossless
+        sc.seed = seed;
+        std::vector<int> g = m->gpt->generate_speculative(p, n_new, spec_draft_k, sc);
+        const int n = (int)std::min<size_t>(g.size(), (size_t)max_out);
+        std::memcpy(out, g.data(), sizeof(int) * (size_t)n);
+        return n;
+    } LM_CATCH(return -1)
 }
 
 int vgre_lm_save(vgre_lm* m, const char* path) {
     if (!m || !path) return 0;
-    try { return model::save_checkpoint(*m->gpt, path) ? 1 : 0; } catch (...) { return 0; }
+    try { return model::save_checkpoint(*m->gpt, path) ? 1 : 0; } LM_CATCH(return 0)
 }
 
 int vgre_lm_load(vgre_lm* m, const char* path) {
     if (!m || !path) return 0;
-    try { return model::load_checkpoint(*m->gpt, path) ? 1 : 0; } catch (...) { return 0; }
+    try { return model::load_checkpoint(*m->gpt, path) ? 1 : 0; } LM_CATCH(return 0)
 }
 
-vgre_bpe* vgre_bpe_create(void) { try { return new vgre_bpe(); } catch (...) { return nullptr; } }
+int vgre_lm_load_llama(vgre_lm* m, const char* path) {
+    if (!m || !path) return 0;
+    try { return model::load_llama_safetensors(*m->gpt, path) ? 1 : 0; } LM_CATCH(return 0)
+}
+
+int vgre_lm_load_gguf(vgre_lm* m, const char* path) {
+    if (!m || !path) return 0;
+    try { return model::load_gguf_llama(*m->gpt, path) ? 1 : 0; } LM_CATCH(return 0)
+}
+
+vgre_bpe* vgre_bpe_create(void) { try { return new vgre_bpe(); } LM_CATCH(return nullptr) }
 void      vgre_bpe_free(vgre_bpe* t) { delete t; }
 
 void vgre_bpe_train(vgre_bpe* t, const char* corpus, int num_merges) {
     if (!t || !corpus) return;
-    try { t->tok.train(std::string(corpus), num_merges); } catch (...) {}
+    try { t->tok.train(std::string(corpus), num_merges); } LM_CATCH()
 }
 
-int vgre_bpe_vocab_size(const vgre_bpe* t) { return t ? t->tok.vocabSize() : 0; }
+int vgre_bpe_vocab_size(const vgre_bpe* t) {
+    if (!t) return 0;
+    return t->tok.hfReady() ? t->tok.hfVocabSize() : t->tok.vocabSize();
+}
+
+int vgre_bpe_load_hf(vgre_bpe* t, const char* tokenizer_json_path) {
+    if (!t || !tokenizer_json_path) return 0;
+    try { return t->tok.loadHf(std::string(tokenizer_json_path)) ? 1 : 0; } LM_CATCH(return 0)
+}
+
+int vgre_bpe_load_gpt2(vgre_bpe* t, const char* vocab_json_path, const char* merges_txt_path) {
+    if (!t || !vocab_json_path || !merges_txt_path) return 0;
+    try {
+        return t->tok.loadGpt2(std::string(vocab_json_path), std::string(merges_txt_path)) ? 1 : 0;
+    } LM_CATCH(return 0)
+}
+
+int vgre_bpe_special_id(const vgre_bpe* t, const char* content) {
+    if (!t || !content) return -1;
+    try { return t->tok.specialTokenId(std::string(content)); } LM_CATCH(return -1)
+}
 
 int vgre_bpe_encode(const vgre_bpe* t, const char* text, int* out, int max_out) {
     if (!t || !text || !out || max_out <= 0) return -1;
     try {
-        std::vector<int> ids = t->tok.encode(std::string(text));
+        std::vector<int> ids = t->tok.hfReady()   ? t->tok.encodeHf(std::string(text))
+                               : t->tok.gpt2Ready() ? t->tok.encodeGpt2(std::string(text))
+                                                    : t->tok.encode(std::string(text));
         const int n = (int)std::min<size_t>(ids.size(), (size_t)max_out);
         std::memcpy(out, ids.data(), sizeof(int) * (size_t)n);
         return n;
-    } catch (...) { return -1; }
+    } LM_CATCH(return -1)
 }
 
 int vgre_bpe_decode(const vgre_bpe* t, const int* ids, int n, char* out, int max_out) {
     if (!t || !ids || n < 0 || !out || max_out <= 0) return -1;
     try {
-        std::string s = t->tok.decode(std::vector<int>(ids, ids + n));
+        std::vector<int> v(ids, ids + n);
+        std::string s = t->tok.hfReady()     ? t->tok.decodeHf(v)
+                        : t->tok.gpt2Ready() ? t->tok.decodeGpt2(v)
+                                             : t->tok.decode(v);
         const int len = (int)std::min<size_t>(s.size(), (size_t)(max_out - 1));
         std::memcpy(out, s.data(), (size_t)len);
         out[len] = '\0';
         return len;
-    } catch (...) { return -1; }
+    } LM_CATCH(return -1)
 }
 
 }  // extern "C"

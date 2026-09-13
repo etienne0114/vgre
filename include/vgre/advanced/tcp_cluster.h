@@ -132,6 +132,8 @@ public:
    */
   VGREResult coordinateRestartWithPeers(uint32_t restart_delay_ms = 5000);
   VGREResult enableSecurity(bool enabled);
+  /** Load cluster auth token from VGRE_TCP_AUTH_TOKEN(_FILE) into memory. */
+  bool loadAuthToken();
   bool isSecurityEnabled() const { return security_enabled_.load(); }
   SessionInfo getSecurityInfo() const;
   VGREResult launchPartitionedKernel(uint64_t kernel_id,
@@ -163,6 +165,9 @@ public:
     uint64_t cpu_memory = 0;
     bool has_igpu = false;
     char igpu_name[64] = {};
+    char platform_name[32] = {};   // reported OS: "Linux"/"macOS"/"Windows"
+    char arch_name[16] = {};       // reported arch: "x86_64"/"arm64"
+    char node_hostname[64] = {};   // reported hostname
     bool capability_received = false;
     std::string ip_address;
     int port = 0;
@@ -198,6 +203,10 @@ public:
     std::deque<OutgoingPacket> high_priority_tx;
     std::deque<OutgoingPacket> low_priority_tx;
     std::atomic<uint32_t> in_flight_kernels{0};
+    // Cumulative count of kernels this worker has actually executed and returned
+    // a result for — the proof a node is *used*, not merely connected. Bumped on
+    // each RESPONSE / PARTITION_RESULT received from the worker.
+    std::atomic<uint64_t> kernels_completed{0};
     bool is_local = false;
     std::unique_ptr<vgre::core::ShmManager> shm_manager;
     uint64_t shm_offset = 0;
@@ -224,6 +233,11 @@ public:
     uint64_t cpu_memory;
     bool has_igpu;
     char igpu_name[64];
+    char platform_name[32];   // reported OS ("" if a legacy worker)
+    char arch_name[16];       // reported CPU arch
+    char node_hostname[64];   // reported hostname
+    uint32_t in_flight_kernels;   // kernels dispatched to this node, not yet returned
+    uint64_t kernels_completed;   // cumulative kernels this node has executed
     bool security_established;
     bool is_authenticating;
     int worker_idx;
@@ -389,7 +403,9 @@ private:
   uint32_t pending_collective_datatype_ = 0;
   uint64_t pending_collective_count_ = 0;
   bool is_master_ = false;
+  bool explicit_master_connect_ = false;  // true when worker dials a configured master (not UDP-learned)
   int port_ = 7777;
+  std::chrono::steady_clock::time_point next_master_connect_after_{};
   std::string host_;
   std::thread cluster_thread_;
   std::thread client_loop_thread_;

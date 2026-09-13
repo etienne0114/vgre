@@ -229,6 +229,18 @@ void DiscoveryManager::proactiveConnectionLoop() {
 
         auto now = std::chrono::steady_clock::now();
 
+        // A worker's single connection to its master is owned by clientLoop
+        // (parent_->client_fd_), which is NOT tracked in clients_. If the
+        // proactive loop also dialled the master it would run a SECOND handshake
+        // and install a second secure channel with a different key, desyncing
+        // the stream ("Invalid secure packet magic") and dropping the node with
+        // ERR_IO. A worker that already holds a master fd must never proactively
+        // dial — its outbound target is always its (already-connected) master.
+        if (!parent_->is_master_ &&
+            parent_->has_master_fd_.load(std::memory_order_acquire)) {
+            continue;
+        }
+
         for (const auto& addr : addrSnapshot) {
             if (!parent_->enabled_ || stop_proactive_) break;
 
@@ -236,12 +248,18 @@ void DiscoveryManager::proactiveConnectionLoop() {
             int port = parent_->port_;
             if (!parseAddress(addr, host, port)) continue;
 
-            // ── 2. Skip if already connected ──────────────────────────────────
+            // ── 2. Skip if already connected OR mid-handshake ─────────────────
+            // Counting is_authenticating is essential: during the handshake
+            // window a connection is present but not yet active, and dialling a
+            // duplicate here is exactly what causes the double-handshake /
+            // secure-channel desync.
             {
                 std::lock_guard<std::recursive_mutex> lock(parent_->clients_mutex_);
                 bool live = false;
                 for (const auto& c : parent_->clients_) {
-                    if (c && c->active && c->ip_address == host) { live = true; break; }
+                    if (c && (c->active || c->is_authenticating) &&
+                        c->socket_fd != vgre::common::VGRE_INVALID_SOCKET &&
+                        c->ip_address == host) { live = true; break; }
                 }
                 if (live) {
                     // Reset backoff since the peer is already connected

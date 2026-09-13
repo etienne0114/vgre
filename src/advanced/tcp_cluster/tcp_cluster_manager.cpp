@@ -275,6 +275,10 @@ VGREResult TCPClusterManager::enableSecurity(bool enabled) {
   return security_manager_->enableSecurity(enabled);
 }
 
+bool TCPClusterManager::loadAuthToken() {
+  return security_manager_->loadAuthToken(false);
+}
+
 SessionInfo TCPClusterManager::getSecurityInfo() const {
   return security_manager_->getSecurityInfo();
 }

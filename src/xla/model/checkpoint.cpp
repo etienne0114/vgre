@@ -45,6 +45,7 @@ bool save_checkpoint(GPT& model, const std::string& path) {
         << "\"n_layer\":\""   << c.n_layer   << "\","
         << "\"d_model\":\""   << c.d_model   << "\","
         << "\"n_head\":\""    << c.n_head    << "\","
+        << "\"n_kv_head\":\"" << c.kv_heads() << "\","
         << "\"d_ff\":\""      << c.ff()      << "\","
         << "\"max_seq\":\""   << c.max_seq   << "\""
         << "}}";

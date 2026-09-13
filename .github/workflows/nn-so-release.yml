@@ -1,0 +1,64 @@
+name: Publish libvgre_nn.so (for Streamlit Cloud)
+
+# Streamlit Community Cloud is our free, no-card, no-subscription host (HF now
+# requires PRO for server-side Spaces). Streamlit clones the repo and runs the
+# app, but it can't build libvgre_nn (that needs LLVM 18 to configure, ~1 GB).
+# So we build the LLVM-free libvgre_nn.so here on ubuntu-22.04 (glibc 2.35, <=
+# Streamlit's Debian glibc, so it loads there) and publish it as a PUBLIC
+# GitHub Release asset. deploy/streamlit/streamlit_app.py downloads it at start.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "include/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/nn-so-release.yml"
+
+concurrency:
+  group: nn-so-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed to create/update the release
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-22.04  # glibc 2.35 — loads on Streamlit's newer Debian glibc
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 18 + toolchain
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build llvm-18-dev libclang-18-dev libomp-18-dev \
+            libssl-dev zlib1g-dev
+
+      - name: Build libvgre_nn (LLVM-free artifact)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+          cmake --build build --target vgre_nn --parallel
+          test -f build/src/xla/libvgre_nn.so
+          echo "── glibc symbols required (max must be <= 2.35) ──"
+          objdump -T build/src/xla/libvgre_nn.so | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -3
+          echo "── shared deps ──"; ldd build/src/xla/libvgre_nn.so || true
+
+      - name: Publish to the nn-so-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/src/xla/libvgre_nn.so libvgre_nn.so
+          # Create the (prerelease, rolling) release once, then clobber its asset.
+          gh release view nn-so-latest >/dev/null 2>&1 || \
+            gh release create nn-so-latest --prerelease --title "libvgre_nn.so (rolling)" \
+              --notes "Rolling build of the LLVM-free libvgre_nn.so for the Streamlit Cloud demo. Built on ubuntu-22.04 (glibc 2.35). Updated automatically on each push to main that touches the native sources."
+          gh release upload nn-so-latest libvgre_nn.so --clobber
+          echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/download/nn-so-latest/libvgre_nn.so"

@@ -24,6 +24,8 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "vgre/common/os_backend.h"
 #if !defined(_WIN32)
@@ -72,6 +74,18 @@ vgre::common::vgre_socket_t connectToMaster(const std::string& ip, int port) {
     return sock;
 }
 
+// True for RFC1918 / loopback IPv4 literals (used to prefer LAN sender over WAN adv).
+bool isPrivateOrLoopbackIp(const std::string& ip) {
+    if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost") return true;
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
+    if (a == 10) return true;
+    if (a == 172 && b >= 16 && b <= 31) return true;
+    if (a == 192 && b == 168) return true;
+    if (a == 127) return true;
+    return false;
+}
+
 // Parse the sender address from a recvfrom result into a printable string.
 // IPv6 addresses are returned without brackets (brackets added by caller if needed).
 std::string senderToString(const sockaddr_storage& ss) {
@@ -84,6 +98,43 @@ std::string senderToString(const sockaddr_storage& ss) {
                   buf, sizeof(buf));
     }
     return std::string(buf);
+}
+
+struct ParsedDiscoveryPing {
+    int tcpPort = 7777;
+    bool hasSecMode = false;
+    bool secure = false;
+    std::string advertisedAddr;
+    std::string hmacHex;
+};
+
+ParsedDiscoveryPing parseDiscoveryPingFields(const std::vector<std::string>& fields) {
+    ParsedDiscoveryPing out;
+    if (fields.size() >= 2) {
+        try { out.tcpPort = std::stoi(fields[1]); } catch (...) {}
+    }
+
+    size_t idx = 2;
+    if (fields.size() > idx &&
+        (fields[idx] == "SECURE" || fields[idx] == "PLAIN")) {
+        out.hasSecMode = true;
+        out.secure = (fields[idx] == "SECURE");
+        idx++;
+    }
+
+    if (!fields.empty() && fields.back().size() == 64) {
+        out.hmacHex = fields.back();
+        for (size_t i = idx; i + 1 < fields.size(); ++i) {
+            if (!out.advertisedAddr.empty()) out.advertisedAddr += ':';
+            out.advertisedAddr += fields[i];
+        }
+    } else if (fields.size() > idx) {
+        for (size_t i = idx; i < fields.size(); ++i) {
+            if (!out.advertisedAddr.empty()) out.advertisedAddr += ':';
+            out.advertisedAddr += fields[i];
+        }
+    }
+    return out;
 }
 
 } // anonymous namespace
@@ -142,10 +193,9 @@ void DiscoveryManager::udpDiscoveryLoop() {
             if (senderIp.empty()) continue;
 
             // Parse message fields:
-            //   VGRE_DISCOVERY_PING:<tcp_port>:<sec_mode>[:<adv_addr>][:<hmac_hex>]
-            // Fields beyond <sec_mode> are optional and added in newer versions.
+            //   VGRE_DISCOVERY_PING:<tcp_port>[:SECURE|PLAIN][:<adv_host:port>][:<hmac_hex>]
+            // Legacy (no sec mode): VGRE_DISCOVERY_PING:<port>:<host>:<port>[:<hmac>]
             int masterTcpPort = parent_->port_;
-            std::string advertisedAddr;  // optional master public address
             std::string hmacField;
 
             // Split into tokens on ':'
@@ -160,41 +210,27 @@ void DiscoveryManager::udpDiscoveryLoop() {
                     pos = c + 1;
                 }
             }
-            // fields[0] = "VGRE_DISCOVERY_PING"
-            // fields[1] = tcp_port
-            // fields[2] = sec_mode  (SECURE/PLAIN)
-            // fields[3] = adv_addr or hmac_hex  (64-char hex = HMAC, else addr)
-            // fields[4] = hmac_hex              (when fields[3] is adv_addr)
-            if (fields.size() >= 2) {
-                try { masterTcpPort = std::stoi(fields[1]); } catch (...) {}
-            }
-            if (fields.size() >= 4) {
-                // Detect HMAC by its fixed 64-character hex length
-                if (fields.back().size() == 64) {
-                    hmacField = fields.back();
-                    // If there's a field between sec_mode and hmac, it's adv_addr
-                    if (fields.size() >= 5) advertisedAddr = fields[3];
-                } else {
-                    // No HMAC present; last field might be adv_addr
-                    advertisedAddr = fields.back();
-                }
-            }
 
-            // Prefer the master's self-advertised address (public IP/hostname)
-            // over the UDP sender address for NAT/WAN scenarios.
-            std::string masterIp = advertisedAddr.empty() ? senderIp : advertisedAddr;
-            // Strip port from adv_addr if it includes one (e.g. "1.2.3.4:7777")
+            const ParsedDiscoveryPing parsed = parseDiscoveryPingFields(fields);
+            masterTcpPort = parsed.tcpPort;
+            hmacField = parsed.hmacHex;
+            std::string advertisedAddr = parsed.advertisedAddr;
+
+            // Prefer LAN sender when master advertises a public IP but we heard
+            // the ping on the local subnet (NAT hairpin usually blocks public IP).
+            std::string advHost;
             if (!advertisedAddr.empty()) {
+                advHost = advertisedAddr;
                 size_t colon = advertisedAddr.rfind(':');
                 if (colon != std::string::npos) {
-                    masterIp = advertisedAddr.substr(0, colon);
+                    advHost = advertisedAddr.substr(0, colon);
                     try { masterTcpPort = std::stoi(advertisedAddr.substr(colon + 1)); }
                     catch (...) {}
                 }
             }
 
             // Verify HMAC when an auth token is configured.
-            // The HMAC covers the message prefix UP TO (not including) the HMAC field.
+            parent_->loadAuthToken();
             std::string token;
             {
                 std::lock_guard<std::recursive_mutex> lk(parent_->auth_token_mutex_);
@@ -206,23 +242,75 @@ void DiscoveryManager::udpDiscoveryLoop() {
                         "UDP master ping from " + senderIp + " has no HMAC — ignoring");
                     continue;
                 }
-                // Rebuild the signed prefix (everything before the HMAC field).
-                // Drop the last colon-separated token (the HMAC) to reconstruct it.
                 std::string prefix = msg.substr(0, msg.size() - hmacField.size() - 1);
                 if (!CryptoUtils::verifyHmacHex(token, prefix, hmacField)) {
-                    VGRE_LOG_WARN("TCPCluster",
-                        "UDP master ping from " + senderIp + " failed HMAC — ignoring");
+                    static std::unordered_map<std::string,
+                        std::chrono::steady_clock::time_point> last_hmac_warn;
+                    const auto now = std::chrono::steady_clock::now();
+                    bool should_log = true;
+                    {
+                        auto it = last_hmac_warn.find(senderIp);
+                        if (it != last_hmac_warn.end() &&
+                            now - it->second < std::chrono::seconds(30)) {
+                            should_log = false;
+                        }
+                    }
+                    if (should_log) {
+                        last_hmac_warn[senderIp] = now;
+                        const std::string fp = CryptoUtils::computeTokenFingerprint(token);
+                        VGRE_LOG_WARN("TCPCluster",
+                            "UDP master ping from " + senderIp +
+                            " failed HMAC — master uses a DIFFERENT auth token than this worker "
+                            "(worker SHA256: " +
+                            (fp.size() >= 16 ? fp.substr(0, 16) : fp) +
+                            "...). If vgre-token fingerprint already matches on both "
+                            "nodes, restart the master (vgre-start --master) so it "
+                            "reloads the token from ~/.vgre/token.");
+                    }
                     continue;
                 }
             }
 
+            // Sync worker security mode only after the ping is authenticated (or
+            // when no token is configured and discovery is intentionally open).
+            if (parsed.hasSecMode) {
+                parent_->security_enabled_.store(parsed.secure, std::memory_order_release);
+                VGRE_LOG_INFO("TCPCluster",
+                    std::string("Worker: master UDP mode ") +
+                    (parsed.secure ? "SECURE" : "PLAIN"));
+            }
+
+            std::vector<std::string> connectCandidates;
+            if (advHost.empty()) {
+                connectCandidates.push_back(senderIp);
+            } else if (isPrivateOrLoopbackIp(senderIp)) {
+                connectCandidates.push_back(senderIp);
+                if (advHost != senderIp) connectCandidates.push_back(advHost);
+            } else {
+                connectCandidates.push_back(advHost);
+                if (advHost != senderIp) connectCandidates.push_back(senderIp);
+            }
+
+            if (std::chrono::steady_clock::now() < parent_->next_master_connect_after_) {
+                continue;
+            }
+
+            std::string masterIp;
+            vgre::common::vgre_socket_t sock = vgre::common::VGRE_INVALID_SOCKET;
+            for (const auto& candidate : connectCandidates) {
+                masterIp = candidate;
+                sock = connectToMaster(candidate, masterTcpPort);
+                if (sock != vgre::common::VGRE_INVALID_SOCKET) break;
+            }
+
+            const bool usedAdvertised =
+                !advHost.empty() && masterIp == advHost && masterIp != senderIp;
+
             VGRE_LOG_INFO("TCPCluster",
                 "Worker: discovered master at " + masterIp + ":" +
                 std::to_string(masterTcpPort) +
-                (advertisedAddr.empty() ? " (LAN)" : " (advertised/WAN)"));
+                (usedAdvertised ? " (advertised/WAN)" : " (LAN)"));
 
-            // ── Attempt TCP connect ────────────────────────────────────────────
-            vgre::common::vgre_socket_t sock = connectToMaster(masterIp, masterTcpPort);
             if (sock == vgre::common::VGRE_INVALID_SOCKET) {
                 VGRE_LOG_WARN("TCPCluster",
                     "Worker: TCP connect to master at " + masterIp + ":" +
@@ -232,10 +320,21 @@ void DiscoveryManager::udpDiscoveryLoop() {
 
             {
                 std::lock_guard<std::mutex> lk(parent_->client_mutex_);
-                parent_->host_ = masterIp;
+                // Do not set host_ here — that would trigger clientLoop direct
+                // reconnect and race UDP discovery on the same master address.
                 parent_->client_fd_ = sock;
                 parent_->has_master_fd_.store(true, std::memory_order_release);
             }
+
+            // NOTE: the master is deliberately NOT added to
+            // proactive_worker_addresses_. A UDP-discovered worker's single
+            // master connection is owned by clientLoop (client_fd_), and
+            // reconnection is handled by re-entering UDP discovery. Adding the
+            // master here made the proactive loop open a SECOND connection and
+            // run a competing security handshake, installing a second secure
+            // channel with a different key — desyncing the stream ("Invalid
+            // secure packet magic") and dropping the worker with ERR_IO (12).
+
             VGRE_LOG_INFO("TCPCluster",
                 "Worker: TCP connection to master established (" + masterIp + ")");
             break;

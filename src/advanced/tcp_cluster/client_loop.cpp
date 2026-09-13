@@ -27,6 +27,7 @@
 // Only include headers not provided by sockets.h:
 #if !defined(_WIN32)
 #include <netdb.h>        // getaddrinfo / freeaddrinfo for reconnect path
+#include <unistd.h>       // gethostname for node identity
 #endif
 #if defined(__APPLE__)
 #include <sys/sysctl.h>   // sysctlbyname("hw.memsize") for macOS RAM detection
@@ -74,16 +75,16 @@ void TCPClusterManager::clientLoop() {
     }
     if (!enabled_) return;
 
-    // ── Security auto-negotiate (once per new connection) ────────
-    // performClientSecureHandshake() peeks for a SECURE_HANDSHAKE from the
-    // master (200ms window) and responds if one arrives, regardless of whether
-    // the worker's own security_enabled_ flag is set. This lets the worker
-    // automatically adapt to master's security mode without prior configuration.
+    // ── Security handshake (once per new connection) ────────
+    // Worker mode follows master's UDP :SECURE/:PLAIN advertisement (or token
+    // default for explicit WAN connects). performClientHandshake() skips the
+    // crypto handshake in plaintext mode and waits for SECURE_HANDSHAKE when
+    // secure mode is active.
     {
       VGRE_LOG_INFO("TCPCluster", "Worker: Starting security handshake...");
       VGREResult sr = performClientSecureHandshake();
 
-      if (sr != VGREResult::SUCCESS) {
+        if (sr != VGREResult::SUCCESS) {
         VGRE_LOG_ERROR("TCPCluster", "Client: Security handshake failed with result: " + std::to_string(static_cast<int>(sr)) + " — dropping connection");
         {
           std::lock_guard<std::mutex> lock(client_mutex_);
@@ -93,8 +94,10 @@ void TCPClusterManager::clientLoop() {
             has_master_fd_.store(false, std::memory_order_release);
           }
         }
-        if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
-        continue; // standby: wait for next master
+        // Back off before UDP discovery hammers the master (avoids auth rate-limit).
+        next_master_connect_after_ =
+            std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        continue;
       } else {
         VGRE_LOG_INFO("TCPCluster", "Worker: Security handshake completed successfully");
       }
@@ -118,7 +121,6 @@ void TCPClusterManager::clientLoop() {
               has_master_fd_.store(false, std::memory_order_release);
             }
           }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue;
         }
 
@@ -163,7 +165,6 @@ void TCPClusterManager::clientLoop() {
               has_master_fd_.store(false, std::memory_order_release);
             }
           }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue;
         }
 
@@ -185,7 +186,6 @@ void TCPClusterManager::clientLoop() {
               has_master_fd_.store(false, std::memory_order_release);
             }
           }
-          if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
           continue;
         }
 
@@ -202,8 +202,7 @@ void TCPClusterManager::clientLoop() {
                 has_master_fd_.store(false, std::memory_order_release);
               }
             }
-            if (server_fd_ == VGRE_INVALID_SOCKET) { enabled_ = false; return; }
-            continue;
+          continue;
           }
         }
 
@@ -231,20 +230,18 @@ void TCPClusterManager::clientLoop() {
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count());
                 ClockSyncReplyPayload rpl{cs.t1_us, t2, t3};
-                // Send as plaintext (same pattern as SECURE_READY exchange)
-                auto replyPkt = PacketUtils::constructVSBPPacket(
-                    PacketType::CLOCK_SYNC_REPLY, &rpl, sizeof(rpl), 0);
-                auto fd = client_fd_;
-                size_t off = 0;
-                while (off < replyPkt.size()) {
-                  int n = send(fd,
-                               reinterpret_cast<const char *>(replyPkt.data() + off),
-                               static_cast<int>(replyPkt.size() - off), 0);
-                  if (n > 0) { off += n; continue; }
-                  break;
-                }
+                // Send ENCRYPTED through the established secure channel. The
+                // master reads this via its main receive loop, which decrypts
+                // every post-handshake packet (recv_packet with secure_channel).
+                // Sending it plaintext (as SECURE_READY/CLOCK_SYNC are, before
+                // the worker's channel is ready) desynced the master's decrypt
+                // stream — "Invalid secure packet magic" — dropping the worker
+                // with ERR_IO (12) on every connection. This block only runs in
+                // secure mode, so client_secure_channel_ is valid here.
+                send_packet(client_fd_, PacketType::CLOCK_SYNC_REPLY, &rpl,
+                            sizeof(rpl), client_secure_channel_.get());
                 VGRE_LOG_DEBUG("TCPCluster",
-                    "Clock sync reply sent: T1=" + std::to_string(cs.t1_us) +
+                    "Clock sync reply sent (encrypted): T1=" + std::to_string(cs.t1_us) +
                     " T2=" + std::to_string(t2) + " T3=" + std::to_string(t3));
               }
             }
@@ -318,6 +315,36 @@ void TCPClusterManager::clientLoop() {
         cpkt.gpu_compute_minor = 0;
         cpkt.gpu_sm_count      = 0;
       }
+
+      // ── Node identity: OS, architecture, hostname (all platforms) ─────────
+#if defined(_WIN32)
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "Windows");
+#elif defined(__APPLE__)
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "macOS");
+#elif defined(__linux__)
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "Linux");
+#else
+      std::snprintf(cpkt.platform_name, sizeof(cpkt.platform_name), "Unknown");
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+      std::snprintf(cpkt.arch_name, sizeof(cpkt.arch_name), "arm64");
+#elif defined(__x86_64__) || defined(_M_X64)
+      std::snprintf(cpkt.arch_name, sizeof(cpkt.arch_name), "x86_64");
+#else
+      std::snprintf(cpkt.arch_name, sizeof(cpkt.arch_name), "unknown");
+#endif
+#if defined(_WIN32)
+      {
+        char hn[64] = {0};
+        DWORD hnLen = sizeof(hn);
+        if (GetComputerNameA(hn, &hnLen)) std::snprintf(cpkt.hostname, sizeof(cpkt.hostname), "%s", hn);
+      }
+#else
+      {
+        char hn[64] = {0};
+        if (gethostname(hn, sizeof(hn) - 1) == 0) std::snprintf(cpkt.hostname, sizeof(cpkt.hostname), "%s", hn);
+      }
+#endif
 
       VGRE_LOG_INFO("TCPCluster", "Worker: Sending capability packet...");
       send_packet(client_fd_, PacketType::CAPABILITY, &cpkt, sizeof(CapabilityPacket),
@@ -518,6 +545,17 @@ void TCPClusterManager::clientLoop() {
     pending_args_.clear();
     client_secure_channel_.reset();
     client_security_established_ = false;
+    // UDP-discovery workers re-sync :SECURE/:PLAIN from the next master ping.
+    // Explicit-address workers keep secure mode when a token is configured.
+    if (explicit_master_connect_) {
+      if (loadAuthToken()) {
+        security_enabled_.store(true, std::memory_order_release);
+      } else {
+        security_enabled_.store(false, std::memory_order_release);
+      }
+    } else {
+      security_enabled_.store(false, std::memory_order_release);
+    }
     receive_state_ = ReceiveState::IDLE;
     pending_kernel_id_ = 0;
     pending_kernel_name_.clear();
@@ -539,21 +577,13 @@ void TCPClusterManager::clientLoop() {
     // will set client_fd_ on the next inbound master connection.
     if (server_fd_ == VGRE_INVALID_SOCKET) {
       std::string host;
-      int port;
+      int port = port_;
       {
         std::lock_guard<std::mutex> lk(client_mutex_);
         host = host_;
-        port = port_;
       }
 
-      if (host.empty() || host == "0.0.0.0") {
-        // UDP auto-discovery mode — re-enter discovery loop.
-        // udpDiscoveryLoop() is still running and will reconnect when a
-        // master ping arrives; this thread just loops back to Phase 0 and
-        // waits for client_fd_ to become valid again.
-        VGRE_LOG_INFO("TCPCluster",
-            "Worker: master disconnected — re-entering UDP auto-discovery");
-      } else {
+      if (explicit_master_connect_ && !host.empty() && host != "0.0.0.0") {
         // Explicit master address — try a direct reconnect before looping.
         // Use getaddrinfo so hostnames, IPv4, and IPv6 literals all work.
         VGRE_LOG_INFO("TCPCluster",
@@ -567,6 +597,16 @@ void TCPClusterManager::clientLoop() {
                                 [this]() { return !enabled_; });
         }
         if (!enabled_) return;
+
+        // UDP discovery may have reconnected during the backoff window.
+        {
+          std::lock_guard<std::mutex> lk(client_mutex_);
+          if (client_fd_ != VGRE_INVALID_SOCKET) {
+            VGRE_LOG_INFO("TCPCluster",
+                "Worker: discovery already reconnected — skipping direct dial");
+            continue;
+          }
+        }
 
         char portStr[8];
         snprintf(portStr, sizeof(portStr), "%d", port);
@@ -594,11 +634,17 @@ void TCPClusterManager::clientLoop() {
           freeaddrinfo(res);
           if (sock != VGRE_INVALID_SOCKET) {
             std::lock_guard<std::mutex> lk(client_mutex_);
-            client_fd_ = sock;
-            has_master_fd_.store(true, std::memory_order_release);
-            VGRE_LOG_INFO("TCPCluster",
-                "Worker: reconnected to master at " +
-                host + ":" + std::to_string(port));
+            if (client_fd_ != VGRE_INVALID_SOCKET) {
+              vgre_close_socket(sock);
+              VGRE_LOG_INFO("TCPCluster",
+                  "Worker: discovery won race — dropped redundant direct dial");
+            } else {
+              client_fd_ = sock;
+              has_master_fd_.store(true, std::memory_order_release);
+              VGRE_LOG_INFO("TCPCluster",
+                  "Worker: reconnected to master at " +
+                  host + ":" + std::to_string(port));
+            }
           } else {
             VGRE_LOG_WARN("TCPCluster",
                 "Worker: direct reconnect failed — proactive loop will retry");
@@ -607,6 +653,13 @@ void TCPClusterManager::clientLoop() {
         // Whether or not direct reconnect succeeded, loop back to Phase 0.
         // The proactive reconnect thread (startProactiveConnections) will
         // keep retrying with exponential backoff in the background.
+      } else {
+        // UDP auto-discovery mode — re-enter discovery loop.
+        // udpDiscoveryLoop() is still running and will reconnect when a
+        // master ping arrives; this thread just loops back to Phase 0 and
+        // waits for client_fd_ to become valid again.
+        VGRE_LOG_INFO("TCPCluster",
+            "Worker: master disconnected — re-entering UDP auto-discovery");
       }
     } else {
       VGRE_LOG_INFO("TCPCluster", "Worker: Standby — waiting for next master connection...");

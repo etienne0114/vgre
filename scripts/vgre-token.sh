@@ -7,7 +7,8 @@
 #   vgre-token fingerprint           Print the SHA-256 fingerprint
 #   vgre-token set <TOKEN>           Store a specific token (from another node)
 #   vgre-token verify                Check env-var matches the stored file
-#   vgre-token copy                  Print the scp command to share with a worker
+#   vgre-token copy                  Print scp command to share with a worker
+#   vgre-token push <user@HOST>      Copy token file to master or worker via scp
 #   vgre-token revoke                Delete the stored token (prompts for confirmation)
 #
 # The token is stored in ~/.vgre/token (chmod 600).
@@ -19,6 +20,20 @@
 set -eu
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
+# Resolve the real scripts/ directory even when invoked via ~/.local/bin symlinks.
+_script="$0"
+while [ -L "$_script" ]; do
+    _link=$(readlink "$_script")
+    case "$_link" in
+        /*) _script="$_link" ;;
+        *) _script="$(CDPATH= cd -- "$(dirname "$_script")" && pwd)/$_link" ;;
+    esac
+done
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$_script")" && pwd)"
+
+# shellcheck source=vgre-cli-install.sh
+. "$SCRIPT_DIR/vgre-cli-install.sh"
+
 VGRE_DIR="${VGRE_DIR:-$HOME/.vgre}"
 TOKEN_FILE="$VGRE_DIR/token"
 ENV_FILE="$VGRE_DIR/env"
@@ -88,7 +103,7 @@ _update_env_file() {
 _add_to_shell_profile() {
     SOURCE_LINE="# VGRE environment"
     LOAD_LINE="[ -f \"$ENV_FILE\" ] && . \"$ENV_FILE\""
-    for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+    for PROFILE in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$PROFILE" ]; then
             if ! grep -q "vgre/env" "$PROFILE" 2>/dev/null; then
                 printf '\n%s\n%s\n' "$SOURCE_LINE" "$LOAD_LINE" >> "$PROFILE"
@@ -96,6 +111,7 @@ _add_to_shell_profile() {
             fi
         fi
     done
+    vgre_ensure_cli_path
 }
 
 _gen_token() {
@@ -203,10 +219,24 @@ cmd_verify() {
 
 cmd_copy() {
     [ -f "$TOKEN_FILE" ] || die "No token found. Run: vgre-token generate"
-    printf "\n${BOLD}Copy token to a worker machine:${RESET}\n\n"
-    printf "  ${CYAN}scp %s user@WORKER_IP:%s${RESET}\n\n" "$TOKEN_FILE" "$TOKEN_FILE"
-    printf "${DIM}Replace  user@WORKER_IP  with the actual worker address."
-    printf "\nRun  vgre-token fingerprint  on both machines to confirm they match.${RESET}\n\n"
+    FP=$(_sha256 "$(_read_token)")
+    printf "\n${BOLD}Copy token to another cluster node (master or worker):${RESET}\n\n"
+    printf "  ${CYAN}scp %s user@REMOTE_IP:%s${RESET}\n\n" "$TOKEN_FILE" "$TOKEN_FILE"
+    printf "  ${BOLD}This node fingerprint:${RESET} ${CYAN}%s${RESET}\n\n" "$FP"
+    printf "${DIM}On the remote node run  vgre-token fingerprint  — it MUST match."
+    printf "\nThen restart vgre-start --master or --worker on the remote node.${RESET}\n\n"
+}
+
+cmd_push() {
+    [ -n "${1:-}" ] || die "Usage: vgre-token push user@HOST"
+    [ -f "$TOKEN_FILE" ] || die "No token found. Run: vgre-token generate"
+    info "Copying token to $1:$TOKEN_FILE ..."
+    _ensure_dir
+    scp "$TOKEN_FILE" "$1:$TOKEN_FILE"
+    ok "Token copied. On the remote host run:"
+    printf "  ${CYAN}vgre-token fingerprint${RESET}   # must match this node\n"
+    printf "  ${CYAN}vgre-start --master${RESET}      # or --worker\n\n"
+    _print_fingerprint_block "$(_read_token)"
 }
 
 cmd_revoke() {
@@ -233,12 +263,25 @@ cmd_revoke() {
     esac
 }
 
+cmd_install() {
+    info "Installing VGRE CLI tools to $(vgre_cli_bin_dir)..."
+    vgre_install_cli_symlinks "$SCRIPT_DIR"
+    vgre_ensure_cli_path
+    ok "CLI symlinks installed to $(vgre_cli_bin_dir)"
+    if command -v brew >/dev/null 2>&1 && [ -w "$(brew --prefix 2>/dev/null)/bin" ]; then
+        ok "Also linked into $(brew --prefix)/bin (already on PATH)"
+    fi
+    ok "PATH updated for this session and future terminals"
+    printf "\n${DIM}If a command is still not found, run:  . %s${RESET}\n\n" "$ENV_FILE"
+}
+
 cmd_help() {
     cat <<'HELP'
 
 vgre-token — VGRE Auth Token Manager
 
 Usage:
+  vgre-token install               Install all VGRE CLI tools and add ~/.local/bin to PATH
   vgre-token generate              Generate a new secure 64-hex token
   vgre-token show                  Print the stored token value
   vgre-token fingerprint           Print the SHA-256 fingerprint
@@ -270,12 +313,14 @@ CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
+    install)     cmd_install ;;
     generate)    cmd_generate ;;
     show)        cmd_show ;;
     fingerprint) cmd_fingerprint ;;
     set)         cmd_set "${1:-}" ;;
     verify)      cmd_verify ;;
     copy)        cmd_copy ;;
+    push)        cmd_push "${1:-}" ;;
     revoke)      cmd_revoke ;;
     help|--help|-h) cmd_help ;;
     *)

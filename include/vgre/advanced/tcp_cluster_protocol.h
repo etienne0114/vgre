@@ -269,6 +269,12 @@ struct CapabilityPacket {
   int  gpu_compute_major;        // CUDA compute capability major
   int  gpu_compute_minor;        // CUDA compute capability minor
   int  gpu_sm_count;             // streaming multiprocessor count
+  // ── v2 fields (appended; a legacy peer sends a shorter payload — the
+  //    receiver copies min(payloadSize, sizeof) and zero-inits the rest, so a
+  //    Linux master and a macOS/Windows worker interoperate) ────────────────
+  char platform_name[32];        // "Linux" | "macOS" | "Windows" ("" = legacy)
+  char arch_name[16];            // "x86_64" | "arm64"
+  char hostname[64];             // node hostname, shown in the dashboard
 };
 #pragma pack(pop)
 

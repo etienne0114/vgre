@@ -1,12 +1,15 @@
 # Test CMakeLists.txt
 # Unit tests and integration tests for VGRE
 
+vgre_test_library_path_env(VGRE_TEST_LIB_ENV)
+
 # ── Pre-test cleanup fixture ─────────────────────────────────────────────────
 # Cleans stale OpenMP (libomp) KMP registration files left by killed processes.
-# These files accumulate in /dev/shm when processes are SIGKILL'd, causing the
-# next test that initializes OpenMP to deadlock during library registration.
+# Linux: /dev/shm; macOS: TMPDIR (libomp registers under the temp dir).
 add_test(NAME KMPCleanup
-    COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
+    COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; \
+        find \"\${TMPDIR:-/tmp}\" -maxdepth 1 -name '__KMP_REGISTERED_LIB_*' -delete 2>/dev/null; \
+        rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
 set_tests_properties(KMPCleanup PROPERTIES FIXTURES_SETUP KMPRegistrationClean)
 
 # ── Unit tests ──────────────────────────────────────────────────────────────
@@ -86,19 +89,23 @@ add_test(NAME MultiDeviceIntegration COMMAND test_multi_device)
 set_tests_properties(MultiDeviceIntegration PROPERTIES
     ENVIRONMENT "VGRE_VIRTUAL_DEVICE_COUNT=2")
 
-add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
-target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)
-add_test(NAME MultiDeviceCooperativeComprehensive COMMAND test_multi_device_cooperative_comprehensive)
-set_tests_properties(MultiDeviceCooperativeComprehensive PROPERTIES
-    TIMEOUT 300
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_multi_device_cooperative_comprehensive integration/test_multi_device_cooperative_comprehensive.cpp)
+    target_link_libraries(test_multi_device_cooperative_comprehensive PRIVATE vgre)
+    add_test(NAME MultiDeviceCooperativeComprehensive COMMAND test_multi_device_cooperative_comprehensive)
+    set_tests_properties(MultiDeviceCooperativeComprehensive PROPERTIES
+        TIMEOUT 300
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_cooperative_groups_partition unit/test_cooperative_groups_partition.cpp)
-target_link_libraries(test_cooperative_groups_partition PRIVATE vgre)
-add_test(NAME CooperativeGroupsPartition COMMAND test_cooperative_groups_partition)
-set_tests_properties(CooperativeGroupsPartition PROPERTIES
-    TIMEOUT 120
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_cooperative_groups_partition unit/test_cooperative_groups_partition.cpp)
+    target_link_libraries(test_cooperative_groups_partition PRIVATE vgre)
+    add_test(NAME CooperativeGroupsPartition COMMAND test_cooperative_groups_partition)
+    set_tests_properties(CooperativeGroupsPartition PROPERTIES
+        TIMEOUT 120
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_stream_concurrency integration/test_stream_concurrency.cpp)
 target_link_libraries(test_stream_concurrency PRIVATE vgre)
@@ -130,34 +137,40 @@ target_link_libraries(test_syncthreads PRIVATE vgre)
 add_test(NAME SyncthreadsIntegration COMMAND test_syncthreads)
 set_tests_properties(SyncthreadsIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
-add_executable(test_warp_shuffle_jit integration/test_warp_shuffle.cpp)
-target_link_libraries(test_warp_shuffle_jit PRIVATE vgre)
-add_test(NAME WarpShuffleJITIntegration COMMAND test_warp_shuffle_jit)
-set_tests_properties(WarpShuffleJITIntegration PROPERTIES
-    TIMEOUT 120
-    FIXTURES_REQUIRED KMPRegistrationClean
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_warp_shuffle_jit integration/test_warp_shuffle.cpp)
+    target_link_libraries(test_warp_shuffle_jit PRIVATE vgre)
+    add_test(NAME WarpShuffleJITIntegration COMMAND test_warp_shuffle_jit)
+    set_tests_properties(WarpShuffleJITIntegration PROPERTIES
+        TIMEOUT 120
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_device_intrinsics integration/test_device_intrinsics.cpp)
-target_link_libraries(test_device_intrinsics PRIVATE vgre)
-add_test(NAME DeviceIntrinsicsIntegration COMMAND test_device_intrinsics)
-set_tests_properties(DeviceIntrinsicsIntegration PROPERTIES
-    TIMEOUT 180
-    FIXTURES_REQUIRED KMPRegistrationClean
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_device_intrinsics integration/test_device_intrinsics.cpp)
+    target_link_libraries(test_device_intrinsics PRIVATE vgre)
+    add_test(NAME DeviceIntrinsicsIntegration COMMAND test_device_intrinsics)
+    set_tests_properties(DeviceIntrinsicsIntegration PROPERTIES
+        TIMEOUT 180
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_extern_shared integration/test_extern_shared.cpp)
 target_link_libraries(test_extern_shared PRIVATE vgre)
 add_test(NAME ExternSharedIntegration COMMAND test_extern_shared)
 set_tests_properties(ExternSharedIntegration PROPERTIES FIXTURES_REQUIRED KMPRegistrationClean)
 
-add_executable(test_device_curand integration/test_device_curand.cpp)
-target_link_libraries(test_device_curand PRIVATE vgre)
-add_test(NAME DeviceCurandIntegration COMMAND test_device_curand)
-set_tests_properties(DeviceCurandIntegration PROPERTIES
-    TIMEOUT 120
-    FIXTURES_REQUIRED KMPRegistrationClean
-    RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_device_curand integration/test_device_curand.cpp)
+    target_link_libraries(test_device_curand PRIVATE vgre)
+    add_test(NAME DeviceCurandIntegration COMMAND test_device_curand)
+    set_tests_properties(DeviceCurandIntegration PROPERTIES
+        TIMEOUT 120
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_extern_c_kernel integration/test_extern_c_kernel.cpp)
 target_link_libraries(test_extern_c_kernel PRIVATE vgre)
@@ -240,26 +253,35 @@ add_test(NAME ClangParser COMMAND test_clang_parser)
 set_tests_properties(ClangParser PROPERTIES TIMEOUT 300)
 
 
-add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
-target_link_libraries(test_clang_enhanced PRIVATE vgre)
-add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
-set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_clang_enhanced compiler/test_clang_enhanced.cpp)
+    target_link_libraries(test_clang_enhanced PRIVATE vgre)
+    add_test(NAME ClangEnhanced COMMAND test_clang_enhanced)
+    set_tests_properties(ClangEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
-target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
-add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
-set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_kernel_parser_enhanced compiler/test_kernel_parser_enhanced.cpp)
+    target_link_libraries(test_kernel_parser_enhanced PRIVATE vgre)
+    add_test(NAME KernelParserEnhanced COMMAND test_kernel_parser_enhanced)
+    set_tests_properties(KernelParserEnhanced PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 
-add_executable(test_flop_counting compiler/test_flop_counting.cpp)
-target_link_libraries(test_flop_counting PRIVATE vgre)
-add_test(NAME FLOPCounting COMMAND test_flop_counting)
-set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+# Uses the LLVM IRBuilder API directly — only meaningful in a JIT-enabled build.
+if(VGRE_ENABLE_JIT)
+    add_executable(test_flop_counting compiler/test_flop_counting.cpp)
+    target_link_libraries(test_flop_counting PRIVATE vgre)
+    add_test(NAME FLOPCounting COMMAND test_flop_counting)
+    set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_vectorization_hints compiler/test_vectorization_hints.cpp)
-target_link_libraries(test_vectorization_hints PRIVATE vgre)
-add_test(NAME VectorizationHints COMMAND test_vectorization_hints)
-set_tests_properties(VectorizationHints PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_vectorization_hints compiler/test_vectorization_hints.cpp)
+    target_link_libraries(test_vectorization_hints PRIVATE vgre)
+    add_test(NAME VectorizationHints COMMAND test_vectorization_hints)
+    set_tests_properties(VectorizationHints PROPERTIES TIMEOUT 30)
+endif()
 
 add_executable(test_texture_view unit/test_texture_view.cpp)
 target_link_libraries(test_texture_view PRIVATE vgre)
@@ -290,12 +312,15 @@ add_executable(test_radix_sort core/test_radix_sort.cpp)
 target_link_libraries(test_radix_sort PRIVATE vgre)
 add_test(NAME RadixSort COMMAND test_radix_sort)
 
-add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
-target_link_libraries(test_roofline_autotuner PRIVATE vgre)
-add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
-set_tests_properties(RooflineAutoTuner PROPERTIES
-    TIMEOUT 120
-    RESOURCE_LOCK vgre_llvm_jit)
+# Benchmarks real kernel launches through the JIT — requires VGRE_ENABLE_JIT.
+if(VGRE_ENABLE_JIT)
+    add_executable(test_roofline_autotuner core/test_roofline_autotuner.cpp)
+    target_link_libraries(test_roofline_autotuner PRIVATE vgre)
+    add_test(NAME RooflineAutoTuner COMMAND test_roofline_autotuner)
+    set_tests_properties(RooflineAutoTuner PROPERTIES
+        TIMEOUT 120
+        RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_memory_concurrency unit/test_memory_concurrency.cpp)
 target_link_libraries(test_memory_concurrency PRIVATE vgre)
@@ -535,11 +560,13 @@ set_tests_properties(NCCLReduceScatter PROPERTIES TIMEOUT 60)
 
 # PTX warp shuffle emulation — group-aware permutation network (QUEUE-10)
 # Self-contained: provides its own JIT runtime stubs; does not link vgre.
-add_executable(test_warp_shuffle unit/test_warp_shuffle.cpp)
-target_include_directories(test_warp_shuffle PRIVATE
-    ${CMAKE_SOURCE_DIR}/include)
-add_test(NAME WarpShuffle COMMAND test_warp_shuffle)
-set_tests_properties(WarpShuffle PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_warp_shuffle unit/test_warp_shuffle.cpp)
+    target_include_directories(test_warp_shuffle PRIVATE
+        ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME WarpShuffle COMMAND test_warp_shuffle)
+    set_tests_properties(WarpShuffle PROPERTIES TIMEOUT 30)
+endif()
 
 # cuBLAS DOT/NRM2/ASUM Kahan summation + cublasDnrm2 (QUEUE-08)
 add_executable(test_kahan_level1 api/test_kahan_level1.cpp)
@@ -573,10 +600,12 @@ target_include_directories(test_sparse_view PRIVATE ${CMAKE_SOURCE_DIR}/src/api/
 add_test(NAME SparseViewConversions COMMAND test_sparse_view)
 set_tests_properties(SparseViewConversions PROPERTIES TIMEOUT 30)
 
-add_executable(test_ptx_translate api/test_ptx_translate.cpp)
-target_link_libraries(test_ptx_translate PRIVATE vgre)
-add_test(NAME PTXTranslate COMMAND test_ptx_translate)
-set_tests_properties(PTXTranslate PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_ptx_translate api/test_ptx_translate.cpp)
+    target_link_libraries(test_ptx_translate PRIVATE vgre)
+    add_test(NAME PTXTranslate COMMAND test_ptx_translate)
+    set_tests_properties(PTXTranslate PROPERTIES TIMEOUT 30)
+endif()
 
 add_executable(test_metrics_server api/test_metrics_server.cpp)
 target_link_libraries(test_metrics_server PRIVATE vgre_cudart)
@@ -588,25 +617,31 @@ target_link_libraries(test_config_buildinfo PRIVATE vgre_cudart)
 add_test(NAME ConfigBuildInfo COMMAND test_config_buildinfo)
 set_tests_properties(ConfigBuildInfo PROPERTIES TIMEOUT 30)
 
-add_executable(test_flash_attention integration/test_flash_attention.cpp)
-target_link_libraries(test_flash_attention PRIVATE vgre)
-add_test(NAME FlashAttention COMMAND test_flash_attention)
-# JIT-compiles its kernels, so serialise it against the other LLVM-JIT tests:
-# under -j2 CI load a concurrent clang fork can transiently fail the first
-# (cold) compile, which surfaced as a non-deterministic non-causal failure.
-set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_flash_attention integration/test_flash_attention.cpp)
+    target_link_libraries(test_flash_attention PRIVATE vgre)
+    add_test(NAME FlashAttention COMMAND test_flash_attention)
+    # JIT-compiles its kernels, so serialise it against the other LLVM-JIT tests:
+    # under -j2 CI load a concurrent clang fork can transiently fail the first
+    # (cold) compile, which surfaced as a non-deterministic non-causal failure.
+    set_tests_properties(FlashAttention PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
-add_executable(test_tensorcore_mma integration/test_tensorcore_mma.cpp)
-target_link_libraries(test_tensorcore_mma PRIVATE vgre)
-add_test(NAME TensorCoreMMA COMMAND test_tensorcore_mma)
-# JIT-compiles warp-collective mma kernels — serialise with the other JIT tests.
-set_tests_properties(TensorCoreMMA PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_tensorcore_mma integration/test_tensorcore_mma.cpp)
+    target_link_libraries(test_tensorcore_mma PRIVATE vgre)
+    add_test(NAME TensorCoreMMA COMMAND test_tensorcore_mma)
+    # JIT-compiles warp-collective mma kernels — serialise with the other JIT tests.
+    set_tests_properties(TensorCoreMMA PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 # Phase 3, P3-4: Hopper warp-group MMA (wgmma).
-add_executable(test_wgmma integration/test_wgmma.cpp)
-target_link_libraries(test_wgmma PRIVATE vgre)
-add_test(NAME WgmmaWarpGroup COMMAND test_wgmma)
-set_tests_properties(WgmmaWarpGroup PROPERTIES TIMEOUT 60)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_wgmma integration/test_wgmma.cpp)
+    target_link_libraries(test_wgmma PRIVATE vgre)
+    add_test(NAME WgmmaWarpGroup COMMAND test_wgmma)
+    set_tests_properties(WgmmaWarpGroup PROPERTIES TIMEOUT 60)
+endif()
 
 add_executable(test_cublaslt api/test_cublaslt.cpp)
 target_link_libraries(test_cublaslt PRIVATE vgre_cudart)
@@ -828,6 +863,13 @@ target_link_libraries(test_xla_c_api PRIVATE vgre)
 add_test(NAME XlaExecutableCApi COMMAND test_xla_c_api)
 set_tests_properties(XlaExecutableCApi PROPERTIES TIMEOUT 30)
 
+# From-scratch HNSW ANN index (local-RAG retrieval): recall@10 vs brute force,
+# self-retrieval, save/load roundtrip, error paths — cosine + squared-L2.
+add_executable(test_vector_index xla/test_vector_index.cpp)
+target_link_libraries(test_vector_index PRIVATE vgre)
+add_test(NAME XlaVectorIndex COMMAND test_vector_index)
+set_tests_properties(XlaVectorIndex PROPERTIES TIMEOUT 60)
+
 # Work-stealing thread pool: parallel coverage, reentrancy, concurrent jobs.
 add_executable(test_thread_pool xla/test_thread_pool.cpp)
 target_link_libraries(test_thread_pool PRIVATE vgre Threads::Threads)
@@ -875,6 +917,30 @@ add_executable(test_model xla/test_model.cpp)
 target_link_libraries(test_model PRIVATE vgre Threads::Threads)
 add_test(NAME XlaModel COMMAND test_model)
 set_tests_properties(XlaModel PROPERTIES TIMEOUT 240)
+
+# Batched prefill == sequential prefill, bit-identical (fp32/bf16/int8).
+add_executable(test_batched_prefill xla/test_batched_prefill.cpp)
+target_link_libraries(test_batched_prefill PRIVATE vgre Threads::Threads)
+add_test(NAME XlaBatchedPrefill COMMAND test_batched_prefill)
+set_tests_properties(XlaBatchedPrefill PROPERTIES TIMEOUT 60)
+
+# vgre_lm C ABI: speculative decode lossless + batched-prefill toggle.
+add_executable(test_lm_c_api xla/test_lm_c_api.cpp)
+target_link_libraries(test_lm_c_api PRIVATE vgre Threads::Threads)
+add_test(NAME XlaLmCApi COMMAND test_lm_c_api)
+set_tests_properties(XlaLmCApi PROPERTIES TIMEOUT 60)
+
+# HF Llama safetensors loader: verified against a self-contained HF reference.
+add_executable(test_hf_loader xla/test_hf_loader.cpp)
+target_link_libraries(test_hf_loader PRIVATE vgre Threads::Threads)
+add_test(NAME XlaHfLoader COMMAND test_hf_loader)
+set_tests_properties(XlaHfLoader PROPERTIES TIMEOUT 60)
+
+# Grouped-query attention: repeat_kv gradient + native-GQA == replicated-MHA.
+add_executable(test_gqa xla/test_gqa.cpp)
+target_link_libraries(test_gqa PRIVATE vgre Threads::Threads)
+add_test(NAME XlaGqa COMMAND test_gqa)
+set_tests_properties(XlaGqa PROPERTIES TIMEOUT 30)
 
 # VGRE-LM full pipeline: real text → BPE → train → checkpoint round-trip →
 # generate + decode (all offline, embedded public-domain corpus).
@@ -928,6 +994,156 @@ target_link_libraries(test_tokenizer PRIVATE vgre)
 add_test(NAME XlaTokenizer COMMAND test_tokenizer)
 set_tests_properties(XlaTokenizer PROPERTIES TIMEOUT 30)
 
+# In-tree JSON (vgre::common::json): parser + serializer completeness, so the
+# engine needs no third-party JSON dependency (Track Z).
+add_executable(test_json common/test_json.cpp)
+target_link_libraries(test_json PRIVATE vgre Threads::Threads)
+add_test(NAME CommonJson COMMAND test_json)
+set_tests_properties(CommonJson PROPERTIES TIMEOUT 30)
+
+# Track Z (Zero-Burden Engine): the from-scratch CUDA-C front-end lexer.
+add_executable(test_cuda_lexer compiler/test_cuda_lexer.cpp)
+target_link_libraries(test_cuda_lexer PRIVATE vgre Threads::Threads)
+add_test(NAME CudaLexer COMMAND test_cuda_lexer)
+set_tests_properties(CudaLexer PROPERTIES TIMEOUT 30)
+
+# Track Z: the CUDA-C front-end parser -> AST.
+add_executable(test_cuda_parser compiler/test_cuda_parser.cpp)
+target_link_libraries(test_cuda_parser PRIVATE vgre Threads::Threads)
+add_test(NAME CudaParser COMMAND test_cuda_parser)
+set_tests_properties(CudaParser PROPERTIES TIMEOUT 30)
+
+# Track Z: END-TO-END — CUDA-C source -> our PTX -> interpreter backend, no LLVM.
+add_executable(test_cuda_e2e compiler/test_cuda_e2e.cpp)
+target_link_libraries(test_cuda_e2e PRIVATE vgre Threads::Threads)
+add_test(NAME CudaEndToEnd COMMAND test_cuda_e2e)
+set_tests_properties(CudaEndToEnd PROPERTIES TIMEOUT 30)
+
+# Track Z: broader CUDA-C subset — shared memory, __syncthreads, loops, ++/--,
+# math intrinsics, all end-to-end with no LLVM.
+add_executable(test_cuda_subset compiler/test_cuda_subset.cpp)
+target_link_libraries(test_cuda_subset PRIVATE vgre Threads::Threads)
+add_test(NAME CudaSubset COMMAND test_cuda_subset)
+set_tests_properties(CudaSubset PROPERTIES TIMEOUT 30)
+
+# Track Z: ternary ?:, C-style casts, expanded intrinsics — verified on BOTH the
+# interpreter and the compiled tier.
+add_executable(test_cuda_subset2 compiler/test_cuda_subset2.cpp)
+target_link_libraries(test_cuda_subset2 PRIVATE vgre Threads::Threads)
+add_test(NAME CudaSubset2 COMMAND test_cuda_subset2)
+set_tests_properties(CudaSubset2 PROPERTIES TIMEOUT 30)
+
+# Track Z: atomicAdd (histogram/scatter-reduce) on both tiers.
+add_executable(test_cuda_atomic compiler/test_cuda_atomic.cpp)
+target_link_libraries(test_cuda_atomic PRIVATE vgre Threads::Threads)
+add_test(NAME CudaAtomic COMMAND test_cuda_atomic)
+set_tests_properties(CudaAtomic PROPERTIES TIMEOUT 30)
+
+# Track Z: double precision — compiled tier runs it; codegen rejects cleanly.
+add_executable(test_cuda_double compiler/test_cuda_double.cpp)
+target_link_libraries(test_cuda_double PRIVATE vgre Threads::Threads)
+add_test(NAME CudaDouble COMMAND test_cuda_double)
+set_tests_properties(CudaDouble PROPERTIES TIMEOUT 30)
+
+# Track Z: a real GEMM kernel on both tiers (no LLVM).
+add_executable(test_cuda_gemm compiler/test_cuda_gemm.cpp)
+target_link_libraries(test_cuda_gemm PRIVATE vgre Threads::Threads)
+add_test(NAME CudaGemm COMMAND test_cuda_gemm)
+set_tests_properties(CudaGemm PROPERTIES TIMEOUT 60)
+
+# Track Z: tiled shared-memory GEMM (cooperative __syncthreads) on the interpreter.
+add_executable(test_cuda_gemm_tiled compiler/test_cuda_gemm_tiled.cpp)
+target_link_libraries(test_cuda_gemm_tiled PRIVATE vgre Threads::Threads)
+add_test(NAME CudaGemmTiled COMMAND test_cuda_gemm_tiled)
+set_tests_properties(CudaGemmTiled PROPERTIES TIMEOUT 60)
+
+# Track Z: __device__ helper functions (inlined) on the interpreter tier.
+add_executable(test_cuda_device_fn compiler/test_cuda_device_fn.cpp)
+target_link_libraries(test_cuda_device_fn PRIVATE vgre Threads::Threads)
+add_test(NAME CudaDeviceFn COMMAND test_cuda_device_fn)
+set_tests_properties(CudaDeviceFn PROPERTIES TIMEOUT 30)
+
+# Track Z: by-value struct kernel parameters (interpreter tier).
+add_executable(test_cuda_struct compiler/test_cuda_struct.cpp)
+target_link_libraries(test_cuda_struct PRIVATE vgre Threads::Threads)
+add_test(NAME CudaStruct COMMAND test_cuda_struct)
+set_tests_properties(CudaStruct PROPERTIES TIMEOUT 30)
+
+# Track Z: per-thread local (.local) arrays — register scratch (interpreter tier).
+add_executable(test_cuda_local_array compiler/test_cuda_local_array.cpp)
+target_link_libraries(test_cuda_local_array PRIVATE vgre Threads::Threads)
+add_test(NAME CudaLocalArray COMMAND test_cuda_local_array)
+set_tests_properties(CudaLocalArray PROPERTIES TIMEOUT 30)
+
+# Track Z: flash-attention capstone (shared tiles + local acc + online softmax).
+add_executable(test_cuda_flash_attention compiler/test_cuda_flash_attention.cpp)
+target_link_libraries(test_cuda_flash_attention PRIVATE vgre Threads::Threads)
+add_test(NAME CudaFlashAttention COMMAND test_cuda_flash_attention)
+set_tests_properties(CudaFlashAttention PROPERTIES TIMEOUT 30)
+
+# Track Z: multi-dimensional array syntax (2D __shared__ tiles + 2D local arrays).
+add_executable(test_cuda_array2d compiler/test_cuda_array2d.cpp)
+target_link_libraries(test_cuda_array2d PRIVATE vgre Threads::Threads)
+add_test(NAME CudaArray2D COMMAND test_cuda_array2d)
+set_tests_properties(CudaArray2D PROPERTIES TIMEOUT 30)
+
+# Track Z: warp-shuffle intrinsics (__shfl[_up|_down|_xor]_sync) on the interpreter.
+add_executable(test_cuda_warp_shuffle compiler/test_cuda_warp_shuffle.cpp)
+target_link_libraries(test_cuda_warp_shuffle PRIVATE vgre Threads::Threads)
+add_test(NAME CudaWarpShuffle COMMAND test_cuda_warp_shuffle)
+set_tests_properties(CudaWarpShuffle PROPERTIES TIMEOUT 30)
+
+# Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
+# speed vs the interpreter + clean barrier-kernel fallback.
+add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
+target_link_libraries(test_compiled_kernel PRIVATE vgre Threads::Threads)
+add_test(NAME CompiledKernel COMMAND test_compiled_kernel)
+set_tests_properties(CompiledKernel PROPERTIES TIMEOUT 60)
+
+# Track Z: the real CUDA-on-CPU C-ABI (register+launch) routed through the
+# interpreter backend via VGRE_EXEC_BACKEND — no LLVM for this kernel.
+add_executable(test_backend_dispatch api/test_backend_dispatch.cpp)
+target_link_libraries(test_backend_dispatch PRIVATE vgre Threads::Threads)
+add_test(NAME BackendDispatch COMMAND test_backend_dispatch)
+set_tests_properties(BackendDispatch PROPERTIES TIMEOUT 60)
+
+# Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
+# real saxpy PTX kernel through the Tier-0 interpreter backend via the public
+# interface + registry, with NO LLVM/codegen on the path.
+add_executable(test_execution_backend compiler/test_execution_backend.cpp)
+target_link_libraries(test_execution_backend PRIVATE vgre Threads::Threads)
+add_test(NAME ExecutionBackend COMMAND test_execution_backend)
+set_tests_properties(ExecutionBackend PROPERTIES TIMEOUT 60)
+
+# CUDA-GDB debug stepping (§6.1): PTX single-step interpreter (saxpy across
+# CTAs, bar.sync shared-memory reduction, breakpoint/step semantics) + the GDB
+# remote-serial-protocol server exercised over a real localhost socket.
+add_executable(test_ptx_debugger debug/test_ptx_debugger.cpp)
+target_link_libraries(test_ptx_debugger PRIVATE vgre Threads::Threads)
+add_test(NAME DebugPtxDebugger COMMAND test_ptx_debugger)
+set_tests_properties(DebugPtxDebugger PROPERTIES TIMEOUT 60)
+
+# Same stack driven by a real, unmodified gdb client in batch mode over TCP
+# (threads-as-lanes, break/continue/stepi, register + memory inspection).
+# Skips (77) when gdb is not installed.
+add_executable(test_gdb_client debug/test_gdb_client.cpp)
+target_link_libraries(test_gdb_client PRIVATE vgre Threads::Threads)
+add_test(NAME DebugGdbClient COMMAND test_gdb_client)
+set_tests_properties(DebugGdbClient PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+
+# Unified HF tokenizer.json engine: synthetic full-surface checks always run;
+# token-for-token parity vs the HF `tokenizers` reference ids (tests/data/)
+# runs when the real GPT-2/Qwen2.5 tokenizer files are present (else skip 77).
+add_executable(test_tokenizer_hf xla/test_tokenizer_hf.cpp)
+target_link_libraries(test_tokenizer_hf PRIVATE vgre)
+add_test(NAME XlaTokenizerHf COMMAND test_tokenizer_hf
+         ${CMAKE_SOURCE_DIR}/tests/data
+         $ENV{HOME}/.vgre_cache/hf_gpt2/tokenizer.json
+         $ENV{HOME}/.vgre_cache/hf_qwen2/tokenizer.json
+         $ENV{HOME}/.vgre_cache/hf_gpt2/vocab.json
+         $ENV{HOME}/.vgre_cache/hf_gpt2/merges.txt)
+set_tests_properties(XlaTokenizerHf PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+
 # Tensor + pipeline parallelism (L5): sharded matmul + collectives == single node.
 add_executable(test_parallel xla/test_parallel.cpp)
 target_link_libraries(test_parallel PRIVATE vgre Threads::Threads)
@@ -946,6 +1162,29 @@ add_executable(test_gspmd xla/test_gspmd.cpp)
 target_link_libraries(test_gspmd PRIVATE vgre Threads::Threads)
 add_test(NAME XlaGspmd COMMAND test_gspmd)
 set_tests_properties(XlaGspmd PROPERTIES TIMEOUT 30)
+
+# Lightweight libvgre_nn distributed collective: real 2-process TCP all-reduce
+# (cluster_collective.cpp), proving the LLVM-free ML library is not single-node.
+if(TARGET vgre_nn)
+    add_executable(test_cluster_collective xla/test_cluster_collective.cpp)
+    target_link_libraries(test_cluster_collective PRIVATE vgre_nn Threads::Threads)
+    add_test(NAME XlaClusterCollective COMMAND test_cluster_collective)
+    set_tests_properties(XlaClusterCollective PROPERTIES TIMEOUT 30)
+
+    # Ternary / BitNet b1.58 multiplication-free GEMM (roadmap T1): kernel
+    # exactness vs the dense dequantized GEMM + quantization sanity.
+    add_executable(test_ternary_gemm xla/test_ternary_gemm.cpp)
+    target_link_libraries(test_ternary_gemm PRIVATE vgre_nn Threads::Threads)
+    add_test(NAME XlaTernaryGemm COMMAND test_ternary_gemm)
+    set_tests_properties(XlaTernaryGemm PROPERTIES TIMEOUT 30)
+
+    # MXFP4 (OCP microscaling 4-bit, roadmap T5): dequant-in-GEMM exactness +
+    # codec round-trip + footprint.
+    add_executable(test_mxfp4 xla/test_mxfp4.cpp)
+    target_link_libraries(test_mxfp4 PRIVATE vgre_nn Threads::Threads)
+    add_test(NAME XlaMxfp4 COMMAND test_mxfp4)
+    set_tests_properties(XlaMxfp4 PROPERTIES TIMEOUT 30)
+endif()
 
 # Perf analytics: roofline model + flamegraph collapsed-stack.
 add_executable(test_perf_analytics advanced/test_perf_analytics.cpp)
@@ -995,29 +1234,41 @@ target_link_libraries(test_etl PRIVATE vgre)
 add_test(NAME ETLPipeline COMMAND test_etl)
 set_tests_properties(ETLPipeline PROPERTIES TIMEOUT 30)
 
-add_executable(test_nsight_export api/test_nsight_export.cpp)
-target_link_libraries(test_nsight_export PRIVATE vgre)
-if(SQLITE3_LIBRARY)
-    target_link_libraries(test_nsight_export PRIVATE SQLite::SQLite3)
-    add_test(NAME NsightExport COMMAND test_nsight_export)
-    set_tests_properties(NsightExport PROPERTIES
-        TIMEOUT 120
-        FIXTURES_REQUIRED KMPRegistrationClean
-        RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_nsight_export api/test_nsight_export.cpp)
+    target_link_libraries(test_nsight_export PRIVATE vgre)
+    if(SQLITE3_LIBRARY)
+        target_link_libraries(test_nsight_export PRIVATE SQLite::SQLite3)
+        add_test(NAME NsightExport COMMAND test_nsight_export)
+        set_tests_properties(NsightExport PROPERTIES
+            TIMEOUT 120
+            FIXTURES_REQUIRED KMPRegistrationClean
+            RESOURCE_LOCK vgre_llvm_jit)
+    endif()
 endif()
 
 add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
 target_link_libraries(test_ptx_cross_module_link PRIVATE vgre_cudart)
 add_test(NAME PTXCrossModuleLink COMMAND test_ptx_cross_module_link)
 
-add_executable(test_llvm_bitcode_module api/test_llvm_bitcode_module.cpp)
-target_link_libraries(test_llvm_bitcode_module PRIVATE vgre_cudart)
-add_test(NAME LLVMBitcodeModuleDirect COMMAND test_llvm_bitcode_module)
-set_tests_properties(LLVMBitcodeModuleDirect PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_llvm_bitcode_module api/test_llvm_bitcode_module.cpp)
+    target_link_libraries(test_llvm_bitcode_module PRIVATE vgre_cudart)
+    add_test(NAME LLVMBitcodeModuleDirect COMMAND test_llvm_bitcode_module)
+    set_tests_properties(LLVMBitcodeModuleDirect PROPERTIES TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 add_executable(test_ptx_fp8 api/test_ptx_fp8.cpp)
 target_link_libraries(test_ptx_fp8 PRIVATE vgre_cudart)
 add_test(NAME PTXFp8Translation COMMAND test_ptx_fp8)
+
+# ── HIP/ROCm compatibility layer (src/hip/hip_runtime.cpp) ───────────────────
+add_executable(test_hip_runtime api/test_hip_runtime.cpp)
+target_link_libraries(test_hip_runtime PRIVATE vgre_cudart)
+add_test(NAME HIPRuntimeLayer COMMAND test_hip_runtime)
+set_tests_properties(HIPRuntimeLayer PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
 
 add_executable(test_sass_detection api/test_sass_detection.cpp)
 target_link_libraries(test_sass_detection PRIVATE vgre_cudart)
@@ -1291,10 +1542,12 @@ add_test(NAME ThreadBlockCluster COMMAND test_cluster)
 set_tests_properties(ThreadBlockCluster PROPERTIES TIMEOUT 30)
 
 # Phase 3, P3-6: end-to-end cluster execution via the executor (executeClustered).
-add_executable(test_cluster_exec integration/test_cluster_exec.cpp)
-target_link_libraries(test_cluster_exec PRIVATE vgre Threads::Threads)
-add_test(NAME ClusterExecution COMMAND test_cluster_exec)
-set_tests_properties(ClusterExecution PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_cluster_exec integration/test_cluster_exec.cpp)
+    target_link_libraries(test_cluster_exec PRIVATE vgre Threads::Threads)
+    add_test(NAME ClusterExecution COMMAND test_cluster_exec)
+    set_tests_properties(ClusterExecution PROPERTIES TIMEOUT 30)
+endif()
 
 # Phase 3, P3-7: Blackwell tcgen05 Tensor Memory (TMEM) data path.
 add_executable(test_tmem core/test_tmem.cpp)
@@ -1491,21 +1744,31 @@ add_executable(test_trmm_trsv_batched unit/test_trmm_trsv_batched.cpp)
 target_link_libraries(test_trmm_trsv_batched PRIVATE vgre)
 add_test(NAME TrmmTrsvBatched COMMAND test_trmm_trsv_batched)
 set_tests_properties(TrmmTrsvBatched PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
 
 # ── QUEUE-49: Event creation flags + elapsed time ────────────────────────────
 add_executable(test_event_flags unit/test_event_flags.cpp)
 target_link_libraries(test_event_flags PRIVATE vgre)
 add_test(NAME EventFlags COMMAND test_event_flags)
 set_tests_properties(EventFlags PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+
+# ── Runtime block-threading toggle (vgre_set_block_threads is a real control) ─
+if(VGRE_ENABLE_JIT)  # JIT-only test (uses vgre_jit_* runtime intrinsics)
+    add_executable(test_block_threads_toggle unit/test_block_threads_toggle.cpp)
+    target_link_libraries(test_block_threads_toggle PRIVATE vgre)
+    add_test(NAME BlockThreadsToggle COMMAND test_block_threads_toggle)
+    set_tests_properties(BlockThreadsToggle PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+        TIMEOUT 120 RESOURCE_LOCK vgre_llvm_jit)
+endif()
 
 # ── QUEUE-57: cuSOLVER sygvd generalized eigenvalue ──────────────────────────
 add_executable(test_cusolver_sygvd api/test_cusolver_sygvd.cpp)
 target_link_libraries(test_cusolver_sygvd PRIVATE vgre_cudart)
 add_test(NAME CusolverSygvd COMMAND test_cusolver_sygvd)
 set_tests_properties(CusolverSygvd PROPERTIES
-    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}" TIMEOUT 30)
 
 # ── Cross-Platform Integration Tests ────────────────────────────────────────
 add_executable(test_cross_platform_tcp_cluster
@@ -1574,10 +1837,12 @@ target_link_libraries(test_udp_discovery_buffer_safety PRIVATE vgre)
 add_test(NAME UDPDiscoveryBufferSafety COMMAND test_udp_discovery_buffer_safety)
 
 # ── Kernel Fusion Integration Test ─────────────────────────────────────────
-add_executable(test_kernel_fusion integration/test_kernel_fusion.cpp)
-target_link_libraries(test_kernel_fusion PRIVATE vgre)
-add_test(NAME KernelFusionIntegration COMMAND test_kernel_fusion)
-set_tests_properties(KernelFusionIntegration PROPERTIES TIMEOUT 30)
+if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    add_executable(test_kernel_fusion integration/test_kernel_fusion.cpp)
+    target_link_libraries(test_kernel_fusion PRIVATE vgre)
+    add_test(NAME KernelFusionIntegration COMMAND test_kernel_fusion)
+    set_tests_properties(KernelFusionIntegration PROPERTIES TIMEOUT 30)
+endif()
 
 # ── WebSocket Transport Integration Test ───────────────────────────────────
 add_executable(test_websocket_transport integration/test_websocket_transport.cpp)
@@ -1592,7 +1857,7 @@ if(EXISTS "${VGRE_VENV_PYTHON}")
     add_test(NAME PythonCAPIVectorAdd
         COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
     set_tests_properties(PythonCAPIVectorAdd PROPERTIES
-        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
         LABELS "python;e2e"
         SKIP_RETURN_CODE 77
     )
@@ -1603,7 +1868,7 @@ else()
         add_test(NAME PythonCAPIVectorAdd
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test_cuda_on_cpu.py)
         set_tests_properties(PythonCAPIVectorAdd PROPERTIES
-            ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+            ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
             LABELS "python;e2e"
             SKIP_RETURN_CODE 77
         )
@@ -1616,7 +1881,7 @@ if(EXISTS "${VGRE_VENV_PYTHON}")
     add_test(NAME PythonLmBindings
         COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
     set_tests_properties(PythonLmBindings PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1625,7 +1890,7 @@ elseif(Python3_FOUND)
     add_test(NAME PythonLmBindings
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
     set_tests_properties(PythonLmBindings PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1640,11 +1905,76 @@ endif()
 if(_vgre_nn_py)
     add_test(NAME PythonNn COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn.py)
     set_tests_properties(PythonNn PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
     )
+
+    # Real 2-process data-parallel training over the lightweight libvgre_nn
+    # collective: spawns rank 0 + rank 1, each trains a data shard, then
+    # all_reduce_gradients() syncs over a real TCP socket. Requires the
+    # vgre_nn target (env points the workers at libvgre_nn.so).
+    if(TARGET vgre_nn)
+        add_test(NAME PythonNnDistributed
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_distributed.py)
+        set_tests_properties(PythonNnDistributed PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+
+        # Multi-step DP: 8 full train iterations across 2 real processes with
+        # AdamW state under gradient sync — catches cross-step drift and is
+        # checked against a single-process full-batch run of the same loop.
+        add_test(NAME PythonNnDistributedMultistep
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_distributed_multistep.py)
+        set_tests_properties(PythonNnDistributedMultistep PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+
+        # LoRA adapters (CPU fine-tuning: grad-correctness vs NumPy, frozen
+        # base, training, merge, adapter save/load) + HNSW VectorIndex binding
+        # (recall vs brute force, save/load) — the local-AI additions.
+        add_test(NAME PythonNnLoraVector
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_lora_vector.py)
+        set_tests_properties(PythonNnLoraVector PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_LIB_PATH=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+
+        # Tensor parallelism across 2 real processes: sharded-weight forward
+        # reconstructs the full matmul via the TCP all_reduce, shard gradients
+        # match the row-blocks of the full gradient, and a sharded SGD run
+        # reassembles to the single-process full-model trajectory.
+        add_test(NAME PythonNnTensorParallel
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_tensor_parallel.py)
+        set_tests_properties(PythonNnTensorParallel PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+
+        # Expert-parallel MoE across 2 real processes: experts sharded by rank,
+        # each rank's partial summed via the TCP all_reduce reconstructs the
+        # single-process output; router-gradient sum and sharded expert gradients
+        # match the single-process run.
+        add_test(NAME PythonNnExpertParallel
+                 COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn_expert_parallel.py)
+        set_tests_properties(PythonNnExpertParallel PROPERTIES
+            ENVIRONMENT "VGRE_IPC_MODE=OFF;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>"
+            LABELS "python;e2e"
+            TIMEOUT 120
+            SKIP_RETURN_CODE 77
+        )
+    endif()
 endif()
 
 # ── Global Test Configuration ──────────────────────────────────────────────
@@ -1659,7 +1989,7 @@ endif()
 # and hard-to-diagnose SEGFAULTs.
 get_directory_property(vgre_full_test_list TESTS)
 set_tests_properties(${vgre_full_test_list} PROPERTIES
-    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
 )
 
 # HardwareTokenManager validates token encrypt/decrypt/store *correctness*, not
@@ -1670,7 +2000,7 @@ set_tests_properties(${vgre_full_test_list} PROPERTIES
 # Production code is unaffected; only this test process gets the override.
 if("HardwareTokenManager" IN_LIST vgre_full_test_list)
     set_tests_properties(HardwareTokenManager PROPERTIES
-        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_PBKDF2_ITERATIONS=10000")
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_PBKDF2_ITERATIONS=10000")
 endif()
 
 # ── Network/TCP serialization ──────────────────────────────────────────────
@@ -1727,7 +2057,7 @@ if(_vgre_intpy)
              COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(PyTorchIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
                          TIMEOUT 120
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")
@@ -1735,7 +2065,7 @@ if(_vgre_intpy)
              COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_tensorflow.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(TensorFlowIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
                          TIMEOUT 120
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")

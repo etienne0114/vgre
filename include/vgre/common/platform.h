@@ -2,7 +2,17 @@
 #define VGRE_COMMON_PLATFORM_H
 
 #if defined(_WIN32)
-#  define VGRE_PUBLIC_API   __declspec(dllexport)
+// On Windows the shared libraries export their public symbols via CMake's
+// WINDOWS_EXPORT_ALL_SYMBOLS (an auto-generated .def covering every non-static
+// symbol), so no per-function __declspec(dllexport) is needed here. Emitting one
+// is in fact harmful under clang-cl: unlike cl.exe, clang-cl makes it a hard
+// ERROR to add dllexport on a definition when an earlier plain forward
+// declaration was already seen ("cannot add 'dllexport' attribute") — and the
+// vgre_jit_* / vgre_cdp_* runtime symbols are forward-declared plainly in a dozen
+// device-lib headers and .cpp translation units. Leaving this empty removes that
+// entire error class while WINDOWS_EXPORT_ALL_SYMBOLS keeps every symbol
+// importable by the tests, tools and the JIT.
+#  define VGRE_PUBLIC_API
 #else
 #  define VGRE_PUBLIC_API   __attribute__((visibility("default")))
 #endif

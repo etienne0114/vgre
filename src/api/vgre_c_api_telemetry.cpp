@@ -3,6 +3,7 @@
  */
 
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/runtime/gpu_thread_context.h"
 #include <atomic>
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/runtime/gpu_cache.h"
@@ -528,12 +529,12 @@ int vgre_set_service_mode(int is_master) {
 }
 
 int vgre_set_block_threads(int enabled) {
-  // Note: BlockWorkerPool::initialize() has already run at this point and will
-  // never re-read VGRE_BLOCK_THREADS, so calling setenv() here is both useless
-  // and unsafe (setenv reallocates environ without locking against concurrent
-  // getenv calls on other threads). This function is a no-op for now.
-  // Future: implement a thread-safe runtime flag if needed.
-  VGRE_LOG_INFO("VGRE", std::string("VGRE_BLOCK_THREADS set to ") + (enabled ? "1" : "0"));
+  // Flip the process-wide atomic that JIT-generated launchers consult on every
+  // launch (see vgre_jit_block_threads_enabled in gpu_thread_context.cpp).
+  // Takes effect immediately, including for already-compiled kernels.
+  vgre::runtime::vgre_jit_set_block_threads(enabled);
+  VGRE_LOG_INFO("VGRE", std::string("Block-threaded dispatch ") +
+                            (enabled ? "enabled" : "disabled") + " at runtime");
   return VGRE_SUCCESS;
 }
 
@@ -541,6 +542,24 @@ int vgre_set_block_threads(int enabled) {
 
 int vgre_cluster_set_security(int enabled) {
   return to_status_tel(vgre::advanced::TCPClusterManager::instance().enableSecurity(enabled != 0));
+}
+
+// Sum-reduce `count` elements of `datatype` across all cluster nodes, in place
+// (the result is identical on every node). Over the TCP/RDMA transport. With no
+// peers connected this is a single-node no-op (sum over one). Previously the
+// header declared this but it had no definition — wiring it to the implemented
+// CollectiveOpsManager::allReduce.
+int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype) {
+  if (!ptr || count == 0) return VGRE_ERROR_INVALID_VALUE;
+  return to_status_tel(vgre::advanced::TCPClusterManager::instance().allReduce(
+      ptr, count, datatype, vgre::advanced::ReductionOp::Sum));
+}
+
+// Number of nodes participating in collectives (self + active peers; >= 1).
+// Lets data-parallel trainers average all-reduced gradients by the world size.
+int vgre_cluster_world_size(void) {
+  auto st = vgre::advanced::TCPClusterManager::instance().getMeshTopologyStatus();
+  return static_cast<int>(st.active_peers) + 1;
 }
 
 int vgre_cluster_get_security_info(vgre_security_info_t *info) {
@@ -726,6 +745,11 @@ int vgre_get_cluster_nodes(vgre_cluster_node_t *nodes, int *count) {
         nodes[i].available = 0;
     }
     snprintf(nodes[i].igpu_name, sizeof(nodes[i].igpu_name), "%s", conn.igpu_name);
+    snprintf(nodes[i].platform_name, sizeof(nodes[i].platform_name), "%s", conn.platform_name);
+    snprintf(nodes[i].arch_name, sizeof(nodes[i].arch_name), "%s", conn.arch_name);
+    snprintf(nodes[i].hostname, sizeof(nodes[i].hostname), "%s", conn.node_hostname);
+    nodes[i].in_flight_kernels = conn.in_flight_kernels;
+    nodes[i].kernels_completed = conn.kernels_completed;
 
     to_sync.push_back(nodes[i]);
   }

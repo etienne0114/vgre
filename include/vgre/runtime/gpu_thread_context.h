@@ -38,6 +38,11 @@ extern "C" VGRE_PUBLIC_API void vgre_jit_clear_block_barrier();
 extern "C" VGRE_PUBLIC_API void vgre_jit_block_dispatch(int threadCount, void (*task)(int tid, void* arg), void* arg);
 // Barrier + block-wide vote (backs __syncthreads_count/_and/_or).
 extern "C" VGRE_PUBLIC_API int  vgre_jit_block_barrier_reduce(int predicate, int op);
+// Runtime toggle for threaded dispatch of single-thread sync-kernel blocks.
+// Generated launchers consult this at every launch, so vgre_set_block_threads()
+// takes effect immediately — including for already-JIT-compiled kernels.
+extern "C" VGRE_PUBLIC_API int  vgre_jit_block_threads_enabled();
+extern "C" VGRE_PUBLIC_API void vgre_jit_set_block_threads(int enabled);
 
 // ── Thread-block cluster context (P3-6) ──────────────────────────────────────
 // The executor's clustered path installs the current CTA's Cluster + cluster-rank

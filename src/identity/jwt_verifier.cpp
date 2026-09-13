@@ -71,6 +71,30 @@ void collectStrings(const vgre::common::json::Value* v, std::vector<std::string>
             if (e.isString()) out.push_back(e.str);
 }
 
+vgre::common::json::ParseOptions jwksJsonOptions() {
+    vgre::common::json::ParseOptions opts;
+    opts.maxInputBytes = 1024u * 1024u;
+    opts.maxStringBytes = 16u * 1024u;
+    opts.maxArrayElements = 4096;
+    opts.maxObjectMembers = 64;
+    opts.maxTotalValues = 32768;
+    opts.maxNumberBytes = 64;
+    opts.maxDepth = 16;
+    return opts;
+}
+
+vgre::common::json::ParseOptions jwtJsonOptions(bool payload) {
+    vgre::common::json::ParseOptions opts;
+    opts.maxInputBytes = payload ? 128u * 1024u : 8u * 1024u;
+    opts.maxStringBytes = payload ? 16u * 1024u : 1024u;
+    opts.maxArrayElements = payload ? 4096 : 64;
+    opts.maxObjectMembers = payload ? 256 : 32;
+    opts.maxTotalValues = payload ? 16384 : 512;
+    opts.maxNumberBytes = 64;
+    opts.maxDepth = payload ? 32 : 8;
+    return opts;
+}
+
 #ifdef VGRE_ENABLE_SSL
 const EVP_MD* mdFor(JwtAlg a) {
     switch (a) {
@@ -194,7 +218,8 @@ bool verifySignature(const JwksKey& key, JwtAlg alg, const std::string& signingI
 vgre::VGREResult Jwks::parse(const std::string& jwksJson, Jwks& out) {
     out.keys.clear();
     vgre::common::json::Value root;
-    if (!vgre::common::json::parse(jwksJson, root)) return vgre::VGREResult::ERR_INVALID_VALUE;
+    if (!vgre::common::json::parse(jwksJson, root, jwksJsonOptions()))
+        return vgre::VGREResult::ERR_INVALID_VALUE;
     const auto* keys = root.find("keys");
     if (!keys || !keys->isArray()) return vgre::VGREResult::ERR_INVALID_VALUE;
     for (const auto& k : keys->arr) {
@@ -233,7 +258,7 @@ vgre::VGREResult JwtVerifier::verify(const std::string& token, const Jwks& jwks,
         return vgre::VGREResult::ERR_INVALID_VALUE;
 
     vgre::common::json::Value header;
-    if (!vgre::common::json::parse(headerJson, header) || !header.isObject())
+    if (!vgre::common::json::parse(headerJson, header, jwtJsonOptions(false)) || !header.isObject())
         return vgre::VGREResult::ERR_INVALID_VALUE;
     const auto* algV = header.find("alg");
     JwtAlg alg = algV ? algFromString(algV->asString()) : JwtAlg::UNKNOWN;
@@ -253,7 +278,7 @@ vgre::VGREResult JwtVerifier::verify(const std::string& token, const Jwks& jwks,
 
     // Signature valid — parse + validate claims.
     vgre::common::json::Value claims;
-    if (!vgre::common::json::parse(payloadJson, claims) || !claims.isObject())
+    if (!vgre::common::json::parse(payloadJson, claims, jwtJsonOptions(true)) || !claims.isObject())
         return vgre::VGREResult::ERR_INVALID_VALUE;
 
     JwtClaims c;

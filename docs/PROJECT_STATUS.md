@@ -1,8 +1,51 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-06-10 (Honest re-baseline: Phase-2 plan, cross-platform reality)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (198 tests) on x86-64 Linux  
-**Production Readiness**: **NOT YET — core-emulation stable on Linux, but five P0 gates remain** (no CI for Windows/macOS, no live `/metrics`, no health probes, no config validation, parallel-test flakiness). See `docs/implementationPlan.md` Phase 2 (Tracks 1–6).
+**Last Updated**: 2026-09-06 (CI reactivated + green on Linux/macOS; free Streamlit demo live; LLVM-reduction plan drafted)  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (~300 tests) on x86-64 Linux — the required CI job  
+**Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64) — `test_mamba` (ARM FMA tolerance) and `PythonCAPIVectorAdd` (ctypes ABI signatures) fixed for CI  
+**Build Status (Windows)**: ⚙️ **builds in CI** on `windows-2022` (LLVM-18 tarball cached); `continue-on-error` until fully green  
+**Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
+**Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 is CI-green; Windows builds in CI.
+
+> **CI status corrected (2026-09):** the previous "GitHub Actions billing
+> blocker" is **resolved** — CI now runs free on the public repo on **every
+> push**, with Linux required and macOS/Windows informational
+> (`continue-on-error`) until fully green. The prior text below (billing failing
+> since 2026-06-22) is **historical and no longer true**.
+
+> **Next version:** a staged plan to make the heavy **LLVM dependency optional**
+> (drop `llvm::json`; add `VGRE_ENABLE_JIT`; promote the in-tree PTX interpreter
+> to a runtime backend) is in `docs/vNext_audit_and_llvm_reduction.md`. It
+> targets the slow/never-completing Windows LLVM download directly.
+
+> **2026-07-03 macOS bring-up** (in-tree, not yet full CI-green):
+> - `cmake/VGREPlatform.cmake` auto-detects Homebrew `llvm@18`, `libomp`, SDK,
+>   and libc++ rpath — no hardcoded install prefixes.
+> - OpenMP, CTest `DYLD_LIBRARY_PATH`, JIT clang discovery, Keychain `SecItem*`,
+>   `dispatch_semaphore` external semaphores, and IOKit SMC temperature are real
+>   implementations (not stubs).
+> - Verified locally: full `cmake --build`, `examples/vector_addition` (1M elems),
+>   integration/JIT ctest subset green. Run full suite serially:
+>   `VGRE_LOG_LEVEL=ERROR ctest -j1 --timeout 300`.
+
+> **2026-07-02 audit deltas** (see git log for the commits):
+> - HIP/ROCm layer expanded from a 9-function memcpy veneer to the real core
+>   runtime surface (streams, events, async memory, device props/attrs, module
+>   load + JIT kernel launch), with an end-to-end numerically-verified test.
+> - `vgre_set_block_threads` was a logged no-op returning success; it is now a
+>   real runtime flag consulted by every JIT-generated launcher (tested).
+> - `cuModuleGetFunction` on a module whose image had no extractable source
+>   crashed the process inside ORC (uncaught `std::length_error`); foreign
+>   handles are now validated and return `CUDA_ERROR_INVALID_VALUE`.
+> - `getActiveKernelCount()` always returned 0 (counter never incremented);
+>   live and cumulative kernel-launch counters are now maintained and the gRPC
+>   `kernels_launched` metric reports the cumulative total.
+> - Distributed-training verification deepened: multi-step (8-iteration)
+>   2-process data-parallel AdamW training (zero cross-step drift; matches the
+>   single-process full-batch trajectory) and cross-process tensor parallelism
+>   (sharded forward/backward + sharded SGD reassembling the full-model run)
+>   now run over the real TCP collective in CI-shaped tests
+>   (`PythonNnDistributedMultistep`, `PythonNnTensorParallel`).
 
 > **Correction (2026-06-10):** earlier revisions of this file claimed
 > "CI/CD-Ready", "validated across Linux, Windows, macOS", and "zero stubs".
@@ -26,11 +69,33 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ## 1. Core Platform Verification
 
-**Verified on Linux (x86-64) only.** The full `ctest` suite (198 tests) passes
+### 1.1 Linux (x86-64) — canonical
+
+**Verified on Linux (x86-64).** The full `ctest` suite (293 tests) passes
 on Linux, exercised with property-based exploration, ThreadSanitizer race
-analysis, and static-destruction verification. **Windows and macOS are not yet
-verified** — their code paths are compile-guarded but have never been built or
-run in CI (Phase 2, Track 1 brings up the matrix).
+analysis, and static-destruction verification.
+
+### 1.2 macOS (ARM64 / Intel) — build-verified
+
+**Built and exercised locally (July 2026).** The native engine (`libvgre`,
+`libvgre_cudart`, examples, integration tests) compiles with Homebrew
+`llvm@18` auto-selected by CMake. JIT kernel compilation discovers Clang at
+runtime (`VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`).
+Integration/JIT ctests pass; the full serial `ctest` suite (`-j1`) is the
+remaining bring-up gate before claiming macOS CI-green.
+
+**macOS-specific real implementations** (not stubs): UVM via `SIGSEGV`/`SIGBUS`,
+Keychain via `SecItemAdd`/`SecItemCopyMatching`, thermal via IOKit SMC,
+external semaphores via `dispatch_semaphore`, cluster TCP via BSD sockets.
+
+**Documented macOS approximations** (see `missingFeatures.md`): NUMA pinning
+(Mach hints vs Linux affinity), no Metal Performance Shaders backend, no NVIDIA
+PMU/CUPTI counters without physical GPU hardware.
+
+### 1.3 Windows — unverified
+
+**Windows is not yet verified** — code paths are compile-guarded but have not
+been built or run in CI (Phase 2, Track 1 brings up the matrix).
 
 - **Linux core passes**: full regression + integration + platform suite green on x86-64.
 - **Mostly real compute, with documented exceptions**: nearly every path runs real

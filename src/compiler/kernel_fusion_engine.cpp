@@ -637,6 +637,11 @@ extern "C" __global__ void )" << ir.name << R"(_fused_transformer(
 
 std::string KernelFusionEngine::genLayerNormFusedSource(const KernelIR& ir) {
     std::ostringstream ss;
+    // Fused residual-add + LayerNorm. LayerNorm normalises over the feature
+    // dimension `d` (the last axis), so each thread owns one row of width `d`
+    // and reduces mean/variance across that row — a per-element reduction would
+    // give var == 0 and collapse the output to `beta`. gamma/beta are the
+    // per-feature affine parameters; the grid is one thread per row (n_rows).
     ss << R"(
 extern "C" __global__ void )" << ir.name << R"(_fused_layernorm(
     const float* __restrict x,
@@ -644,24 +649,31 @@ extern "C" __global__ void )" << ir.name << R"(_fused_layernorm(
     const float* __restrict beta,
     const float* __restrict residual,
     float* __restrict out,
-    int n, float eps) {
+    int n_rows, int d, float eps) {
 
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid >= n) return;
+    int row = threadIdx.x + blockIdx.x * blockDim.x;
+    if (row >= n_rows) return;
 
-    // Each thread computes mean and variance over its assigned elements
-    // (simplified per-element; full reduction would use shared memory)
-    float v = x[tid] + residual[tid];
-    float m = v;
-    float v2 = v * v;
+    const float* __restrict xr   = x        + (long long)row * d;
+    const float* __restrict rr   = residual + (long long)row * d;
+    float*       __restrict outr = out      + (long long)row * d;
 
-    // Two-pass: compute mean then variance
-    // For single-element blocks, mean = v and var = 0
-    float mean = m;
-    float var = v2 - mean * mean;
+    // Pass 1: mean of (x + residual) over the feature dimension.
+    float mean = 0.0f;
+    for (int i = 0; i < d; ++i) mean += xr[i] + rr[i];
+    mean /= (float)d;
+
+    // Pass 2: variance over the same row.
+    float var = 0.0f;
+    for (int i = 0; i < d; ++i) {
+        float c = (xr[i] + rr[i]) - mean;
+        var += c * c;
+    }
+    var /= (float)d;
+
     float rstd = 1.0f / sqrtf(var + eps);
-
-    out[tid] = (v - mean) * rstd * gamma[tid] + beta[tid];
+    for (int i = 0; i < d; ++i)
+        outr[i] = ((xr[i] + rr[i]) - mean) * rstd * gamma[i] + beta[i];
 }
 )";
     return ss.str();

@@ -48,6 +48,13 @@ public:
    * @return VGREResult::SUCCESS on success, error code otherwise
    */
   VGREResult enableSecurity(bool enabled);
+
+  /**
+   * @brief Load the cluster auth token from env, file, secrets, or hardware.
+   * @param allow_auto_generate When true and no token exists, generate one (master only).
+   * @return true if a non-empty token is available in memory
+   */
+  bool loadAuthToken(bool allow_auto_generate = false);
   
   /**
    * @brief Check if security is enabled

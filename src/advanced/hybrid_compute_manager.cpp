@@ -142,12 +142,8 @@ void HybridComputeManager::detectIntegratedGPU() {
     resources_.igpuDispatchLatencyMs = 0.0;
   }
 #else
-#if defined(_WIN32)
-  // On Windows, iGPU detection would require DXGI/WMI enumeration.
-  // Until that integration lands, this backend is reported unavailable.
-  resources_.hasIntegratedGPU = false;
-#else
-  // Enumerate all DRM cards to find an integrated GPU.
+#if defined(__linux__)
+  // Enumerate DRM cards to find an integrated GPU (Linux sysfs).
   // card0 may be a discrete GPU (e.g. PCIe dGPU) — we must check all cards
   // and identify the iGPU by its driver (i915 = Intel, amdgpu with PCI class
   // 0x030000 sub-ID < 0x1000 = AMD iGPU, etnaviv = ARM Vivante).
@@ -238,6 +234,14 @@ void HybridComputeManager::detectIntegratedGPU() {
       }
     }
   }
+#elif defined(_WIN32)
+  // DXGI/WMI enumeration not yet integrated — report unavailable.
+  resources_.hasIntegratedGPU = false;
+#else
+  // macOS / other POSIX without OpenCL: no Linux DRM sysfs; rely on OpenCL path above.
+  resources_.hasIntegratedGPU = false;
+  resources_.igpuGflops = 0.0;
+  resources_.igpuDispatchLatencyMs = 0.0;
 #endif
 #endif
 }

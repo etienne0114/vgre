@@ -327,7 +327,12 @@ float AdaptiveExecutionEngine::getDeviceTemperature() const {
     };
 
     io_service_t service = IOServiceGetMatchingService(
-        kIOMasterPortDefault, IOServiceMatching("AppleSMC"));
+#if defined(kIOMainPortDefault)
+        kIOMainPortDefault,
+#else
+        kIOMasterPortDefault,
+#endif
+        IOServiceMatching("AppleSMC"));
     if (service != IO_OBJECT_NULL) {
       io_connect_t conn = IO_OBJECT_NULL;
       kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
@@ -468,8 +473,20 @@ double AdaptiveExecutionEngine::getMaxGFLOPS() const {
 }
 
 int AdaptiveExecutionEngine::getActiveKernelCount() const {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  return activeKernels_;
+  return activeKernels_.load(std::memory_order_relaxed);
+}
+
+void AdaptiveExecutionEngine::kernelLaunchBegin() {
+  activeKernels_.fetch_add(1, std::memory_order_relaxed);
+  totalKernelsLaunched_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void AdaptiveExecutionEngine::kernelLaunchEnd() {
+  activeKernels_.fetch_sub(1, std::memory_order_relaxed);
+}
+
+uint64_t AdaptiveExecutionEngine::getTotalKernelsLaunched() const {
+  return totalKernelsLaunched_.load(std::memory_order_relaxed);
 }
 
 double AdaptiveExecutionEngine::getMemoryBandwidth() const {

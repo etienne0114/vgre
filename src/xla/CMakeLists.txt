@@ -5,10 +5,13 @@ add_library(vgre_xla OBJECT
     thread_pool.cpp
     blas_gemm.cpp
     gemm/intree_gemm_f32.cpp
+    gemm/ternary_gemm.cpp
+    gemm/mxfp4.cpp
     autograd/autograd.cpp
     autograd/optim.cpp
     model/transformer.cpp
     model/checkpoint.cpp
+    model/hf_loader.cpp
     model_c_api.cpp
     autograd_c_api.cpp
     safetensors.cpp
@@ -20,6 +23,7 @@ add_library(vgre_xla OBJECT
     gspmd.cpp
     quant_gemm.cpp
     gptq.cpp
+    vector_index.cpp
 )
 
 target_include_directories(vgre_xla PUBLIC
@@ -36,6 +40,23 @@ if(_VGRE_XLA_BLAS_FOUND)
 endif()
 
 set_target_properties(vgre_xla PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# clang-cl only: the SIMD GEMM/autograd kernels (gemm/*.cpp, model/transformer.cpp)
+# select AVX2/FMA per-function via __attribute__((target(...))) and need no global
+# -march on GCC/Clang, whose <immintrin.h> declares __m256/__m256i unconditionally.
+# clang-cl's <immintrin.h> instead gates <avx*intrin.h> behind __AVX__ under
+# _MSC_VER, so those TYPES are undeclared without /arch:AVX2 and the target
+# attribute cannot recover them. Apply the ISA flags on MSVC only — GCC/Clang must
+# stay flag-free here (a global -mfma would change scalar float rounding and break
+# exact-comparison GEMM tests), matching src/core/api/runtime.
+if(MSVC)
+    if(VGRE_SIMD_COMPILE_OPTIONS)
+        target_compile_options(vgre_xla PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+    endif()
+    if(VGRE_SIMD_COMPILE_DEFS)
+        target_compile_definitions(vgre_xla PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+    endif()
+endif()
 
 # Always optimize the compute kernels, even in Debug builds. A numerical GEMM /
 # autograd path at -O0 is ~10-15× slower (the packing, accumulation and threading
@@ -61,3 +82,74 @@ endif()
 # NB: the interpreter parallelizes hot loops with std::thread (see parallelFor in
 # hlo_evaluator.cpp), NOT OpenMP — libomp's TLS is incompatible with the
 # RTLD_DEEPBIND loading used for in-process TensorFlow coexistence.
+
+# ── libvgre_nn — lightweight, LLVM-free, dependency-free ML framework ─────────
+# The in-tree ML stack (SIMD GEMM + autograd + optimizers + VGRE-LM + tokenizer +
+# checkpoints, with the vgre.nn C-ABI) uses no LLVM, no BLAS and no CUDA — LLVM is
+# only needed by the CUDA-JIT path, which this library deliberately excludes. It
+# ships as its own small shared object so "import vgre.nn; train a model" works on
+# any platform with just a C++ runtime + threads. Distributed training uses a
+# real, self-contained TCP all-reduce (cluster_collective.cpp) — no LLVM, no core
+# runtime — configured via VGRE_NN_WORLD_SIZE/RANK/MASTER_HOST/MASTER_PORT. The
+# full libvgre instead routes through its richer TCP/RDMA TCPClusterManager.
+option(VGRE_BUILD_NN_LIB "Build the lightweight LLVM-free ML library (libvgre_nn)" ON)
+if(VGRE_BUILD_NN_LIB)
+    add_library(vgre_nn SHARED
+        thread_pool.cpp
+        blas_gemm.cpp
+        gemm/intree_gemm_f32.cpp
+        gemm/ternary_gemm.cpp
+        gemm/mxfp4.cpp
+        autograd/autograd.cpp
+        autograd/optim.cpp
+        model/transformer.cpp
+        model/checkpoint.cpp
+        model/hf_loader.cpp
+        model_c_api.cpp
+        autograd_c_api.cpp
+        safetensors.cpp
+        gguf.cpp
+        generation.cpp
+        tokenizer.cpp
+        hlo_evaluator.cpp
+        xla_c_api.cpp
+        parallel.cpp
+        gspmd.cpp
+        cluster_collective.cpp
+        vector_index.cpp
+        ${PROJECT_SOURCE_DIR}/src/common/json.cpp
+    )
+    target_include_directories(vgre_nn PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
+    if(TARGET Threads::Threads)
+        target_link_libraries(vgre_nn PUBLIC Threads::Threads)
+    endif()
+    if(_VGRE_XLA_BLAS_FOUND)
+        # Optional: faster GEMM if a system BLAS is present, but NOT required.
+        target_compile_definitions(vgre_nn PRIVATE VGRE_XLA_HAS_BLAS)
+        target_include_directories(vgre_nn PRIVATE "${_VGRE_XLA_BLAS_INCLUDE}")
+    endif()
+    set_target_properties(vgre_nn PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(WIN32)
+        # Symbols are no longer __declspec(dllexport)'d in source (VGRE_PUBLIC_API
+        # is empty on Windows — see include/vgre/common/platform.h); export them
+        # from the DLL the same way vgre / vgre_cudart do, so tests and tools can
+        # link vgre_nn by name.
+        set_target_properties(vgre_nn PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    endif()
+    # clang-cl only: same __AVX__-gated <immintrin.h> issue as vgre_xla — the SIMD
+    # GEMM/transformer kernels need /arch:AVX2 to see __m256/__m256i. MSVC-scoped so
+    # GCC/Clang keep the flag-free per-function target-attribute path.
+    if(MSVC)
+        if(VGRE_SIMD_COMPILE_OPTIONS)
+            target_compile_options(vgre_nn PRIVATE ${VGRE_SIMD_COMPILE_OPTIONS})
+        endif()
+        if(VGRE_SIMD_COMPILE_DEFS)
+            target_compile_definitions(vgre_nn PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
+        endif()
+    endif()
+    if(NOT CMAKE_CXX_FLAGS MATCHES "fsanitize")
+        set_source_files_properties(gemm/intree_gemm_f32.cpp autograd/autograd.cpp
+            model/transformer.cpp PROPERTIES COMPILE_OPTIONS
+            $<IF:$<BOOL:${MSVC}>,/O2,-O3>)
+    endif()
+endif()
