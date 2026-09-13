@@ -3,6 +3,7 @@
 #include "vgre/xla/model.h"
 #include "vgre/xla/intree_gemm.h"
 #include "vgre/xla/half.h"
+#include "vgre/common/cpu_features.h"
 #include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
@@ -12,7 +13,7 @@
 #include <stdexcept>
 
 // AVX2 int8→fp32 accumulate for the batched int8 prefill, dispatched at runtime
-// via __builtin_cpu_supports (scalar fallback everywhere else). Same pattern as
+// via vgre::cpu::supports (scalar fallback everywhere else). Same pattern as
 // src/xla/gemm/ternary_gemm.cpp.
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
 #  include <immintrin.h>
@@ -208,7 +209,7 @@ inline void int8_block_avx2(float* acc, const float* Xr, int rb,
         }
     }
 }
-inline bool int8_use_avx2() { static const bool ok = __builtin_cpu_supports("avx2"); return ok; }
+inline bool int8_use_avx2() { static const bool ok = vgre::cpu::supports("avx2"); return ok; }
 #endif
 
 // Weight-only int8 BATCHED GEMM: Y[P,N] = (X[P,K]·W8[K,N]) · per-column scale.

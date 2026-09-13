@@ -1,6 +1,7 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/cpu_features.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
 
@@ -185,16 +186,16 @@ void AdaptiveExecutionEngine::updateHardwareMetrics(int cores, double clockGHz,
       bool hasFMA = false;
       
 #if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
-      // x86 GCC/Clang: __builtin_cpu_supports is an x86-only target builtin.
-      if (__builtin_cpu_supports("avx512f")) {
+      // x86 GCC/Clang: vgre::cpu::supports is an x86-only target builtin.
+      if (vgre::cpu::supports("avx512f")) {
           simdLanes = 16;
           hasFMA = true;  // AVX-512F includes FMA
-      } else if (__builtin_cpu_supports("avx2")) {
+      } else if (vgre::cpu::supports("avx2")) {
           simdLanes = 8;
-          hasFMA = __builtin_cpu_supports("fma");
-      } else if (__builtin_cpu_supports("sse4.1")) {
+          hasFMA = vgre::cpu::supports("fma");
+      } else if (vgre::cpu::supports("sse4.1")) {
           simdLanes = 4;
-          hasFMA = __builtin_cpu_supports("fma");
+          hasFMA = vgre::cpu::supports("fma");
       }
 #elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
       // ARM64 (Apple Silicon, etc.): 128-bit NEON → 4 fp32 lanes, with FMA (FMLA).
@@ -343,9 +344,9 @@ void AdaptiveExecutionEngine::runBenchmark() {
             int simdWidth = 1;
             bool hasFMA = false;
 #if defined(__GNUC__) || defined(__clang__)
-            if (__builtin_cpu_supports("avx512f")) { simdWidth = 16; hasFMA = true; }
-            else if (__builtin_cpu_supports("avx2"))    { simdWidth = 8; hasFMA = __builtin_cpu_supports("fma"); }
-            else if (__builtin_cpu_supports("sse4.1"))  { simdWidth = 4; hasFMA = __builtin_cpu_supports("fma"); }
+            if (vgre::cpu::supports("avx512f")) { simdWidth = 16; hasFMA = true; }
+            else if (vgre::cpu::supports("avx2"))    { simdWidth = 8; hasFMA = vgre::cpu::supports("fma"); }
+            else if (vgre::cpu::supports("sse4.1"))  { simdWidth = 4; hasFMA = vgre::cpu::supports("fma"); }
 #else
             // Non-GCC/Clang (e.g. MSVC): use __cpuid for feature detection
             int regs[4];

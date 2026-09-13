@@ -8,6 +8,7 @@
 // it. Accumulation is fp32, matching the mixed-precision ML contract.
 
 #include "vgre/xla/ternary_gemm.h"
+#include "vgre/common/cpu_features.h"
 
 #include <cmath>
 #include <cstring>
@@ -101,7 +102,7 @@ void gemm_row_avx2(int64_t N, int64_t K, const float* a,
     for (int64_t n = 0; n < N; ++n) c[n] = acc[n] * colScale[n];
 }
 
-bool cpu_has_avx2() { return __builtin_cpu_supports("avx2"); }
+bool cpu_has_avx2() { return vgre::cpu::supports("avx2"); }
 #endif  // VGRE_TERNARY_X86
 
 }  // namespace

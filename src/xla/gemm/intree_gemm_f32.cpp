@@ -16,6 +16,7 @@
 #include "vgre/xla/intree_gemm.h"
 #include "vgre/xla/half.h"
 #include "vgre/xla/thread_pool.h"
+#include "vgre/common/cpu_features.h"
 
 #include <algorithm>
 #include <cstring>
@@ -60,12 +61,11 @@ enum class Isa { Scalar, Avx2, Avx512 };
 
 Isa detectIsa() {
 #if defined(VGRE_GEMM_X86) && (defined(__GNUC__) || defined(__clang__))
-    __builtin_cpu_init();
     // AVX-512F micro-kernel is selected only when present; otherwise AVX2+FMA.
 #ifdef VGRE_GEMM_HAS_AVX512
-    if (__builtin_cpu_supports("avx512f")) return Isa::Avx512;
+    if (vgre::cpu::supports("avx512f")) return Isa::Avx512;
 #endif
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+    if (vgre::cpu::supports("avx2") && vgre::cpu::supports("fma"))
         return Isa::Avx2;
 #endif
     return Isa::Scalar;

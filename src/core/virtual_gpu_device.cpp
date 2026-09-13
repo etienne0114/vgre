@@ -1,5 +1,6 @@
 #include "vgre/core/virtual_gpu_device.h"
 #include "vgre/common/logger.h"
+#include "vgre/common/cpu_features.h"
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
 
@@ -434,15 +435,15 @@ void VirtualGPUDevice::detectHardware() {
 
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__GNUC__) || defined(__clang__)
-  if (__builtin_cpu_supports("avx512f")) {
+  if (vgre::cpu::supports("avx512f")) {
     props_.major = 8;
     props_.minor = 0;
     props_.sharedMemPerBlock = 164 * 1024; // Sm 8.0 capacity
-  } else if (__builtin_cpu_supports("avx2")) {
+  } else if (vgre::cpu::supports("avx2")) {
     props_.major = 7;
     props_.minor = 5;
     props_.sharedMemPerBlock = 64 * 1024; // Sm 7.5 capacity
-  } else if (__builtin_cpu_supports("avx")) {
+  } else if (vgre::cpu::supports("avx")) {
     props_.major = 7;
     props_.minor = 0;
     props_.sharedMemPerBlock = 48 * 1024; // Sm 7.0 capacity
