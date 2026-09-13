@@ -89,6 +89,28 @@ def _bind() -> None:
     _lib.vgre_bpe_load_gpt2.restype = c.c_int
     _lib.vgre_bpe_special_id.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_bpe_special_id.restype = c.c_int
+    # Premium surface: reset, structured errors, checked APIs, introspection.
+    _lib.vgre_bpe_reset.argtypes = [c.c_void_p]
+    _lib.vgre_bpe_last_error.argtypes = [c.c_void_p]
+    _lib.vgre_bpe_last_error.restype = c.c_int
+    _lib.vgre_bpe_last_error_message.argtypes = [c.c_void_p]
+    _lib.vgre_bpe_last_error_message.restype = c.c_char_p
+    _lib.vgre_bpe_error_string.argtypes = [c.c_int]
+    _lib.vgre_bpe_error_string.restype = c.c_char_p
+    _lib.vgre_bpe_validate.argtypes = [c.c_void_p]
+    _lib.vgre_bpe_validate.restype = c.c_int
+    _lib.vgre_bpe_is_valid_utf8.argtypes = [c.c_char_p, c.c_int, P(c.c_int), P(c.c_int)]
+    _lib.vgre_bpe_is_valid_utf8.restype = c.c_int
+    _lib.vgre_bpe_encode_checked.argtypes = [c.c_void_p, c.c_char_p, P(c.c_int), c.c_int]
+    _lib.vgre_bpe_encode_checked.restype = c.c_int
+    _lib.vgre_bpe_decode_checked.argtypes = [c.c_void_p, P(c.c_int), c.c_int, c.c_char_p, c.c_int]
+    _lib.vgre_bpe_decode_checked.restype = c.c_int
+    _lib.vgre_bpe_added_token_count.argtypes = [c.c_void_p]
+    _lib.vgre_bpe_added_token_count.restype = c.c_int
+    _lib.vgre_bpe_added_token.argtypes = [c.c_void_p, c.c_int, c.c_char_p, c.c_int,
+                                          P(c.c_int), P(c.c_int), P(c.c_int), P(c.c_int),
+                                          P(c.c_int), P(c.c_int)]
+    _lib.vgre_bpe_added_token.restype = c.c_int
     _bound = True
 
 
@@ -154,6 +176,88 @@ class Tokenizer:
         if n < 0:
             raise RuntimeError("decode failed")
         return out.value.decode("utf-8", errors="replace")
+
+    # ── Premium surface ─────────────────────────────────────────────────────
+    def reset(self) -> "Tokenizer":
+        """Return to the pristine 256-byte base state (no merges/model/specials),
+        so this instance can load a different model with zero carryover."""
+        _lib.vgre_bpe_reset(self._h)
+        return self
+
+    @property
+    def last_error(self) -> int:
+        """Integer code of the most recent operation (0 == ok)."""
+        return int(_lib.vgre_bpe_last_error(self._h))
+
+    @property
+    def last_error_message(self) -> str:
+        msg = _lib.vgre_bpe_last_error_message(self._h)
+        return msg.decode("utf-8", errors="replace") if msg else ""
+
+    @staticmethod
+    def error_string(code: int) -> str:
+        """Stable, human-readable name for an error code."""
+        _require()
+        s = _lib.vgre_bpe_error_string(int(code))
+        return s.decode("utf-8", errors="replace") if s else "unknown error"
+
+    def validate(self) -> bool:
+        """Check the loaded state is self-consistent (see last_error on failure)."""
+        return bool(_lib.vgre_bpe_validate(self._h))
+
+    @staticmethod
+    def is_valid_utf8(data) -> bool:
+        """Strict RFC 3629 UTF-8 validation (rejects overlong forms, surrogate
+        codepoints and values above U+10FFFF). Accepts str or bytes."""
+        _require()
+        raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+        return bool(_lib.vgre_bpe_is_valid_utf8(raw, len(raw), None, None))
+
+    def encode_checked(self, text: str, max_tokens: int = 1 << 20) -> List[int]:
+        """Like encode(), but validates UTF-8 and guarantees no byte is lost to
+        the model vocabulary; raises ValueError(last_error_message) on failure."""
+        buf = (ctypes.c_int * max_tokens)()
+        n = _lib.vgre_bpe_encode_checked(self._h, text.encode("utf-8"), buf, max_tokens)
+        if n < 0:
+            raise ValueError(self.last_error_message or "encode_checked failed")
+        return list(buf[:n])
+
+    def decode_checked(self, ids: List[int], max_bytes: int = 1 << 20) -> str:
+        """Like decode(), but every id must be resolvable; raises ValueError on
+        an invalid id instead of silently skipping it."""
+        arr = (ctypes.c_int * len(ids))(*ids)
+        out = ctypes.create_string_buffer(max_bytes)
+        n = _lib.vgre_bpe_decode_checked(self._h, arr, len(ids), out, max_bytes)
+        if n < 0:
+            raise ValueError(self.last_error_message or "decode_checked failed")
+        return out.value.decode("utf-8", errors="replace")
+
+    def added_tokens(self) -> List[dict]:
+        """Rich metadata for every HF added/special token (after load_hf)."""
+        count = int(_lib.vgre_bpe_added_token_count(self._h))
+        result: List[dict] = []
+        for i in range(count):
+            content = ctypes.create_string_buffer(256)
+            tid = ctypes.c_int(0)
+            special = ctypes.c_int(0)
+            lstrip = ctypes.c_int(0)
+            rstrip = ctypes.c_int(0)
+            single_word = ctypes.c_int(0)
+            normalized = ctypes.c_int(0)
+            if _lib.vgre_bpe_added_token(self._h, i, content, 256,
+                                         ctypes.byref(tid), ctypes.byref(special),
+                                         ctypes.byref(lstrip), ctypes.byref(rstrip),
+                                         ctypes.byref(single_word), ctypes.byref(normalized)):
+                result.append({
+                    "content": content.value.decode("utf-8", errors="replace"),
+                    "id": tid.value,
+                    "special": bool(special.value),
+                    "lstrip": bool(lstrip.value),
+                    "rstrip": bool(rstrip.value),
+                    "single_word": bool(single_word.value),
+                    "normalized": bool(normalized.value),
+                })
+        return result
 
     def close(self) -> None:
         if getattr(self, "_h", None):
