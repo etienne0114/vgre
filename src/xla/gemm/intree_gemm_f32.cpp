@@ -27,6 +27,20 @@
 #  define VGRE_GEMM_X86 1
 #endif
 
+// The AVX-512 micro-kernel is compiled unconditionally on GCC/Clang and selected
+// at runtime (__builtin_cpu_supports), because their <immintrin.h> always
+// declares the _mm512_* intrinsics regardless of the -march baseline. clang-cl's
+// MSVC-mode <immintrin.h> instead hides <avx512fintrin.h> unless __AVX512F__ is
+// defined (i.e. built with /arch:AVX512), so on an AVX2-baseline clang-cl build
+// the _mm512_* intrinsics are undeclared and the kernel cannot be compiled. Gate
+// its compilation (and its runtime selection) on that: such a build cleanly uses
+// the AVX2/scalar kernels instead — the AVX-512 path is a runtime-optional fast
+// path, so dropping it changes speed, never correctness.
+#if defined(VGRE_GEMM_X86) && (defined(__GNUC__) || defined(__clang__)) && \
+    (!defined(_MSC_VER) || defined(__AVX512F__))
+#  define VGRE_GEMM_HAS_AVX512 1
+#endif
+
 namespace vgre {
 namespace xla {
 namespace intree {
@@ -48,7 +62,9 @@ Isa detectIsa() {
 #if defined(VGRE_GEMM_X86) && (defined(__GNUC__) || defined(__clang__))
     __builtin_cpu_init();
     // AVX-512F micro-kernel is selected only when present; otherwise AVX2+FMA.
+#ifdef VGRE_GEMM_HAS_AVX512
     if (__builtin_cpu_supports("avx512f")) return Isa::Avx512;
+#endif
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
         return Isa::Avx2;
 #endif
@@ -146,6 +162,7 @@ void microAvx2(int kc, const float* Ap, const float* Bp, float* cbuf) {
 // ── AVX-512 micro-kernel: 6×16 (6 rows × one __m512) ─────────────────────────
 // Same algorithm as microAvx2, one 16-wide ZMM per row (NR == 16). Selected on
 // CPUs with AVX-512F; correct by construction (identical math, wider vectors).
+#ifdef VGRE_GEMM_HAS_AVX512
 __attribute__((target("avx512f")))
 void microAvx512(int kc, const float* Ap, const float* Bp, float* cbuf) {
     __m512 c0 = _mm512_setzero_ps(), c1 = _mm512_setzero_ps(), c2 = _mm512_setzero_ps();
@@ -164,11 +181,14 @@ void microAvx512(int kc, const float* Ap, const float* Bp, float* cbuf) {
     _mm512_storeu_ps(cbuf + 32, c2); _mm512_storeu_ps(cbuf + 48, c3);
     _mm512_storeu_ps(cbuf + 64, c4); _mm512_storeu_ps(cbuf + 80, c5);
 }
+#endif  // VGRE_GEMM_HAS_AVX512
 #endif
 
 inline void microKernel(int kc, const float* Ap, const float* Bp, float* cbuf) {
 #if defined(VGRE_GEMM_X86) && (defined(__GNUC__) || defined(__clang__))
+#ifdef VGRE_GEMM_HAS_AVX512
     if (g_isa == Isa::Avx512) { microAvx512(kc, Ap, Bp, cbuf); return; }
+#endif
     if (g_isa == Isa::Avx2)   { microAvx2(kc, Ap, Bp, cbuf); return; }
 #endif
     microScalar(kc, Ap, Bp, cbuf);
