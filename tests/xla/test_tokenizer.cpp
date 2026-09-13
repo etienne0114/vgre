@@ -106,6 +106,79 @@ int main() {
         fs::remove(vj); fs::remove(mt);
     }
 
+    // ── Premium: strict RFC 3629 UTF-8 validation ──────────────────────────
+    {
+        using vgre::xla::TokenizerError;
+        TokenizerError why;
+        size_t at;
+        CHECK(BpeTokenizer::isValidUtf8("hello", &why, &at), "ascii is valid UTF-8");
+        CHECK(BpeTokenizer::isValidUtf8("café \xF0\x9F\x9A\x80", &why, &at), "café+emoji valid UTF-8");
+        // Overlong '/' (0xC0 0xAF) — must be rejected as overlong.
+        CHECK(!BpeTokenizer::isValidUtf8(std::string("\xC0\xAF", 2), &why, &at) &&
+              why == TokenizerError::OverlongUtf8, "overlong 2-byte rejected");
+        // Overlong 3-byte for U+0000..U+07FF: 0xE0 0x80 0x80.
+        CHECK(!BpeTokenizer::isValidUtf8(std::string("\xE0\x80\x80", 3), &why, &at) &&
+              why == TokenizerError::OverlongUtf8, "overlong 3-byte rejected");
+        // UTF-16 surrogate U+D800 encoded as 0xED 0xA0 0x80.
+        CHECK(!BpeTokenizer::isValidUtf8(std::string("\xED\xA0\x80", 3), &why, &at) &&
+              why == TokenizerError::SurrogateCodepoint, "surrogate codepoint rejected");
+        // Above U+10FFFF: 0xF4 0x90 0x80 0x80 (U+110000).
+        CHECK(!BpeTokenizer::isValidUtf8(std::string("\xF4\x90\x80\x80", 4), &why, &at) &&
+              why == TokenizerError::CodepointOutOfRange, "codepoint > U+10FFFF rejected");
+        // Truncated multibyte / lone continuation.
+        CHECK(!BpeTokenizer::isValidUtf8(std::string("\xE2\x82", 2), &why, &at) &&
+              why == TokenizerError::InvalidUtf8, "truncated sequence rejected");
+        CHECK(!BpeTokenizer::isValidUtf8(std::string("\x80", 1), &why, &at) &&
+              why == TokenizerError::InvalidUtf8, "lone continuation byte rejected");
+        CHECK(at == 0, "offset of first offender reported");
+    }
+
+    // ── Premium: checked encode/decode + structured errors + no byte loss ───
+    {
+        using vgre::xla::TokenizerError;
+        BpeTokenizer t;
+        std::vector<int> ids;
+        CHECK(t.encodeChecked("hello world", ids), "encodeChecked accepts valid UTF-8");
+        CHECK(t.lastError() == TokenizerError::Ok, "no error after valid encode");
+        std::string back;
+        CHECK(t.decodeChecked(ids, back) && back == "hello world", "decodeChecked round-trip");
+        // Invalid UTF-8 is rejected by the checked encoder (but the plain byte
+        // encoder still round-trips it — losslessness preserved).
+        std::string bad("\xC0\xAF", 2);
+        CHECK(!t.encodeChecked(bad, ids) && t.lastError() == TokenizerError::OverlongUtf8,
+              "encodeChecked rejects overlong UTF-8 with structured error");
+        CHECK(!t.lastErrorMessage().empty(), "error message populated");
+        CHECK(t.decode(t.encode(bad)) == bad, "plain byte path still lossless for invalid UTF-8");
+        // Invalid token id detected on checked decode; plain decode skips silently.
+        CHECK(!t.decodeChecked({0, 999999, 1}, back) &&
+              t.lastError() == TokenizerError::InvalidTokenId, "decodeChecked rejects bad id");
+        // Checked HF/GPT-2 APIs report NotLoaded before any load.
+        CHECK(!t.encodeHfChecked("x", ids) && t.lastError() == TokenizerError::NotLoaded,
+              "encodeHfChecked before load -> NotLoaded");
+    }
+
+    // ── Premium: explicit reset / state isolation ───────────────────────────
+    {
+        BpeTokenizer t;
+        std::string corpus;
+        for (int i = 0; i < 50; ++i) corpus += "reset test ";
+        t.train(corpus, 20);
+        CHECK(t.vocabSize() > 256, "trained vocab grew");
+        t.reset();
+        CHECK(t.vocabSize() == 256, "reset restores base 256-byte vocab");
+        CHECK(t.encode("reset").size() == 5, "reset cleared merges (one id per byte)");
+        // A reused instance can load a fresh model with zero carryover.
+        int n = t.loadMerges({{"r", "e"}});
+        CHECK(n == 1, "reused instance loads merges after reset");
+    }
+
+    // ── Premium: strict merge validation via loadMerges (unknown operand) ───
+    {
+        BpeTokenizer t;
+        // Known-operand merges accepted; unknown-operand ones skipped (not fatal).
+        CHECK(t.loadMerges({{"h", "e"}, {"zz", "q"}}) == 1, "only resolvable merge accepted");
+    }
+
     if (g_fail == 0) { std::printf("test_tokenizer: ALL CHECKS PASSED\n"); return 0; }
     std::printf("test_tokenizer: %d FAILURE(S)\n", g_fail);
     return 1;

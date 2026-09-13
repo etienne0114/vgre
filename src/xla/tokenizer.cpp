@@ -88,9 +88,102 @@ inline bool isUWs(uint32_t cp) {
 }
 }  // namespace
 
+const char* tokenizerErrorString(TokenizerError e) {
+    switch (e) {
+        case TokenizerError::Ok:                  return "ok";
+        case TokenizerError::InvalidUtf8:         return "invalid UTF-8 byte sequence";
+        case TokenizerError::OverlongUtf8:        return "overlong (non-minimal) UTF-8 encoding";
+        case TokenizerError::SurrogateCodepoint:  return "UTF-16 surrogate codepoint in UTF-8";
+        case TokenizerError::CodepointOutOfRange: return "codepoint above U+10FFFF";
+        case TokenizerError::InvalidTokenId:      return "token id not in vocabulary";
+        case TokenizerError::ByteNotInVocab:      return "raw byte missing from model vocabulary";
+        case TokenizerError::FileNotFound:        return "tokenizer file not found";
+        case TokenizerError::ParseError:          return "tokenizer file parse error";
+        case TokenizerError::UnsupportedModel:    return "unsupported tokenizer model/normalizer/split";
+        case TokenizerError::InvalidVocabId:      return "invalid vocabulary id";
+        case TokenizerError::DuplicateVocabId:    return "duplicate vocabulary id";
+        case TokenizerError::InvalidMerge:        return "malformed merge rule";
+        case TokenizerError::InconsistentState:   return "inconsistent loaded tokenizer state";
+        case TokenizerError::NotLoaded:           return "tokenizer not loaded for this API";
+    }
+    return "unknown error";
+}
+
+// Strict RFC 3629 UTF-8 validation via the Unicode "well-formed byte sequences"
+// table: rejects overlong forms, surrogate codepoints and anything > U+10FFFF,
+// each with a distinct error code and the byte offset of the first offender.
+bool BpeTokenizer::isValidUtf8(const std::string& s, TokenizerError* why, size_t* atByte) {
+    auto reject = [&](TokenizerError e, size_t at) {
+        if (why) *why = e;
+        if (atByte) *atByte = at;
+        return false;
+    };
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char b0 = p[i];
+        if (b0 < 0x80) { ++i; continue; }             // ASCII
+
+        int len;
+        unsigned char lo1, hi1;                        // legal range of the 1st cont. byte
+        if (b0 == 0xC0 || b0 == 0xC1) return reject(TokenizerError::OverlongUtf8, i);
+        else if (b0 >= 0xC2 && b0 <= 0xDF) { len = 2; lo1 = 0x80; hi1 = 0xBF; }
+        else if (b0 == 0xE0)               { len = 3; lo1 = 0xA0; hi1 = 0xBF; }  // <A0 overlong
+        else if (b0 >= 0xE1 && b0 <= 0xEC) { len = 3; lo1 = 0x80; hi1 = 0xBF; }
+        else if (b0 == 0xED)               { len = 3; lo1 = 0x80; hi1 = 0x9F; }  // >9F surrogate
+        else if (b0 >= 0xEE && b0 <= 0xEF) { len = 3; lo1 = 0x80; hi1 = 0xBF; }
+        else if (b0 == 0xF0)               { len = 4; lo1 = 0x90; hi1 = 0xBF; }  // <90 overlong
+        else if (b0 >= 0xF1 && b0 <= 0xF3) { len = 4; lo1 = 0x80; hi1 = 0xBF; }
+        else if (b0 == 0xF4)               { len = 4; lo1 = 0x80; hi1 = 0x8F; }  // >8F out of range
+        else if (b0 >= 0xF5)               return reject(TokenizerError::CodepointOutOfRange, i);
+        else                               return reject(TokenizerError::InvalidUtf8, i);  // lone continuation
+
+        if (i + (size_t)len > n) return reject(TokenizerError::InvalidUtf8, i);   // truncated
+        const unsigned char b1 = p[i + 1];
+        if (b1 < lo1 || b1 > hi1) {
+            // Classify the boundary violation precisely for E0/ED/F0/F4 leads.
+            if (b0 == 0xE0 && b1 >= 0x80 && b1 <= 0x9F) return reject(TokenizerError::OverlongUtf8, i);
+            if (b0 == 0xED && b1 >= 0xA0 && b1 <= 0xBF) return reject(TokenizerError::SurrogateCodepoint, i);
+            if (b0 == 0xF0 && b1 >= 0x80 && b1 <= 0x8F) return reject(TokenizerError::OverlongUtf8, i);
+            if (b0 == 0xF4 && b1 >= 0x90 && b1 <= 0xBF) return reject(TokenizerError::CodepointOutOfRange, i);
+            return reject(TokenizerError::InvalidUtf8, i);
+        }
+        for (int k = 2; k < len; ++k)
+            if (p[i + k] < 0x80 || p[i + k] > 0xBF) return reject(TokenizerError::InvalidUtf8, i);
+        i += (size_t)len;
+    }
+    if (why) *why = TokenizerError::Ok;
+    return true;
+}
+
+bool BpeTokenizer::setError(TokenizerError e, std::string msg) const {
+    err_ = e;
+    errMsg_ = std::move(msg);
+    return e == TokenizerError::Ok;
+}
+
 BpeTokenizer::BpeTokenizer() {
     vocab_.resize(256);
     for (int i = 0; i < 256; ++i) vocab_[i] = std::string(1, (char)(unsigned char)i);
+}
+
+void BpeTokenizer::reset() {
+    vocab_.assign(256, std::string());
+    for (int i = 0; i < 256; ++i) vocab_[i] = std::string(1, (char)(unsigned char)i);
+    merge_.clear();
+    gpt2_ = false;
+    hf_ = false;
+    byteToCp_.clear();
+    cpToByte_.clear();
+    bytesToVocabId_.clear();
+    vocabIdToBytes_.clear();
+    split_ = SplitRule{};
+    specials_.clear();
+    specialById_.clear();
+    added_.clear();
+    hfVocabSize_ = 0;
+    clearError();
 }
 
 std::string BpeTokenizer::tokenBytes(int id) const {
@@ -253,37 +346,64 @@ std::string BpeTokenizer::cpsToBytes(const std::string& s) const {
 }
 
 bool BpeTokenizer::loadGpt2(const std::string& vocabJsonPath, const std::string& mergesTxtPath) {
-    buildByteLevelTable();
-
-    // vocab.json: token(remapped) → id.
+    // Phase 1: read + validate both files without mutating state.
     std::ifstream vf(vocabJsonPath, std::ios::binary);
-    if (!vf) return false;
+    if (!vf) return setError(TokenizerError::FileNotFound, "cannot open " + vocabJsonPath);
     std::stringstream ss; ss << vf.rdbuf();
     common::json::Value root;
-    if (!common::json::parse(ss.str(), root) || !root.isObject()) return false;
-    for (const auto& kv : root.obj) {
-        int id = (int)kv.second.asNumber(-1);
-        if (id < 0) continue;
-        std::string bytes = cpsToBytes(kv.first);
-        bytesToVocabId_[bytes] = id;
-        vocabIdToBytes_[id] = bytes;
-    }
+    if (!common::json::parse(ss.str(), root) || !root.isObject())
+        return setError(TokenizerError::ParseError, "vocab.json is not a JSON object");
 
-    // merges.txt: ordered "A B" lines (skip a leading #version comment).
+    std::map<std::string, int> b2id;  // remapped token string -> id
+    std::map<int, std::string> id2b;
+    for (const auto& kv : root.obj) {
+        double num = kv.second.asNumber(-1);
+        int id = (int)num;
+        if (num < 0 || (double)id != num)
+            return setError(TokenizerError::InvalidVocabId,
+                            "vocab entry '" + kv.first + "' has a non-integer/negative id");
+        b2id.emplace(kv.first, id);
+        auto ins = id2b.emplace(id, kv.first);
+        if (!ins.second && ins.first->second != kv.first)
+            return setError(TokenizerError::DuplicateVocabId,
+                            "vocab id " + std::to_string(id) + " assigned to two tokens");
+    }
+    if (b2id.empty()) return setError(TokenizerError::ParseError, "vocab.json is empty");
+
     std::ifstream mf(mergesTxtPath);
-    if (!mf) return false;
-    std::vector<std::pair<std::string, std::string>> merges;
+    if (!mf) return setError(TokenizerError::FileNotFound, "cannot open " + mergesTxtPath);
+    std::vector<std::pair<std::string, std::string>> mergesRemapped;
     std::string line;
     while (std::getline(mf, line)) {
-        if (line.empty() || line[0] == '#') continue;
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF tolerance
+        if (line.empty() || line[0] == '#') continue;               // skip #version header
         size_t sp = line.find(' ');
-        if (sp == std::string::npos) continue;
-        merges.emplace_back(cpsToBytes(line.substr(0, sp)), cpsToBytes(line.substr(sp + 1)));
+        if (sp == std::string::npos || sp == 0 || sp + 1 >= line.size() ||
+            line.find(' ', sp + 1) != std::string::npos)
+            return setError(TokenizerError::InvalidMerge,
+                            "merges.txt line is not two space-separated operands: '" + line + "'");
+        mergesRemapped.emplace_back(line.substr(0, sp), line.substr(sp + 1));
     }
+
+    // Phase 2: commit from a clean base.
+    reset();
+    buildByteLevelTable();
+    for (const auto& kv : b2id) {
+        std::string bytes = cpsToBytes(kv.first);
+        bytesToVocabId_[bytes] = kv.second;
+        vocabIdToBytes_[kv.second] = bytes;
+    }
+    std::vector<std::pair<std::string, std::string>> merges;
+    merges.reserve(mergesRemapped.size());
+    for (const auto& mp : mergesRemapped)
+        merges.emplace_back(cpsToBytes(mp.first), cpsToBytes(mp.second));
     loadMerges(merges);
     split_ = SplitRule{};  // GPT-2 pattern: exact-case contractions, ' ?' prefixes,
                            // unbounded digit runs, plain punct, no newline rule
     gpt2_ = true;
+    hf_ = false;
+    if (!validate()) { TokenizerError e = err_; std::string m = errMsg_; reset(); return setError(e, m); }
+    clearError();
     return true;
 }
 
@@ -460,29 +580,35 @@ int BpeTokenizer::specialTokenId(const std::string& content) const {
 }
 
 bool BpeTokenizer::loadHf(const std::string& tokenizerJsonPath) {
+    // ── Phase 1: parse + validate the file WITHOUT mutating any state, so a bad
+    // or unsupported file leaves the tokenizer exactly as it was. ─────────────
     std::ifstream f(tokenizerJsonPath, std::ios::binary);
-    if (!f) return false;
+    if (!f) return setError(TokenizerError::FileNotFound, "cannot open " + tokenizerJsonPath);
     std::stringstream ss;
     ss << f.rdbuf();
     common::json::Value root;
-    if (!common::json::parse(ss.str(), root) || !root.isObject()) return false;
+    if (!common::json::parse(ss.str(), root) || !root.isObject())
+        return setError(TokenizerError::ParseError, "tokenizer.json is not a JSON object");
 
-    // model: must be BPE.
     const common::json::Value* model = root.find("model");
-    if (!model || !model->isObject()) return false;
+    if (!model || !model->isObject())
+        return setError(TokenizerError::ParseError, "missing model object");
     const common::json::Value* mtype = model->find("type");
-    if (mtype && mtype->asString("BPE") != "BPE") return false;
+    if (mtype && mtype->asString("BPE") != "BPE")
+        return setError(TokenizerError::UnsupportedModel,
+                        "model.type is '" + mtype->asString() + "', only BPE is supported");
 
-    // normalizer: only the identity-on-NFC-text kinds these models use.
     const common::json::Value* norm = root.find("normalizer");
     if (norm && !norm->isNull()) {
         std::string nt = norm->find("type") ? norm->find("type")->asString() : "";
-        if (nt != "NFC") return false;  // Metaspace/Prepend/… = SentencePiece → unsupported
+        if (nt != "NFC")
+            return setError(TokenizerError::UnsupportedModel,
+                            "normalizer '" + nt + "' (SentencePiece-style) is unsupported");
     }
 
-    // pre_tokenizer: must contain ByteLevel; may contain one Split pattern.
     const common::json::Value* pre = root.find("pre_tokenizer");
-    if (!pre || pre->isNull()) return false;
+    if (!pre || pre->isNull())
+        return setError(TokenizerError::UnsupportedModel, "missing pre_tokenizer");
     bool byteLevel = false;
     std::string splitPat;
     auto scanPre = [&](const common::json::Value& p) {
@@ -499,12 +625,14 @@ bool BpeTokenizer::loadHf(const std::string& tokenizerJsonPath) {
     std::string preType = pre->find("type") ? pre->find("type")->asString() : "";
     if (preType == "Sequence") {
         const common::json::Value* subs = pre->find("pretokenizers");
-        if (!subs || !subs->isArray()) return false;
+        if (!subs || !subs->isArray())
+            return setError(TokenizerError::ParseError, "pre_tokenizer.Sequence has no pretokenizers[]");
         for (const auto& p : subs->arr) scanPre(p);
     } else {
         scanPre(*pre);
     }
-    if (!byteLevel) return false;
+    if (!byteLevel)
+        return setError(TokenizerError::UnsupportedModel, "pre_tokenizer is not byte-level");
 
     SplitRule sr;  // ByteLevel's built-in regex = the GPT-2 pattern (defaults)
     if (!splitPat.empty()) {
@@ -517,49 +645,81 @@ bool BpeTokenizer::loadHf(const std::string& tokenizerJsonPath) {
         } else if (splitPat == kPatGpt2 || splitPat == kPatGpt2Alt) {
             sr = SplitRule{};
         } else {
-            return false;  // unknown split family — refuse rather than approximate
+            return setError(TokenizerError::UnsupportedModel,
+                            "unrecognized Split regex — refusing to approximate");
         }
     }
 
-    buildByteLevelTable();
-    bytesToVocabId_.clear();
-    vocabIdToBytes_.clear();
-
-    // model.vocab: token(remapped) → id.
     const common::json::Value* vocab = model->find("vocab");
-    if (!vocab || !vocab->isObject()) return false;
+    if (!vocab || !vocab->isObject())
+        return setError(TokenizerError::ParseError, "missing model.vocab object");
+    const common::json::Value* merges = model->find("merges");
+    if (!merges || !merges->isArray())
+        return setError(TokenizerError::ParseError, "missing model.merges array");
+
+    // Strict vocab-id validation + duplicate detection, into locals.
+    std::map<std::string, int> b2id;
+    std::map<int, std::string> id2b;
     int maxId = -1;
     for (const auto& kv : vocab->obj) {
-        int id = (int)kv.second.asNumber(-1);
-        if (id < 0) continue;
-        std::string bytes = cpsToBytes(kv.first);
-        bytesToVocabId_[bytes] = id;
-        vocabIdToBytes_[id] = bytes;
+        double num = kv.second.asNumber(-1);
+        int id = (int)num;
+        if (num < 0 || (double)id != num)
+            return setError(TokenizerError::InvalidVocabId,
+                            "vocab entry '" + kv.first + "' has a non-integer/negative id");
+        // Keyed by the remapped token string for now; decoded to raw bytes at
+        // commit (Phase 2), after the byte-level table exists.
+        b2id.emplace(kv.first, id);
+        auto ins = id2b.emplace(id, kv.first);
+        if (!ins.second && ins.first->second != kv.first)
+            return setError(TokenizerError::DuplicateVocabId,
+                            "vocab id " + std::to_string(id) + " assigned to both '" +
+                            ins.first->second + "' and '" + kv.first + "'");
         if (id > maxId) maxId = id;
     }
-    if (maxId < 0) return false;
+    if (maxId < 0)
+        return setError(TokenizerError::ParseError, "model.vocab is empty");
 
-    // model.merges: legacy "A B" strings or newer ["A","B"] pairs.
-    const common::json::Value* merges = model->find("merges");
-    if (!merges || !merges->isArray()) return false;
-    std::vector<std::pair<std::string, std::string>> ms;
-    ms.reserve(merges->arr.size());
+    // Strict merge validation: every entry must be a well-formed pair.
+    std::vector<std::pair<std::string, std::string>> msRemapped;
+    msRemapped.reserve(merges->arr.size());
     for (const auto& mv : merges->arr) {
         if (mv.isString()) {
             size_t sp = mv.str.find(' ');
-            if (sp == std::string::npos) continue;
-            ms.emplace_back(cpsToBytes(mv.str.substr(0, sp)),
-                            cpsToBytes(mv.str.substr(sp + 1)));
-        } else if (mv.isArray() && mv.arr.size() == 2) {
-            ms.emplace_back(cpsToBytes(mv.arr[0].asString()),
-                            cpsToBytes(mv.arr[1].asString()));
+            // Exactly one space: byte-level operands never contain a space (it is
+            // remapped to 'Ġ'), so "A B" is well-formed but "A B C" or "A " is not.
+            if (sp == std::string::npos || sp == 0 || sp + 1 >= mv.str.size() ||
+                mv.str.find(' ', sp + 1) != std::string::npos)
+                return setError(TokenizerError::InvalidMerge,
+                                "merge '" + mv.str + "' is not two space-separated operands");
+            msRemapped.emplace_back(mv.str.substr(0, sp), mv.str.substr(sp + 1));
+        } else if (mv.isArray() && mv.arr.size() == 2 &&
+                   mv.arr[0].isString() && mv.arr[1].isString() &&
+                   !mv.arr[0].str.empty() && !mv.arr[1].str.empty()) {
+            msRemapped.emplace_back(mv.arr[0].str, mv.arr[1].str);
+        } else {
+            return setError(TokenizerError::InvalidMerge, "malformed merge entry (wrong arity/type)");
         }
     }
+
+    // ── Phase 2: commit. All checks passed; build clean state from scratch so a
+    // reused instance carries nothing over and any (now unlikely) failure below
+    // leaves the pristine base tokenizer, never a half-built one. ─────────────
+    reset();
+    buildByteLevelTable();
+    for (const auto& kv : b2id) {  // keyed by remapped token string
+        std::string bytes = cpsToBytes(kv.first);
+        bytesToVocabId_[bytes] = kv.second;
+        vocabIdToBytes_[kv.second] = bytes;
+    }
+    std::vector<std::pair<std::string, std::string>> ms;
+    ms.reserve(msRemapped.size());
+    for (const auto& mp : msRemapped)
+        ms.emplace_back(cpsToBytes(mp.first), cpsToBytes(mp.second));
     loadMerges(ms);
 
-    // added_tokens: literal-match specials with reserved ids.
-    specials_.clear();
-    specialById_.clear();
+    // added_tokens: full metadata + fast literal-match list + reverse map, with
+    // duplicate-id detection.
     const common::json::Value* added = root.find("added_tokens");
     if (added && added->isArray()) {
         for (const auto& tv : added->arr) {
@@ -568,18 +728,46 @@ bool BpeTokenizer::loadHf(const std::string& tokenizerJsonPath) {
             if (!content || !idv) continue;
             int id = (int)idv->asNumber(-1);
             if (content->str.empty() || id < 0) continue;
+            auto ins = specialById_.emplace(id, content->str);
+            if (!ins.second && ins.first->second != content->str) {
+                reset();
+                return setError(TokenizerError::DuplicateVocabId,
+                                "added-token id " + std::to_string(id) + " used twice");
+            }
+            AddedToken at;
+            at.content = content->str;
+            at.id = id;
+            auto flag = [&](const char* k) {
+                const common::json::Value* v = tv.find(k);
+                return v && v->asBool(false);
+            };
+            at.special    = flag("special");
+            at.lstrip     = flag("lstrip");
+            at.rstrip     = flag("rstrip");
+            at.singleWord = flag("single_word");
+            at.normalized = flag("normalized");
+            added_.push_back(std::move(at));
             specials_.emplace_back(content->str, id);
-            specialById_[id] = content->str;
             if (id > maxId) maxId = id;
         }
     }
-    std::sort(specials_.begin(), specials_.end(),
-              [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+    // Deterministic special ordering: longest content first (greedy match), ties
+    // broken by ascending id then content, so encode() is reproducible run-to-run.
+    std::sort(specials_.begin(), specials_.end(), [](const auto& a, const auto& b) {
+        if (a.first.size() != b.first.size()) return a.first.size() > b.first.size();
+        if (a.second != b.second) return a.second < b.second;
+        return a.first < b.first;
+    });
+    std::sort(added_.begin(), added_.end(),
+              [](const AddedToken& a, const AddedToken& b) { return a.id < b.id; });
 
     split_ = sr;
     hfVocabSize_ = maxId + 1;
     hf_ = true;
     gpt2_ = false;
+
+    if (!validate()) { TokenizerError e = err_; std::string m = errMsg_; reset(); return setError(e, m); }
+    clearError();
     return true;
 }
 
@@ -614,6 +802,165 @@ std::string BpeTokenizer::decodeHf(const std::vector<int>& ids) const {
         if (it != vocabIdToBytes_.end()) out += it->second;
     }
     return out;
+}
+
+// ── Loaded-state validation ──────────────────────────────────────────────────
+bool BpeTokenizer::validate() const {
+    if (!hf_ && !gpt2_) { clearError(); return true; }  // base mode: lossless by construction
+
+    // Byte<->codepoint table complete and invertible.
+    if (byteToCp_.size() != 256)
+        return setError(TokenizerError::InconsistentState, "byte->codepoint table is not 256 entries");
+    for (int b = 0; b < 256; ++b) {
+        auto it = cpToByte_.find(byteToCp_[b]);
+        if (it == cpToByte_.end() || it->second != b)
+            return setError(TokenizerError::InconsistentState,
+                            "byte<->codepoint table is not invertible at byte " + std::to_string(b));
+    }
+
+    // bytes<->id maps are exact inverses (this also catches a duplicate id, which
+    // would leave more byte-strings than distinct ids).
+    if (bytesToVocabId_.size() != vocabIdToBytes_.size())
+        return setError(TokenizerError::DuplicateVocabId,
+                        "bytes<->id maps disagree in size (duplicate id or token)");
+    for (const auto& kv : bytesToVocabId_) {
+        auto it = vocabIdToBytes_.find(kv.second);
+        if (it == vocabIdToBytes_.end() || it->second != kv.first)
+            return setError(TokenizerError::InconsistentState, "bytes<->id map is not invertible");
+    }
+
+    // Special-token ids must not collide with each other.
+    if (specialById_.size() != specials_.size())
+        return setError(TokenizerError::DuplicateVocabId, "duplicate special-token id");
+
+    // NB: byte-level *completeness* (all 256 raw bytes representable) is not
+    // required here — minimal/partial vocabularies are legal to load. Instead the
+    // checked encoders (encode*Checked) report ByteNotInVocab at encode time, so a
+    // byte that cannot be mapped is surfaced rather than silently dropped.
+    clearError();
+    return true;
+}
+
+bool BpeTokenizer::mappedIdKnown(int id) const {
+    return specialById_.find(id) != specialById_.end() ||
+           vocabIdToBytes_.find(id) != vocabIdToBytes_.end();
+}
+
+// ── Checked encode/decode ────────────────────────────────────────────────────
+bool BpeTokenizer::encodeChecked(const std::string& text, std::vector<int>& out) const {
+    out.clear();
+    TokenizerError why;
+    size_t at;
+    if (!isValidUtf8(text, &why, &at))
+        return setError(why, "invalid UTF-8 at byte " + std::to_string(at));
+    out = encode(text);  // base byte-level path is inherently lossless
+    clearError();
+    return true;
+}
+
+bool BpeTokenizer::decodeChecked(const std::vector<int>& ids, std::string& out) const {
+    out.clear();
+    for (size_t i = 0; i < ids.size(); ++i)
+        if (ids[i] < 0 || ids[i] >= (int)vocab_.size())
+            return setError(TokenizerError::InvalidTokenId,
+                            "token id " + std::to_string(ids[i]) + " at position " +
+                            std::to_string(i) + " is out of range [0," +
+                            std::to_string(vocab_.size()) + ")");
+    out = decode(ids);
+    clearError();
+    return true;
+}
+
+// Byte-loss-checked mapped encoder: appends ids for `segment`, or fails with
+// ByteNotInVocab. Mirrors encodeMappedSegment but never silently drops a byte.
+bool BpeTokenizer::encodeMappedSegmentChecked(const std::string& segment,
+                                              std::vector<int>& out) const {
+    for (auto& piece : pretokenizeMapped(segment)) {
+        std::vector<int> p = piece;
+        applyMerges(p);
+        for (int internalId : p) {
+            const std::string& bytes = vocab_[internalId];
+            auto it = bytesToVocabId_.find(bytes);
+            if (it != bytesToVocabId_.end()) { out.push_back(it->second); continue; }
+            for (unsigned char b : bytes) {
+                auto bi = bytesToVocabId_.find(std::string(1, (char)b));
+                if (bi == bytesToVocabId_.end())
+                    return setError(TokenizerError::ByteNotInVocab,
+                                    "byte 0x" +
+                                    std::string(1, "0123456789abcdef"[(b >> 4) & 0xF]) +
+                                    std::string(1, "0123456789abcdef"[b & 0xF]) +
+                                    " has no model vocabulary id");
+                out.push_back(bi->second);
+            }
+        }
+    }
+    return true;
+}
+
+bool BpeTokenizer::encodeGpt2Checked(const std::string& text, std::vector<int>& out) const {
+    out.clear();
+    if (!gpt2_ && !hf_) return setError(TokenizerError::NotLoaded, "encodeGpt2Checked before loadGpt2");
+    TokenizerError why;
+    size_t at;
+    if (!isValidUtf8(text, &why, &at))
+        return setError(why, "invalid UTF-8 at byte " + std::to_string(at));
+    if (!encodeMappedSegmentChecked(text, out)) { out.clear(); return false; }
+    clearError();
+    return true;
+}
+
+bool BpeTokenizer::decodeGpt2Checked(const std::vector<int>& ids, std::string& out) const {
+    out.clear();
+    if (!gpt2_) return setError(TokenizerError::NotLoaded, "decodeGpt2Checked before loadGpt2");
+    for (size_t i = 0; i < ids.size(); ++i)
+        if (vocabIdToBytes_.find(ids[i]) == vocabIdToBytes_.end())
+            return setError(TokenizerError::InvalidTokenId,
+                            "token id " + std::to_string(ids[i]) + " at position " +
+                            std::to_string(i) + " is not in the model vocabulary");
+    out = decodeGpt2(ids);
+    clearError();
+    return true;
+}
+
+bool BpeTokenizer::encodeHfChecked(const std::string& text, std::vector<int>& out) const {
+    out.clear();
+    if (!hf_) return setError(TokenizerError::NotLoaded, "encodeHfChecked before loadHf");
+    TokenizerError why;
+    size_t at;
+    if (!isValidUtf8(text, &why, &at))
+        return setError(why, "invalid UTF-8 at byte " + std::to_string(at));
+    // Special-aware segmentation identical to encodeHf, but each non-special
+    // segment goes through the byte-loss-checked mapped encoder.
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t best = std::string::npos, bi = 0;
+        for (size_t s = 0; s < specials_.size(); ++s) {
+            size_t a = text.find(specials_[s].first, pos);
+            if (a < best) { best = a; bi = s; }
+        }
+        const size_t end = (best == std::string::npos) ? text.size() : best;
+        if (end > pos) {
+            if (!encodeMappedSegmentChecked(text.substr(pos, end - pos), out)) { out.clear(); return false; }
+        }
+        if (best == std::string::npos) break;
+        out.push_back(specials_[bi].second);
+        pos = best + specials_[bi].first.size();
+    }
+    clearError();
+    return true;
+}
+
+bool BpeTokenizer::decodeHfChecked(const std::vector<int>& ids, std::string& out) const {
+    out.clear();
+    if (!hf_) return setError(TokenizerError::NotLoaded, "decodeHfChecked before loadHf");
+    for (size_t i = 0; i < ids.size(); ++i)
+        if (!mappedIdKnown(ids[i]))
+            return setError(TokenizerError::InvalidTokenId,
+                            "token id " + std::to_string(ids[i]) + " at position " +
+                            std::to_string(i) + " is neither a vocabulary nor a special id");
+    out = decodeHf(ids);
+    clearError();
+    return true;
 }
 
 }  // namespace xla
