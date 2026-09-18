@@ -1,4 +1,5 @@
 #include "vgre/advanced/tcp_cluster/internal/collective_ops_manager.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/tcp_cluster/internal/diagnostic_logger.h"
 #include "vgre/api/vgre_c_api.h"

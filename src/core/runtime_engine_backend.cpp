@@ -10,6 +10,7 @@
 #ifndef VGRE_ENABLE_JIT
 
 #include "vgre/core/runtime_engine.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include "vgre/common/logger.h"
 #include "vgre/compiler/backend/backend_registry.h"

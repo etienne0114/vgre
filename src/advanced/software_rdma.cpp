@@ -1,6 +1,7 @@
 // Portable software RDMA — impl. See include/vgre/advanced/software_rdma.h.
 
 #include "vgre/advanced/software_rdma.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include <cstring>
 

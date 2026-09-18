@@ -1,4 +1,5 @@
 #include "vgre/runtime/gpu_thread_context.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/common/platform.h"
 #include "vgre/core/cluster.h"
 #include "vgre/core/tmem.h"

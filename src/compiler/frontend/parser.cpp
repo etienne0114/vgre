@@ -1,6 +1,7 @@
 // Recursive-descent parser — see include/vgre/compiler/frontend/parser.h.
 
 #include "vgre/compiler/frontend/parser.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include "vgre/compiler/frontend/lexer.h"
 

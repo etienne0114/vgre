@@ -1,6 +1,7 @@
 // Memory-mapped safetensors loader — see include/vgre/xla/safetensors.h.
 
 #include "vgre/xla/safetensors.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include <cstring>
 

@@ -3,6 +3,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster/internal/dispatch_manager.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/advanced/workload_partitioner.h"
 #include "vgre/advanced/hybrid_compute_manager.h"

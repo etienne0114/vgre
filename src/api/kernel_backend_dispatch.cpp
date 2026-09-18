@@ -1,6 +1,7 @@
 // See include/vgre/api/kernel_backend_dispatch.h.
 
 #include "vgre/api/kernel_backend_dispatch.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include "vgre/compiler/backend/backend_registry.h"
 #include "vgre/compiler/backend/execution_backend.h"

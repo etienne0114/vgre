@@ -1,4 +1,5 @@
 #include "vgre/advanced/tcp_cluster.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/advanced/tcp_cluster/tcp_cluster_defaults.h"
 #include "vgre/advanced/secure_channel.h"
 #include "vgre/advanced/gpu_passthrough.h"

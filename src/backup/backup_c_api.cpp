@@ -1,6 +1,7 @@
 // Stable C ABI for the backup / DR archive.  See backup_c_api.h.
 
 #include "vgre/backup/backup_c_api.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/backup/backup_archive.h"
 
 #include <cstring>

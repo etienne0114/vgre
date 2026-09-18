@@ -1,4 +1,5 @@
 #include "vgre/core/scheduler.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/common/logger.h"
 
 #include <sstream>

@@ -5,6 +5,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster/internal/windows_socket_manager.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/common/logger.h"
 #include <thread>
 #include <chrono>

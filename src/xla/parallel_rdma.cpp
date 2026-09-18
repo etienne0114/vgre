@@ -7,6 +7,7 @@
 // binding from the sharding executor to the portable cluster transport.
 
 #include "vgre/xla/parallel.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include <cstdint>
 #include <memory>

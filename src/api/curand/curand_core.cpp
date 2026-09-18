@@ -12,6 +12,7 @@
 // and Gray-code quasi-random generation are all fully implemented.
 
 #include "vgre/api/curand_shim.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/common/logger.h"
 
 #include <cmath>

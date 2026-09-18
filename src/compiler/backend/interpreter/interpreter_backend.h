@@ -6,6 +6,7 @@
 #define VGRE_SRC_COMPILER_BACKEND_INTERPRETER_BACKEND_H
 
 #include "vgre/compiler/backend/execution_backend.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 namespace vgre {
 namespace compiler {

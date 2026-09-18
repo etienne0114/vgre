@@ -1,6 +1,9 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/common/logger.h"
 
+#include <algorithm>   // std::sort (do not rely on transitive includes: pulled in
+                       // via an LLVM/OpenMP header in other build configs, but not
+                       // in the LLVM-free / OpenMP-off build)
 #include <sstream>
 #include <cstring>
 

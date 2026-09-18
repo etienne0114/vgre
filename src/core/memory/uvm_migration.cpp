@@ -1,4 +1,5 @@
 #include "vgre/core/memory_manager.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/common/logger.h"
 

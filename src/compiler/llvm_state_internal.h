@@ -10,6 +10,7 @@
 #  pragma warning(disable: 4100 4127 4244 4267 4324 4456 4459 4624 4996)
 #endif
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC diagnostic pop

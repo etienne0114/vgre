@@ -1,4 +1,5 @@
 #include "vgre/core/event.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/virtual_gpu_device.h"
 #include "vgre/core/scheduler.h"

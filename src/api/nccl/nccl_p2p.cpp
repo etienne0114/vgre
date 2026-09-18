@@ -1,4 +1,5 @@
 #include "vgre/api/nccl_internal.h"
+#include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 #include "vgre/common/logger.h"
 
 extern "C" {
