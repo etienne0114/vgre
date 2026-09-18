@@ -31,25 +31,17 @@ void MemoryManager::startMigrationThread() {
 void MemoryManager::stopMigrationThread() {
   migrationStop_.store(true, std::memory_order_release);
   migrationCv_.notify_all();
+  // Join directly. migrationStop_ is already set and the CV already
+  // notified, so migrationLoop's wait predicate is satisfied and the thread
+  // returns promptly — no timeout wrapper is needed. A prior version joined
+  // via a std::async-spawned thread to add a timeout, but this can run
+  // during static-storage teardown at process exit (e.g. an atexit-driven
+  // shutdown for callers that never call vgre_shutdown() explicitly), where
+  // creating a new OS thread is unsafe — see the identical fix and rationale
+  // in Scheduler::~Scheduler (scheduler.cpp), which hit the same crash.
   if (migrationThread_.joinable()) {
-    // Configurable thread join timeout via VGRE_THREAD_JOIN_TIMEOUT_MS
-    static const int joinTimeoutMs = []() -> int {
-        const char* e = vgre_get_config("VGRE_THREAD_JOIN_TIMEOUT_MS");
-        if (e) {
-            try {
-                int v = std::stoi(e);
-                if (v >= 1000 && v <= 30000) return v; // 1s to 30s range
-            } catch (...) {}
-        }
-        return 5000; // 5 seconds default
-    }();
-    auto future = std::async(std::launch::async, [this]() { migrationThread_.join(); });
-    if (future.wait_for(std::chrono::milliseconds(joinTimeoutMs)) == std::future_status::timeout) {
-      VGRE_LOG_WARN("MemoryManager", "Migration thread join timeout - detaching");
-      migrationThread_.detach();
-    } else {
-      VGRE_LOG_DEBUG("MemoryManager", "UVM migration background thread stopped");
-    }
+    migrationThread_.join();
+    VGRE_LOG_DEBUG("MemoryManager", "UVM migration background thread stopped");
   }
 }
 
@@ -211,25 +203,12 @@ void MemoryManager::startPendingDrainer() {
 
 void MemoryManager::stopPendingDrainer() {
   pendingDrainerStop_.store(true, std::memory_order_release);
+  // Join directly — see MemoryManager::stopMigrationThread for why a
+  // std::async-spawned joiner thread is unsafe here (this can run during
+  // atexit-driven static teardown).
   if (pendingDrainerThread_.joinable()) {
-    // Use the same configurable timeout for consistency
-    static const int joinTimeoutMs = []() -> int {
-        const char* e = vgre_get_config("VGRE_THREAD_JOIN_TIMEOUT_MS");
-        if (e) {
-            try {
-                int v = std::stoi(e);
-                if (v >= 1000 && v <= 30000) return v;
-            } catch (...) {}
-        }
-        return 5000;
-    }();
-    auto future = std::async(std::launch::async, [this]() { pendingDrainerThread_.join(); });
-    if (future.wait_for(std::chrono::milliseconds(joinTimeoutMs)) == std::future_status::timeout) {
-      VGRE_LOG_WARN("MemoryManager", "Pending drainer thread join timeout - detaching");
-      pendingDrainerThread_.detach();
-    } else {
-      VGRE_LOG_DEBUG("MemoryManager", "Pending-fault drainer thread stopped");
-    }
+    pendingDrainerThread_.join();
+    VGRE_LOG_DEBUG("MemoryManager", "Pending-fault drainer thread stopped");
   }
 }
 

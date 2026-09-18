@@ -18,6 +18,18 @@
 #include <random>
 #include <vector>
 
+#if defined(_WIN32)
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return _aligned_malloc(size, alignment);
+}
+static inline void aligned_free_portable(void* p) { _aligned_free(p); }
+#else
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return std::aligned_alloc(alignment, size);
+}
+static inline void aligned_free_portable(void* p) { std::free(p); }
+#endif
+
 extern "C" {
   void vgre_jit_block_dispatch(int, void (*)(int, void*), void*);
   vgre::dim3* vgre_jit_get_threadIdx();
@@ -50,8 +62,8 @@ static void lane_job(int tid, void* arg) {
 static bool run_case(int N, float cInit) {
     const int M = 64, K = 16;
     // 16-byte-aligned bf16 tiles so (ptr>>4)<<4 recovers the pointer.
-    auto* A = static_cast<uint16_t*>(std::aligned_alloc(16, ((size_t)M * K * 2 + 15) & ~15ull));
-    auto* B = static_cast<uint16_t*>(std::aligned_alloc(16, ((size_t)K * N * 2 + 15) & ~15ull));
+    auto* A = static_cast<uint16_t*>(aligned_alloc_portable(16, ((size_t)M * K * 2 + 15) & ~15ull));
+    auto* B = static_cast<uint16_t*>(aligned_alloc_portable(16, ((size_t)K * N * 2 + 15) & ~15ull));
     std::mt19937 rng(N * 131 + 7);
     std::normal_distribution<float> nd(0.0f, 1.0f);
     std::vector<float> Af(M * K), Bf(K * N);
@@ -89,7 +101,7 @@ static bool run_case(int N, float cInit) {
             for (int k = 0; k < K; ++k) acc += Af[m * K + k] * Bf[k * N + n];
             maxErr = std::max(maxErr, (double)std::fabs(D[(size_t)m * N + n] - acc));
         }
-    std::free(A); std::free(B);
+    aligned_free_portable(A); aligned_free_portable(B);
     printf("  [info] N=%d cInit=%.1f: bijection=%d max abs err=%.2e\n", N, cInit, bijection, maxErr);
     return bijection && maxErr < 1e-2;
 }

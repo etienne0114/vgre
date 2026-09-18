@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #define PASS(msg) std::cout << "[PASS] " << msg << "\n"

@@ -18,26 +18,35 @@ extern "C" {
 namespace cooperative_groups {
 
 // ── Base class ───────────────────────────────────────────────────────────────
+// Deliberately NOT polymorphic: every call site in this header (reduce(),
+// partition_copy(), inclusive_scan(), ...) takes `Group` as a template
+// parameter and resolves sync()/size()/thread_rank() statically on the
+// concrete type — nothing here ever stores or dispatches through a
+// thread_group*/thread_group&. `virtual` bought nothing but a vtable, whose
+// MSVC-ABI "complete object locator" needs a type_info symbol that
+// DynamicLibrarySearchGenerator::GetForCurrentProcess() cannot resolve on
+// Windows (PE exports don't expose that CRT-internal vtable, unlike ELF/
+// Mach-O on Linux/macOS) — a real ORC JIT link failure for any cooperative
+// kernel, not merely a version-gate error -fno-rtti has no effect on: MSVC
+// ABI populates this vtable slot for polymorphic classes regardless of RTTI
+// flags (Itanium ABI on Linux/macOS suppresses it under -fno-rtti, which is
+// why this never surfaced there).
 class thread_group {
 public:
-    virtual ~thread_group() = default;
-    virtual void sync() const = 0;
-    virtual unsigned int size() const = 0;
-    virtual unsigned int thread_rank() const = 0;
     bool is_valid() const { return true; }
 };
 
 // ── thread_block (maps to a CUDA block) ────────────────────────────────────
 class thread_block : public thread_group {
 public:
-    inline void sync() const override { vgre_jit_block_barrier_sync(); }
+    inline void sync() const { vgre_jit_block_barrier_sync(); }
 
-    inline unsigned int size() const override {
+    inline unsigned int size() const {
         auto* bd = vgre_jit_get_blockDim();
         return bd->x * bd->y * bd->z;
     }
 
-    inline unsigned int thread_rank() const override {
+    inline unsigned int thread_rank() const {
         auto* ti = vgre_jit_get_threadIdx();
         auto* bd = vgre_jit_get_blockDim();
         return (ti->z * bd->y + ti->y) * bd->x + ti->x;
@@ -68,9 +77,9 @@ public:
     explicit coalesced_group(unsigned int sz = 32, unsigned int rk = 0)
         : m_size(sz), m_rank(rk) {}
 
-    inline void sync() const override { vgre_jit_block_barrier_sync(); }
-    inline unsigned int size() const override { return m_size; }
-    inline unsigned int thread_rank() const override { return m_rank; }
+    inline void sync() const { vgre_jit_block_barrier_sync(); }
+    inline unsigned int size() const { return m_size; }
+    inline unsigned int thread_rank() const { return m_rank; }
 
     template<typename T>
     inline T shfl(T val, int srcLane) const {
@@ -103,11 +112,11 @@ class thread_block_tile : public thread_group {
     static_assert(TileSize == 4 || TileSize == 8 || TileSize == 16 || TileSize == 32,
                   "TileSize must be 4, 8, 16, or 32");
 public:
-    inline void sync() const override { vgre_jit_block_barrier_sync(); }
+    inline void sync() const { vgre_jit_block_barrier_sync(); }
 
-    inline unsigned int size() const override { return TileSize; }
+    inline unsigned int size() const { return TileSize; }
 
-    inline unsigned int thread_rank() const override {
+    inline unsigned int thread_rank() const {
         int tid = static_cast<int>(vgre_jit_get_threadIdx()->x);
         return static_cast<unsigned int>(tid % static_cast<int>(TileSize));
     }
@@ -147,15 +156,15 @@ inline thread_block_tile<TileSize> tiled_partition(const coalesced_group&) {
 // ── grid_group (already declared in cpu_cuda_env.h; keep compatible) ─────────
 class grid_group : public thread_group {
 public:
-    inline void sync() const override { vgre_jit_syncgrid(); }
+    inline void sync() const { vgre_jit_syncgrid(); }
 
-    inline unsigned int size() const override {
+    inline unsigned int size() const {
         auto* gd = vgre_jit_get_gridDim();
         auto* bd = vgre_jit_get_blockDim();
         return gd->x * gd->y * gd->z * bd->x * bd->y * bd->z;
     }
 
-    inline unsigned int thread_rank() const override {
+    inline unsigned int thread_rank() const {
         auto* ti = vgre_jit_get_threadIdx();
         auto* bi = vgre_jit_get_blockIdx();
         auto* bd = vgre_jit_get_blockDim();
@@ -175,15 +184,15 @@ inline grid_group this_grid() { return grid_group{}; }
 // In VGRE this is a single-host abstraction; behaves like grid_group.
 class multi_grid_group : public thread_group {
 public:
-    inline void sync() const override { vgre_jit_syncgrid(); }
+    inline void sync() const { vgre_jit_syncgrid(); }
 
-    inline unsigned int size() const override {
+    inline unsigned int size() const {
         auto* gd = vgre_jit_get_gridDim();
         auto* bd = vgre_jit_get_blockDim();
         return gd->x * gd->y * gd->z * bd->x * bd->y * bd->z;
     }
 
-    inline unsigned int thread_rank() const override {
+    inline unsigned int thread_rank() const {
         auto* ti = vgre_jit_get_threadIdx();
         auto* bi = vgre_jit_get_blockIdx();
         auto* bd = vgre_jit_get_blockDim();

@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,6 +48,31 @@ constexpr int VGRE_SOCKET_ERROR = -1;
 #endif
 
 // ── Platform-Agnostic Socket Helpers ─────────────────────────────────────
+
+// Windows requires WSAStartup() before any socket()/bind()/connect() call —
+// without it every call fails with WSANOTINITIALISED. Most of this codebase
+// gets it for free because RuntimeEngine::initialize() calls it as a side
+// effect, but that made every socket entry point here implicitly depend on
+// RuntimeEngine having already run first, which broke standalone users of
+// this header (e.g. SoftwareRDMA's own unit test, which never touches
+// RuntimeEngine) with a bare "listen failed", no obvious cause. Call this at
+// the top of every function below that creates a socket, so the header is
+// self-sufficient regardless of what else has (or hasn't) run first.
+inline void vgre_ensure_winsock() {
+#if defined(_WIN32)
+  static std::once_flag once;
+  std::call_once(once, []() {
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    // Intentionally never call WSACleanup(): WSAStartup is refcounted per
+    // process, and RuntimeEngine::shutdown() already calls WSACleanup() once
+    // for its own matching WSAStartup call. A second, independent cleanup
+    // here has no reliable pairing point (this header has no "shutdown"),
+    // and letting the OS tear down Winsock at process exit is standard
+    // practice for a call meant to run at most once per process anyway.
+  });
+#endif
+}
 
 inline void vgre_close_socket(vgre_socket_t s) {
 #if defined(_WIN32)
@@ -250,6 +276,7 @@ private:
 // Caller is responsible for calling vgre_close_socket() on the returned fd.
 inline vgre_socket_t vgre_connect_tcp(const char* host, int port,
                                        int timeoutMs = 5000) {
+  vgre_ensure_winsock();
   char portStr[8];
   ::snprintf(portStr, sizeof(portStr), "%d", port);
 
@@ -328,6 +355,7 @@ inline vgre_socket_t vgre_connect_tcp(const char* host, int port,
 // both IPv4 and IPv6 connections (dual-stack).  Falls back to IPv4-only if
 // IPv6 is unavailable.
 inline vgre_socket_t vgre_listen_tcp(int port, int backlog = 32) {
+  vgre_ensure_winsock();
   // Try IPv6 dual-stack first.
   vgre_socket_t fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
   if (fd != VGRE_INVALID_SOCKET) {

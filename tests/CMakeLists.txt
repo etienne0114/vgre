@@ -5,11 +5,19 @@ vgre_test_library_path_env(VGRE_TEST_LIB_ENV)
 
 # ── Pre-test cleanup fixture ─────────────────────────────────────────────────
 # Cleans stale OpenMP (libomp) KMP registration files left by killed processes.
-# Linux: /dev/shm; macOS: TMPDIR (libomp registers under the temp dir).
-add_test(NAME KMPCleanup
-    COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; \
-        find \"\${TMPDIR:-/tmp}\" -maxdepth 1 -name '__KMP_REGISTERED_LIB_*' -delete 2>/dev/null; \
-        rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
+# Linux: /dev/shm; macOS: TMPDIR (libomp registers under the temp dir). Windows
+# has no libomp path here at all (VGRE_ENABLE_OPENMP=OFF / no libomp package —
+# see the in-tree work-stealing thread pool used instead), and no bash on PATH
+# by default, so `bash -c ...` just fails the fixture and skips every test
+# that requires it. Use CMake's own -E true as a no-op setup on Windows.
+if(WIN32)
+    add_test(NAME KMPCleanup COMMAND ${CMAKE_COMMAND} -E true)
+else()
+    add_test(NAME KMPCleanup
+        COMMAND bash -c "rm -f /dev/shm/__KMP_REGISTERED_LIB_* 2>/dev/null; \
+            find \"\${TMPDIR:-/tmp}\" -maxdepth 1 -name '__KMP_REGISTERED_LIB_*' -delete 2>/dev/null; \
+            rm -f \$HOME/.vgre_cache/*.ll.tmp.* 2>/dev/null; exit 0")
+endif()
 set_tests_properties(KMPCleanup PROPERTIES FIXTURES_SETUP KMPRegistrationClean)
 
 # ── Unit tests ──────────────────────────────────────────────────────────────
@@ -271,7 +279,11 @@ endif()
 # Uses the LLVM IRBuilder API directly — only meaningful in a JIT-enabled build.
 if(VGRE_ENABLE_JIT)
     add_executable(test_flop_counting compiler/test_flop_counting.cpp)
-    target_link_libraries(test_flop_counting PRIVATE vgre)
+    # Calls raw llvm:: APIs directly (IRBuilder, Type, ...) rather than going
+    # through VGRE's exported C API. On Windows, vgre is a DLL whose import lib
+    # only exposes VGRE's own dllexport'd symbols — LLVM's statically-linked-in
+    # symbols aren't re-exported, so link against LLVM directly too.
+    target_link_libraries(test_flop_counting PRIVATE vgre vgre_llvm_iface)
     add_test(NAME FLOPCounting COMMAND test_flop_counting)
     set_tests_properties(FLOPCounting PROPERTIES TIMEOUT 600 RESOURCE_LOCK vgre_llvm_jit)
 endif()
@@ -916,7 +928,14 @@ set_tests_properties(XlaTrain PROPERTIES TIMEOUT 180)
 add_executable(test_model xla/test_model.cpp)
 target_link_libraries(test_model PRIVATE vgre Threads::Threads)
 add_test(NAME XlaModel COMMAND test_model)
-set_tests_properties(XlaModel PROPERTIES TIMEOUT 240)
+# Runs several independent 300-step training loops (baseline, a fresh "serve"
+# copy, flash-attention, weight-tied) plus KV-cache/bf16/int8/sampling checks —
+# substantially more work than sibling Xla tests. Measured up to ~300s+ on a
+# loaded/weak host, so 240s is too tight; verified functionally correct
+# (deterministic PASS) standalone and under synthetic contention every time —
+# the one observed failure under full-suite load was a timing flake, not a
+# reproducible logic bug.
+set_tests_properties(XlaModel PROPERTIES TIMEOUT 480)
 
 # Batched prefill == sequential prefill, bit-identical (fp32/bf16/int8).
 add_executable(test_batched_prefill xla/test_batched_prefill.cpp)
@@ -1234,17 +1253,18 @@ target_link_libraries(test_etl PRIVATE vgre)
 add_test(NAME ETLPipeline COMMAND test_etl)
 set_tests_properties(ETLPipeline PROPERTIES TIMEOUT 30)
 
-if(VGRE_ENABLE_JIT)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+if(VGRE_ENABLE_JIT AND SQLITE3_LIBRARY)  # JIT-only / broader-CUDA-C-subset / dual-registry follow-on
+    # Calls the real sqlite3 C API directly (unlike vgre_api, which falls back
+    # to a no-op stub when SQLite isn't found — see VGRE_HAS_SQLITE). Gate the
+    # whole target on SQLite being present so the build doesn't try to link a
+    # binary whose symbols nothing can provide.
     add_executable(test_nsight_export api/test_nsight_export.cpp)
-    target_link_libraries(test_nsight_export PRIVATE vgre)
-    if(SQLITE3_LIBRARY)
-        target_link_libraries(test_nsight_export PRIVATE SQLite::SQLite3)
-        add_test(NAME NsightExport COMMAND test_nsight_export)
-        set_tests_properties(NsightExport PROPERTIES
-            TIMEOUT 120
-            FIXTURES_REQUIRED KMPRegistrationClean
-            RESOURCE_LOCK vgre_llvm_jit)
-    endif()
+    target_link_libraries(test_nsight_export PRIVATE vgre SQLite::SQLite3)
+    add_test(NAME NsightExport COMMAND test_nsight_export)
+    set_tests_properties(NsightExport PROPERTIES
+        TIMEOUT 120
+        FIXTURES_REQUIRED KMPRegistrationClean
+        RESOURCE_LOCK vgre_llvm_jit)
 endif()
 
 add_executable(test_ptx_cross_module_link api/test_ptx_cross_module_link.cpp)
@@ -1881,7 +1901,15 @@ if(EXISTS "${VGRE_VENV_PYTHON}")
     add_test(NAME PythonLmBindings
         COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
     set_tests_properties(PythonLmBindings PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        # VGRE_LIB_PATH is _find_library()'s first, highest-priority check
+        # (bindings/python/vgre/_native.py) and, unlike LD_LIBRARY_PATH/
+        # DYLD_LIBRARY_PATH, is honored on every platform including Windows,
+        # where _find_library() otherwise checks %LOCALAPPDATA%\VGRE\vgre.dll
+        # BEFORE the build directory — silently running the test against
+        # whatever was last installed there instead of this build, however
+        # stale (this cost hours of chasing a phantom "missing symbol" that
+        # was really "missing from that unrelated older DLL").
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1890,7 +1918,7 @@ elseif(Python3_FOUND)
     add_test(NAME PythonLmBindings
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_lm_bindings.py)
     set_tests_properties(PythonLmBindings PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
         TIMEOUT 240
         SKIP_RETURN_CODE 77
@@ -1905,9 +1933,23 @@ endif()
 if(_vgre_nn_py)
     add_test(NAME PythonNn COMMAND "${_vgre_nn_py}" ${CMAKE_SOURCE_DIR}/tests/python/test_nn.py)
     set_tests_properties(PythonNn PROPERTIES
-        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        # See PythonLmBindings above for why VGRE_LIB_PATH is required on
+        # Windows specifically (bindings/python/vgre/_native.py checks
+        # %LOCALAPPDATA%\VGRE\vgre.dll before the build directory).
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
         LABELS "python;e2e"
-        TIMEOUT 240
+        # This exercises ~50 independent nn ops/module checks plus several small
+        # training loops (transformer, GPT, MoE, Mamba, …) end-to-end through
+        # ctypes. Runtime is highly variable on constrained/thermally-loaded
+        # hosts — measured anywhere from ~675s to ~1190s for byte-identical,
+        # fully-correct output on the same machine depending on system load —
+        # so this needs a generous margin rather than a tight bound.
+        TIMEOUT 1800
+        # This is CPU-bound for its entire ~675s run (native training loops
+        # driven from Python); running any other test concurrently with it
+        # starves both under ctest's parallel scheduling and can push
+        # unrelated tests past their own TIMEOUT. Force it to run alone.
+        RUN_SERIAL TRUE
         SKIP_RETURN_CODE 77
     )
 
@@ -2003,6 +2045,25 @@ if("HardwareTokenManager" IN_LIST vgre_full_test_list)
         ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_PBKDF2_ITERATIONS=10000")
 endif()
 
+# The Python e2e tests need VGRE_LIB_PATH/PYTHONPATH (see the comments where
+# they were originally add_test()'d, above), but those got silently replaced
+# by the global ENVIRONMENT setter above (set_tests_properties REPLACES the
+# property, it does not merge/append) — same class of bug already called out
+# for HardwareTokenManager. Re-set them here, after the global setter, still
+# preserving the global vars.
+if("PythonLmBindings" IN_LIST vgre_full_test_list)
+    set_tests_properties(PythonLmBindings PROPERTIES
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python")
+endif()
+if("PythonNn" IN_LIST vgre_full_test_list)
+    set_tests_properties(PythonNn PROPERTIES
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python")
+endif()
+if("PythonNnExpertParallel" IN_LIST vgre_full_test_list)
+    set_tests_properties(PythonNnExpertParallel PROPERTIES
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python;VGRE_NN_LIB=$<TARGET_FILE:vgre_nn>")
+endif()
+
 # ── Network/TCP serialization ──────────────────────────────────────────────
 # All tests that bind to TCP/UDP ports share vgre_tcp_cluster_port so CTest
 # never runs two of them at the same time, preventing port conflicts and
@@ -2070,3 +2131,7 @@ if(_vgre_intpy)
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")
 endif()
+
+# Must run last: patches every test added above (Windows only — see the
+# function's definition for why).
+vgre_fixup_test_dll_search_path()

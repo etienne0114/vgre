@@ -1159,8 +1159,16 @@ static void gf_mul(gf o, const gf a, const gf b) {
     for (int i = 0; i < 16; i++)
         for (int j = 0; j < 16; j++)
             t[i+j] += a[i] * b[j];
-    // 2^256 ≡ 38 mod (2^255-19); use 37 matching TweetNaCl (double carry fixes residual)
-    for (int i = 0; i < 15; i++) t[i] += 37 * t[i+16];
+    // 2^256 ≡ 38 mod (2^255-19) — this is the actual TweetNaCl reduction
+    // constant (its reference M() uses 38, e.g. tweetnacl.c). A prior 37
+    // here was silently wrong: X25519 still returned *a* value (no crash,
+    // no all-zero rejection), just not the field element either side
+    // actually agreed on, so every hybrid KEM decaps mismatched its encaps
+    // 100% of the time — this build's fallback-to-software-X25519 path
+    // (used whenever OpenSSL isn't available/linked, as on this machine) is
+    // the only place that ever exercised this code, hence a bug invisible
+    // wherever OpenSSL's real X25519 is used instead.
+    for (int i = 0; i < 15; i++) t[i] += 38 * t[i+16];
     for (int i = 0; i < 16; i++) o[i] = t[i];
     gf_carry(o); gf_carry(o);
 }

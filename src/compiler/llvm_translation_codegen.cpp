@@ -605,10 +605,34 @@ VGREResult LLVMTranslationEngine::compileToLLVMIR(const std::string &cppSource,
     bool transient = false;
 #if defined(_WIN32)
     {
-      std::string cmd = std::string("clang++ -S -emit-llvm ") + optFlag +
-                        " " + archFlag + " -fno-math-errno"
-                        " -fno-trapping-math -Xclang -I\"" + includePath + "\" \""
+      const std::string clangBin = vgre::common::findCompilerPath();
+      // -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH: see the identical
+      // rationale in ClangKernelParser::runClangAstDump — this clang can be
+      // older than whatever MSVC STL the machine's default include search
+      // finds first, and the STL's own version gate otherwise hard-errors
+      // before any kernel code is reached.
+      // Note -I (not -Xclang -I): -I is a driver-level flag; wrapping it in
+      // -Xclang forces it down to cc1 as one opaque argument instead of the
+      // normal driver-handled include path, which the POSIX branch below
+      // (an explicit "-I", includePath argv pair) never did.
+      // VCToolsInstallDir pins the MSVC toolset clang borrows STL headers
+      // from — see the detailed comment in
+      // ClangKernelParser::runClangAstDump (-vctoolsdir is clang-cl-only;
+      // the plain driver used here reads this environment variable instead).
+      if (std::string dir = vgre::common::findMSVCToolsDir(); !dir.empty()) {
+          _putenv_s("VCToolsInstallDir", (dir + "\\").c_str());
+      }
+      std::string inner = "\"" + clangBin + "\" -S -emit-llvm " + optFlag +
+                        " " + archFlag + " -fno-math-errno -fno-rtti"
+                        " -fno-trapping-math -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+                        " -I\"" + includePath + "\" \""
                         + tmpCpp + "\" -o \"" + tmpIR + "\" > \"" + logFile + "\" 2>&1";
+      // std::system() on Windows runs this via `cmd.exe /C <command>` — see
+      // the detailed comment in ClangKernelParser::runClangAstDump for why a
+      // command starting with a quoted token needs one more outer pair of
+      // quotes to avoid cmd.exe mis-parsing a drive-letter path as an
+      // invalid volume label.
+      std::string cmd = "\"" + inner + "\"";
       int st = std::system(cmd.c_str());
       exitCode = st;
       transient = (st == -1);  // command interpreter could not be started

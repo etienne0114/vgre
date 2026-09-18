@@ -28,7 +28,17 @@ static constexpr float EPSILON = 1e-5f;
 void test_runtime_engine_vector_add() {
   std::cout << "\n--- Test: RuntimeEngine vector addition ---\n";
 
-  core::RuntimeEngine engine;
+  // Use the process-wide singleton, not a local instance: RuntimeEngine::
+  // initialize()/shutdown() drive Meyer's-singleton subsystems (Scheduler,
+  // StreamDepTracker, RuntimeProfiler, ...) that are shared with whatever
+  // RuntimeEngine object touches them next in this process — including
+  // CUDAInterceptor::instance() used later in main() via
+  // test_cuda_api_vector_add(). A local RuntimeEngine explicitly shut down
+  // here would tear down those shared subsystems (e.g. join Scheduler's
+  // worker threads) while CUDAInterceptor's later
+  // RuntimeEngine::instance().initialize() still expects them alive,
+  // causing an intermittent use-after-shutdown crash.
+  core::RuntimeEngine &engine = core::RuntimeEngine::instance();
   VGREResult r = engine.initialize();
   (void)r;
   assert(r == VGREResult::SUCCESS);
@@ -119,7 +129,9 @@ void test_runtime_engine_vector_add() {
   mm.free(devA);
   mm.free(devB);
   mm.free(devC);
-  engine.shutdown();
+  // Do NOT call engine.shutdown() here: this is the process-wide singleton,
+  // still needed by test_cuda_api_vector_add() below. Real teardown happens
+  // once, automatically, via the atexit hook registered inside initialize().
 
   std::cout << "[PASS] RuntimeEngine vector addition\n";
 }

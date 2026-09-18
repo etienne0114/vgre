@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <array>
 #include <memory>
+#include <vector>
+#include <cctype>
 
 #include "vgre/common/os_backend.h"
 
@@ -195,6 +197,18 @@ inline std::string findCompilerPath() {
                 return s;
             if (parent.has_parent_path()) parent = parent.parent_path();
         }
+        // Install-BuildTools.ps1's actual install location: it has no fixed
+        // relation to wherever the running binary happens to live (a dev
+        // build under the source tree, an installed app under Program
+        // Files, ...), so the binary-relative search above never finds it.
+        if (const char* installDir = std::getenv("VGRE_INSTALL_DIR")) {
+            if (auto s = tryPath(std::filesystem::path(installDir) / "BuildTools/llvm/bin/clang++.exe"); !s.empty())
+                return s;
+        }
+        if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+            if (auto s = tryPath(std::filesystem::path(localAppData) / "VGRE/BuildTools/llvm/bin/clang++.exe"); !s.empty())
+                return s;
+        }
 #else
         for (const auto& rel : {"clang++", "llvm/bin/clang++", "../llvm@18/bin/clang++",
                                 "../../llvm/bin/clang++"}) {
@@ -224,6 +238,73 @@ inline std::string findCompilerPath() {
 
     return "clang++";
 }
+
+#if defined(_WIN32)
+/**
+ * @brief Find an MSVC toolset directory (VC/Tools/MSVC/<version>) for the
+ * runtime JIT's clang subprocess to borrow STL/CRT headers from via
+ * -vctoolsdir, pinning it explicitly instead of leaving clang to
+ * auto-detect. On a machine with multiple side-by-side VS installs (e.g. a
+ * preview/Insiders build alongside the stable one), auto-detection can pick
+ * a too-new toolset whose STL uses syntax the pinned clang version can't
+ * parse at all — not a version-gate check, a real parse failure.
+ *
+ * Returns an empty string if nothing can be found; callers should skip
+ * -vctoolsdir entirely in that case and let clang fall back to its own
+ * auto-detection (unchanged behavior for machines where only one VS install
+ * exists, e.g. most CI runners).
+ */
+inline std::string findMSVCToolsDir() {
+    if (const char* envOverride = std::getenv("VGRE_MSVC_TOOLS_DIR")) {
+        if (envOverride[0]) return envOverride;
+    }
+
+    // A vcvars-initialized shell already names the exact toolset the caller
+    // intends to build with — prefer it over any filesystem probing.
+    if (const char* vcTools = std::getenv("VCToolsInstallDir")) {
+        if (vcTools[0] && detail::pathExists(vcTools)) {
+            std::string s(vcTools);
+            while (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back();
+            return s;
+        }
+    }
+
+    // No override and no active dev-shell context: probe the standard VS
+    // install roots. Best-effort default, not exhaustive — covers the
+    // layout every VS 2022+ edition (Community/Professional/Enterprise/
+    // Insiders/BuildTools) installs into.
+    static const char* kRoots[] = {
+        "C:\\Program Files\\Microsoft Visual Studio",
+        "C:\\Program Files (x86)\\Microsoft Visual Studio",
+    };
+    std::vector<std::string> candidates;
+    std::error_code ec;
+    for (const char* root : kRoots) {
+        if (!std::filesystem::is_directory(root, ec)) continue;
+        for (auto& yearEntry : std::filesystem::directory_iterator(root, ec)) {
+            if (!yearEntry.is_directory(ec)) continue;
+            for (auto& editionEntry : std::filesystem::directory_iterator(yearEntry.path(), ec)) {
+                if (!editionEntry.is_directory(ec)) continue;
+                auto toolsRoot = editionEntry.path() / "VC" / "Tools" / "MSVC";
+                if (!std::filesystem::is_directory(toolsRoot, ec)) continue;
+                for (auto& verEntry : std::filesystem::directory_iterator(toolsRoot, ec)) {
+                    if (verEntry.is_directory(ec)) candidates.push_back(verEntry.path().string());
+                }
+            }
+        }
+    }
+    if (candidates.empty()) return "";
+
+    // Prefer a non-preview toolset when more than one is installed.
+    for (auto& c : candidates) {
+        std::string lower = c;
+        for (auto& ch : lower) ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+        if (lower.find("insiders") == std::string::npos && lower.find("preview") == std::string::npos)
+            return c;
+    }
+    return candidates.front();
+}
+#endif
 
 } // namespace common
 } // namespace vgre

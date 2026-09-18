@@ -275,27 +275,59 @@ MPSServer::~MPSServer() {
 mps_handle_t MPSServer::createSecurePipeInstance(const std::string& pipeName) {
     PSECURITY_DESCRIPTOR pSD = nullptr;
     PACL pACL = nullptr;
-    PSID pOwnerSid = nullptr, pSystemSid = nullptr;
+    PSID pSystemSid = nullptr;
+    // The caller's real user SID (not the CREATOR_OWNER placeholder — see
+    // below) — owns the buffer backing pTokenUser's embedded SID pointer.
+    std::vector<uint8_t> tokenUserBuf;
+    PSID pCallerSid = nullptr;
     EXPLICIT_ACCESS_W ea[2] = {};
-    SID_IDENTIFIER_AUTHORITY creatorAuth = SECURITY_CREATOR_SID_AUTHORITY;
-    SID_IDENTIFIER_AUTHORITY ntAuth     = SECURITY_NT_AUTHORITY;
-    AllocateAndInitializeSid(&creatorAuth, 1, SECURITY_CREATOR_OWNER_RID,
-                             0,0,0,0,0,0,0, &pOwnerSid);
+    int eaCount = 0;
+
+    // SECURITY_CREATOR_OWNER_RID ("CREATOR OWNER", S-1-3-0) is a placeholder
+    // the system substitutes with the real creating user's SID ONLY when the
+    // ACE is inherited by a new child object from a container's DACL. Used
+    // directly on the object's own (non-inherited) DACL, as it was here, it
+    // is never substituted — the ACE ends up granting access to the literal
+    // S-1-3-0 SID, which no real process token ever has, so every access
+    // check against this pipe (including from the very process that just
+    // created it) was silently denied (ERROR_ACCESS_DENIED). Resolve and use
+    // the actual current-process user SID instead.
+    {
+        HANDLE hToken = nullptr;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+            DWORD needed = 0;
+            GetTokenInformation(hToken, TokenUser, nullptr, 0, &needed);
+            if (needed > 0) {
+                tokenUserBuf.resize(needed);
+                if (GetTokenInformation(hToken, TokenUser, tokenUserBuf.data(), needed, &needed)) {
+                    pCallerSid = reinterpret_cast<TOKEN_USER*>(tokenUserBuf.data())->User.Sid;
+                }
+            }
+            CloseHandle(hToken);
+        }
+    }
+    SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
     AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID,
                              0,0,0,0,0,0,0, &pSystemSid);
-    ea[0].grfAccessPermissions = GENERIC_ALL;
-    ea[0].grfAccessMode        = SET_ACCESS;
-    ea[0].grfInheritance       = NO_INHERITANCE;
-    ea[0].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
-    ea[0].Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea[0].Trustee.ptstrName    = (LPWSTR)pOwnerSid;
-    ea[1].grfAccessPermissions = GENERIC_ALL;
-    ea[1].grfAccessMode        = SET_ACCESS;
-    ea[1].grfInheritance       = NO_INHERITANCE;
-    ea[1].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
-    ea[1].Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea[1].Trustee.ptstrName    = (LPWSTR)pSystemSid;
-    SetEntriesInAclW(2, ea, nullptr, &pACL);
+    if (pCallerSid) {
+        ea[eaCount].grfAccessPermissions = GENERIC_ALL;
+        ea[eaCount].grfAccessMode        = SET_ACCESS;
+        ea[eaCount].grfInheritance       = NO_INHERITANCE;
+        ea[eaCount].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+        ea[eaCount].Trustee.TrusteeType  = TRUSTEE_IS_USER;
+        ea[eaCount].Trustee.ptstrName    = (LPWSTR)pCallerSid;
+        ++eaCount;
+    }
+    if (pSystemSid) {
+        ea[eaCount].grfAccessPermissions = GENERIC_ALL;
+        ea[eaCount].grfAccessMode        = SET_ACCESS;
+        ea[eaCount].grfInheritance       = NO_INHERITANCE;
+        ea[eaCount].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+        ea[eaCount].Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        ea[eaCount].Trustee.ptstrName    = (LPWSTR)pSystemSid;
+        ++eaCount;
+    }
+    SetEntriesInAclW(eaCount, ea, nullptr, &pACL);
     pSD = LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH);
     InitializeSecurityDescriptor(pSD, SECURITY_DESCRIPTOR_REVISION);
     SetSecurityDescriptorDacl(pSD, TRUE, pACL, FALSE);
@@ -312,7 +344,6 @@ mps_handle_t MPSServer::createSecurePipeInstance(const std::string& pipeName) {
         65536, 65536,
         0, &sa);
 
-    if (pOwnerSid) FreeSid(pOwnerSid);
     if (pSystemSid) FreeSid(pSystemSid);
     if (pACL) LocalFree(pACL);
     if (pSD) LocalFree(pSD);
@@ -439,14 +470,24 @@ void MPSServer::stop() {
     running_.store(false);
 #if defined(_WIN32)
     if (listenFd_ != MPS_INVALID_HANDLE) {
-        CloseHandle(listenFd_);
-        listenFd_ = MPS_INVALID_HANDLE;
+        // acceptLoop() may be blocked in a synchronous ConnectNamedPipe() on
+        // this handle with no timeout. CloseHandle() from another thread does
+        // not reliably unblock a pending I/O request, so without this the
+        // join() below can stall for an unbounded time waiting for a client
+        // that never connects. CancelIoEx aborts the pending call immediately
+        // (it then returns FALSE/ERROR_OPERATION_ABORTED), so the loop sees
+        // running_==false and exits right away.
+        CancelIoEx(reinterpret_cast<HANDLE>(listenFd_), nullptr);
     }
     if (acceptThread_) {
         auto* t = reinterpret_cast<std::thread*>(acceptThread_);
         if (t->joinable()) t->join();
         delete t;
         acceptThread_ = nullptr;
+    }
+    if (listenFd_ != MPS_INVALID_HANDLE) {
+        CloseHandle(listenFd_);
+        listenFd_ = MPS_INVALID_HANDLE;
     }
 #elif defined(__linux__) || defined(__APPLE__)
     if (listenFd_ != MPS_INVALID_HANDLE) { close(listenFd_); listenFd_ = MPS_INVALID_HANDLE; }
@@ -830,7 +871,8 @@ bool MPSClient::connect(const std::string& socketPath) {
     mps_handle_t hPipe = CreateFileA(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE,
                                      0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (hPipe == INVALID_HANDLE_VALUE) {
-        VGRE_LOG_WARN("MPS", "Could not open named pipe: " + pipeName);
+        VGRE_LOG_WARN("MPS", "Could not open named pipe: " + pipeName +
+                             " (GetLastError=" + std::to_string(GetLastError()) + ")");
         return false;
     }
     fd_ = hPipe;

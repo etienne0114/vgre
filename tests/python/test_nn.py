@@ -11,6 +11,7 @@ Both run entirely through the in-tree autograd C ABI — no GPU, no PyTorch/JAX.
 import math
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -105,11 +106,12 @@ def test_module_api() -> bool:
     print(f"[module] Sequential MLP xor accuracy = {acc*100:.0f}%  loss = {loss.item():.4f}")
 
     # Checkpoint round-trip: save, load into a fresh model, identical output.
+    ckpt_path = os.path.join(tempfile.gettempdir(), "vgre_nn_model.safetensors")
     before = model(X).numpy()
-    nn.save(model, "/tmp/vgre_nn_model.safetensors")
+    nn.save(model, ckpt_path)
     nn.seed(999)
     fresh = nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 2))
-    nn.load(fresh, "/tmp/vgre_nn_model.safetensors")
+    nn.load(fresh, ckpt_path)
     after = fresh(X).numpy()
     same = bool(np.max(np.abs(before - after)) < 1e-5)
     print(f"[module] checkpoint round-trip identical = {same}")

@@ -5,12 +5,15 @@
 // in the exposition — i.e. the metric reflects actual runtime activity.
 
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/common/sockets.h"
 #include "vgre/core/runtime_engine.h"
 
+#if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include <cstdio>
 #include <string>
@@ -19,6 +22,14 @@
 
 using namespace vgre;
 using namespace vgre::core;
+
+static inline void closeSocket(int fd) {
+#if defined(_WIN32)
+    closesocket(static_cast<SOCKET>(fd));
+#else
+    close(fd);
+#endif
+}
 
 static int g_pass = 0, g_total = 0;
 static void check(const char *name, bool ok) {
@@ -35,7 +46,7 @@ static std::string httpGet(int port, const std::string &path) {
     a.sin_family = AF_INET;
     a.sin_port = htons(static_cast<uint16_t>(port));
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)) != 0) { ::close(fd); return ""; }
+    if (::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof(a)) != 0) { closeSocket(fd); return ""; }
     std::string req = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     ::send(fd, req.data(), req.size(), 0);
     std::string out;
@@ -45,7 +56,7 @@ static std::string httpGet(int port, const std::string &path) {
         if (n <= 0) break;
         out.append(buf, static_cast<size_t>(n));
     }
-    ::close(fd);
+    closeSocket(fd);
     return out;
 }
 

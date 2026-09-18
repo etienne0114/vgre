@@ -15,6 +15,12 @@
 #include <cstdlib>
 #include <vector>
 
+#if defined(_WIN32)
+static inline int setenv(const char* name, const char* value, int) {
+    return _putenv_s(name, value);
+}
+#endif
+
 static int g_fail = 0;
 #define CHECK(cond, msg)                                                   \
     do {                                                                   \

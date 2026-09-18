@@ -1,5 +1,11 @@
 #include <iostream>
+#if defined(_WIN32)
+#  include <windows.h>
+static void sleep_us(unsigned long usec) { Sleep((usec + 999) / 1000); }
+#else
 #include <unistd.h>
+static void sleep_us(unsigned long usec) { usleep(usec); }
+#endif
 // Standard CUDART API that unmodified frameworks use natively
 extern "C" {
 typedef int cudaError_t;
@@ -42,7 +48,7 @@ int main() {
 
   std::cout << "Start event recorded. Sleeping for 1500us (simulating async "
                "stream work)...\n";
-  usleep(150000); // Sleep for 150ms
+  sleep_us(150000); // Sleep for 150ms
 
   // Record end event on stream
   if (cudaEventRecord(end, stream) != 0) {

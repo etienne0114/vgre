@@ -1,5 +1,11 @@
 #include <iostream>
+#if defined(_WIN32)
+#  include <windows.h>
+static void sleep_us(unsigned long usec) { Sleep((usec + 999) / 1000); }
+#else
 #include <unistd.h>
+static void sleep_us(unsigned long usec) { usleep(usec); }
+#endif
 
 // Standard CUDART API — resolved via LD_PRELOAD when libvgre_cudart.so is loaded
 extern "C" {
@@ -65,7 +71,7 @@ int main() {
       std::cerr << "FAIL: Unexpected error code " << err << "\n";
       return 1;
     }
-    usleep(1000); // 1ms
+    sleep_us(1000); // 1ms
     ++attempts;
   } while (attempts < maxAttempts);
 

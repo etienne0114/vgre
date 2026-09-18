@@ -74,11 +74,19 @@ $L__BB0_2:
 
 static std::string run(const std::string& cmd) {
     std::string out;
+#if defined(_WIN32)
+    FILE* f = _popen((cmd + " 2>&1").c_str(), "r");
+#else
     FILE* f = popen((cmd + " 2>&1").c_str(), "r");
+#endif
     if (!f) return out;
     char buf[512];
     while (fgets(buf, sizeof(buf), f)) out += buf;
+#if defined(_WIN32)
+    _pclose(f);
+#else
     pclose(f);
+#endif
     return out;
 }
 

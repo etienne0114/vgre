@@ -6,9 +6,18 @@
 #include <mutex>
 #include <new>
 #include <type_traits>
-#include <unordered_map>
 #include <vector>
 #include <limits>
+// Deliberately not <unordered_map>: its bucket implementation drags in an
+// internal <list> whose template metaprogramming (allocator_traits-derived
+// aliases) some MSVC STL releases express in syntax this pinned clang
+// version can't parse at all — a real parse failure, not just a version
+// mismatch _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH can paper over. This
+// header is force-included into every JIT-compiled kernel (see
+// cpu_cuda_env.h), so pulling in <unordered_map> here breaks kernel
+// compilation on any such machine even when the kernel never touches CUB.
+// The free-list below only ever holds a handful of distinct allocation
+// sizes, so a linear scan over a small std::vector is fine.
 #if defined(_WIN32)
 #  include <malloc.h>   // _aligned_malloc / _aligned_free
 #endif
@@ -239,8 +248,8 @@ public:
     ~CachingDeviceAllocator() {
         // Drain all cached blocks on destruction to avoid leaks.
         std::lock_guard<std::mutex> lk(mu_);
-        for (auto& [bytes, vec] : pool_) {
-            for (void* p : vec) aligned_free_impl(p);
+        for (auto& entry : pool_) {
+            for (void* p : entry.blocks) aligned_free_impl(p);
         }
     }
     CachingDeviceAllocator(const CachingDeviceAllocator&) = delete;
@@ -252,10 +261,12 @@ public:
         void* raw = nullptr;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            auto it = pool_.find(bytes);
-            if (it != pool_.end() && !it->second.empty()) {
-                raw = it->second.back();
-                it->second.pop_back();
+            for (auto& entry : pool_) {
+                if (entry.bytes == bytes && !entry.blocks.empty()) {
+                    raw = entry.blocks.back();
+                    entry.blocks.pop_back();
+                    break;
+                }
             }
         }
         if (!raw) {
@@ -280,12 +291,14 @@ public:
         const size_t bytes = n * sizeof(T);
         // Cap the per-size cache at 16 entries to bound memory usage.
         std::lock_guard<std::mutex> lk(mu_);
-        auto& vec = pool_[bytes];
-        if (vec.size() < 16) {
-            vec.push_back(static_cast<void*>(p));
-        } else {
-            aligned_free_impl(p);
+        for (auto& entry : pool_) {
+            if (entry.bytes == bytes) {
+                if (entry.blocks.size() < 16) entry.blocks.push_back(static_cast<void*>(p));
+                else aligned_free_impl(p);
+                return;
+            }
         }
+        pool_.push_back(SizeClass{bytes, {static_cast<void*>(p)}});
     }
 
 private:
@@ -297,9 +310,16 @@ private:
 #endif
     }
 
+    // Free-list: byte-size -> cached raw blocks of that size. A handful of
+    // distinct sizes at most in practice, so linear scan over a vector
+    // (instead of std::unordered_map — see the include comment above) costs
+    // nothing measurable and avoids a real clang/MSVC-STL parse conflict.
+    struct SizeClass {
+        size_t bytes;
+        std::vector<void*> blocks;
+    };
     std::mutex mu_;
-    // Free-list: maps allocation byte-size → cached raw blocks.
-    std::unordered_map<size_t, std::vector<void*>> pool_;
+    std::vector<SizeClass> pool_;
 };
 
 } // namespace cub

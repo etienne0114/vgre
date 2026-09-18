@@ -7,7 +7,6 @@
 #include <iostream>
 #include <cstring>
 #include <atomic>
-#include <unistd.h>
 
 extern "C" {
 typedef int cudaError_t;

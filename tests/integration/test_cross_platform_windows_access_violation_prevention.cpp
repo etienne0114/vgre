@@ -61,6 +61,18 @@ LONG WINAPI AccessViolationHandler(EXCEPTION_POINTERS* ExceptionInfo) {
 #include <signal.h>
 #endif
 
+#if defined(_WIN32)
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return _aligned_malloc(size, alignment);
+}
+static inline void aligned_free_portable(void* p) { _aligned_free(p); }
+#else
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return std::aligned_alloc(alignment, size);
+}
+static inline void aligned_free_portable(void* p) { std::free(p); }
+#endif
+
 using namespace vgre;
 using namespace vgre::common;
 using namespace vgre::advanced;
@@ -123,7 +135,7 @@ public:
         
         // Test WindowsSocketManager class
         WindowsSocketManager wsm;
-        VGREResult init_result = wsm.initializeWinsock();
+        VGREResult init_result = wsm.initialize();
         if (init_result != VGREResult::SUCCESS) {
             std::cout << "FAIL: WindowsSocketManager initialization failed" << std::endl;
             all_passed = false;
@@ -139,7 +151,7 @@ public:
                 vgre_close_socket(test_sock);
             }
             
-            wsm.cleanupWinsock();
+            wsm.cleanup();
         }
         
 #else
@@ -355,7 +367,7 @@ public:
             // valid request — a stronger alignment still satisfies the smaller one
             // the test verifies below.
             size_t req_align = (align < sizeof(void*)) ? sizeof(void*) : align;
-            void* aligned_ptr = std::aligned_alloc(req_align, 1024);
+            void* aligned_ptr = aligned_alloc_portable(req_align, 1024);
             if (!aligned_ptr) {
                 std::cout << "FAIL: aligned_alloc failed for alignment " << align << std::endl;
                 all_passed = false;
@@ -370,8 +382,8 @@ public:
             
             // Test memory access (should not cause ACCESS_VIOLATION)
             memset(aligned_ptr, 0xCC, 1024);
-            
-            std::free(aligned_ptr);
+
+            aligned_free_portable(aligned_ptr);
         }
         
         // Test null pointer handling

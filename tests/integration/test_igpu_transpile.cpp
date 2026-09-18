@@ -6,9 +6,11 @@
 // the SKIP'd iGPU integration test never exercises the emitted OpenCL.
 
 #include "vgre/runtime/igpu_opencl_executor.h"
+#include "vgre/common/system_utils.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -37,11 +39,17 @@ static bool opencCompiles(const std::string &ocl, std::string &err) {
         "float intel_sub_group_shuffle_down(float, float, uint);\n"
         "float intel_sub_group_shuffle_up(float, float, uint);\n"
         "float intel_sub_group_shuffle_xor(float, uint);\n";
-    const std::string clPath = "/tmp/vgre_igpu_test.cl";
+    const std::string clPath = (std::filesystem::temp_directory_path() / "vgre_igpu_test.cl").string();
     { std::ofstream f(clPath); f << kIntelStubs << ocl; }
-    const std::string errPath = "/tmp/vgre_igpu_test.err";
-    std::string cmd = "clang -w -c -x cl -cl-std=CL1.2 -Xclang -finclude-default-header "
-                      + clPath + " -o /dev/null 2>" + errPath;
+    const std::string errPath = (std::filesystem::temp_directory_path() / "vgre_igpu_test.err").string();
+#if defined(_WIN32)
+    const char* nullDevice = "NUL";
+#else
+    const char* nullDevice = "/dev/null";
+#endif
+    std::string cmd = "\"" + vgre::common::findCompilerPath() +
+                      "\" -w -c -x cl -cl-std=CL1.2 -Xclang -finclude-default-header \""
+                      + clPath + "\" -o " + nullDevice + " 2>\"" + errPath + "\"";
     int rc = std::system(cmd.c_str());
     std::ifstream ef(errPath);
     err.assign((std::istreambuf_iterator<char>(ef)), std::istreambuf_iterator<char>());

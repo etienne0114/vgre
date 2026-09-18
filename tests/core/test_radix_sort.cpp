@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 
 #define PASS(msg) std::cout << "[PASS] " << msg << "\n"

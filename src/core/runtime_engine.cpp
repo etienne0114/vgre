@@ -48,6 +48,31 @@ RuntimeEngine::~RuntimeEngine() {
   // go through vgre_shutdown() which is called before static destruction.
 }
 
+namespace {
+// Callers that only use the CUDA-emulation surface (cudaStreamCreate, etc.,
+// mirroring how unmodified CUDA programs never call an explicit "shutdown")
+// have no reason to know about vgre_shutdown(). Without it, teardown falls
+// through to plain C++ static destruction of the Meyers singletons below
+// (Scheduler, StreamDepTracker, IPCManager, ...), whose relative order across
+// translation units is unspecified — exactly the "undefined destruction
+// order" hazard RuntimeEngine's own destructor comment warns about. Register
+// the real, carefully-sequenced shutdown() to run via atexit so every caller
+// gets it, whether or not they remember to call it themselves.
+//
+// Ordering note: per [basic.start.term], an atexit function registered
+// AFTER a static-storage-duration object's constructor completes runs
+// BEFORE that object's destructor (LIFO, interleaved with static dtors as if
+// registration were itself a construction event). So this must be registered
+// LAST — after Scheduler/StreamDepTracker/etc. below are already
+// constructed — or shutdown() would run AFTER those singletons are torn
+// down instead of before, defeating the whole point.
+void vgreAtExitShutdown() {
+  if (RuntimeEngine::instance().isInitialized()) {
+    RuntimeEngine::instance().shutdown(/*isProcessExit=*/true);
+  }
+}
+} // namespace
+
 // ── Initialization ─────────────────────────────────────────────────────────
 VGREResult RuntimeEngine::initialize() {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -205,10 +230,40 @@ VGREResult RuntimeEngine::initialize() {
   VGRE_LOG_INFO("RuntimeEngine", "VGRE Runtime Engine initialized with " +
                                      std::to_string(devices_.size()) +
                                      " devices");
+
+  // Force-construct singletons that shutdown() touches but that nothing
+  // above naturally constructs yet. RuntimeProfiler is normally born lazily
+  // on the first kernel registration/launch, and TCPClusterManager only on
+  // the first call to IPCManager::shutdown() (its only ::instance() call
+  // site) — both AFTER this function returns and AFTER the atexit
+  // registration below. Per [basic.start.term]'s LIFO rule (an atexit
+  // function registered before an object's constructor completes runs
+  // AFTER that object's destructor), that ordering meant shutdown() called
+  // into an ALREADY-DESTROYED singleton at real process exit — a genuine
+  // use-after-destruction crash, not a hang or a benign no-op. This bit
+  // TCPClusterManager specifically whenever some earlier RuntimeEngine
+  // instance in the same process (e.g. a local, non-singleton RuntimeEngine
+  // a test constructs and explicitly shuts down) was the one to first touch
+  // it, since s_atexitRegistered below is shared process-wide and only the
+  // very first initialize() call actually registers the handler. Touching
+  // both here guarantees they are constructed before this atexit
+  // registration, so they are destroyed after vgreAtExitShutdown runs,
+  // matching scheduler_/IPCManager.
+  advanced::RuntimeProfiler::instance();
+  advanced::TCPClusterManager::instance();
+
+  // Registered last (see vgreAtExitShutdown's comment on ordering): every
+  // singleton this shutdown() path tears down is already constructed above.
+  static bool s_atexitRegistered = false;
+  if (!s_atexitRegistered) {
+    std::atexit(vgreAtExitShutdown);
+    s_atexitRegistered = true;
+  }
+
   return VGREResult::SUCCESS;
 }
 
-VGREResult RuntimeEngine::shutdown() {
+VGREResult RuntimeEngine::shutdown(bool isProcessExit) {
   // Export profiler trace before tearing down subsystems.
   {
     const char* tracePath = ::getenv("VGRE_TRACE_PATH");
@@ -248,7 +303,21 @@ VGREResult RuntimeEngine::shutdown() {
   deviceMemManagers_.clear();
   executor_.reset();
   vectorEngine_.reset();
-  translator_.reset();
+  // translator_ (LLVMTranslationEngine) owns an ORC JIT ExecutionSession
+  // (llvmState_) that touches LLVM's own process-wide static state (target
+  // registration, ManagedStatics, ...). That state's construction/teardown
+  // order relative to LLVM's internal globals is outside this codebase's
+  // control — destroying translator_ during the atexit-driven final
+  // teardown raced LLVM's own static destructors in exactly the way this
+  // engine's comment on the JIT-warmup call already documents ("the source
+  // of the intermittent SASSDetection crash in LLVM's vector legalization").
+  // At real process exit the OS reclaims this memory regardless, so leaking
+  // it deliberately is strictly safer than an ordering-dependent crash. A
+  // mid-process vgre_shutdown() (isProcessExit=false) that might
+  // reinitialize still tears it down properly.
+  if (!isProcessExit) {
+    translator_.reset();
+  }
   parser_.reset();
   devices_.clear();
 

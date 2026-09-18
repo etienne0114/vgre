@@ -15,11 +15,21 @@
 #include "vgre/advanced/tcp_cluster/internal/packet_handler.h"
 #include "vgre/common/logger.h"
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <vector>
+
+#if defined(_WIN32)
+static inline int setenv(const char* name, const char* value, int) {
+    return _putenv_s(name, value);
+}
+static inline int unsetenv(const char* name) {
+    return _putenv_s(name, "");
+}
+#endif
 
 using namespace vgre;
 using namespace vgre::advanced;

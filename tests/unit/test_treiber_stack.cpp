@@ -70,7 +70,7 @@ static void test_concurrent() {
         std::vector<std::thread> pushers;
         pushers.reserve(kThreads);
         for (int t = 0; t < kThreads; ++t) {
-            pushers.emplace_back([&s, t]() {
+            pushers.emplace_back([&s, t, kPerThread]() {
                 const int base = t * kPerThread;
                 for (int i = 0; i < kPerThread; ++i)
                     s.push(base + i);

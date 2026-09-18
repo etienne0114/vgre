@@ -10,9 +10,15 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
+#if defined(_WIN32)
+#include <process.h>  // _getpid
+#define getpid _getpid
+#else
 #include <unistd.h>  // getpid
+#endif
 
 using namespace vgre::mps;
 
@@ -24,7 +30,14 @@ static void check(const char* name, bool ok) {
 }
 
 static std::string writeTempPolicy(const std::string& json) {
+#if defined(_WIN32)
+    const char* tmpDir = std::getenv("TEMP");
+    if (!tmpDir) tmpDir = std::getenv("TMP");
+    if (!tmpDir) tmpDir = ".";
+    std::string path = std::string(tmpDir) + "\\vgre_mps_policy_" + std::to_string(::getpid()) + ".json";
+#else
     std::string path = "/tmp/vgre_mps_policy_" + std::to_string(::getpid()) + ".json";
+#endif
     std::ofstream f(path);
     f << json;
     f.close();

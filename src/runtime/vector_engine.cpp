@@ -7,8 +7,50 @@
 #include <chrono>
 #include <sstream>
 
-#ifdef __x86_64__
+// __x86_64__ is GCC/Clang-only; MSVC (cl.exe) defines _M_X64/_M_AMD64
+// instead and never defines __x86_64__ at all. Every CPUID-based capability
+// check in this file was previously gated on __x86_64__ alone, so on an
+// MSVC build detectCapabilities()'s entire body silently compiled out —
+// caps_ stayed zero-initialized (all false) and every kernel fell back to
+// scalar-only execution, with nothing indicating this was wrong beyond the
+// "SIMD: none (scalar only)" log line at startup.
+#if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+#define VGRE_VECENGINE_X86_64 1
+#else
+#define VGRE_VECENGINE_X86_64 0
+#endif
+
+#if VGRE_VECENGINE_X86_64
+#if defined(_MSC_VER)
+#include <intrin.h>
+// __get_cpuid/__get_cpuid_count (GCC/Clang, <cpuid.h>) return eax/ebx/ecx/edx
+// via separate out-params; MSVC's __cpuid/__cpuidex (<intrin.h>) return the
+// same four values packed into one int[4]. Wrap both behind the GCC/Clang
+// call shape so the capability-bit logic below needs no per-compiler branches.
+static inline int __get_cpuid(unsigned leaf, unsigned* eax, unsigned* ebx,
+                               unsigned* ecx, unsigned* edx) {
+    int regs[4];
+    __cpuid(regs, static_cast<int>(leaf));
+    *eax = static_cast<unsigned>(regs[0]);
+    *ebx = static_cast<unsigned>(regs[1]);
+    *ecx = static_cast<unsigned>(regs[2]);
+    *edx = static_cast<unsigned>(regs[3]);
+    return 1;
+}
+static inline int __get_cpuid_count(unsigned leaf, unsigned subleaf,
+                                     unsigned* eax, unsigned* ebx,
+                                     unsigned* ecx, unsigned* edx) {
+    int regs[4];
+    __cpuidex(regs, static_cast<int>(leaf), static_cast<int>(subleaf));
+    *eax = static_cast<unsigned>(regs[0]);
+    *ebx = static_cast<unsigned>(regs[1]);
+    *ecx = static_cast<unsigned>(regs[2]);
+    *edx = static_cast<unsigned>(regs[3]);
+    return 1;
+}
+#else
 #include <cpuid.h>
+#endif
 #endif
 
 #if defined(__linux__) && defined(__x86_64__)
@@ -46,7 +88,7 @@ VectorEngine::~VectorEngine() = default;
 
 // ── CPU feature detection ──────────────────────────────────────────────────
 void VectorEngine::detectCapabilities() {
-    #ifdef __x86_64__
+    #if VGRE_VECENGINE_X86_64
     unsigned int eax, ebx, ecx, edx;
 
     if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {

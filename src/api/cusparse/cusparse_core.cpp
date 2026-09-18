@@ -134,7 +134,7 @@ void csr_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
 
     T zero = T{};
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 1024)
+    #pragma omp parallel for if (m * n > 1024)
     #endif
     for (int64_t row = 0; row < m; ++row)
         for (int64_t col = 0; col < n; ++col) {
@@ -222,7 +222,7 @@ void ell_spmm(cusparseOperation_t opA, cusparseOperation_t opB,
     T zero = T{};
     // Scale C by beta
     #ifdef _OPENMP
-    #pragma omp parallel for collapse(2) if (m * n > 1024)
+    #pragma omp parallel for if (m * n > 1024)
     #endif
     for (int64_t row = 0; row < m; ++row)
         for (int64_t col = 0; col < n; ++col) {

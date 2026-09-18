@@ -47,6 +47,18 @@
 #include <signal.h>
 #endif
 
+#if defined(_WIN32)
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return _aligned_malloc(size, alignment);
+}
+static inline void aligned_free_portable(void* p) { _aligned_free(p); }
+#else
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return std::aligned_alloc(alignment, size);
+}
+static inline void aligned_free_portable(void* p) { std::free(p); }
+#endif
+
 using namespace vgre;
 using namespace vgre::common;
 using namespace vgre::advanced;
@@ -230,9 +242,18 @@ public:
             std::cout << "WARNING: Connection to unused port succeeded unexpectedly" << std::endl;
         } else {
             int error_code = vgre_get_last_socket_error();
-            // ECONNREFUSED (111 on Linux) is expected when connecting to a port that's not listening
-            // This is the correct behavior, not a "would block" error
-            if (error_code != ECONNREFUSED && !vgre_is_would_block(error_code)) {
+            // vgre_get_last_socket_error() returns WSAGetLastError()'s WSAE*
+            // codes on Windows (e.g. WSAECONNREFUSED = 10061), not the CRT
+            // errno.h ECONNREFUSED (107) — a different, unrelated numeric
+            // space. ECONNREFUSED (111 on Linux) is expected when connecting
+            // to a port that's not listening; this is the correct behavior,
+            // not a "would block" error.
+#if defined(_WIN32)
+            const int expectedRefused = WSAECONNREFUSED;
+#else
+            const int expectedRefused = ECONNREFUSED;
+#endif
+            if (error_code != expectedRefused && !vgre_is_would_block(error_code)) {
                 std::cout << "FAIL: Unexpected network error code: " << error_code << std::endl;
                 all_passed = false;
             }
@@ -330,9 +351,9 @@ public:
         }
         
         // Test aligned allocation failure
-        void* aligned_ptr = std::aligned_alloc(64, 0); // Zero size
+        void* aligned_ptr = aligned_alloc_portable(64, 0); // Zero size
         if (aligned_ptr) {
-            std::free(aligned_ptr);
+            aligned_free_portable(aligned_ptr);
         }
         
         // Test calloc failure — volatile prevents compile-time overflow evaluation.

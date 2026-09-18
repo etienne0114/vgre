@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
@@ -86,7 +87,8 @@ int main() {
     std::vector<float> logitsBefore = gpt.forward(probe)->data;
 
     // ── Checkpoint round-trip ────────────────────────────────────────────────
-    const std::string ckpt = "/tmp/vgre_lm_ckpt.safetensors";
+    const std::string ckpt =
+        (std::filesystem::temp_directory_path() / "vgre_lm_ckpt.safetensors").string();
     check("save_checkpoint", model::save_checkpoint(gpt, ckpt));
 
     // It is real safetensors: the existing loader sees every named parameter.

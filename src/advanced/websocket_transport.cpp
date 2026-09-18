@@ -236,6 +236,7 @@ bool WebsocketTransportClient::parseUrl(const std::string& url) {
 
 // ── TCP connect ──────────────────────────────────────────────────────────────
 bool WebsocketTransportClient::tcpConnect(int timeoutMs) {
+    vgre::common::vgre_ensure_winsock();
     struct addrinfo hints{}, *res;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -733,6 +734,7 @@ bool WebsocketTransportServer::configureTls(
 #endif // VGRE_ENABLE_SSL
 
 VGREResult WebsocketTransportServer::start(int backlog) {
+    vgre::common::vgre_ensure_winsock();
     listenfd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd_ == VGRE_INVALID_SOCKET) return VGREResult::ERR_IO;
 

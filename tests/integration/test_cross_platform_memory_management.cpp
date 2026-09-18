@@ -44,6 +44,21 @@
 #include <fcntl.h>
 #endif
 
+// MSVC never implemented C11 std::aligned_alloc (its free() can't handle the
+// over-aligned pointer); _aligned_malloc/_aligned_free is the CRT equivalent,
+// with alignment/size argument order swapped from aligned_alloc's.
+#if defined(_WIN32)
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return _aligned_malloc(size, alignment);
+}
+static inline void aligned_free_portable(void* p) { _aligned_free(p); }
+#else
+static inline void* aligned_alloc_portable(size_t alignment, size_t size) {
+    return std::aligned_alloc(alignment, size);
+}
+static inline void aligned_free_portable(void* p) { std::free(p); }
+#endif
+
 using namespace vgre;
 using namespace vgre::advanced;
 using namespace vgre::core;
@@ -105,7 +120,7 @@ public:
             // glibc is lenient, but macOS/Windows enforce it (return NULL otherwise),
             // so round the request up to a multiple of 8.
             size_t alloc_size = (size + 7) & ~static_cast<size_t>(7);
-            void* aligned_ptr = std::aligned_alloc(8, alloc_size);
+            void* aligned_ptr = aligned_alloc_portable(8, alloc_size);
             if (!aligned_ptr) {
                 std::cout << "FAIL: aligned_alloc failed for size " << size << std::endl;
                 all_passed = false;
@@ -132,9 +147,9 @@ public:
                 }
             }
             
-            std::free(aligned_ptr);
+            aligned_free_portable(aligned_ptr);
         }
-        
+
         // Test endianness consistency
         uint32_t test_value = 0x12345678;
         uint8_t* bytes = reinterpret_cast<uint8_t*>(&test_value);
@@ -155,7 +170,8 @@ public:
         
         bool all_passed = true;
         std::vector<void*> allocated_ptrs;
-        
+        std::vector<void*> aligned_ptrs;
+
         // Test various allocation sizes
         std::vector<size_t> sizes = {
             1, 16, 64, 256, 1024, 4096, 16384, 65536, 1048576
@@ -189,26 +205,29 @@ public:
         
         // Test aligned allocation
         for (size_t size : sizes) {
-            void* ptr = std::aligned_alloc(16, (size + 15) & ~15); // 16-byte aligned
+            void* ptr = aligned_alloc_portable(16, (size + 15) & ~15); // 16-byte aligned
             if (!ptr) {
                 std::cout << "FAIL: aligned_alloc failed for size " << size << std::endl;
                 all_passed = false;
                 continue;
             }
-            
-            allocated_ptrs.push_back(ptr);
-            
+
+            aligned_ptrs.push_back(ptr);
+
             // Check alignment
             if (reinterpret_cast<uintptr_t>(ptr) % 16 != 0) {
-                std::cout << "FAIL: aligned_alloc returned unaligned pointer for size " 
+                std::cout << "FAIL: aligned_alloc returned unaligned pointer for size "
                           << size << std::endl;
                 all_passed = false;
             }
         }
-        
+
         // Deallocate all memory
         for (void* ptr : allocated_ptrs) {
             std::free(ptr);
+        }
+        for (void* ptr : aligned_ptrs) {
+            aligned_free_portable(ptr);
         }
         
         // Test calloc (zero-initialized allocation)

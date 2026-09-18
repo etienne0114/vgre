@@ -94,7 +94,12 @@ std::unique_ptr<GGUF> GGUF::open(const std::string& path) {
     std::unique_ptr<GGUF> g(new GGUF());
 
 #if defined(_WIN32)
-    HANDLE fh = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+    // FILE_SHARE_DELETE: see the identical rationale in safetensors.cpp — lets
+    // a caller delete/replace this file while our mapping is still open,
+    // matching POSIX unlink-while-mapped semantics instead of throwing
+    // ERROR_SHARING_VIOLATION out of fs::remove().
+    HANDLE fh = CreateFileA(path.c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (fh == INVALID_HANDLE_VALUE) return nullptr;
     LARGE_INTEGER sz;

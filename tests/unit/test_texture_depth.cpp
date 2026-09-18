@@ -14,7 +14,7 @@ void test_int16_sampling() {
     desc.elementType = TextureElementType::INT16;
     desc.filterMode = TextureFilterMode::POINT;
     
-    TextureId tex;
+    TextureId tex{};
     assert(mgr.createTexture(tex, data.data(), 2, 2, sizeof(int16_t), desc) == VGREResult::SUCCESS);
     
     // Test point sampling
@@ -31,7 +31,7 @@ void test_uint8_surface() {
     TextureManager& mgr = TextureManager::instance();
     std::vector<uint8_t> data(16, 0);
     
-    SurfaceId surf;
+    SurfaceId surf{};
     assert(mgr.createSurface(surf, data.data(), 4, 4, sizeof(uint8_t), TextureElementType::UINT8) == VGREResult::SUCCESS);
     
     mgr.surf2Dwrite(surf, 255.0f, 0, 0);
@@ -58,7 +58,7 @@ void test_int32_linear_sampling() {
     desc.elementType = TextureElementType::INT32;
     desc.filterMode = TextureFilterMode::LINEAR;
     
-    TextureId tex;
+    TextureId tex{};
     assert(mgr.createTexture(tex, data.data(), 2, 2, sizeof(int32_t), desc) == VGREResult::SUCCESS);
     
     // Nearest to center (0.5, 0.5) => 10

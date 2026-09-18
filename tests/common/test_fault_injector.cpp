@@ -5,6 +5,12 @@
 #include <cstdio>
 #include <cstdlib>
 
+#if defined(_WIN32)
+static inline int setenv(const char* name, const char* value, int) {
+    return _putenv_s(name, value);
+}
+#endif
+
 using namespace vgre::testing;
 
 static int g_pass = 0, g_total = 0;

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <string>
 
 #define PASS(msg) std::cout << "[PASS] " << msg << "\n"
 #define FAIL(msg) do { std::cerr << "[FAIL] " << msg << "\n"; return 1; } while(0)

@@ -122,17 +122,18 @@ Scheduler::~Scheduler() {
   }
   cv_.notify_all(); // wake workers so they see shutdown_ and exit
 
-  // Phase 3: join workers with timeout.
+  // Phase 3: join workers directly. Phases 1-2 already guarantee shutdown_
+  // is set and every queue is drained, so workerLoop's cv_.wait predicate
+  // (shutdown_ && allEmpty) is satisfied and each worker returns promptly —
+  // no timeout wrapper is needed. A prior version joined via a spawned
+  // "joiner" thread to add a timeout, but this destructor can run during
+  // static-storage teardown at process exit, where creating a new OS thread
+  // is unsafe (Windows explicitly documents CreateThread as unsafe from
+  // DLL/CRT-teardown context — the observed symptom was a hard crash inside
+  // ucrtbase.dll's exit-handler dispatch, not a hang, so the timeout this
+  // was guarding against was never the actual risk).
   for (auto &w : workers_) {
-    if (!w.joinable()) continue;
-    auto p = std::make_shared<std::promise<void>>();
-    auto f = p->get_future();
-    std::thread joiner([p, innerW = std::move(w)]() mutable {
-        innerW.join();
-        p->set_value();
-    });
-    joiner.detach();
-    f.wait_for(std::chrono::seconds(5));
+    if (w.joinable()) w.join();
   }
   VGRE_LOG_DEBUG("Scheduler", "Shut down — completed " +
                                   std::to_string(completed_.load()) + " tasks");

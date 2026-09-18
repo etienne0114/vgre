@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 // Minimal SQLite read-back API (ABI-stable).
@@ -75,7 +76,8 @@ int main() {
     check("kernel launch", r == VGREResult::SUCCESS);
     engine.synchronize();
 
-    const char *path = "/tmp/vgre_nsight_test.nsys-rep";
+    const std::string pathStr = (std::filesystem::temp_directory_path() / "vgre_nsight_test.nsys-rep").string();
+    const char *path = pathStr.c_str();
     std::remove(path);
     int rc = vgre_export_nsight_trace(path);
     check("export returns success", rc == VGRE_SUCCESS);

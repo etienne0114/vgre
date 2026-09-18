@@ -1,4 +1,13 @@
 $installDir = Join-Path $env:LOCALAPPDATA 'VGRE'
+# The build itself (source tree + build/ output) is the directory Avast's
+# real-time scanner actually contends with during a parallel ninja build —
+# hundreds of .obj files created per second, each briefly opened for a scan
+# right as cl.exe/ninja also wants it. That race is what causes intermittent
+# "Cannot open include file" C1083 errors that vary by file/run and disappear
+# on retry: not a code bug, a scanner-vs-compiler file lock race. Excluding
+# only %LOCALAPPDATA%\VGRE (the installed app) doesn't cover this at all.
+$sourceDir = 'C:\Users\Dell\Documents\vgre'
+$exclusionTargets = @($installDir, $sourceDir)
 
 # Method 1: Avast registry exclusions (file path exclusions)
 $avastPaths = @(
@@ -9,16 +18,19 @@ $added = $false
 foreach ($key in $avastPaths) {
     if (Test-Path $key) {
         $props = Get-ItemProperty $key -ErrorAction SilentlyContinue
-        $existing = ($props.PSObject.Properties | Where-Object { $_.Value -eq $installDir }).Count
-        if ($existing -eq 0) {
-            $idx = ($props.PSObject.Properties | Where-Object { $_.Name -match '^\d+$' } | Measure-Object).Count
-            Set-ItemProperty -Path $key -Name "$idx" -Value $installDir -Type String
-            Write-Host "[OK] Added $installDir to Avast exclusions at $key"
-            $added = $true
-        } else {
-            Write-Host "[OK] $installDir already in Avast exclusions at $key"
+        foreach ($target in $exclusionTargets) {
+            $existing = ($props.PSObject.Properties | Where-Object { $_.Value -eq $target }).Count
+            if ($existing -eq 0) {
+                $idx = 0
+                while (Get-ItemProperty $key -Name "$idx" -ErrorAction SilentlyContinue) { $idx++ }
+                Set-ItemProperty -Path $key -Name "$idx" -Value $target -Type String
+                Write-Host "[OK] Added $target to Avast exclusions at $key"
+            } else {
+                Write-Host "[OK] $target already in Avast exclusions at $key"
+            }
             $added = $true
         }
+        $props = $null
     }
 }
 
@@ -30,10 +42,13 @@ if (-not $added -and (Test-Path 'HKLM:\SOFTWARE\AVAST Software\Avast')) {
         if (-not (Test-Path $avastScanKey)) {
             New-Item -Path $avastScanKey -Force | Out-Null
         }
-        $props = Get-ItemProperty $avastScanKey -ErrorAction SilentlyContinue
-        $idx = if ($props) { ($props.PSObject.Properties | Where-Object { $_.Name -match '^\d+$' } | Measure-Object).Count } else { 0 }
-        Set-ItemProperty -Path $avastScanKey -Name "$idx" -Value $installDir -Type String
-        Write-Host "[OK] Added $installDir to Avast scan exclusions"
+        foreach ($target in $exclusionTargets) {
+            $props = Get-ItemProperty $avastScanKey -ErrorAction SilentlyContinue
+            $idx = 0
+            while ($props -and (Get-Member -InputObject $props -Name "$idx" -ErrorAction SilentlyContinue)) { $idx++ }
+            Set-ItemProperty -Path $avastScanKey -Name "$idx" -Value $target -Type String
+            Write-Host "[OK] Added $target to Avast scan exclusions"
+        }
         $added = $true
     } catch {
         Write-Host "[WARN] Could not add via registry: $_"
@@ -43,7 +58,7 @@ if (-not $added -and (Test-Path 'HKLM:\SOFTWARE\AVAST Software\Avast')) {
 if (-not $added) {
     Write-Host "[INFO] Could not auto-add Avast exclusion."
     Write-Host "       Please add manually in Avast > Menu > Settings > General > Exceptions:"
-    Write-Host "       $installDir"
+    foreach ($target in $exclusionTargets) { Write-Host "       $target" }
 }
 
 # Restore quarantined vgre_dashboard.exe from the build output

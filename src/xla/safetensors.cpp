@@ -79,7 +79,16 @@ std::unique_ptr<SafeTensors> SafeTensors::open(const std::string& path) {
 
     // ── mmap the whole file read-only ──────────────────────────────────────
 #if defined(_WIN32)
-    HANDLE fh = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+    // FILE_SHARE_DELETE matches POSIX unlink-while-open/mapped semantics:
+    // without it, a caller that deletes/replaces this file while our mapping
+    // is still alive (e.g. a temp-file test, or a model reload) gets
+    // ERROR_SHARING_VIOLATION / an uncaught std::filesystem::filesystem_error
+    // from fs::remove() on Windows, even though the identical code path
+    // succeeds silently on Linux/macOS (mmap keeps the inode alive after
+    // unlink; the file object here is only released once ~SafeTensors()
+    // unmaps and closes it).
+    HANDLE fh = CreateFileA(path.c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (fh == INVALID_HANDLE_VALUE) return nullptr;
     LARGE_INTEGER sz;

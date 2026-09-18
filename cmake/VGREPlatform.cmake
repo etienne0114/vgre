@@ -83,3 +83,33 @@ function(vgre_test_library_path_env OUT_VAR)
         "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
         PARENT_SCOPE)
 endfunction()
+
+# Windows has no LD_LIBRARY_PATH/DYLD_LIBRARY_PATH equivalent: its loader
+# resolves DLLs via the launching exe's own directory, then PATH. CTest runs
+# each test with its CWD set to the CMake subdirectory that defined it (e.g.
+# build/tests), which holds neither vgre.dll nor vgre_nn.dll — so without a
+# PATH entry the loader silently falls through to any same-named DLL already
+# on the user's PATH (e.g. a stale prior install in %LOCALAPPDATA%\VGRE),
+# producing STATUS_ENTRYPOINT_NOT_FOUND / access-violation crashes instead of
+# a clean "DLL not found" error, and worse — a "passing" test could quietly be
+# exercising old code. Call once per directory, after all add_test() calls in
+# it, to prepend the real build output dirs ahead of everything already on PATH.
+function(vgre_fixup_test_dll_search_path)
+    if(NOT WIN32)
+        return()
+    endif()
+    get_property(_vgre_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
+    foreach(_t IN LISTS _vgre_tests)
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.22)
+            set_property(TEST ${_t} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:${CMAKE_BINARY_DIR}"
+                "PATH=path_list_prepend:${CMAKE_BINARY_DIR}/src/xla")
+        else()
+            # Fallback for CMake < 3.22 (no ENVIRONMENT_MODIFICATION): escape
+            # the PATH value's semicolons so CTest's ";"-separated ENVIRONMENT
+            # list treats the whole thing as one NAME=VALUE entry.
+            set_property(TEST ${_t} APPEND PROPERTY ENVIRONMENT
+                "PATH=${CMAKE_BINARY_DIR}\\;${CMAKE_BINARY_DIR}/src/xla\\;$ENV{PATH}")
+        endif()
+    endforeach()
+endfunction()

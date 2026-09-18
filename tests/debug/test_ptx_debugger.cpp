@@ -15,11 +15,19 @@
 
 #include "vgre/debug/gdb_rsp_server.h"
 #include "vgre/debug/ptx_interpreter.h"
+#include "vgre/common/sockets.h"
 
+#if defined(_WIN32)
+#include <basetsd.h>
+typedef SSIZE_T ssize_t;
+static inline void closeSocket(int fd) { closesocket(static_cast<SOCKET>(fd)); }
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+static inline void closeSocket(int fd) { close(fd); }
+#endif
 
 #include <cmath>
 #include <cstdio>
@@ -273,7 +281,7 @@ struct RspClient {
             }
         }
     }
-    void kill() { txnNoReply("k"); ::close(fd); }
+    void kill() { txnNoReply("k"); closeSocket(fd); }
     void txnNoReply(const std::string& body) {
         uint8_t sum = 0;
         for (char c : body) sum = (uint8_t)(sum + (uint8_t)c);

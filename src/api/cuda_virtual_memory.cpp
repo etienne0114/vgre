@@ -80,6 +80,20 @@ using PFN_MapViewOfFile3 = PVOID (WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_
                                             ULONG, ULONG, void*, ULONG);
 using PFN_UnmapViewOfFile2 = BOOL (WINAPI*)(HANDLE, PVOID, ULONG);
 
+// Placeholder-management flags for VirtualAlloc2/MapViewOfFile3/VirtualFree
+// (winnt.h; not pulled in transitively since these APIs are resolved
+// dynamically via GetProcAddress rather than declared/linked normally).
+// Named constants instead of inline hex literals because two of these are a
+// single bit apart and easy to confuse — VGRE_MEM_PRESERVE_PLACEHOLDER (for
+// VirtualFree, splitting a placeholder) was previously passed to
+// MapViewOfFile3's AllocationType where VGRE_MEM_REPLACE_PLACEHOLDER
+// belongs, which Windows rejects with ERROR_INVALID_PARAMETER (87) — every
+// cuMemMap() call failed as a result.
+constexpr ULONG VGRE_MEM_COALESCE_PLACEHOLDERS = 0x00000001;
+constexpr ULONG VGRE_MEM_PRESERVE_PLACEHOLDER  = 0x00000002;
+constexpr ULONG VGRE_MEM_REPLACE_PLACEHOLDER   = 0x00004000;
+constexpr ULONG VGRE_MEM_RESERVE_PLACEHOLDER   = 0x00040000;
+
 static PFN_VirtualAlloc2 pVirtualAlloc2 = nullptr;
 static PFN_MapViewOfFile3 pMapViewOfFile3 = nullptr;
 static PFN_UnmapViewOfFile2 pUnmapViewOfFile2 = nullptr;
@@ -341,8 +355,20 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
     void* p = nullptr;
     initWinVMFunctions();
     if (pVirtualAlloc2 && pMapViewOfFile3) {
-        // MEM_RESERVE | MEM_RESERVE_PLACEHOLDER (0x00040000)
-        p = pVirtualAlloc2(GetCurrentProcess(), nullptr, size, MEM_RESERVE | 0x00040000, PAGE_NOACCESS, nullptr, 0);
+        // Request the actual alignment via MEM_EXTENDED_PARAMETER — passing
+        // no extended parameters (as this previously did) makes VirtualAlloc2
+        // return an address aligned only to the default 64 KiB allocation
+        // granularity, silently ignoring any larger alignment (e.g. 2 MiB)
+        // the caller asked for.
+        MEM_ADDRESS_REQUIREMENTS addrReq{};
+        addrReq.LowestStartingAddress = nullptr;
+        addrReq.HighestEndingAddress  = nullptr;
+        addrReq.Alignment             = (effectiveAlign > ps) ? effectiveAlign : 0;
+        MEM_EXTENDED_PARAMETER param{};
+        param.Type = MemExtendedParameterAddressRequirements;
+        param.Pointer = &addrReq;
+        p = pVirtualAlloc2(GetCurrentProcess(), nullptr, size, MEM_RESERVE | VGRE_MEM_RESERVE_PLACEHOLDER,
+                           PAGE_NOACCESS, addrReq.Alignment ? &param : nullptr, addrReq.Alignment ? 1 : 0);
     } else {
         p = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
     }
@@ -388,7 +414,7 @@ CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
                     }
                 }
                 for (uintptr_t va : to_unmap) {
-                    pUnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(va), 0x00000002); // MEM_PRESERVE_PLACEHOLDER
+                    pUnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(va), VGRE_MEM_PRESERVE_PLACEHOLDER);
                     getMappings().erase(va);
                 }
             }
@@ -415,6 +441,13 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
 
     // Fix (Gap 10): verify that the VA range [ptr, ptr+size) lies within a known reservation.
     // Invariant: any mapped VA must have been reserved by cuMemAddressReserve first.
+    // Also record whether [ptr, ptr+size) is the WHOLE reservation (as opposed
+    // to a sub-range leaving a placeholder remainder) — needed on Windows
+    // below, where VirtualFree(..., MEM_PRESERVE_PLACEHOLDER) is only valid
+    // when it is actually splitting a smaller piece off a larger placeholder;
+    // called on the placeholder's exact full size it fails with
+    // ERROR_INVALID_ADDRESS (487), since nothing is left to "preserve".
+    bool isWholeReservation = false;
     {
         uintptr_t reqStart = static_cast<uintptr_t>(ptr);
         uintptr_t reqEnd   = reqStart + size;
@@ -424,6 +457,7 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
             uintptr_t rEnd   = rStart + kv.second.size;
             if (reqStart >= rStart && reqEnd <= rEnd) {
                 found = true;
+                isWholeReservation = (reqStart == rStart && reqEnd == rEnd);
                 break;
             }
         }
@@ -451,15 +485,24 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
     if (it->second.hSection) {
         initWinVMFunctions();
         if (pMapViewOfFile3) {
-            // Split placeholder: MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER (0x00000002)
-            VirtualFree(va, size, MEM_RELEASE | 0x00000002);
-            // Map view: MEM_REPLACE_PLACEHOLDER (0x00000002)
+            // VirtualFree(..., MEM_PRESERVE_PLACEHOLDER) carves a smaller
+            // piece off a larger placeholder, leaving the remainder as a
+            // still-valid placeholder. When [va, va+size) IS the entire
+            // reservation there is no remainder to preserve, and Windows
+            // rejects the call with ERROR_INVALID_ADDRESS — skip straight to
+            // replacing the whole placeholder in that case.
+            if (!isWholeReservation &&
+                !VirtualFree(va, size, MEM_RELEASE | VGRE_MEM_PRESERVE_PLACEHOLDER)) {
+                return CUDA_ERROR_INVALID_VALUE;
+            }
+            // Map view: replaces the (whole or just-split) placeholder with a real mapping.
             void* mapped_ptr = pMapViewOfFile3((HANDLE)it->second.hSection, GetCurrentProcess(), va, 0, size,
-                                               0x00000002, PAGE_READWRITE, nullptr, 0);
+                                               VGRE_MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
             if (!mapped_ptr) {
-                // Restore placeholder if failed: MEM_RESERVE | MEM_RESERVE_PLACEHOLDER (0x00040000)
+                // Restore the placeholder so the VA range is left in a
+                // consistent (reserved-but-unmapped) state on failure.
                 if (pVirtualAlloc2) {
-                    pVirtualAlloc2(GetCurrentProcess(), va, size, MEM_RESERVE | 0x00040000, PAGE_NOACCESS, nullptr, 0);
+                    pVirtualAlloc2(GetCurrentProcess(), va, size, MEM_RESERVE | VGRE_MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
                 }
                 return CUDA_ERROR_INVALID_VALUE;
             }
@@ -522,8 +565,7 @@ CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
     }
 
     if (mapped_via_section && pUnmapViewOfFile2) {
-        // MEM_PRESERVE_PLACEHOLDER (0x00000002)
-        if (!pUnmapViewOfFile2(GetCurrentProcess(), va, 0x00000002)) {
+        if (!pUnmapViewOfFile2(GetCurrentProcess(), va, VGRE_MEM_PRESERVE_PLACEHOLDER)) {
             // Fix (Gap 6): propagate UnmapViewOfFile2 failure.
             return CUDA_ERROR_INVALID_VALUE;
         }

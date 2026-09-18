@@ -65,7 +65,16 @@ typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
 typedef unsigned long long uint64_t;
+// size_t must match clang's own builtin typedef for the target it defaults
+// to, or clang treats this stub as a real (fatal) redefinition conflict.
+// clang's default target here is its own host triple: on Windows that's
+// x86_64-pc-windows-msvc (LLP64: size_t is 64-bit but `long` stays 32-bit),
+// unlike Linux/macOS's LP64 where `unsigned long` already is 64-bit.
+#if defined(_WIN32) || defined(_WIN64)
+typedef unsigned long long size_t;
+#else
 typedef unsigned long      size_t;
+#endif
 
 // CUDA kernel annotations — must produce a SectionAttr whose name contains
 // "vgre_global" so hasSectionAttr() can identify __global__ functions. Mach-O
@@ -646,9 +655,38 @@ std::string ClangKernelParser::runClangAstDump(const std::string& source) {
       bool transient = false;
 #if defined(_WIN32)
       {
-        std::string cmd = "\"" + clangPath + "\" -Xclang -ast-dump=json -fsyntax-only -xc++ -w"
-                          " -fno-delayed-template-parsing -I\"" + includePath + "\" \""
+        // -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH + VCToolsInstallDir:
+        // this clang (pinned to LLVM 18) auto-detects an MSVC toolset to
+        // borrow STL headers from, and on a machine with multiple
+        // side-by-side VS installs (e.g. a newer "Insiders" build alongside
+        // the stable one) it can pick a too-new STL that uses syntax clang
+        // 18 doesn't parse at all (not just a version-gate #error the
+        // _ALLOW_ define can paper over, but genuine unsupported syntax).
+        // -vctoolsdir is clang-cl-only ("unknown argument" on plain
+        // clang++); the plain driver instead reads the VCToolsInstallDir
+        // environment variable when probing for a toolchain, exactly like a
+        // vcvars-initialized shell would already have set, so set it here
+        // for the child process to pin the toolset instead of leaving
+        // clang to auto-detect whichever install ranks "latest".
+        if (std::string dir = vgre::common::findMSVCToolsDir(); !dir.empty()) {
+            _putenv_s("VCToolsInstallDir", (dir + "\\").c_str());
+        }
+        std::string inner = "\"" + clangPath + "\" -Xclang -ast-dump=json -fsyntax-only -xc++ -w"
+                          " -fno-delayed-template-parsing -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+                          " -I\"" + includePath + "\" \""
                           + tempPath + "\" 2>&1";
+        // _popen() on Windows runs the command via `cmd.exe /C <command>`. When
+        // <command> itself starts with a quoted token (the exe path here) but
+        // doesn't also end in one, cmd.exe's own quote-stripping heuristic for
+        // /C doesn't fire, and the extra layer of quoting _popen adds around
+        // the whole string collides with our leading quote — cmd.exe then
+        // mis-parses the drive-letter path as a malformed volume label
+        // ("The filename, directory name, or volume label syntax is
+        // incorrect."), and clang never runs. Wrapping the entire command in
+        // one more outer pair of quotes is the documented fix: it makes the
+        // combined string start AND end with '"', which is exactly the shape
+        // cmd.exe's /C stripping expects, restoring our intended inner quoting.
+        std::string cmd = "\"" + inner + "\"";
         char buffer[8192];
         FILE* pipe = _popen(cmd.c_str(), "r");
         if (pipe) {

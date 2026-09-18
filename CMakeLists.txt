@@ -620,6 +620,13 @@ endif()
 # Likewise, subdirectory OBJECT libraries need the LLVM include path
 # so their #include <llvm/...> directives resolve during compilation.
 include_directories(${LLVM_INCLUDE_DIRS})
+# MSVC-only: LLVM 18's llvm/IR/Operator.h implicitly deletes several of its own
+# operator-wrapper destructors, which cl.exe flags as C4624 across every TU
+# that includes it. It's LLVM's own header, harmless, and identical on every
+# MSVC+LLVM-18 build — silence just this one code rather than a blanket /W0.
+if(MSVC)
+    add_compile_options(/wd4624)
+endif()
 else()
     # ── Zero-Burden build: no LLVM/Clang ────────────────────────────────────
     message(STATUS "LLVM: DISABLED (VGRE_ENABLE_JIT=OFF) — building with no LLVM/Clang; "

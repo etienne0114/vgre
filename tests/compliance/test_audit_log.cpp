@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -29,9 +30,10 @@ static void check(const char* name, bool ok) {
 }
 
 static std::string tmpPath(const char* leaf) {
-    const char* dir = std::getenv("TMPDIR");
-    std::string base = dir && *dir ? dir : "/tmp";
-    return base + "/vgre_audit_" + std::to_string(VGRE_GETPID()) + "_" + leaf;
+    // fs::temp_directory_path() resolves TMPDIR/TMP/TEMP per platform — a
+    // hardcoded "/tmp" fallback doesn't exist on Windows.
+    std::filesystem::path base = std::filesystem::temp_directory_path();
+    return (base / ("vgre_audit_" + std::to_string(VGRE_GETPID()) + "_" + leaf)).string();
 }
 
 static void removeAll(const std::string& p) {

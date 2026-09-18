@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <string>
 
 // Mirror of the types declared in cuda_virtual_memory.cpp.
 using CUresult = int;

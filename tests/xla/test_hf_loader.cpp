@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <string>
@@ -194,7 +195,7 @@ static void run_case(bool tied, bool gguf, bool nativeGqa = false, bool bias = f
             ts.push_back({nm("self_attn.v_proj.bias","attn_v.bias"), {NKV*hd}, lw[l].bv});
         }
     }
-    const std::string path = std::string("/tmp/vgre_llama_test") + (tied ? "_tied" : "") + (gguf ? ".gguf" : ".safetensors");
+    const std::string path = (std::filesystem::temp_directory_path() / (std::string("vgre_llama_test") + (tied ? "_tied" : "") + (gguf ? ".gguf" : ".safetensors"))).string();
     if (gguf) write_gguf(path, ts); else write_safetensors(path, ts);
 
     // ── reference HF forward for a token sequence ───────────────────────────

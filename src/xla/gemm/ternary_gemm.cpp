@@ -14,9 +14,10 @@
 #include <cstring>
 #include <vector>
 
-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#if (defined(__x86_64__) || defined(_M_X64) || defined(__i386__)) && \
+    (!defined(_MSC_VER) || defined(__AVX2__))
 #  include <immintrin.h>
-#  define VGRE_TERNARY_X86 1
+#  define VGRE_TERNARY_AVX2 1
 #endif
 
 namespace vgre {
@@ -67,10 +68,12 @@ void gemm_row_scalar(int64_t N, int64_t K, const float* a,
     for (int64_t n = 0; n < N; ++n) c[n] = acc[n] * colScale[n];
 }
 
-#if defined(VGRE_TERNARY_X86)
+#if defined(VGRE_TERNARY_AVX2)
 // AVX2: accumulate 8 output columns at a time. The ternary codes become add/sub
 // masks via compares; the hot path is compare + and + add + sub — no multiply.
+#if defined(__GNUC__) || defined(__clang__)
 __attribute__((target("avx2")))
+#endif
 void gemm_row_avx2(int64_t N, int64_t K, const float* a,
                    const int8_t* codes, const float* colScale, float* c) {
     std::vector<float> acc(N, 0.0f);
@@ -103,20 +106,20 @@ void gemm_row_avx2(int64_t N, int64_t K, const float* a,
 }
 
 bool cpu_has_avx2() { return vgre::cpu::supports("avx2"); }
-#endif  // VGRE_TERNARY_X86
+#endif  // VGRE_TERNARY_AVX2
 
 }  // namespace
 
 void gemm(int64_t M, int64_t N, int64_t K,
           const float* A, const int8_t* codes, const float* colScale,
           float* C) {
-#if defined(VGRE_TERNARY_X86)
+#if defined(VGRE_TERNARY_AVX2)
     const bool useAvx2 = cpu_has_avx2();
 #endif
     for (int64_t m = 0; m < M; ++m) {
         const float* a = A + m * K;
         float* c = C + m * N;
-#if defined(VGRE_TERNARY_X86)
+#if defined(VGRE_TERNARY_AVX2)
         if (useAvx2) { gemm_row_avx2(N, K, a, codes, colScale, c); continue; }
 #endif
         gemm_row_scalar(N, K, a, codes, colScale, c);
@@ -124,7 +127,7 @@ void gemm(int64_t M, int64_t N, int64_t K,
 }
 
 const char* isa() {
-#if defined(VGRE_TERNARY_X86)
+#if defined(VGRE_TERNARY_AVX2)
     return cpu_has_avx2() ? "avx2" : "scalar";
 #else
     return "scalar";

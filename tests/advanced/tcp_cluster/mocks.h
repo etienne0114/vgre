@@ -180,7 +180,7 @@ private:
         bool is_bound = false;
         bool is_listening = false;
         bool is_connected = false;
-        vgre_socket_t peer_fd = -1;
+        vgre_socket_t peer_fd = static_cast<vgre_socket_t>(-1);
         std::queue<std::vector<uint8_t>> recv_queue;
         std::string bound_address;
         int bound_port = 0;

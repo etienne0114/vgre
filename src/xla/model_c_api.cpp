@@ -18,9 +18,9 @@ using namespace vgre::xla;
 // record exceptions instead of silently swallowing them, so a failed train step
 // is queryable via vgre_ag_last_error() rather than corrupting the model unseen.
 extern "C" void vgre_ag__set_error(const char* msg);
-#define LM_CATCH(stmt)                                                       \
-    catch (const std::exception& ex) { vgre_ag__set_error(ex.what()); stmt; } \
-    catch (...) { vgre_ag__set_error("unknown error"); stmt; }
+#define LM_CATCH(...)                                                         \
+    catch (const std::exception& ex) { vgre_ag__set_error(ex.what()); __VA_ARGS__; } \
+    catch (...) { vgre_ag__set_error("unknown error"); __VA_ARGS__; }
 
 // Opaque handle: a model plus its persistent AdamW state (so train steps chain).
 struct vgre_lm {

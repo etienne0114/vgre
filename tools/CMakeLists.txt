@@ -52,3 +52,7 @@ if(VGRE_BUILD_TESTS AND DEFINED ENV{VGRE_RUN_REAL_CHECKPOINT_TESTS}
         set_tests_properties(RealGpt2Tokenizer PROPERTIES TIMEOUT 300)
     endif()
 endif()
+
+# Must run last: patches every test added above (Windows only — see the
+# function's definition for why).
+vgre_fixup_test_dll_search_path()

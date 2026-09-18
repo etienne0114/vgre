@@ -194,13 +194,27 @@ public:
         
         bool all_passed = true;
         
-        // Test WOULD_BLOCK detection
+        // Test WOULD_BLOCK detection. vgre_is_would_block() checks socket
+        // error codes as returned by vgre_get_last_socket_error() — on
+        // Windows that's WSAGetLastError()'s WSAE* namespace, not the CRT
+        // errno.h EWOULDBLOCK/EAGAIN (a different, unrelated numeric space:
+        // e.g. EWOULDBLOCK is 140 in the UCRT vs WSAEWOULDBLOCK's 10035), so
+        // the platform under test must match what a real would-block error
+        // actually looks like there.
+#if defined(_WIN32)
+        if (!vgre_is_would_block(WSAEWOULDBLOCK)) {
+            std::cout << "FAIL: WOULD_BLOCK detection failed for WSAEWOULDBLOCK" << std::endl;
+            all_passed = false;
+        }
+        if (!vgre_is_would_block(WSAEINPROGRESS)) {
+            std::cout << "FAIL: WOULD_BLOCK detection failed for WSAEINPROGRESS" << std::endl;
+            all_passed = false;
+        }
+#else
         if (!vgre_is_would_block(EWOULDBLOCK)) {
             std::cout << "FAIL: WOULD_BLOCK detection failed for EWOULDBLOCK" << std::endl;
             all_passed = false;
         }
-        
-#ifndef _WIN32
         if (!vgre_is_would_block(EAGAIN)) {
             std::cout << "FAIL: WOULD_BLOCK detection failed for EAGAIN" << std::endl;
             all_passed = false;

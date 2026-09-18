@@ -12,6 +12,7 @@ Run via ctest (sets LD_LIBRARY_PATH + PYTHONPATH) or:
 import os
 import random
 import sys
+import tempfile
 
 # Allow running from the source tree without installing the wheel.
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -79,7 +80,7 @@ def main() -> int:
     assert spec == gen, "generate_speculative must equal greedy generate"
     print("[4b] speculative decode == greedy (lossless)")
 
-    ckpt = "/tmp/vgre_lm_bindings.safetensors"
+    ckpt = os.path.join(tempfile.gettempdir(), "vgre_lm_bindings.safetensors")
     lm.save(ckpt)
     lm2 = vgre.LanguageModel(vocab=V, n_layer=2, d_model=64, n_head=4,
                              d_ff=128, max_seq=32, seed=999)

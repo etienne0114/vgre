@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #ifdef _WIN32
@@ -27,7 +28,12 @@ static void check(const char* name, bool ok) {
 int main() {
     std::printf("=== ETL pipeline (extract/validate/transform/load) ===\n");
 
-    std::string base = "/tmp/vgre_etl_" + std::to_string(VGRE_GETPID());
+    // fs::temp_directory_path() resolves TMPDIR/TMP/TEMP per platform — a
+    // hardcoded "/tmp" fallback doesn't exist on Windows, so fopen() below
+    // returned nullptr and the very next fputs() dereferenced it, crashing
+    // before any test output could even be printed.
+    std::string base = (std::filesystem::temp_directory_path() /
+                         ("vgre_etl_" + std::to_string(VGRE_GETPID()))).string();
     std::string inPath = base + "_in.csv", outPath = base + "_out.csv";
 
     // ── CSV connector round-trip ─────────────────────────────────────────

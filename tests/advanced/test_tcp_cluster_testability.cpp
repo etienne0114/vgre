@@ -28,6 +28,15 @@
 #include "vgre/common/types.h"
 #include <cstdlib> // for setenv/unsetenv
 
+#if defined(_WIN32)
+static inline int setenv(const char* name, const char* value, int) {
+    return _putenv_s(name, value);
+}
+static inline int unsetenv(const char* name) {
+    return _putenv_s(name, "");
+}
+#endif
+
 // Try to include interface abstractions (will fail on unfixed code)
 #include "vgre/advanced/tcp_cluster/internal/interfaces.h"
 

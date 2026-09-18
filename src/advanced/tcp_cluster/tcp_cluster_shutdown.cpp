@@ -6,7 +6,6 @@
 #include "vgre/advanced/tcp_cluster/internal/discovery_manager.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/sockets.h"
-#include <future>
 #include <thread>
 
 namespace vgre {
@@ -25,39 +24,26 @@ static void forceCloseSocket(vgre::common::vgre_socket_t &fd) {
     fd = vgre::common::VGRE_INVALID_SOCKET;
 }
 
-// joinWithTimeout: transfer thread ownership into a detached joiner thread,
-// then wait up to timeoutSec for the join to complete.
+// joinWithTimeout: join the thread directly.
 //
-// This avoids two problems:
-//  - The std::async future destructor blocks when the timeout fires.
-//  - Calling t.detach() while another thread holds a reference to t causes
-//    a data race.
-//
-// After this call, t is in a moved-from (non-joinable) state regardless of
-// whether the join succeeded or timed out, so its destructor is a no-op.
-// The joiner thread continues running independently until the actual thread
-// exits (which happens within ~50 ms after sockets are closed and CVs notified).
-static void joinWithTimeout(std::thread& t, const char* name, int timeoutSec = 5) {
+// A prior version transferred ownership into a spawned "joiner" thread and
+// waited on it with a timeout, to avoid std::async's future destructor
+// blocking. But spawning any new OS thread here is itself unsafe: shutdown()
+// runs from RuntimeEngine's atexit handler (registered so callers who never
+// call vgre_shutdown() explicitly still get clean teardown), i.e. during
+// process-exit-time static teardown — exactly the context Windows documents
+// CreateThread as unsafe in, and where a spawned joiner previously crashed
+// with STATUS_STACK_BUFFER_OVERRUN (observed as the identical crash already
+// fixed in Scheduler::~Scheduler and MemoryManager::stopMigrationThread/
+// stopPendingDrainer). By the time this runs, sockets are already force-closed
+// and every CV already notified (see call sites below), so each thread's own
+// wait predicate is satisfied and it returns within ~50 ms — a direct join
+// is both safe and prompt; no timeout wrapper is needed.
+static void joinWithTimeout(std::thread& t, const char* name, int /*timeoutSec*/ = 5) {
     if (!t.joinable()) return;
     fprintf(stderr, "DEBUG [TCPCluster] Joining %s\n", name);
-
-    auto p = std::make_shared<std::promise<void>>();
-    auto f = p->get_future();
-
-    // Move t ownership into the joiner.  After this, t.joinable() == false.
-    std::thread joiner([p, innerT = std::move(t)]() mutable {
-        innerT.join();      // blocks until the actual thread exits (~50 ms)
-        p->set_value();     // signal completion
-    });
-    joiner.detach();        // joiner runs independently; its destructor is a no-op
-
-    if (f.wait_for(std::chrono::seconds(timeoutSec)) == std::future_status::ready) {
-        fprintf(stderr, "DEBUG [TCPCluster] %s joined cleanly\n", name);
-    } else {
-        fprintf(stderr, "WARN [TCPCluster] %s join timed out\n", name);
-        // The joiner will eventually call innerT.join() and set_value(),
-        // but we don't wait for it here.
-    }
+    t.join();
+    fprintf(stderr, "DEBUG [TCPCluster] %s joined cleanly\n", name);
 }
 
 void TCPClusterManager::shutdown() {

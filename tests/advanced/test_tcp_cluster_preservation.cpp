@@ -74,7 +74,11 @@ namespace {
         int sock = ::socket(AF_INET, SOCK_STREAM, 0);
         assert(sock >= 0);
         int opt = 1;
+#if defined(_WIN32)
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+#else
         setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
@@ -83,7 +87,11 @@ namespace {
         socklen_t len = sizeof(addr);
         getsockname(sock, (struct sockaddr*)&addr, &len);
         int port = ntohs(addr.sin_port);
+#if defined(_WIN32)
+        closesocket(sock);
+#else
         ::close(sock);
+#endif
         return port;
     }
 }

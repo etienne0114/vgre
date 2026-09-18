@@ -53,8 +53,13 @@ public:
 
   /**
    * @brief Synchronously shuts down all executors and releases hardware resources.
+   * @param isProcessExit True when called from the atexit-driven final
+   *     teardown (the process is terminating regardless, so the OS reclaims
+   *     everything) rather than a caller's mid-process vgre_shutdown() that
+   *     might reinitialize later. See the comment at its one call site in
+   *     the .cpp for why this distinction exists.
    */
-  VGREResult shutdown();
+  VGREResult shutdown(bool isProcessExit = false);
   
   bool isInitialized() const;
 

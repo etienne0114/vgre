@@ -6,6 +6,12 @@
 //   - cuBLAS Sgemm vs a layout-independent diagonal product,
 //   - cuRAND uniform/normal vs theoretical distribution moments.
 
+// MSVC only defines M_PI etc. from <cmath> when this is set, and it must be
+// defined before <cmath> is first included (transitively) anywhere in the TU.
+#if defined(_MSC_VER) && !defined(_USE_MATH_DEFINES)
+#define _USE_MATH_DEFINES
+#endif
+
 #include "vgre/api/cufft_shim.h"
 #include "vgre/api/curand_shim.h"
 

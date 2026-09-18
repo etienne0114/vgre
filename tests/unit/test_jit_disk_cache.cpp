@@ -27,11 +27,14 @@ namespace fs = std::filesystem;
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 static std::string make_tmp_path(const char* suffix) {
-    // Use /tmp for isolation; create a unique name.
-    const char* tmpdir = std::getenv("TMPDIR");
-    std::string base = tmpdir ? tmpdir : "/tmp";
-    // pid-based uniqueness is sufficient for a single-process test run.
-    return base + "/vgre_cache_test_" + std::to_string(::getpid()) + suffix;
+    // fs::temp_directory_path() resolves TMPDIR/TMP/TEMP correctly per
+    // platform (a hardcoded "/tmp" fallback doesn't exist on Windows, where
+    // none of those env vars is named TMPDIR — every writeElfCache() call
+    // below silently failed to open its .tmp file in a nonexistent
+    // directory). pid-based uniqueness is sufficient for a single-process
+    // test run.
+    fs::path base = fs::temp_directory_path();
+    return (base / ("vgre_cache_test_" + std::to_string(::getpid()) + suffix)).string();
 }
 
 static void cleanup(const std::string& path) {

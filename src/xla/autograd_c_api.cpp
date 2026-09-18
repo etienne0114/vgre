@@ -33,9 +33,9 @@ extern "C" void vgre_ag__set_error(const char* msg) {
     agLastError() = (msg && *msg) ? msg : "unknown error";
 }
 // Record the in-flight exception, then run the trailing statement (e.g. return).
-#define AG_CATCH(stmt)                                                       \
-    catch (const std::exception& ex) { vgre_ag__set_error(ex.what()); stmt; } \
-    catch (...) { vgre_ag__set_error("unknown error"); stmt; }
+#define AG_CATCH(...)                                                         \
+    catch (const std::exception& ex) { vgre_ag__set_error(ex.what()); __VA_ARGS__; } \
+    catch (...) { vgre_ag__set_error("unknown error"); __VA_ARGS__; }
 
 // Cluster collectives (implemented in the api/advanced layer; resolved within
 // libvgre). Declared here to avoid a header dependency inversion.
@@ -47,6 +47,12 @@ extern "C" int vgre_cluster_world_size(void);
 namespace {
 inline Var&  ref(vgre_ag h) { return *reinterpret_cast<Var*>(h); }
 inline vgre_ag wrap(Var v)  { return reinterpret_cast<vgre_ag>(new Var(std::move(v))); }
+std::vector<Var> collectParams(vgre_ag* params, int n) {
+    std::vector<Var> p;
+    p.reserve(n);
+    for (int i = 0; i < n; ++i) p.push_back(ref(params[i]));
+    return p;
+}
 }
 
 // Holds either an AdamW or an SGD; the generic step/zero_grad/set_lr dispatch.
@@ -199,11 +205,6 @@ vgre_ag vgre_ag_checkpoint(vgre_ag_builder fn, void* user, vgre_ag* inputs, int 
 }
 
 namespace {
-std::vector<Var> collectParams(vgre_ag* params, int n) {
-    std::vector<Var> p; p.reserve(n);
-    for (int i = 0; i < n; ++i) p.push_back(ref(params[i]));
-    return p;
-}
 inline vgre_ag_optimizer* opt(vgre_ag_opt o) { return reinterpret_cast<vgre_ag_optimizer*>(o); }
 }
 

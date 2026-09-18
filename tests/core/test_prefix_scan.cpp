@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cmath>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #define PASS(msg) std::cout << "[PASS] " << msg << "\n"

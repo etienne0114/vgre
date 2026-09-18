@@ -130,17 +130,21 @@ IPCManager::IPCManager() {
 }
 
 IPCManager::~IPCManager() {
-  // Skip shutdown during static destruction to prevent deadlock
-  // In test environments, the destruction order of singletons can cause hangs
-  // The OS will reclaim resources when the process exits
+  // Normally a no-op: RuntimeEngine's atexit handler already calls
+  // IPCManager::instance().shutdown() before static teardown begins, which
+  // sets enabled_ = false. This is defense-in-depth for the rare path where
+  // this destructor runs with enabled_ still true.
+  //
+  // Call shutdown() directly rather than via a spawned/timed-out thread: a
+  // new OS thread here is unsafe (this can run during process-exit-time
+  // static teardown, which Windows documents CreateThread as unsafe in —
+  // the identical crash this caused was already fixed in Scheduler and
+  // MemoryManager's teardown). shutdown() itself no longer blocks
+  // indefinitely now that TCPClusterManager::shutdown() joins its threads
+  // directly instead of via a timeout wrapper, so no timeout is needed here
+  // either.
   if (!enabled_) return;
-  
-  // Try shutdown with timeout
-  auto future = std::async(std::launch::async, [this]() { shutdown(); });
-  if (future.wait_for(std::chrono::seconds(5)) == std::future_status::timeout) {
-    // Timeout - skip shutdown to prevent hang
-    VGRE_LOG_WARN("IPCManager", "Shutdown timeout during destruction - skipping");
-  }
+  shutdown();
 }
 
 bool IPCManager::initialize(bool isMaster) {

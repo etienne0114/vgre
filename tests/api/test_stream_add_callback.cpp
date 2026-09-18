@@ -1,6 +1,5 @@
 #include <iostream>
 #include <atomic>
-#include <unistd.h>
 
 // Standard CUDART API — resolved via LD_PRELOAD when libvgre_cudart.so is loaded
 extern "C" {
