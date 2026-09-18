@@ -532,6 +532,18 @@ void PtxInterpreter::releaseVoteIfReady(int anyTid) {
     }
 }
 
+void PtxInterpreter::releaseWarpSyncIfReady(int anyTid) {
+    // 32-lane-scoped barrier: release once every active lane of the warp arrived.
+    // The pc was already advanced by the bar.warp.sync handler (as for bar.sync),
+    // so this only clears the park flag.
+    const int total = (int)threads_.size();
+    const int warpBase = anyTid - (anyTid % 32);
+    const int warpEnd = std::min(warpBase + 32, total);
+    for (int L = warpBase; L < warpEnd; ++L)
+        if (!threads_[L].done && !threads_[L].atWarpSync) return;
+    for (int L = warpBase; L < warpEnd; ++L) threads_[L].atWarpSync = false;
+}
+
 StopReason PtxInterpreter::resume() {
     if (exited_) return StopReason::Exited;
     // Step the previously-stopped thread over its breakpoint first (gdb also
@@ -814,10 +826,25 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         t.done = true;
         return true;
     } else if (mnem == "bar" || mnem == "barrier") {
-        t.atBarrier = true;
-        ++t.pc;
-        releaseBarrierIfReady();
+        if (has("warp")) {          // bar.warp.sync — 32-lane barrier (__syncwarp)
+            t.atWarpSync = true;
+            ++t.pc;
+            releaseWarpSyncIfReady(tid);
+        } else {                    // bar.sync — CTA-wide barrier (__syncthreads)
+            t.atBarrier = true;
+            ++t.pc;
+            releaseBarrierIfReady();
+        }
         return true;
+    } else if (mnem == "activemask") {
+        // activemask.b32 d — bitmask of the warp's currently non-exited lanes.
+        const int total = (int)threads_.size();
+        const int warpBase = tid - (tid % 32);
+        const int warpEnd = std::min(warpBase + 32, total);
+        uint32_t mask = 0;
+        for (int L = warpBase; L < warpEnd; ++L)
+            if (!threads_[L].done) mask |= (1u << (L - warpBase));
+        setReg(A(0), mask);
     } else if (mnem == "shfl") {
         // Warp shuffle: park at this instruction offering our value; the last
         // lane of the warp to arrive performs the exchange for everyone. pc is

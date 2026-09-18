@@ -76,6 +76,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
 | **warp shuffle** — `__shfl_sync`, `__shfl_up_sync`, `__shfl_down_sync`, `__shfl_xor_sync` | ✅ Tier-0 interpreter (32-lane warp rendezvous; optional power-of-two `width`). **32-bit and 64-bit** values: `double`/`long` shuffle as two `.b32` words (low/high) recombined — bit-exact (a `double` moves through an integer register, shuffling its raw IEEE-754 bits). Warp-cooperative, so the compiled tier defers these to Tier-0. |
 | **warp vote** — `__ballot_sync`, `__any_sync`, `__all_sync` | ✅ Tier-0 interpreter. The predicate becomes a real `.pred` (`setp.ne`); a warp-wide rendezvous collects every active lane's bit into a ballot mask, then each lane reads its result (`ballot` = the masked lane bitmask; `any`/`all` = reductions over the membership mask). Warp-cooperative → Tier-0. |
+| **warp sync** — `__syncwarp([mask])`, `__activemask()` | ✅ Tier-0 interpreter. `__syncwarp` → `bar.warp.sync`, a 32-lane-scoped barrier (all active lanes rendezvous before continuing); `__activemask` → `activemask.b32`, the bitmask of the warp's non-exited lanes. Warp-cooperative → Tier-0. |
 
 ## Intrinsics
 `sqrt`, `rsqrt`, `fabs`, `abs` (int/float, width-preserving), `exp`/`__expf`,

@@ -833,6 +833,17 @@ struct Codegen {
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
+        if (fn == "__syncwarp" && e.args.size() <= 1) {   // warp barrier (default: full mask)
+            std::string mask = "0xffffffff";
+            if (e.args.size() == 1) { Val m = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {}; mask = m.reg; }
+            emit("bar.warp.sync " + mask + ";");
+            return {};
+        }
+        if (fn == "__activemask" && e.args.empty()) {     // bitmask of active warp lanes
+            std::string d = fresh(RC::R32);
+            emit("activemask.b32 " + d + ";");
+            return {d, intType()};
+        }
         if (fn == "atomicAdd"  && e.args.size() == 2) return emitAtomic(e, "add");
         if (fn == "atomicSub"  && e.args.size() == 2) return emitAtomic(e, "sub");
         if (fn == "atomicMin"  && e.args.size() == 2) return emitAtomic(e, "min");
