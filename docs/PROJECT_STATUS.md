@@ -1,11 +1,11 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-09-06 (CI reactivated + green on Linux/macOS; free Streamlit demo live; LLVM-reduction plan drafted)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (~300 tests) on x86-64 Linux — the required CI job  
-**Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64) — `test_mamba` (ARM FMA tolerance) and `PythonCAPIVectorAdd` (ctypes ABI signatures) fixed for CI  
-**Build Status (Windows)**: ⚙️ **builds in CI** on `windows-2022` (LLVM-18 tarball cached); `continue-on-error` until fully green  
+**Last Updated**: 2026-09-18 (Windows brought from build-only to full-suite in CI; cross-platform regression fixes on all three OSes)  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (325 tests) on x86-64 Linux — the required CI job  
+**Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64). Latest fix: the process-exit `recursive_mutex` abort (an `atexit` handler locking the `RuntimeEngine` singleton after its destruction — EINVAL on macOS libc++) resolved by a leaked, never-destroyed singleton  
+**Build Status (Windows)**: ✅ **CI-green** — builds and runs the full `ctest` suite on `windows-2022` (LLVM-18 tarball cached, clang-cl), confirmed on run 35325255176 (2026-09-18, Test step = success). The bring-up fixes: AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output. Still `continue-on-error` in the workflow (may be promoted to required after a few more consecutive green runs)  
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
-**Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 is CI-green; Windows builds in CI.
+**Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.
 
 > **CI status corrected (2026-09):** the previous "GitHub Actions billing
 > blocker" is **resolved** — CI now runs free on the public repo on **every

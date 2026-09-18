@@ -165,7 +165,7 @@ list is tracked here.
 |---|---|
 | PROJECT_STATUS: *"single hard blocker is GitHub Actions billing; every CI run since 2026-06-22 fails"* | **False now.** CI runs free on the public repo on every push; Linux green (required), macOS green, Windows builds (informational). |
 | README/STATUS: *"macOS full serial ctest bring-up in progress"* | macOS CI is **green** (fixed `test_mamba` FMA tolerance + `PythonCAPIVectorAdd` ctypes ABI). |
-| README: *"Windows code-complete but CI-unverified"* | Windows now **builds in CI** (LLVM-18 tarball cached); still informational until fully green. |
+| README: *"Windows code-complete but CI-unverified"* | Windows is now **CI-green** — builds and runs the full `ctest` suite (clang-cl, LLVM-18 tarball cached), confirmed 2026-09-18; kept `continue-on-error` pending a few more consecutive green runs before promotion to required. |
 | No mention of a public demo | **Live free demo:** `https://vgrengine.streamlit.app` (Streamlit Community Cloud; HF now requires PRO for server-side Spaces). |
 | Test count "293" | ~300 locally (see memory / latest run). |
 | Dates stamped "July 2026" | It is **September 2026**. |

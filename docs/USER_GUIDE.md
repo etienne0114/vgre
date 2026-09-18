@@ -497,11 +497,15 @@ The dashboard detects worker disconnections automatically (TCP keepalive, ~12 s 
 
 ### Cross-platform compatibility
 
+The cluster wire protocol is OS-agnostic (the `CrossPlatform*` socket/error/memory
+tests pass on every platform). Support levels below track each OS's overall CI
+status, not just the networking layer.
+
 | Master | Worker | Notes |
 |--------|--------|-------|
-| Linux | Linux / macOS / Windows | Fully supported |
-| macOS | Linux / Windows | Fully supported |
-| Windows | Linux / macOS | Fully supported |
+| Linux | Linux / macOS / Windows | Fully supported (Linux CI-verified) |
+| macOS | Linux / Windows | Fully supported (macOS CI-green) |
+| Windows | Linux / macOS | Fully supported (Windows CI-green, full suite) |
 
 ---
 
