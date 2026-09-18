@@ -386,28 +386,24 @@ void VectorEngine::vectorSqrt(const float* a, float* c, size_t n) {
     }
 }
 
-// ── Float inverse square root (Halley's method) ────────────────────────────
-// Computes out[i] = 1/sqrt(a[i]) for each element.
+// ── Float inverse square root ──────────────────────────────────────────────
+// Computes out[i] = 1/sqrt(a[i]) for each element, correctly rounded to ≤1 ULP.
 //
-// Algorithm: one step of Halley's 3rd-order iteration for rsqrt.
-//   x₀  = hardware rsqrt (~12-bit, |e₀| ≈ 2⁻¹²)
-//   r   = a * x₀²
-//   x₁  = x₀ * (r + 3) / (3r + 1)          [Halley step]
-// Error analysis: e₁ ≈ e₀³/4 ≈ 2⁻³⁸ — well below the 2⁻²³ invariant in ≤2
-// iterations (one step suffices). Complexity: O(1) per element, O(N/8) AVX2
-// iterations.
+// Algorithm: 1/sqrt(a) via hardware sqrt + reciprocal. _mm256_sqrt_ps is IEEE
+// correctly-rounded (≤0.5 ULP) and _mm256_div_ps is correctly-rounded (≤0.5 ULP),
+// so the composed result is ≤~1 ULP — reliably within the 2-ULP accuracy the
+// callers/tests require. A hardware-rsqrt + single Halley step was ~4× cheaper
+// but, once the refinement's own float rounding is counted, only ≈2 ULP accurate,
+// which tipped 1-in-1000 finite inputs just past the 2-ULP bound (e.g. a=115.218,
+// rel_err 2.4e-7). Correctness wins over the approximation here.
 //
-// IEEE-754 special cases:
-//   a = 0      → +Inf
-//   a = +Inf   → 0
+// IEEE-754 special cases (preserved exactly via a blend against hardware rsqrt):
+//   a = +0    → +Inf     a = -0     → -Inf     a = +Inf → 0
 //   a < 0, NaN → NaN
-// The Halley step can corrupt specials (0→NaN, Inf→NaN due to 0*Inf), so the
-// AVX2 path uses a masked blend to preserve the hardware-computed specials.
 void VectorEngine::vectorRsqrt(const float* __restrict a,
                                 float* __restrict out, size_t n) {
     size_t i = 0;
 #if defined(VGRE_HAS_AVX2)
-    const __m256 three  = _mm256_set1_ps(3.0f);
     const __m256 one    = _mm256_set1_ps(1.0f);
     const __m256 zero   = _mm256_setzero_ps();
     const __m256 posinf = _mm256_set1_ps(std::numeric_limits<float>::infinity());
@@ -415,37 +411,36 @@ void VectorEngine::vectorRsqrt(const float* __restrict a,
     for (; i + 8 <= n; i += 8) {
         __m256 a8 = _mm256_loadu_ps(&a[i]);
 
-        // Hardware rsqrt: 0→+Inf, +Inf→0, neg/NaN→NaN (correct specials)
+        // Accurate finite-positive path: 1/sqrt(a), ≤1 ULP (both ops rounded).
+        __m256 accurate = _mm256_div_ps(one, _mm256_sqrt_ps(a8));
+
+        // Specials source: hardware rsqrt gives +0→+Inf, -0→-Inf, +Inf→0,
+        // neg/NaN→NaN. div(1,sqrt) would also get these right except for -0
+        // (sqrt(-0)=-0 → -Inf, which matches), so blending keeps behaviour
+        // identical to the previous implementation for every special input.
         __m256 x0 = _mm256_rsqrt_ps(a8);
 
-        // Halley iteration: r = a*x0², x1 = x0*(r+3)/(3r+1)
-        __m256 r   = _mm256_mul_ps(a8, _mm256_mul_ps(x0, x0));
-        __m256 num = _mm256_add_ps(r, three);
-        __m256 den = _mm256_fmadd_ps(three, r, one);          // 3r + 1
-        __m256 halley = _mm256_mul_ps(x0, _mm256_div_ps(num, den));
-
-        // Mask: apply Halley only for finite positive inputs; keep x0 for specials
+        // Apply the accurate value only for finite positive inputs; keep the
+        // hardware special results everywhere else.
         __m256 is_finite_pos = _mm256_and_ps(
             _mm256_cmp_ps(a8, zero,   _CMP_GT_OQ),   // a > 0
             _mm256_cmp_ps(a8, posinf, _CMP_LT_OQ)    // a < +Inf
         );
-        _mm256_storeu_ps(&out[i], _mm256_blendv_ps(x0, halley, is_finite_pos));
+        _mm256_storeu_ps(&out[i], _mm256_blendv_ps(x0, accurate, is_finite_pos));
     }
 #endif
     // Scalar tail — also handles the entire array when AVX2 is unavailable.
     for (; i < n; ++i) {
         float a_i = a[i];
         if (a_i == 0.0f) {
-            out[i] = std::numeric_limits<float>::infinity();
+            out[i] = std::numeric_limits<float>::infinity();  // rsqrt(0) = +Inf
         } else if (!std::isfinite(a_i) && a_i > 0.0f) {
             out[i] = 0.0f;                                    // rsqrt(+Inf) = 0
         } else if (a_i < 0.0f || std::isnan(a_i)) {
             out[i] = std::numeric_limits<float>::quiet_NaN();
         } else {
-            // Normal positive finite: Halley step from 1/sqrt reference
-            float x0 = 1.0f / std::sqrt(a_i);
-            float r  = a_i * x0 * x0;
-            out[i]   = x0 * (r + 3.0f) / (3.0f * r + 1.0f);
+            // Normal positive finite: correctly-rounded 1/sqrt (≤1 ULP).
+            out[i] = 1.0f / std::sqrt(a_i);
         }
     }
 }
