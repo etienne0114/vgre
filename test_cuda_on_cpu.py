@@ -30,7 +30,11 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Locate libvgre (platform-specific shared-library name)
 # ---------------------------------------------------------------------------
-BUILD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
+# Build directory holding libvgre. Prefer VGRE_BUILD_DIR (set by CTest to the
+# actual CMAKE_BINARY_DIR) so this works for any out-of-source tree — the plain
+# 'build' assumption breaks the LLVM-free CI lane, which builds into 'build_nollvm'.
+BUILD_DIR = os.environ.get("VGRE_BUILD_DIR") or \
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "build")
 
 def _vgre_library_path():
     if sys.platform == "darwin":
