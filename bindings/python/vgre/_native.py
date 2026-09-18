@@ -197,11 +197,27 @@ def _load_library() -> Optional[ctypes.CDLL]:
         return None
 
     try:
-        mode = getattr(ctypes, "RTLD_GLOBAL", None)
-        if mode is None:
-            lib = ctypes.CDLL(path)
+        if sys.platform == "win32":
+            # Python 3.8+ no longer searches PATH (or the loaded DLL's own
+            # directory) for a DLL's *dependencies* — only System32 and dirs
+            # registered via os.add_dll_directory. vgre.dll pulls in siblings and
+            # toolchain runtime (e.g. sqlite3.dll) that live in its directory and
+            # on PATH, so register its directory and load with winmode=0, which
+            # uses the legacy search order that also consults PATH. Without this
+            # CDLL fails with "Could not find module ... (or one of its
+            # dependencies)" even though vgre.dll itself exists.
+            dll_dir = os.path.dirname(os.path.abspath(path))
+            try:
+                os.add_dll_directory(dll_dir)
+            except (OSError, AttributeError):
+                pass
+            lib = ctypes.CDLL(path, winmode=0)
         else:
-            lib = ctypes.CDLL(path, mode=mode)
+            mode = getattr(ctypes, "RTLD_GLOBAL", None)
+            if mode is None:
+                lib = ctypes.CDLL(path)
+            else:
+                lib = ctypes.CDLL(path, mode=mode)
     except OSError:
         return None
 

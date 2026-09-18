@@ -56,7 +56,20 @@ _lib_env = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH
 if BUILD_DIR not in os.environ.get(_lib_env, ""):
     os.environ[_lib_env] = BUILD_DIR + os.pathsep + os.environ.get(_lib_env, "")
 
-lib = ctypes.CDLL(LIB_PATH)
+if sys.platform == "win32":
+    # Python 3.8+ only searches System32 + os.add_dll_directory() dirs for a
+    # DLL's dependencies (not PATH, not the DLL's own dir). vgre.dll depends on
+    # siblings + toolchain runtime (e.g. sqlite3.dll) in the build dir and on
+    # PATH, so register the build dir and load with winmode=0 (legacy search that
+    # also consults PATH). Otherwise CDLL raises "Could not find module ... (or
+    # one of its dependencies)" although vgre.dll itself is present.
+    try:
+        os.add_dll_directory(BUILD_DIR)
+    except (OSError, AttributeError):
+        pass
+    lib = ctypes.CDLL(LIB_PATH, winmode=0)
+else:
+    lib = ctypes.CDLL(LIB_PATH)
 
 # ---------------------------------------------------------------------------
 # ctypes signatures — REQUIRED for correctness on 64-bit ABIs.
