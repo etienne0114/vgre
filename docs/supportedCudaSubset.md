@@ -94,6 +94,18 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …) evaluated at the operand's width; the compiled
 tier uses libm.
 
+**Explicit-rounding arithmetic:** `__fadd`/`__fsub`/`__fmul`/`__fdiv`,
+`__fmaf`, `__frcp`, `__fsqrt`, `__frsqrt` (f32) and `__dadd`/`__dsub`/`__dmul`/
+`__ddiv`, `__fma`, `__drcp`, `__dsqrt` (f64), each in the `_rn`/`_rz`/`_ru`/`_rd`
+rounding-mode spellings. These name the rounding a plain operator would leave to
+the compiler — e.g. `__fmul_rn(a,b)` then `__fadd_rn(_,c)` stays un-contracted,
+while `__fmaf_rn(a,b,c)` forces a single-rounding fused multiply-add. Lowered to
+the rounding-tagged PTX op (`add.rn.f32`, `fma.rn.f32`, `div.rn.f32`, …).
+**Fidelity note:** the Tier-0 interpreter evaluates round-to-nearest-even
+exactly (it computes in double, then rounds to the result type), so the `_rn`
+forms are bit-exact; the directed `_rz`/`_ru`/`_rd` forms are accepted for source
+compatibility but currently also round to nearest.
+
 **Bit-reinterpret (type-punning):** `__float_as_int`/`__float_as_uint`,
 `__int_as_float`/`__uint_as_float`, `__double_as_longlong`, `__longlong_as_double`
 — copy the raw bits between a float and a same-width integer register (`mov.b32`/

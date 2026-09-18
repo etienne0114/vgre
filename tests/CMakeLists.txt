@@ -1193,6 +1193,11 @@ target_link_libraries(test_cuda_ldg PRIVATE vgre Threads::Threads)
 add_test(NAME CudaLdg COMMAND test_cuda_ldg)
 set_tests_properties(CudaLdg PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_rounded_arith compiler/test_cuda_rounded_arith.cpp)
+target_link_libraries(test_cuda_rounded_arith PRIVATE vgre Threads::Threads)
+add_test(NAME CudaRoundedArith COMMAND test_cuda_rounded_arith)
+set_tests_properties(CudaRoundedArith PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

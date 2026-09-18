@@ -767,6 +767,34 @@ struct Codegen {
                canon == "exp2" || canon == "log2" || canon == "tanh";
     }
 
+    // Recognize an explicit-rounding arithmetic intrinsic:
+    //   __f{add,sub,mul,div}_{rn,rz,ru,rd}  (f32)   __d{add,sub,mul,div}_{...} (f64)
+    //   __fmaf_{...}/__fma_{...}                     __f/drcp_{...}, __f/dsqrt_{...}
+    //   __frsqrt_rn
+    // Fills the PTX op, precision, arity, and rounding mode. These name the
+    // rounding a plain operator leaves to the compiler; we lower to the
+    // rounding-tagged PTX op (rcp/sqrt/div carry a mode; rsqrt is .approx).
+    static bool recognizeRoundedArith(const std::string& fn, std::string& op,
+                                      bool& dbl, int& arity, std::string& mode) {
+        if (fn.size() < 8 || fn.compare(0, 2, "__") != 0) return false;
+        const size_t us = fn.rfind('_');
+        if (us == std::string::npos || us + 3 != fn.size()) return false;   // mode is 2 chars, trailing
+        mode = fn.substr(us + 1);
+        if (mode != "rn" && mode != "rz" && mode != "ru" && mode != "rd") return false;
+        const std::string b = fn.substr(2, us - 2);   // between "__" and "_<mode>"
+        struct E { const char* name; const char* op; bool dbl; int arity; };
+        static const E tbl[] = {
+            {"fadd","add",false,2},{"fsub","sub",false,2},{"fmul","mul",false,2},{"fdiv","div",false,2},
+            {"dadd","add",true, 2},{"dsub","sub",true, 2},{"dmul","mul",true, 2},{"ddiv","div",true, 2},
+            {"fmaf","fma",false,3},{"fma","fma",true,3},
+            {"frcp","rcp",false,1},{"drcp","rcp",true,1},
+            {"fsqrt","sqrt",false,1},{"dsqrt","sqrt",true,1},
+            {"frsqrt","rsqrt",false,1},
+        };
+        for (const E& e : tbl) if (b == e.name) { op = e.op; dbl = e.dbl; arity = e.arity; return true; }
+        return false;
+    }
+
     // Warp shuffle: __shfl[_up|_down|_xor]_sync(mask, var, lane [, width]).
     // Lowers to `shfl.sync.<mode>.b32 d, var, lane, <width>, mask` — the c operand
     // carries the subwarp width (our interpreter's encoding). 32-bit values shuffle
@@ -908,6 +936,32 @@ struct Codegen {
             return emitCachedLoad(e);
         if (fn == "__stwb" || fn == "__stcg" || fn == "__stcs" || fn == "__stwt")
             return emitCachedStore(e);
+        // ── Explicit IEEE-rounding arithmetic: __fadd_rn/__fmaf_rn/__fdiv_rz/… ──
+        {
+            std::string rop, rmode; bool rdbl = false; int rarity = 0;
+            if (recognizeRoundedArith(fn, rop, rdbl, rarity, rmode)) {
+                if ((int)e.args.size() != rarity) {
+                    fail("'" + fn + "' expects " + std::to_string(rarity) + " argument(s)"); return {};
+                }
+                const Type ft = rdbl ? doubleType() : floatType();
+                const std::string suf = rdbl ? "f64" : "f32";
+                Val a = coerce(emitExpr(*e.args[0]), ft); if (failed) return {};
+                std::string d = fresh(classOf(ft));
+                if (rarity == 1) {                       // rcp / sqrt / rsqrt
+                    if (rop == "rsqrt") emit("rsqrt.approx." + suf + " " + d + ", " + a.reg + ";");
+                    else emit(rop + "." + rmode + "." + suf + " " + d + ", " + a.reg + ";");
+                    return {d, ft};
+                }
+                Val b = coerce(emitExpr(*e.args[1]), ft); if (failed) return {};
+                if (rarity == 2) {                       // add / sub / mul / div
+                    emit(rop + "." + rmode + "." + suf + " " + d + ", " + a.reg + ", " + b.reg + ";");
+                    return {d, ft};
+                }
+                Val c = coerce(emitExpr(*e.args[2]), ft); if (failed) return {};   // fma
+                emit("fma." + rmode + "." + suf + " " + d + ", " + a.reg + ", " + b.reg + ", " + c.reg + ";");
+                return {d, ft};
+            }
+        }
         // ── Half arithmetic: compute in float, result __half (or bool for cmp) ──
         if (e.args.size() == 2 &&
             (fn == "__hadd" || fn == "__hsub" || fn == "__hmul" || fn == "__hdiv" ||
