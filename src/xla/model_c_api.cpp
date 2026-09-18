@@ -262,4 +262,98 @@ int vgre_bpe_decode(const vgre_bpe* t, const int* ids, int n, char* out, int max
     } LM_CATCH(return -1)
 }
 
+// ── Premium tokenizer surface ────────────────────────────────────────────────
+
+void vgre_bpe_reset(vgre_bpe* t) {
+    if (!t) return;
+    try { t->tok.reset(); } LM_CATCH()
+}
+
+int vgre_bpe_last_error(const vgre_bpe* t) {
+    if (!t) return (int)TokenizerError::NotLoaded;
+    return (int)t->tok.lastError();
+}
+
+const char* vgre_bpe_last_error_message(const vgre_bpe* t) {
+    if (!t) return "null tokenizer";
+    return t->tok.lastErrorMessage().c_str();
+}
+
+const char* vgre_bpe_error_string(int code) {
+    return tokenizerErrorString((TokenizerError)code);
+}
+
+int vgre_bpe_validate(const vgre_bpe* t) {
+    if (!t) return 0;
+    try { return t->tok.validate() ? 1 : 0; } LM_CATCH(return 0)
+}
+
+int vgre_bpe_is_valid_utf8(const char* data, int len, int* why, int* at_byte) {
+    if (!data || len < 0) { if (why) *why = (int)TokenizerError::InvalidUtf8; return 0; }
+    try {
+        TokenizerError e = TokenizerError::Ok;
+        size_t at = 0;
+        bool ok = BpeTokenizer::isValidUtf8(std::string(data, (size_t)len), &e, &at);
+        if (why) *why = (int)e;
+        if (at_byte) *at_byte = (int)at;
+        return ok ? 1 : 0;
+    } LM_CATCH(return 0)
+}
+
+int vgre_bpe_encode_checked(vgre_bpe* t, const char* text, int* out, int max_out) {
+    if (!t || !text || !out || max_out <= 0) return -1;
+    try {
+        std::vector<int> ids;
+        bool ok = t->tok.hfReady()     ? t->tok.encodeHfChecked(std::string(text), ids)
+                  : t->tok.gpt2Ready() ? t->tok.encodeGpt2Checked(std::string(text), ids)
+                                       : t->tok.encodeChecked(std::string(text), ids);
+        if (!ok) return -1;
+        const int n = (int)std::min<size_t>(ids.size(), (size_t)max_out);
+        std::memcpy(out, ids.data(), sizeof(int) * (size_t)n);
+        return n;
+    } LM_CATCH(return -1)
+}
+
+int vgre_bpe_decode_checked(vgre_bpe* t, const int* ids, int n, char* out, int max_out) {
+    if (!t || !ids || n < 0 || !out || max_out <= 0) return -1;
+    try {
+        std::vector<int> v(ids, ids + n);
+        std::string s;
+        bool ok = t->tok.hfReady()     ? t->tok.decodeHfChecked(v, s)
+                  : t->tok.gpt2Ready() ? t->tok.decodeGpt2Checked(v, s)
+                                       : t->tok.decodeChecked(v, s);
+        if (!ok) return -1;
+        const int len = (int)std::min<size_t>(s.size(), (size_t)(max_out - 1));
+        std::memcpy(out, s.data(), (size_t)len);
+        out[len] = '\0';
+        return len;
+    } LM_CATCH(return -1)
+}
+
+int vgre_bpe_added_token_count(const vgre_bpe* t) {
+    if (!t) return 0;
+    return (int)t->tok.addedTokens().size();
+}
+
+int vgre_bpe_added_token(const vgre_bpe* t, int index, char* content, int content_cap,
+                         int* id, int* special, int* lstrip, int* rstrip,
+                         int* single_word, int* normalized) {
+    if (!t || index < 0) return 0;
+    const auto& toks = t->tok.addedTokens();
+    if (index >= (int)toks.size()) return 0;
+    const AddedToken& a = toks[(size_t)index];
+    if (content && content_cap > 0) {
+        const int len = (int)std::min<size_t>(a.content.size(), (size_t)(content_cap - 1));
+        std::memcpy(content, a.content.data(), (size_t)len);
+        content[len] = '\0';
+    }
+    if (id) *id = a.id;
+    if (special) *special = a.special ? 1 : 0;
+    if (lstrip) *lstrip = a.lstrip ? 1 : 0;
+    if (rstrip) *rstrip = a.rstrip ? 1 : 0;
+    if (single_word) *single_word = a.singleWord ? 1 : 0;
+    if (normalized) *normalized = a.normalized ? 1 : 0;
+    return 1;
+}
+
 }  // extern "C"

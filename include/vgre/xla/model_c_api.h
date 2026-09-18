@@ -129,6 +129,47 @@ VGRE_PUBLIC_API int       vgre_bpe_encode(const vgre_bpe* t, const char* text,
 VGRE_PUBLIC_API int       vgre_bpe_decode(const vgre_bpe* t, const int* ids, int n,
                                           char* out, int max_out);
 
+// ── Premium tokenizer surface: structured errors, checked APIs, introspection ─
+// All error codes below are the integer values of vgre::xla::TokenizerError
+// (0 == ok). vgre_bpe_error_string maps any code to a stable name.
+
+// Reset to the pristine base state: 256 single-byte tokens, no merges, no
+// GPT-2/HF mapping, no special tokens, no error. Lets one instance be reused to
+// load a different model with zero carryover.
+VGRE_PUBLIC_API void        vgre_bpe_reset(vgre_bpe* t);
+// Code / message of the most recent operation on `t` (message never NULL).
+VGRE_PUBLIC_API int         vgre_bpe_last_error(const vgre_bpe* t);
+VGRE_PUBLIC_API const char* vgre_bpe_last_error_message(const vgre_bpe* t);
+// Stable, human-readable name for an error code (never NULL).
+VGRE_PUBLIC_API const char* vgre_bpe_error_string(int code);
+// Validate the loaded tokenizer state (byte<->id inverse maps, no duplicate ids,
+// invertible byte-level table). 1 if consistent, else 0 with last_error set.
+VGRE_PUBLIC_API int         vgre_bpe_validate(const vgre_bpe* t);
+// Strict RFC 3629 UTF-8 validation of `len` bytes: rejects overlong forms,
+// surrogate codepoints and values above U+10FFFF. Returns 1 if valid, else 0
+// with *why (nullable) = the TokenizerError code and *at_byte (nullable) = the
+// byte offset of the first offending sequence. Independent of any loaded model.
+VGRE_PUBLIC_API int         vgre_bpe_is_valid_utf8(const char* data, int len,
+                                                   int* why, int* at_byte);
+// Checked encode/decode: same tokenization as vgre_bpe_encode/decode, but the
+// input is validated (encode: valid UTF-8 + no byte lost to the model vocab;
+// decode: every id resolvable) and failures return -1 with last_error set,
+// instead of best-effort. On encode success returns the id count (writing up to
+// max_out); on decode success the byte count (NUL-terminated, up to max_out).
+VGRE_PUBLIC_API int         vgre_bpe_encode_checked(vgre_bpe* t, const char* text,
+                                                    int* out, int max_out);
+VGRE_PUBLIC_API int         vgre_bpe_decode_checked(vgre_bpe* t, const int* ids, int n,
+                                                    char* out, int max_out);
+// Number of HF added/special tokens (after a successful load_hf).
+VGRE_PUBLIC_API int         vgre_bpe_added_token_count(const vgre_bpe* t);
+// Metadata for added token `index` in [0, count). Copies `content` (NUL-
+// terminated, truncated to content_cap); every out pointer is nullable and
+// flag outputs receive 0/1. Returns 1 on success, 0 if index is out of range.
+VGRE_PUBLIC_API int         vgre_bpe_added_token(const vgre_bpe* t, int index,
+                                                 char* content, int content_cap, int* id,
+                                                 int* special, int* lstrip, int* rstrip,
+                                                 int* single_word, int* normalized);
+
 #ifdef __cplusplus
 }
 #endif

@@ -121,7 +121,84 @@ int main(int argc, char** argv) {
             CHECK(ids == (std::vector<int>{20, 900, 12}), "special token splits + id");
             CHECK(t.decodeHf(ids) == "ab<|eot|>c", "special roundtrip");
         }
+        // ── Premium: added-token metadata, checked APIs, byte-loss, reset ──
+        {
+            using vgre::xla::TokenizerError;
+            using vgre::xla::AddedToken;
+            CHECK(t.validate(), "loaded HF state validates");
+            // Rich added-token metadata is exposed and deterministic (by id).
+            const std::vector<AddedToken>& ats = t.addedTokens();
+            CHECK(ats.size() == 1, "one added token parsed");
+            CHECK(ats[0].content == "<|eot|>" && ats[0].id == 900 && ats[0].special,
+                  "added-token metadata (content/id/special)");
+            // Checked HF encode/decode round-trip on valid text.
+            std::vector<int> ids;
+            CHECK(t.encodeHfChecked("ab<|eot|>c", ids) && ids == (std::vector<int>{20, 900, 12}),
+                  "encodeHfChecked matches encodeHf");
+            std::string back;
+            CHECK(t.decodeHfChecked(ids, back) && back == "ab<|eot|>c", "decodeHfChecked round-trip");
+            // No silent byte loss: 'x' (byte 0x78) is absent from this minimal
+            // vocab, so the checked encoder reports it rather than dropping it —
+            // while the plain encodeHf best-effort path simply omits it.
+            CHECK(!t.encodeHfChecked("x", ids) && t.lastError() == TokenizerError::ByteNotInVocab,
+                  "encodeHfChecked flags a byte with no vocab id");
+            // Invalid id caught on checked decode.
+            CHECK(!t.decodeHfChecked({20, 424242}, back) &&
+                  t.lastError() == TokenizerError::InvalidTokenId, "decodeHfChecked rejects bad id");
+            // Invalid UTF-8 input rejected by the checked encoder.
+            CHECK(!t.encodeHfChecked(std::string("\xED\xA0\x80", 3), ids) &&
+                  t.lastError() == TokenizerError::SurrogateCodepoint,
+                  "encodeHfChecked rejects surrogate UTF-8");
+        }
         fs::remove(tj);
+    }
+
+    // ── 1a'. Structured rejection: duplicate ids and malformed merges ───────
+    {
+        using vgre::xla::TokenizerError;
+        auto write = [&](const std::string& body) {
+            fs::path p = fs::temp_directory_path() / "vgre_tok_err.json";
+            { std::ofstream f(p); f << body; }
+            return p;
+        };
+        const char* preamble =
+            R"("normalizer":{"type":"NFC"},"pre_tokenizer":{"type":"ByteLevel","add_prefix_space":false},)";
+        // Two vocab tokens sharing id 5 -> DuplicateVocabId.
+        {
+            fs::path p = write(std::string("{") + preamble +
+                R"("model":{"type":"BPE","vocab":{"a":5,"b":5},"merges":[]}})");
+            BpeTokenizer t;
+            CHECK(!t.loadHf(p.string()) && t.lastError() == TokenizerError::DuplicateVocabId,
+                  "duplicate vocab id rejected");
+            // Failed load leaves a clean, usable base tokenizer (state isolation).
+            CHECK(!t.hfReady() && t.vocabSize() == 256, "failed load resets to base state");
+            fs::remove(p);
+        }
+        // Malformed merge entry (3 operands) -> InvalidMerge.
+        {
+            fs::path p = write(std::string("{") + preamble +
+                R"("model":{"type":"BPE","vocab":{"a":0,"b":1},"merges":["a b c"]}})");
+            BpeTokenizer t;
+            CHECK(!t.loadHf(p.string()) && t.lastError() == TokenizerError::InvalidMerge,
+                  "malformed merge rejected");
+            fs::remove(p);
+        }
+        // Unsupported (non-NFC / SentencePiece) normalizer -> UnsupportedModel.
+        {
+            fs::path p = write(
+                R"({"normalizer":{"type":"Replace"},"pre_tokenizer":{"type":"ByteLevel"},)"
+                R"("model":{"type":"BPE","vocab":{"a":0},"merges":[]}})");
+            BpeTokenizer t;
+            CHECK(!t.loadHf(p.string()) && t.lastError() == TokenizerError::UnsupportedModel,
+                  "unsupported normalizer -> UnsupportedModel");
+            fs::remove(p);
+        }
+        // Missing file -> FileNotFound.
+        {
+            BpeTokenizer t;
+            CHECK(!t.loadHf("/no/such/tokenizer.json") &&
+                  t.lastError() == TokenizerError::FileNotFound, "missing file -> FileNotFound");
+        }
     }
 
     // ── 1b. Unsupported files are rejected, not approximated ────────────────
