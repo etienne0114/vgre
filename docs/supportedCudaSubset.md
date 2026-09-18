@@ -39,6 +39,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | `float` | ✅ | ✅ |
 | `double`, `long` (64-bit) | ✅ full f64 / i64 (real `.f64`/`.s64` PTX, `cvt`, 64-bit literals) | ✅ full f64 / i64 |
 | pointers (`T*`, `const T* __restrict__`) | ✅ | ✅ |
+| `__half` (fp16, 16-bit storage) | ✅ `__half` variables + `__half*` load/store (`ld/st.b16`) and `__float2half`/`__half2float` (PTX `cvt.rn.f16.f32` / `cvt.f32.f16`, IEEE binary16 round-to-nearest-even). Store fp16, compute in float — the mixed-precision idiom. (Half **arithmetic** operators aren't supported yet; convert via `__half2float`.) | defers to interpreter |
 | by-value `struct` params (scalar members, `.member` reads) | ✅ | defers to interpreter |
 
 ## Expressions

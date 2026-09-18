@@ -17,7 +17,7 @@ namespace frontend {
 // A struct-valued type carries base==Struct and the struct's name; its size and
 // member layout are resolved against the module's struct table.
 struct Type {
-    enum Base { Void, Bool, Char, Short, Int, Long, Float, Double, Struct };
+    enum Base { Void, Bool, Char, Short, Int, Long, Float, Double, Struct, Half };
     Base base = Int;
     bool isUnsigned = false;
     int  ptr = 0;           // pointer depth: float* -> 1
@@ -33,7 +33,7 @@ struct Type {
         switch (base) {
             case Void:   return 1;
             case Bool: case Char: return 1;
-            case Short:  return 2;
+            case Short: case Half: return 2;
             case Int: case Float: return 4;
             case Long: case Double: return 8;
             case Struct: return 0;  // resolved from the struct table

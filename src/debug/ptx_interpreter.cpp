@@ -3,6 +3,7 @@
 #include "vgre/debug/ptx_interpreter.h"
 
 #include "vgre/common/atomic_rmw.h"
+#include "vgre/xla/half.h"   // f16<->f32 codec (header-only, dependency-free)
 
 #include <algorithm>
 #include <cctype>
@@ -1062,12 +1063,17 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         uint64_t raw = evalOperand(t, tid, A(1), ss);
         uint64_t out;
         if (isFloatType(srcT) && isFloatType(dstT)) {
-            double d = ss == 8 ? asF64(raw) : (double)asF32(raw);
+            // Read source (f16 needs the codec; f32/f64 are raw bits).
+            double d = (srcT == "f16") ? (double)vgre::xla::f16_to_f32((uint16_t)raw)
+                     : (ss == 8)       ? asF64(raw)
+                     :                   (double)asF32(raw);
             if (has("rmi")) d = std::floor(d);            // floorf/floor
             else if (has("rpi")) d = std::ceil(d);        // ceilf/ceil
             else if (has("rni")) d = std::nearbyint(d);   // round-to-nearest-even
             else if (has("rzi")) d = std::trunc(d);       // round-toward-zero
-            out = typeSize(dstT) == 8 ? fromF64(d) : fromF32((float)d);
+            out = (dstT == "f16")        ? (uint64_t)vgre::xla::f32_to_f16((float)d)
+                : (typeSize(dstT) == 8)  ? fromF64(d)
+                :                          fromF32((float)d);
         } else if (isFloatType(srcT)) {                              // float → int
             double d = ss == 8 ? asF64(raw) : (double)asF32(raw);
             // Integer rounding mode: rni=nearest-even, rmi=floor, rpi=ceil,

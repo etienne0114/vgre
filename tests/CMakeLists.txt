@@ -1176,6 +1176,13 @@ target_link_libraries(test_cuda_dynamic_shared PRIVATE vgre Threads::Threads)
 add_test(NAME CudaDynamicShared COMMAND test_cuda_dynamic_shared)
 set_tests_properties(CudaDynamicShared PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: half precision (__half type + __float2half/__half2float).
+# Type system + codegen + interpreter cvt f16; runs in the LLVM-free build too.
+add_executable(test_cuda_half compiler/test_cuda_half.cpp)
+target_link_libraries(test_cuda_half PRIVATE vgre Threads::Threads)
+add_test(NAME CudaHalf COMMAND test_cuda_half)
+set_tests_properties(CudaHalf PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

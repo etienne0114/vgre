@@ -64,7 +64,7 @@ bool isTypeStart(TokenKind k) {
         case TokenKind::KwConst: case TokenKind::KwUnsigned: case TokenKind::KwSigned:
         case TokenKind::KwVoid: case TokenKind::KwBool: case TokenKind::KwChar:
         case TokenKind::KwShort: case TokenKind::KwInt: case TokenKind::KwLong:
-        case TokenKind::KwFloat: case TokenKind::KwDouble:
+        case TokenKind::KwFloat: case TokenKind::KwDouble: case TokenKind::KwHalf:
             return true;
         default: return false;
     }
@@ -139,6 +139,7 @@ struct Parser {
             case TokenKind::KwLong:   out.base = Type::Long;  advance(); break;
             case TokenKind::KwFloat:  out.base = Type::Float; advance(); break;
             case TokenKind::KwDouble: out.base = Type::Double; advance(); break;
+            case TokenKind::KwHalf:   out.base = Type::Half;  advance(); break;
             default:
                 // "unsigned"/"const" alone implies int.
                 out.base = Type::Int; break;

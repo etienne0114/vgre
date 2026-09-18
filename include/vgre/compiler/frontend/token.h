@@ -25,7 +25,7 @@ enum class TokenKind {
     KwExtern,       // extern
     KwConst,        // const
     KwRestrict,     // __restrict__ / __restrict
-    KwVoid, KwBool, KwChar, KwShort, KwInt, KwLong, KwFloat, KwDouble, KwUnsigned, KwSigned,
+    KwVoid, KwBool, KwChar, KwShort, KwInt, KwLong, KwFloat, KwDouble, KwHalf, KwUnsigned, KwSigned,
     KwStruct,
     KwIf, KwElse, KwFor, KwWhile, KwReturn,
 

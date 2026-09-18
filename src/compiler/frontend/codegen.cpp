@@ -131,6 +131,7 @@ struct Codegen {
     static Type floatType() { Type t; t.base = Type::Float; return t; }
     static Type longType() { Type t; t.base = Type::Long; return t; }
     static Type doubleType() { Type t; t.base = Type::Double; return t; }
+    static Type halfType() { Type t; t.base = Type::Half; return t; }
 
     // 64-bit int/double and 32-bit int/float are all supported now; nothing to
     // reject here (kept as a hook for genuinely unsupported types).
@@ -139,6 +140,7 @@ struct Codegen {
     // PTX ld/st/param type suffix for a scalar (pointee) type — width-aware.
     static std::string memSuffix(const Type& t) {
         if (t.base == Type::Double) return "f64";
+        if (t.base == Type::Half) return "b16";   // __half: 16-bit raw storage
         if (t.isFloating()) return "f32";
         if (t.base == Type::Long) return "u64";
         return "u32";
@@ -933,6 +935,21 @@ struct Codegen {
                 std::string d = fresh(RC::F64);
                 emit("mov.b64 " + d + ", " + a.reg + ";");
                 return {d, doubleType()};
+            }
+            // Half precision (__half). Values are the raw 16-bit f16 bit pattern,
+            // carried in a 32-bit register; only conversions to/from float are
+            // provided (arithmetic is done in float via __half2float / __float2half).
+            if (fn == "__float2half" || fn == "__float2half_rn") {
+                Val a = coerce(emitExpr(*e.args[0]), floatType()); if (failed) return {};
+                std::string d = fresh(RC::R32);
+                emit("cvt.rn.f16.f32 " + d + ", " + a.reg + ";");
+                return {d, halfType()};
+            }
+            if (fn == "__half2float") {
+                Val a = emitExpr(*e.args[0]); if (failed) return {};   // operand is __half
+                std::string d = fresh(RC::F32);
+                emit("cvt.f32.f16 " + d + ", " + a.reg + ";");
+                return {d, floatType()};
             }
             // Rounding-mode conversions f32 -> int32 (rn=nearest, rz=toward-zero,
             // ru=+inf, rd=-inf) — these VALUE conversions differ from the bit
