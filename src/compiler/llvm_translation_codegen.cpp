@@ -1,4 +1,5 @@
 #include "vgre/compiler/llvm_translation_engine.h"
+#include <algorithm>  // std::find/sort/... (don't rely on transitive includes)
 #include "vgre/compiler/ptx_translator.h"
 #include "vgre/common/logger.h"
 #include "vgre/common/platform.h"

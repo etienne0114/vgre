@@ -1,6 +1,7 @@
 // PTX translator entry-point methods.
 
 #include "ptx_translator_internal.h"
+#include <algorithm>  // std::find/sort/... (don't rely on transitive includes)
 
 namespace vgre {
 namespace compiler {

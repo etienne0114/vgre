@@ -2,6 +2,7 @@
 // backward activation gradients) in post-processing for CPU emulation.
 
 #include "cublaslt_state.h"
+#include <algorithm>  // std::find/sort/... (don't rely on transitive includes)
 #include "vgre/common/openmp_helper.h"
 #include "vgre/core/math/fp_quant_gemm.h"   // Track 17 — FP8 E4M3/E5M2 codecs
 

@@ -1,4 +1,5 @@
 #include "vgre/runtime/cdp_executor.h"
+#include <algorithm>  // std::find/sort/... (don't rely on transitive includes)
 #include "vgre/core/runtime_engine.h"
 #include "vgre/common/logger.h"
 #include <cstdlib>

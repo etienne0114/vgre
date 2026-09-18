@@ -3,6 +3,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster.h"
+#include <algorithm>  // std::find/sort/... (don't rely on transitive includes)
 #include "vgre/advanced/tcp_cluster/internal/connection_manager.h"
 #include "vgre/advanced/tcp_cluster/internal/security_manager.h"
 #include "vgre/api/vgre_c_api.h"
