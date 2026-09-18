@@ -157,6 +157,7 @@ private:
         bool done = false;
         bool atBarrier = false;
         bool atShfl = false;       // parked at a warp-shuffle rendezvous
+        bool atVote = false;       // parked at a warp-vote (ballot/any/all) rendezvous
         uint64_t shflVal = 0;      // the value this lane offers to the shuffle
         std::map<std::string, RegVal> regs;
         std::map<std::string, bool>   preds;
@@ -164,8 +165,10 @@ private:
     };
 
     // A thread that can still execute an instruction right now (not exited, not
-    // parked at a barrier or a warp-shuffle rendezvous).
-    static bool runnable(const Thread& t) { return !t.done && !t.atBarrier && !t.atShfl; }
+    // parked at a barrier or a warp-shuffle / warp-vote rendezvous).
+    static bool runnable(const Thread& t) {
+        return !t.done && !t.atBarrier && !t.atShfl && !t.atVote;
+    }
 
     // Non-throwing parse: fills kernel_/regNames_ and returns true, or leaves a
     // human-readable reason in `err` and returns false. Reports every malformed
@@ -186,6 +189,9 @@ private:
     // When every active lane of `anyTid`'s warp has reached the shuffle, perform
     // the cross-lane exchange and advance them all (a warp-wide rendezvous).
     void releaseShflIfReady(int anyTid);
+    // Same rendezvous for warp vote (vote.sync.{ballot,any,all}): collect every
+    // active lane's predicate into a ballot mask, then write each lane's result.
+    void releaseVoteIfReady(int anyTid);
     void startCta(int cta);
     bool ctaFinished() const;
 

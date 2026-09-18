@@ -762,12 +762,38 @@ struct Codegen {
         return {res, var.type};
     }
 
+    // Warp vote: __ballot_sync / __any_sync / __all_sync(mask, predicate).
+    // The predicate (any int expr) becomes a real .pred via `setp.ne`, then:
+    //   ballot → vote.sync.ballot.b32 (32-bit lane mask, returned as int)
+    //   any/all → vote.sync.{any,all}.pred, then selp to an int 0/1.
+    // Warp-cooperative, so (like shuffle) these run on the Tier-0 interpreter.
+    Val emitVote(const Expr& e) {
+        const std::string& fn = e.str;
+        if (e.args.size() != 2) { fail("'" + fn + "' expects (mask, predicate)"); return {}; }
+        Val mask = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+        Val pv   = coerce(emitExpr(*e.args[1]), intType()); if (failed) return {};
+        std::string p = fresh(RC::Pred);
+        emit("setp.ne.s32 " + p + ", " + pv.reg + ", 0;");
+        if (fn == "__ballot_sync") {
+            std::string d = fresh(RC::R32);
+            emit("vote.sync.ballot.b32 " + d + ", " + p + ", " + mask.reg + ";");
+            return {d, intType()};                       // 32-bit lane mask
+        }
+        const char* vop = (fn == "__all_sync") ? "all" : "any";
+        std::string pd = fresh(RC::Pred);
+        emit("vote.sync." + std::string(vop) + ".pred " + pd + ", " + p + ", " + mask.reg + ";");
+        std::string d = fresh(RC::R32);
+        emit("selp.b32 " + d + ", 1, 0, " + pd + ";");   // pred → int 0/1
+        return {d, intType()};
+    }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
         if (fn == "atomicAdd" && e.args.size() == 2) return emitAtomicAdd(e);
         if (fn == "__shfl_sync" || fn == "__shfl_up_sync" ||
             fn == "__shfl_down_sync" || fn == "__shfl_xor_sync") return emitShfl(e);
+        if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync") return emitVote(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);

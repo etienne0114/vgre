@@ -465,6 +465,53 @@ void PtxInterpreter::releaseShflIfReady(int anyTid) {
     }
 }
 
+void PtxInterpreter::releaseVoteIfReady(int anyTid) {
+    // Warps are 32 consecutive threads by flattened thread id (as for shuffle).
+    const int total = (int)threads_.size();
+    const int warpBase = anyTid - (anyTid % 32);
+    const int warpEnd = std::min(warpBase + 32, total);
+
+    // Ready only when every active (non-exited) lane has reached the vote.
+    for (int L = warpBase; L < warpEnd; ++L)
+        if (!threads_[L].done && !threads_[L].atVote) return;
+
+    // Build the raw ballot: bit `lane` set iff that lane is voting and its
+    // predicate is true. activeMask tracks which lanes actually voted (for `all`).
+    uint32_t predBallot = 0, activeMask = 0;
+    for (int L = warpBase; L < warpEnd; ++L) {
+        Thread& t = threads_[L];
+        if (!t.atVote) continue;                       // an exited lane
+        const int lane = L - warpBase;
+        activeMask |= (1u << lane);
+        const PtxInstr& I = kernel_.code[t.pc];
+        if (evalOperand(t, L, I.args[1], 4) != 0)      // b = predicate
+            predBallot |= (1u << lane);
+    }
+
+    for (int L = warpBase; L < warpEnd; ++L) {
+        Thread& t = threads_[L];
+        if (!t.atVote) continue;
+        const PtxInstr& I = kernel_.code[t.pc];
+        std::vector<std::string> parts = splitDots(I.op);   // vote.sync.<op>.<type>
+        const std::string op = parts.size() > 2 ? parts[2] : "ballot";
+        // c = membership mask (which lanes participate); result counts only those.
+        const uint32_t memMask = (uint32_t)evalOperand(t, L, I.args[2], 4);
+        const uint32_t masked  = predBallot & memMask;
+
+        if (op == "ballot") {
+            t.regs[I.args[0]].u = zeroExtend(masked, 4);            // b32 result
+        } else if (op == "all") {
+            // true iff every participating (masked & voting) lane's predicate is set
+            t.preds[I.args[0]] = (masked == (memMask & activeMask));
+        } else {                                                   // "any" (and "uni")
+            t.preds[I.args[0]] = (masked != 0);
+        }
+        t.atVote = false;
+        ++t.pc;
+        if (t.pc >= (int)kernel_.code.size()) t.done = true;
+    }
+}
+
 StopReason PtxInterpreter::resume() {
     if (exited_) return StopReason::Exited;
     // Step the previously-stopped thread over its breakpoint first (gdb also
@@ -758,6 +805,13 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         t.shflVal = evalOperand(t, tid, A(1), 4) & 0xffffffffu;   // 'a' (b32 value)
         t.atShfl = true;
         releaseShflIfReady(tid);
+        return true;
+    } else if (mnem == "vote") {
+        // Warp vote (vote.sync.{ballot,any,all}): park offering our predicate; the
+        // last active lane of the warp performs the reduction for everyone. pc is
+        // NOT advanced here — releaseVoteIfReady writes the results and advances.
+        t.atVote = true;
+        releaseVoteIfReady(tid);
         return true;
     } else if (mnem == "bra") {
         const std::string& target = I.args.back();

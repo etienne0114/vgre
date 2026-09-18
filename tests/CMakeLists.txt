@@ -1120,6 +1120,13 @@ target_link_libraries(test_cuda_warp_shuffle64 PRIVATE vgre Threads::Threads)
 add_test(NAME CudaWarpShuffle64 COMMAND test_cuda_warp_shuffle64)
 set_tests_properties(CudaWarpShuffle64 PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: warp vote/ballot (__ballot_sync/__any_sync/__all_sync).
+# Frontend + interpreter rendezvous, so it runs in the LLVM-free build too.
+add_executable(test_cuda_warp_vote compiler/test_cuda_warp_vote.cpp)
+target_link_libraries(test_cuda_warp_vote PRIVATE vgre Threads::Threads)
+add_test(NAME CudaWarpVote COMMAND test_cuda_warp_vote)
+set_tests_properties(CudaWarpVote PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
