@@ -80,7 +80,8 @@ an 8-worker pool, both bit-identical to the serial result.
 ## Intrinsics
 `sqrt`, `rsqrt`, `fabs`, `abs` (int/float, width-preserving), `exp`/`__expf`,
 `log`/`__logf`, `exp2`, `log2`, `tanh`, `sin`, `cos`, `floor`, `ceil`, `trunc`,
-`rint`, `nearbyint`, `hypot`, `fmin`,
+`rint`, `nearbyint`, `hypot`, `fmod`, `fdividef`, `copysign`, `__saturatef`,
+`fmin`,
 `fmax`, `min`, `max`, `fma`, `pow` — each in both the **f32** `…f`-suffixed
 spelling and the **f64** (double) bare-C spelling (`sqrtf`↔`sqrt`, `fmaf`↔`fma`,
 `tanhf`↔`tanh`, …), picked by the name. (`exp2`/`log2` map directly to PTX

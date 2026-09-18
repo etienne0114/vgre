@@ -73,6 +73,26 @@ extern "C" __global__ void hy(float* out, const float* a, const float* b, int n)
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = hypotf(a[i], b[i]);
 })";
+static const char* kSatf = R"(
+extern "C" __global__ void sat(float* out, const float* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __saturatef(in[i]);
+})";
+static const char* kFmodf = R"(
+extern "C" __global__ void fm(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fmodf(a[i], b[i]);
+})";
+static const char* kFdiv = R"(
+extern "C" __global__ void fd(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = fdividef(a[i], b[i]);
+})";
+static const char* kCopysignf = R"(
+extern "C" __global__ void cs(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = copysignf(a[i], b[i]);
+})";
 
 template <typename T, typename Ref>
 static bool checkUnary(const char* src, const char* name, Ref ref, double tol) {
@@ -156,7 +176,35 @@ int main() {
         CHECK(ok, "hypotf == sqrt(x*x + y*y)");
     }
 
+    // __saturatef: clamp to [0,1].
+    CHECK(checkUnary<float>(kSatf, "sat", [](double x){ return x < 0 ? 0.0 : (x > 1 ? 1.0 : x); }, 1e-6),
+          "__saturatef clamps to [0,1]");
+
+    // Binary: fmodf, fdividef, copysignf (a/b arrays).
+    auto checkBinaryF = [](const char* src, const char* name, auto ref, double tol) -> bool {
+        const int N = 96;
+        std::vector<float> a(N), b(N), out(N, -999);
+        for (int i = 0; i < N; ++i) { a[i] = (i - 48) * 0.37f; b[i] = ((i % 7) - 3) * 1.3f; if (b[i] == 0) b[i] = 1.7f; }
+        void* op = out.data(); void* ap = a.data(); void* bp = b.data(); int n = N;
+        void* args[] = {&op, &ap, &bp, &n};
+        if (!runInterp(src, name, 3, 32, args, 4)) { std::printf("  %s did not run\n", name); return false; }
+        for (int i = 0; i < N; ++i) {
+            double want = ref((double)a[i], (double)b[i]);
+            if (std::fabs((double)out[i] - want) > tol) {
+                std::printf("  %s i=%d a=%g b=%g got=%g want=%g\n", name, i, a[i], b[i], (double)out[i], want);
+                return false;
+            }
+        }
+        return true;
+    };
+    CHECK(checkBinaryF(kFmodf, "fm", [](double a, double b){ return std::fmod(a, b); }, 1e-4),
+          "fmodf == std::fmod");
+    CHECK(checkBinaryF(kFdiv, "fd", [](double a, double b){ return a / b; }, 1e-4),
+          "fdividef == a/b");
+    CHECK(checkBinaryF(kCopysignf, "cs", [](double a, double b){ return std::copysign(a, b); }, 0.0),
+          "copysignf == std::copysign (exact)");
+
     if (g_fail == 0)
-        std::printf("PASS: math intrinsics (exp2f, log2f, tanhf, tanh, truncf, rintf, hypotf)\n");
+        std::printf("PASS: math intrinsics (exp2f, log2f, tanh, trunc/rint, hypot, saturatef, fmodf, fdividef, copysignf)\n");
     return g_fail ? 1 : 0;
 }

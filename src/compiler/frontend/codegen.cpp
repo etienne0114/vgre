@@ -866,6 +866,13 @@ struct Codegen {
                 emit("cvt." + rnd + "." + suf + "." + suf + " " + d + ", " + a.reg + ";");
                 return {d, ft};
             }
+            if (fn == "__saturatef") {                  // clamp to [0, 1] (f32 only)
+                Val a = coerce(emitExpr(*e.args[0]), floatType()); if (failed) return {};
+                std::string t = fresh(RC::F32), d = fresh(RC::F32);
+                emit("max.f32 " + t + ", " + a.reg + ", 0f00000000;");   // max(x, 0.0f)
+                emit("min.f32 " + d + ", " + t + ", 0f3F800000;");       // min(_, 1.0f)
+                return {d, floatType()};
+            }
             // Float math intrinsic: the `f`-suffixed name is f32, the bare C name
             // is f64 (double). `__expf`/`__logf` are the f32 fast variants.
             std::string canon; bool dbl;
@@ -944,6 +951,43 @@ struct Codegen {
                 emit("mul." + suf + " " + x2 + ", " + a.reg + ", " + a.reg + ";");         // x*x
                 emit("fma.rn." + suf + " " + s + ", " + b.reg + ", " + b.reg + ", " + x2 + ";");  // y*y + x*x
                 emit("sqrt.rn." + suf + " " + d + ", " + s + ";");
+                return {d, ft};
+            }
+            if (fn == "fdividef") {                     // fast x/y (f32)
+                a = coerce(a, floatType()); b = coerce(b, floatType());
+                std::string d = fresh(RC::F32);
+                emit("div.rn.f32 " + d + ", " + a.reg + ", " + b.reg + ";");
+                return {d, floatType()};
+            }
+            if (fn == "fmodf" || fn == "fmod") {        // x - trunc(x/y)*y
+                const bool dbl = (fn == "fmod");
+                const Type ft = dbl ? doubleType() : floatType();
+                const std::string suf = dbl ? "f64" : "f32";
+                a = coerce(a, ft); b = coerce(b, ft);
+                std::string q = fresh(classOf(ft)), tq = fresh(classOf(ft)),
+                            m = fresh(classOf(ft)), d = fresh(classOf(ft));
+                emit("div.rn." + suf + " " + q + ", " + a.reg + ", " + b.reg + ";");
+                emit("cvt.rzi." + suf + "." + suf + " " + tq + ", " + q + ";");       // trunc(x/y)
+                emit("mul." + suf + " " + m + ", " + tq + ", " + b.reg + ";");
+                emit("sub." + suf + " " + d + ", " + a.reg + ", " + m + ";");
+                return {d, ft};
+            }
+            if (fn == "copysignf" || fn == "copysign") {  // |x| with the sign of y
+                const bool dbl = (fn == "copysign");
+                const Type ft = dbl ? doubleType() : floatType();
+                a = coerce(a, ft); b = coerce(b, ft);
+                const std::string bt = dbl ? "b64" : "b32";
+                const std::string absMask  = dbl ? "0x7fffffffffffffff" : "0x7fffffff";
+                const std::string signMask = dbl ? "0x8000000000000000" : "0x80000000";
+                const RC ic = dbl ? RC::RD64 : RC::R32;
+                std::string xb = fresh(ic), yb = fresh(ic), xa = fresh(ic),
+                            ys = fresh(ic), rb = fresh(ic), d = fresh(classOf(ft));
+                emit("mov." + bt + " " + xb + ", " + a.reg + ";");           // bit-reinterpret x
+                emit("mov." + bt + " " + yb + ", " + b.reg + ";");           // bit-reinterpret y
+                emit("and." + bt + " " + xa + ", " + xb + ", " + absMask + ";");   // |x| bits
+                emit("and." + bt + " " + ys + ", " + yb + ", " + signMask + ";");  // sign(y) bit
+                emit("or."  + bt + " " + rb + ", " + xa + ", " + ys + ";");
+                emit("mov." + bt + " " + d + ", " + rb + ";");               // back to float
                 return {d, ft};
             }
             fail("unsupported call to '" + fn + "'");
