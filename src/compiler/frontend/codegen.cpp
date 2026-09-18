@@ -874,6 +874,45 @@ struct Codegen {
             emit("neg.f32 " + rf + ", " + a.reg + ";");
             return f2h({rf, floatType()});
         }
+        // ── Half unary math: promote to float, apply the f32 op, narrow to __half ──
+        // These mirror the f32 math intrinsics (same PTX the float family emits), so
+        // the result is the fp16-rounded value of the correctly computed float. All
+        // run on the Tier-0 interpreter with no LLVM.
+        if (e.args.size() == 1 &&
+            (fn == "hsqrt" || fn == "hrsqrt" || fn == "hrcp" || fn == "__habs" ||
+             fn == "hceil" || fn == "hfloor" || fn == "htrunc" || fn == "hrint" ||
+             fn == "hexp" || fn == "hexp2" || fn == "hexp10" ||
+             fn == "hlog" || fn == "hlog2" || fn == "hlog10" ||
+             fn == "hsin" || fn == "hcos")) {
+            Val a = h2f(emitExpr(*e.args[0])); if (failed) return {};
+            std::string rf = fresh(RC::F32);
+            if (fn == "hsqrt")       emit("sqrt.rn.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hrsqrt") emit("rsqrt.approx.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hrcp")   emit("rcp.approx.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "__habs") emit("abs.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hceil")  emit("cvt.rpi.f32.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hfloor") emit("cvt.rmi.f32.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "htrunc") emit("cvt.rzi.f32.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hrint")  emit("cvt.rni.f32.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hexp2")  emit("ex2.approx.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hlog2")  emit("lg2.approx.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hsin")   emit("sin.approx.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hcos")   emit("cos.approx.f32 " + rf + ", " + a.reg + ";");
+            else if (fn == "hexp" || fn == "hexp10") {      // a^x = 2^(x*log2 a)
+                std::string t = fresh(RC::F32);
+                emit("mul.f32 " + t + ", " + a.reg + ", " +
+                     f32imm(fn == "hexp" ? 1.4426950408889634 /*log2 e*/
+                                         : 3.3219280948873623 /*log2 10*/) + ";");
+                emit("ex2.approx.f32 " + rf + ", " + t + ";");
+            } else {                                        // hlog/hlog10: log2(x)*k
+                std::string t = fresh(RC::F32);
+                emit("lg2.approx.f32 " + t + ", " + a.reg + ";");
+                emit("mul.f32 " + rf + ", " + t + ", " +
+                     f32imm(fn == "hlog" ? 0.6931471805599453 /*ln 2*/
+                                         : 0.3010299956639812 /*log10 2*/) + ";");
+            }
+            return f2h({rf, floatType()});
+        }
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
         if (fn == "__syncwarp" && e.args.size() <= 1) {   // warp barrier (default: full mask)
             std::string mask = "0xffffffff";
