@@ -700,7 +700,8 @@ struct Codegen {
         dbl = fn.empty() || fn.back() != 'f';
         canon = dbl ? fn : fn.substr(0, fn.size() - 1);   // strip trailing 'f' for f32
         return canon == "sqrt" || canon == "fabs" || canon == "rsqrt" ||
-               canon == "sin" || canon == "cos" || canon == "exp" || canon == "log";
+               canon == "sin" || canon == "cos" || canon == "exp" || canon == "log" ||
+               canon == "exp2" || canon == "log2" || canon == "tanh";
     }
 
     // Warp shuffle: __shfl[_up|_down|_xor]_sync(mask, var, lane [, width]).
@@ -870,6 +871,9 @@ struct Codegen {
             if (canon == "rsqrt") { emit("rsqrt.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
             if (canon == "sin")   { emit("sin.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
             if (canon == "cos")   { emit("cos.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "exp2")  { emit("ex2.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "log2")  { emit("lg2.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "tanh")  { emit("tanh.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
             if (canon == "exp") {                       // e^x = 2^(x*log2 e)
                 std::string t = fresh(classOf(ft));
                 std::string log2e = dbl ? f64imm(1.4426950408889634) : "0f3FB8AA3B";

@@ -79,9 +79,12 @@ an 8-worker pool, both bit-identical to the serial result.
 
 ## Intrinsics
 `sqrt`, `rsqrt`, `fabs`, `abs` (int/float, width-preserving), `exp`/`__expf`,
-`log`/`__logf`, `sin`, `cos`, `floor`, `ceil`, `fmin`, `fmax`, `min`, `max`,
-`fma`, `pow` — each in both the **f32** `…f`-suffixed spelling and the **f64**
-(double) bare-C spelling (`sqrtf`↔`sqrt`, `fmaf`↔`fma`, …), picked by the name.
+`log`/`__logf`, `exp2`, `log2`, `tanh`, `sin`, `cos`, `floor`, `ceil`, `fmin`,
+`fmax`, `min`, `max`, `fma`, `pow` — each in both the **f32** `…f`-suffixed
+spelling and the **f64** (double) bare-C spelling (`sqrtf`↔`sqrt`, `fmaf`↔`fma`,
+`tanhf`↔`tanh`, …), picked by the name. (`exp2`/`log2` map directly to PTX
+`ex2.approx`/`lg2.approx`; `tanh` is a dedicated interpreter op — together they
+cover activation kernels like tanh-GELU.)
 On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …) evaluated at the operand's width; the compiled
 tier uses libm.

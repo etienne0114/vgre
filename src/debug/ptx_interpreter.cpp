@@ -932,6 +932,7 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
     } else if (mnem == "lg2")   { setF(A(0), std::log2(fval(1)));
     } else if (mnem == "sin")   { setF(A(0), std::sin(fval(1)));
     } else if (mnem == "cos")   { setF(A(0), std::cos(fval(1)));
+    } else if (mnem == "tanh")  { setF(A(0), std::tanh(fval(1)));
     } else if (mnem == "and" || mnem == "or" || mnem == "xor") {
         uint64_t a = val(1), b = val(2);
         uint64_t r = (mnem == "and") ? (a & b) : (mnem == "or") ? (a | b) : (a ^ b);

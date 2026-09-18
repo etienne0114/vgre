@@ -1134,6 +1134,13 @@ target_link_libraries(test_cuda_bit_intrinsics PRIVATE vgre Threads::Threads)
 add_test(NAME CudaBitIntrinsics COMMAND test_cuda_bit_intrinsics)
 set_tests_properties(CudaBitIntrinsics PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: extra float math intrinsics (exp2/log2/tanh). Frontend +
+# interpreter, so it runs in the LLVM-free build too.
+add_executable(test_cuda_math_intrinsics compiler/test_cuda_math_intrinsics.cpp)
+target_link_libraries(test_cuda_math_intrinsics PRIVATE vgre Threads::Threads)
+add_test(NAME CudaMathIntrinsics COMMAND test_cuda_math_intrinsics)
+set_tests_properties(CudaMathIntrinsics PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
