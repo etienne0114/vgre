@@ -623,27 +623,69 @@ struct Codegen {
     //    runs a grid's CTAs on parallel interpreter instances.
     //  * shared: within one CTA the interpreter runs threads sequentially, so a
     //    plain ld/add/st is atomic (a CTA never spans instances).
-    Val emitAtomicAdd(const Expr& e) {
+    // atomicAdd/Sub/Min/Max/Exch/And/Or/Xor(&p[i], v) and atomicCAS(&p[i], cmp, v).
+    // All return the OLD value. `op` is the CUDA op sans the "atomic" prefix, lower-
+    // cased: add/sub/min/max/exch/and/or/xor/cas.
+    Val emitAtomic(const Expr& e, const std::string& op) {
+        const bool isCas = (op == "cas");
+        if (e.args.size() != (isCas ? 3u : 2u)) {
+            fail("atomic" + op + " has the wrong number of arguments"); return {};
+        }
         const Expr& a0 = *e.args[0];
         if (a0.kind != Expr::Unary || a0.str != "&" || a0.args.empty() || a0.args[0]->kind != Expr::Index) {
-            fail("atomicAdd expects &array[index] as its first argument");
+            fail("atomic" + op + " expects &array[index] as its first argument");
             return {};
         }
         Addr addr = emitAddress(*a0.args[0]);
         if (failed) return {};
         const Type pt = addr.pointee;
-        Val val = coerce(emitExpr(*e.args[1]), pt);
+        const bool w64 = is64BitScalar(pt) || pt.base == Type::Long || pt.isPointer();
+        const bool bitOp = (op == "exch" || op == "and" || op == "or" || op == "xor" || isCas);
+        const std::string bitSuf = w64 ? "b64" : "b32";
+        // atom type suffix: bit ops → bXX; min/max → signed/unsigned int; add → mem.
+        std::string atomSuf;
+        if (bitOp) atomSuf = bitSuf;
+        else if (op == "min" || op == "max")
+            atomSuf = w64 ? (pt.isUnsigned ? "u64" : "s64") : (pt.isUnsigned ? "u32" : "s32");
+        else atomSuf = memSuffix(pt);            // add / sub (int or float)
+
+        Val cmp;
+        if (isCas) { cmp = coerce(emitExpr(*e.args[1]), pt); if (failed) return {}; }
+        Val val = coerce(emitExpr(*e.args[isCas ? 2 : 1]), pt);
         if (failed) return {};
+        if (op == "sub") {                       // atomicSub(p,v) == atomicAdd(p,-v)
+            std::string neg = fresh(classOf(pt));
+            emit("neg." + arithSuffix(pt) + " " + neg + ", " + val.reg + ";");
+            val = {neg, pt};
+        }
+        const std::string ptxOp = (op == "sub") ? "add" : op;
+
         std::string oldv = fresh(classOf(pt));
         if (addr.shared || addr.local) {
             // Shared: one CTA runs sequentially in the interpreter. Local: private
-            // to the thread. Either way a plain ld/add/st is already atomic.
-            std::string sum = fresh(classOf(pt));
-            emit("ld." + spacePrefix(addr) + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "];");
-            emit("add." + arithSuffix(pt) + " " + sum + ", " + oldv + ", " + val.reg + ";");
-            emit("st." + spacePrefix(addr) + memSuffix(pt) + " [" + addr.reg + "], " + sum + ";");
+            // to the thread. Either way a plain ld / compute / st is atomic here.
+            const std::string sp = spacePrefix(addr), ms = memSuffix(pt);
+            emit("ld." + sp + ms + " " + oldv + ", [" + addr.reg + "];");
+            std::string nv;
+            if (op == "exch") {
+                nv = val.reg;
+            } else if (isCas) {
+                std::string pc = fresh(RC::Pred), sel = fresh(classOf(pt));
+                emit("setp.eq." + arithSuffix(pt) + " " + pc + ", " + oldv + ", " + cmp.reg + ";");
+                emit("selp." + bitSuf + " " + sel + ", " + val.reg + ", " + oldv + ", " + pc + ";");
+                nv = sel;
+            } else {                             // add/min/max/and/or/xor
+                nv = fresh(classOf(pt));
+                const std::string s = (ptxOp == "add") ? arithSuffix(pt) : atomSuf;
+                emit(ptxOp + "." + s + " " + nv + ", " + oldv + ", " + val.reg + ";");
+            }
+            emit("st." + sp + ms + " [" + addr.reg + "], " + nv + ";");
+        } else if (isCas) {
+            emit("atom.global.cas." + atomSuf + " " + oldv + ", [" + addr.reg + "], " +
+                 cmp.reg + ", " + val.reg + ";");
         } else {
-            emit(std::string("atom.global.add.") + memSuffix(pt) + " " + oldv + ", [" + addr.reg + "], " + val.reg + ";");
+            emit("atom.global." + ptxOp + "." + atomSuf + " " + oldv + ", [" + addr.reg +
+                 "], " + val.reg + ";");
         }
         return {oldv, pt};
     }
@@ -791,7 +833,15 @@ struct Codegen {
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
-        if (fn == "atomicAdd" && e.args.size() == 2) return emitAtomicAdd(e);
+        if (fn == "atomicAdd"  && e.args.size() == 2) return emitAtomic(e, "add");
+        if (fn == "atomicSub"  && e.args.size() == 2) return emitAtomic(e, "sub");
+        if (fn == "atomicMin"  && e.args.size() == 2) return emitAtomic(e, "min");
+        if (fn == "atomicMax"  && e.args.size() == 2) return emitAtomic(e, "max");
+        if (fn == "atomicExch" && e.args.size() == 2) return emitAtomic(e, "exch");
+        if (fn == "atomicAnd"  && e.args.size() == 2) return emitAtomic(e, "and");
+        if (fn == "atomicOr"   && e.args.size() == 2) return emitAtomic(e, "or");
+        if (fn == "atomicXor"  && e.args.size() == 2) return emitAtomic(e, "xor");
+        if (fn == "atomicCAS"  && e.args.size() == 3) return emitAtomic(e, "cas");
         if (fn == "__shfl_sync" || fn == "__shfl_up_sync" ||
             fn == "__shfl_down_sync" || fn == "__shfl_xor_sync") return emitShfl(e);
         if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync") return emitVote(e);

@@ -1141,6 +1141,13 @@ target_link_libraries(test_cuda_math_intrinsics PRIVATE vgre Threads::Threads)
 add_test(NAME CudaMathIntrinsics COMMAND test_cuda_math_intrinsics)
 set_tests_properties(CudaMathIntrinsics PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: atomic RMW family (min/max/exch/cas/and/or/xor/sub).
+# Frontend + interpreter + shared atomic_rmw.h; runs in the LLVM-free build too.
+add_executable(test_cuda_atomics compiler/test_cuda_atomics.cpp)
+target_link_libraries(test_cuda_atomics PRIVATE vgre Threads::Threads)
+add_test(NAME CudaAtomics COMMAND test_cuda_atomics)
+set_tests_properties(CudaAtomics PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

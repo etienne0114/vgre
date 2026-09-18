@@ -852,17 +852,49 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         std::string space = has("shared") ? "shared" : has("local") ? "local" : has("param") ? "param" : "global";
         storeTo(t, tid, A(0), space, size, val(1));
     } else if (mnem == "atom") {
-        // atom.global.add.<ty> dst, [addr], val — a real atomic RMW so a grid's
-        // CTAs stay correct when the backend runs them on parallel instances.
+        // atom.global.<op>.<ty> dst, [addr], val  (cas: …, [addr], cmp, val) — a
+        // real atomic RMW so a grid's CTAs stay correct when the backend runs them
+        // on parallel instances. Returns the OLD value, matching CUDA.
         if (!has("global")) throw std::runtime_error("PTX: only atom.global.* is supported");
-        if (!has("add"))    throw std::runtime_error("PTX: only atom.*.add is supported");
         std::string base; int64_t off;
         parseMemRef(A(1), base, off);
         uint64_t addr = evalOperand(t, tid, base, 8) + (uint64_t)off;
         uint64_t probe = 0;
         if (!readGlobal(addr, &probe, (size_t)size))
             throw std::runtime_error("PTX: atom global fault @" + std::to_string(addr));
-        uint64_t old = atomicAddGlobal(reinterpret_cast<void*>(addr), size, isF, val(2), fval(2));
+        void* pp = reinterpret_cast<void*>(addr);
+        const bool w8 = (size == 8);
+        uint64_t old = 0;
+        if (has("add")) {
+            old = atomicAddGlobal(pp, size, isF, val(2), fval(2));
+        } else if (has("exch")) {
+            old = w8 ? vgre::common::atomicExchU64(pp, val(2))
+                     : vgre::common::atomicExchU32(pp, (uint32_t)val(2));
+        } else if (has("cas")) {
+            old = w8 ? vgre::common::atomicCasU64(pp, val(2), val(3))
+                     : vgre::common::atomicCasU32(pp, (uint32_t)val(2), (uint32_t)val(3));
+        } else if (has("and")) {
+            old = w8 ? vgre::common::atomicAndU64(pp, val(2))
+                     : vgre::common::atomicAndU32(pp, (uint32_t)val(2));
+        } else if (has("or")) {
+            old = w8 ? vgre::common::atomicOrU64(pp, val(2))
+                     : vgre::common::atomicOrU32(pp, (uint32_t)val(2));
+        } else if (has("xor")) {
+            old = w8 ? vgre::common::atomicXorU64(pp, val(2))
+                     : vgre::common::atomicXorU32(pp, (uint32_t)val(2));
+        } else if (has("min")) {
+            old = w8 ? (isS ? (uint64_t)vgre::common::atomicMinS64(pp, (int64_t)val(2))
+                            : vgre::common::atomicMinU64(pp, val(2)))
+                     : (isS ? (uint64_t)(uint32_t)vgre::common::atomicMinS32(pp, (int32_t)val(2))
+                            : vgre::common::atomicMinU32(pp, (uint32_t)val(2)));
+        } else if (has("max")) {
+            old = w8 ? (isS ? (uint64_t)vgre::common::atomicMaxS64(pp, (int64_t)val(2))
+                            : vgre::common::atomicMaxU64(pp, val(2)))
+                     : (isS ? (uint64_t)(uint32_t)vgre::common::atomicMaxS32(pp, (int32_t)val(2))
+                            : vgre::common::atomicMaxU32(pp, (uint32_t)val(2)));
+        } else {
+            throw std::runtime_error("PTX: unsupported atom op '" + I.op + "'");
+        }
         setReg(A(0), old);
     } else if (mnem == "add" || mnem == "sub" || mnem == "mul" || mnem == "div" ||
                mnem == "rem" || mnem == "min" || mnem == "max") {

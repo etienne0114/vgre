@@ -53,8 +53,8 @@ an 8-worker pool, both bit-identical to the serial result.
 | ternary `cond ? a : b` (nested) | ✅ |
 | C-style casts `(int)x`, `(float)y` | ✅ |
 | indexing `p[i]`, member `threadIdx.x` | ✅ |
-| `atomicAdd(&p[i], v)` (int + float) | ✅ (real atomic RMW on both tiers — correct under parallel CTAs) |
-| address-of `&p[i]` (as an atomicAdd target) | ✅ |
+| `atomicAdd`, `atomicSub`, `atomicMin`, `atomicMax`, `atomicExch`, `atomicAnd`, `atomicOr`, `atomicXor` (`&p[i], v`) and `atomicCAS(&p[i], cmp, v)` | ✅ real lock-free RMW on both tiers — correct under parallel CTAs; each returns the OLD value. add/sub take int **or** float; min/max are integer (signed/unsigned by the pointee); exch/and/or/xor/cas are 32/64-bit. On `__shared__`/local memory they lower to a sequential ld/compute/st (already atomic within a CTA). |
+| address-of `&p[i]` (as an atomic target) | ✅ |
 
 ## Statements / control flow
 | Feature | Status |
