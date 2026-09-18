@@ -846,14 +846,23 @@ struct Codegen {
                 emit("selp.b32 " + d + ", 0, " + tmp + ", " + p + ";");   // x==0 ? 0 : clz+1
                 return {d, intType()};
             }
-            if (fn == "floorf" || fn == "floor" || fn == "ceilf" || fn == "ceil") {
-                const bool dbl = (fn == "floor" || fn == "ceil");
+            // Round-to-integer-in-float. cvt rounding modes: .rmi=floor, .rpi=ceil,
+            // .rzi=trunc (toward zero), .rni=rint/nearbyint (nearest, ties to even).
+            // (CUDA's round() — ties away from zero — is intentionally NOT mapped
+            // here; it differs from rni and would need a separate lowering.)
+            if (fn == "floorf" || fn == "floor" || fn == "ceilf" || fn == "ceil" ||
+                fn == "truncf" || fn == "trunc" || fn == "rintf" || fn == "rint" ||
+                fn == "nearbyintf" || fn == "nearbyint") {
+                const bool dbl = (fn.back() != 'f');     // f32 spellings end in 'f'
                 const std::string suf = dbl ? "f64" : "f32";
                 const Type ft = dbl ? doubleType() : floatType();
                 Val a = coerce(emitExpr(*e.args[0]), ft); if (failed) return {};
                 std::string d = fresh(classOf(ft));
-                // round-to-integer-in-float: .rmi = floor, .rpi = ceil.
-                const std::string rnd = (fn == "floorf" || fn == "floor") ? "rmi" : "rpi";
+                std::string rnd;
+                if (fn == "floorf" || fn == "floor")      rnd = "rmi";
+                else if (fn == "ceilf" || fn == "ceil")   rnd = "rpi";
+                else if (fn == "truncf" || fn == "trunc") rnd = "rzi";
+                else                                      rnd = "rni";  // rint/nearbyint
                 emit("cvt." + rnd + "." + suf + "." + suf + " " + d + ", " + a.reg + ";");
                 return {d, ft};
             }
@@ -924,6 +933,17 @@ struct Codegen {
                 emit("lg2.approx." + suf + " " + lg + ", " + a.reg + ";");
                 emit("mul." + suf + " " + mul + ", " + b.reg + ", " + lg + ";");
                 emit("ex2.approx." + suf + " " + d + ", " + mul + ";");
+                return {d, ft};
+            }
+            if (fn == "hypotf" || fn == "hypot") {      // sqrt(x*x + y*y)
+                const bool dbl = (fn == "hypot");
+                const Type ft = dbl ? doubleType() : floatType();
+                const std::string suf = dbl ? "f64" : "f32";
+                a = coerce(a, ft); b = coerce(b, ft);
+                std::string x2 = fresh(classOf(ft)), s = fresh(classOf(ft)), d = fresh(classOf(ft));
+                emit("mul." + suf + " " + x2 + ", " + a.reg + ", " + a.reg + ";");         // x*x
+                emit("fma.rn." + suf + " " + s + ", " + b.reg + ", " + b.reg + ", " + x2 + ";");  // y*y + x*x
+                emit("sqrt.rn." + suf + " " + d + ", " + s + ";");
                 return {d, ft};
             }
             fail("unsupported call to '" + fn + "'");

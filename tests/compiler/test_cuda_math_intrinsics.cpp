@@ -58,6 +58,21 @@ extern "C" __global__ void thd(double* out, const double* in, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = tanh(in[i]);
 })";
+static const char* kTruncf = R"(
+extern "C" __global__ void tr(float* out, const float* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = truncf(in[i]);
+})";
+static const char* kRintf = R"(
+extern "C" __global__ void ri(float* out, const float* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = rintf(in[i]);
+})";
+static const char* kHypotf = R"(
+extern "C" __global__ void hy(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = hypotf(a[i], b[i]);
+})";
 
 template <typename T, typename Ref>
 static bool checkUnary(const char* src, const char* name, Ref ref, double tol) {
@@ -98,7 +113,50 @@ int main() {
     CHECK(checkUnary<double>(kTanhD, "thd", [](double x){ return std::tanh(x); }, 1e-12),
           "tanh == std::tanh (f64)");
 
+    // trunc: toward zero (exact). Inputs span negatives, positives and .5 ties.
+    {
+        const int N = 96;
+        std::vector<float> in(N), out(N, -999);
+        for (int i = 0; i < N; ++i) in[i] = (i - 48) * 0.5f;   // …-1.5,-1.0,-0.5,0,0.5…
+        void* op = out.data(); void* ip = in.data(); int n = N;
+        void* args[] = {&op, &ip, &n};
+        CHECK(runInterp(kTruncf, "tr", 3, 32, args, 3), "truncf runs");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) if (out[i] != std::trunc(in[i])) { ok = false;
+            std::printf("  tr i=%d in=%g got=%g want=%g\n", i, in[i], out[i], std::trunc(in[i])); break; }
+        CHECK(ok, "truncf == std::trunc (exact, toward zero)");
+    }
+    // rint: nearest, ties to even (matches cvt.rni). .5 ties must round to even.
+    {
+        const int N = 96;
+        std::vector<float> in(N), out(N, -999);
+        for (int i = 0; i < N; ++i) in[i] = (i - 48) * 0.5f;
+        void* op = out.data(); void* ip = in.data(); int n = N;
+        void* args[] = {&op, &ip, &n};
+        CHECK(runInterp(kRintf, "ri", 3, 32, args, 3), "rintf runs");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) if (out[i] != std::nearbyint(in[i])) { ok = false;
+            std::printf("  ri i=%d in=%g got=%g want=%g\n", i, in[i], out[i], std::nearbyint(in[i])); break; }
+        CHECK(ok, "rintf == round-to-nearest-even (ties to even)");
+    }
+    // hypot: sqrt(x*x + y*y) for moderate magnitudes.
+    {
+        const int N = 96;
+        std::vector<float> a(N), b(N), out(N, -999);
+        for (int i = 0; i < N; ++i) { a[i] = (i - 48) * 0.3f; b[i] = (i % 13) * 0.7f - 2.0f; }
+        void* op = out.data(); void* ap = a.data(); void* bp = b.data(); int n = N;
+        void* args[] = {&op, &ap, &bp, &n};
+        CHECK(runInterp(kHypotf, "hy", 3, 32, args, 4), "hypotf runs");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) {
+            double want = std::sqrt((double)a[i] * a[i] + (double)b[i] * b[i]);
+            if (std::fabs(out[i] - want) > 1e-4) { ok = false;
+                std::printf("  hy i=%d got=%g want=%g\n", i, out[i], want); break; }
+        }
+        CHECK(ok, "hypotf == sqrt(x*x + y*y)");
+    }
+
     if (g_fail == 0)
-        std::printf("PASS: math intrinsics (exp2f, log2f, tanhf, tanh)\n");
+        std::printf("PASS: math intrinsics (exp2f, log2f, tanhf, tanh, truncf, rintf, hypotf)\n");
     return g_fail ? 1 : 0;
 }
