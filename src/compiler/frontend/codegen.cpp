@@ -1156,6 +1156,17 @@ struct Codegen {
         switch (s.kind) {
             case Stmt::VarDecl: {
                 if (!ensureSupported(s.type)) return;
+                if (s.isExternShared) {
+                    // extern __shared__ T name[]  ->  .extern .shared .align 16 .b8 name[];
+                    // A dynamically-sized shared array (byte size comes from the launch);
+                    // all such arrays alias the region after the static shared area.
+                    Type ptr = s.type; ptr.ptr = 1;   // decays to a pointer-to-element
+                    Val v; v.type = ptr; v.space = Space::Shared; v.sharedName = s.name;
+                    sharedDecls += "\t.extern .shared .align 16 .b8 " + s.name + "[];\n";
+                    vars[s.name] = v;
+                    arrayDims_[s.name] = std::vector<int>{1};   // 1D; only element stride matters
+                    return;
+                }
                 if (s.arraySize > 0) {
                     int bytes = s.arraySize * s.type.elemBytes();
                     Type ptr = s.type; ptr.ptr = 1;   // the array decays to a pointer-to-element

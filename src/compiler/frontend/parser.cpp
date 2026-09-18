@@ -342,7 +342,8 @@ struct Parser {
             case TokenKind::Semicolon:  { auto s = mkStmt(Stmt::Empty); advance(); return s; }
             default: break;
         }
-        if (isTypeStart(kind()) || at(TokenKind::KwShared)) return parseVarDecl();
+        if (isTypeStart(kind()) || at(TokenKind::KwShared) ||
+            at(TokenKind::KwExtern)) return parseVarDecl();   // extern __shared__ …
         // expression statement
         auto s = mkStmt(Stmt::ExprStmt);
         s->expr = parseExpr();
@@ -364,11 +365,18 @@ struct Parser {
 
     StmtPtr parseVarDecl() {
         auto s = mkStmt(Stmt::VarDecl);
+        // `extern __shared__ T name[];` — dynamic shared memory (size from launch).
+        if (accept(TokenKind::KwExtern)) { s->isExternShared = true; s->isShared = true; }
         if (accept(TokenKind::KwShared)) s->isShared = true;   // __shared__ [type] name[N];
         if (!parseType(s->type)) { fail("expected a type"); return nullptr; }
         if (!at(TokenKind::Identifier)) { fail("expected a variable name"); return nullptr; }
         s->name = advance().text;
         while (accept(TokenKind::LBracket)) {                  // array declarator name[N][M]…
+            if (at(TokenKind::RBracket)) {                     // empty [] — dynamic extern shared
+                if (!s->isExternShared) { fail("only 'extern __shared__' may use an unsized []"); return nullptr; }
+                advance();  // ]
+                continue;
+            }
             if (!at(TokenKind::IntLiteral)) { fail("expected an array size"); return nullptr; }
             int dim = static_cast<int>(std::strtoll(advance().text.c_str(), nullptr, 0));
             expect(TokenKind::RBracket, "']'");

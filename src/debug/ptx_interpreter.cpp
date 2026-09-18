@@ -231,6 +231,22 @@ bool PtxInterpreter::tryParse(const std::string& ptx, const std::string& entry,
                     std::string base = name.substr(0, lt);
                     for (int i = 0; i < n; ++i) declReg(base + std::to_string(i));
                 } else declReg(name);
+            } else if (kind == ".extern") {
+                // ".extern .shared .align A .b8 name[];" — dynamic `extern
+                // __shared__`, sized by the launch. All such arrays alias the
+                // region immediately after the static shared area (base offset =
+                // the static shared byte count).
+                std::string tok, name; bool isShared = false;
+                while (ss >> tok) {
+                    if (tok == ".shared") { isShared = true; continue; }
+                    if (tok == ".align") { ss >> tok; continue; }
+                    if (!tok.empty() && tok[0] != '.') name = tok;
+                }
+                if (isShared && !name.empty()) {
+                    size_t br = name.find('[');
+                    if (br != std::string::npos) name = name.substr(0, br);
+                    kernel_.sharedVars[name] = kernel_.sharedBytes;   // dynamic base
+                }
             } else if (kind == ".shared") {
                 std::string tok, type, name;
                 while (ss >> tok) {
@@ -347,9 +363,11 @@ bool PtxInterpreter::canParse(const std::string& ptx, const std::string& entry) 
 
 bool PtxInterpreter::runKernel(const std::string& ptx, const std::string& entry,
                                const Dim3& grid, const Dim3& block,
-                               void* const* args, int numArgs) noexcept {
+                               void* const* args, int numArgs,
+                               size_t dynSharedBytes) noexcept {
     try {
         PtxInterpreter in(ptx, entry);
+        in.setDynamicSharedBytes(dynSharedBytes);
         in.launch(grid, block, args, numArgs);
         return in.resume() == StopReason::Exited;
     } catch (...) {
@@ -360,9 +378,11 @@ bool PtxInterpreter::runKernel(const std::string& ptx, const std::string& entry,
 bool PtxInterpreter::runKernelRange(const std::string& ptx, const std::string& entry,
                                     const Dim3& grid, const Dim3& block,
                                     void* const* args, int numArgs,
-                                    int ctaBegin, int ctaEnd) noexcept {
+                                    int ctaBegin, int ctaEnd,
+                                    size_t dynSharedBytes) noexcept {
     try {
         PtxInterpreter in(ptx, entry);
+        in.setDynamicSharedBytes(dynSharedBytes);
         return in.runCtaRange(grid, block, args, numArgs, ctaBegin, ctaEnd);
     } catch (...) {
         return false;
@@ -412,7 +432,9 @@ void PtxInterpreter::startCta(int cta) {
     ctaIdx_[0] = cta % gridDim_[0];
     ctaIdx_[1] = (cta / gridDim_[0]) % gridDim_[1];
     ctaIdx_[2] = cta / (gridDim_[0] * gridDim_[1]);
-    shared_.assign((size_t)std::max(kernel_.sharedBytes, 1), 0);
+    // Static `.shared` plus the launch's dynamic `extern __shared__` bytes, which
+    // alias the region immediately after the static shared area.
+    shared_.assign((size_t)std::max(kernel_.sharedBytes + dynSharedBytes_, 1), 0);
     threads_.assign((size_t)blockTotal_, Thread{});
     if (kernel_.localBytes > 0)
         for (auto& t : threads_) t.local.assign((size_t)kernel_.localBytes, 0);

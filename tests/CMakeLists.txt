@@ -1169,6 +1169,13 @@ target_link_libraries(test_cuda_convert PRIVATE vgre Threads::Threads)
 add_test(NAME CudaConvert COMMAND test_cuda_convert)
 set_tests_properties(CudaConvert PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: dynamic shared memory (extern __shared__, launch-sized).
+# Parser + codegen + interpreter arena sizing; runs in the LLVM-free build too.
+add_executable(test_cuda_dynamic_shared compiler/test_cuda_dynamic_shared.cpp)
+target_link_libraries(test_cuda_dynamic_shared PRIVATE vgre Threads::Threads)
+add_test(NAME CudaDynamicShared COMMAND test_cuda_dynamic_shared)
+set_tests_properties(CudaDynamicShared PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

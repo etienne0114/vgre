@@ -70,7 +70,7 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
     // debug component swallows any exception internally and returns a bool, so
     // nothing crosses the library boundary (see PtxInterpreter::runKernel).
     if (gridTotal <= 1 || workers <= 1) {
-        if (!vgre::debug::PtxInterpreter::runKernel(k->ptx(), k->entry(), grid, block, args, numArgs)) {
+        if (!vgre::debug::PtxInterpreter::runKernel(k->ptx(), k->entry(), grid, block, args, numArgs, cfg.sharedBytes)) {
             VGRE_LOG_ERROR("InterpreterBackend", "launch failed");
             return false;
         }
@@ -88,7 +88,7 @@ bool InterpreterBackend::launch(PreparedKernel& kernel, const LaunchConfig& cfg,
         const int end   = static_cast<int>((c + 1) * gridTotal / chunks);
         if (begin >= end) return;
         if (!vgre::debug::PtxInterpreter::runKernelRange(k->ptx(), k->entry(), grid, block,
-                                                         args, numArgs, begin, end)) {
+                                                         args, numArgs, begin, end, cfg.sharedBytes)) {
             ok.store(false, std::memory_order_relaxed);
             VGRE_LOG_ERROR("InterpreterBackend", "launch failed (interpreter error)");
         }

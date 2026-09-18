@@ -91,6 +91,10 @@ public:
     void launch(int gridX, int blockX, void* const* args, int numArgs);
     void launch(const Dim3& grid, const Dim3& block, void* const* args, int numArgs);
 
+    // Bytes of dynamic (`extern __shared__`) shared memory the launch requests,
+    // beyond the kernel's statically-declared `.shared`. Set before launch/run*.
+    void setDynamicSharedBytes(size_t bytes) { dynSharedBytes_ = (int)bytes; }
+
     // ── Non-throwing entry points for other components ───────────────────────
     // These handle every exception INSIDE this translation unit (returning a
     // bool) so nothing propagates across the library boundary to a caller in
@@ -104,11 +108,13 @@ public:
     static bool canParse(const std::string& ptx, const std::string& entry) noexcept;
     static bool runKernel(const std::string& ptx, const std::string& entry,
                           const Dim3& grid, const Dim3& block,
-                          void* const* args, int numArgs) noexcept;
+                          void* const* args, int numArgs,
+                          size_t dynSharedBytes = 0) noexcept;
     static bool runKernelRange(const std::string& ptx, const std::string& entry,
                                const Dim3& grid, const Dim3& block,
                                void* const* args, int numArgs,
-                               int ctaBegin, int ctaEnd) noexcept;
+                               int ctaBegin, int ctaEnd,
+                               size_t dynSharedBytes = 0) noexcept;
 
     // ── Bulk (non-debug) execution ───────────────────────────────────────────
     // Set up launch state, then run the CTA sub-range [ctaBegin, ctaEnd) to
@@ -219,6 +225,7 @@ private:
     int ctaIdx_[3] = {0, 0, 0};
     std::vector<uint8_t> paramBlock_;
     std::vector<uint8_t> shared_;
+    int dynSharedBytes_ = 0;   // extern __shared__ bytes requested by the launch
     std::vector<Thread> threads_;
     std::set<int> breakpoints_;
     bool exited_ = true;
