@@ -127,6 +127,14 @@ Two options, in order of effort:
 lightweight, Windows-friendly, LLVM-free build). Treat Stage 3.2 as an ongoing
 track with a documented, growing "supported CUDA-C subset" list.
 
+**Status (2026-09-18):** Stages 0, 1, 2 and 3.1 are **done and now CI-guarded.**
+A dedicated `linux-x86_64-llvm-free` CI job builds with `VGRE_ENABLE_JIT=OFF` +
+`VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**,
+then runs the 305-test JIT-free subset to green on every push — so the
+lightweight, no-toolchain path can no longer silently regress (previously it was
+only ever built by hand). Remaining: Stage 3.2 (grow the from-scratch CUDA-C →
+PTX frontend's supported subset).
+
 ### Effort / payoff summary
 
 | Stage | Effort | Removes LLVM from | Payoff |

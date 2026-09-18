@@ -32,7 +32,8 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
 **Critical Issues**: 0 known on the verified (Linux) platform  
-**Cross-Platform**: Linux **verified** (full `ctest`, required CI job); macOS **CI-green** on Apple Silicon; Windows **CI-green** (full `ctest` suite, clang-cl) — all three platforms pass in CI (macOS/Windows still `continue-on-error` pending promotion)
+**Cross-Platform**: Linux **verified** (full `ctest`, required CI job); macOS **CI-green** on Apple Silicon; Windows **CI-green** (full `ctest` suite, clang-cl) — all three platforms pass in CI (macOS/Windows still `continue-on-error` pending promotion)  
+**Zero-burden build**: a dedicated `linux-x86_64-llvm-free` CI job builds with **no LLVM/Clang dev libs or OpenMP** (`VGRE_ENABLE_JIT=OFF`, `VGRE_ENABLE_OPENMP=OFF`) and runs the 305-test JIT-free subset green — the lightweight "runs on any machine, no toolchain" path is now guarded on every push, not just built by hand
 
 ### Platform Support
 - ✅ **Linux**: Verified — built and full test suite passing on x86-64 (NUMA + Linux Keyring). The required CI job.

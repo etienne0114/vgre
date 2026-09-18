@@ -93,6 +93,75 @@ jobs:
           name: linux-test-logs
           path: build/Testing/Temporary/
 
+  # ── Linux, LLVM-free: the zero-burden lightweight path (required) ─────────
+  # The project's core promise is running on any machine with NO GPU and NO
+  # LLVM/Clang toolchain: VGRE_ENABLE_JIT=OFF drops the ORC JIT (kernels compile
+  # via the from-scratch front-end and run on the interpreter/compiled execution
+  # backends), and VGRE_ENABLE_OPENMP=OFF uses the in-tree work-stealing pool.
+  # This lane installs NO llvm-*-dev / libclang / libomp — proving the minimal
+  # dependency set actually builds and passes — and guards that path from silent
+  # regressions (previously it was only ever built by hand, never in CI). The
+  # JIT-only tests are gated out in CMake, so ctest runs a clean 305-test subset.
+  linux-llvm-free:
+    name: linux-x86_64-llvm-free
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install minimal toolchain (no LLVM/Clang dev, no OpenMP)
+        # Deliberately NO llvm-18-dev / libclang-18-dev / libomp-18-dev: the whole
+        # point is to prove the LLVM-free build needs none of them. clang-18 here
+        # is only the C++ compiler (its libLLVM runtime dep is unused at
+        # VGRE_ENABLE_JIT=OFF). sqlite3/lapack/keyutils/ssl/zlib are non-LLVM
+        # optional feature deps kept so the full 305-test subset stays green.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang-18 \
+            libsqlite3-dev liblapack-dev libkeyutils-dev libssl-dev zlib1g-dev \
+            ccache python3-numpy
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          clang++-18 --version
+          cmake --version
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-linux-nollvm-${{ github.sha }}
+          restore-keys: ccache-linux-nollvm-
+
+      - name: Configure (LLVM-free, OpenMP-free)
+        # No LLVM_DIR — nothing to find. Pin clang-18 as the compiler explicitly so
+        # the lane is independent of whatever the runner's default cc/c++ resolves
+        # to. VGRE_ENABLE_JIT=OFF / VGRE_ENABLE_OPENMP=OFF select the zero-burden path.
+        run: >
+          cmake -S . -B build_nollvm -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF
+          -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build_nollvm --parallel
+
+      - name: Test
+        working-directory: build_nollvm
+        # Same exclusion/retry policy as the LLVM lane. The suite is slower here
+        # (OpenMP off ⇒ serial inner loops), so the 45-min job budget matters; the
+        # per-test 300 s cap is unchanged (no single test approaches it locally).
+        run: >
+          ctest --output-on-failure -j 2 --test-load 4 --timeout 300
+          --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-llvm-free-test-logs
+          path: build_nollvm/Testing/Temporary/
+
   # ── macOS: bring-up (informational until green) ──────────────────────────
   macos:
     name: macos-arm64
