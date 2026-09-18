@@ -95,6 +95,12 @@ int clzBits(uint64_t v, int bits) {
     int n = 0; uint64_t m = uint64_t(1) << (bits - 1);
     while (!(v & m)) { ++n; m >>= 1; } return n;
 }
+// Reverse the low `bits` bits of v (PTX brev.b{32,64}).
+uint64_t brevBits(uint64_t v, int bits) {
+    uint64_t r = 0;
+    for (int i = 0; i < bits; ++i) { r = (r << 1) | (v & 1); v >>= 1; }
+    return r;
+}
 
 int64_t signExtend(uint64_t v, int bytes) {
     switch (bytes) {
@@ -916,6 +922,9 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
     } else if (mnem == "clz") {
         // clz.b{32,64}: leading-zero count of the source → 32-bit result (__clz/ll).
         setReg(A(0), (uint64_t)clzBits(val(1), size * 8));
+    } else if (mnem == "brev") {
+        // brev.b{32,64}: bit reversal of the source (width-preserving).
+        setReg(A(0), brevBits(val(1), size * 8));
     } else if (mnem == "sqrt")  { setF(A(0), std::sqrt(fval(1)));
     } else if (mnem == "rsqrt") { setF(A(0), 1.0 / std::sqrt(fval(1)));
     } else if (mnem == "rcp")   { setF(A(0), 1.0 / fval(1));

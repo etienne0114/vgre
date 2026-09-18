@@ -819,6 +819,32 @@ struct Codegen {
                 emit(op + (ll ? ".b64 " : ".b32 ") + d + ", " + a.reg + ";");
                 return {d, intType()};
             }
+            // Bit reversal — width-preserving (__brev: unsigned; __brevll: 64-bit).
+            if (fn == "__brev" || fn == "__brevll") {
+                const bool ll = (fn == "__brevll");
+                const Type rt = ll ? longType() : intType();
+                Val a = coerce(emitExpr(*e.args[0]), rt); if (failed) return {};
+                std::string d = fresh(classOf(rt));
+                emit(std::string("brev.") + (ll ? "b64 " : "b32 ") + d + ", " + a.reg + ";");
+                return {d, rt};
+            }
+            // Find-first-set: 1-indexed position of the least-significant set bit, or
+            // 0 if the operand is 0. Composed as clz(brev(x)) + 1, guarded for x == 0.
+            if (fn == "__ffs" || fn == "__ffsll") {
+                const bool ll = (fn == "__ffsll");
+                Val a = coerce(emitExpr(*e.args[0]), ll ? longType() : intType()); if (failed) return {};
+                std::string rev = fresh(ll ? RC::RD64 : RC::R32);
+                emit(std::string("brev.") + (ll ? "b64 " : "b32 ") + rev + ", " + a.reg + ";");
+                std::string clz = fresh(RC::R32);
+                emit(std::string("clz.") + (ll ? "b64 " : "b32 ") + clz + ", " + rev + ";");
+                std::string tmp = fresh(RC::R32);
+                emit("add.s32 " + tmp + ", " + clz + ", 1;");
+                std::string p = fresh(RC::Pred);
+                emit(std::string("setp.eq.") + (ll ? "s64 " : "s32 ") + p + ", " + a.reg + ", 0;");
+                std::string d = fresh(RC::R32);
+                emit("selp.b32 " + d + ", 0, " + tmp + ", " + p + ";");   // x==0 ? 0 : clz+1
+                return {d, intType()};
+            }
             if (fn == "floorf" || fn == "floor" || fn == "ceilf" || fn == "ceil") {
                 const bool dbl = (fn == "floor" || fn == "ceil");
                 const std::string suf = dbl ? "f64" : "f32";

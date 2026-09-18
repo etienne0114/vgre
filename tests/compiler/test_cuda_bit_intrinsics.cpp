@@ -39,6 +39,8 @@ static bool runInterp(const char* src, const char* name,
 
 static int refPopc(uint64_t v) { int c = 0; while (v) { v &= v - 1; ++c; } return c; }
 static int refClz32(uint32_t v) { if (!v) return 32; int n = 0; for (uint32_t m = 1u << 31; !(v & m); m >>= 1) ++n; return n; }
+static uint32_t refBrev32(uint32_t v) { uint32_t r = 0; for (int i = 0; i < 32; ++i) { r = (r << 1) | (v & 1); v >>= 1; } return r; }
+static int refFfs(uint64_t v, int bits) { if (!v) return 0; int n = 1; while (!(v & 1)) { ++n; v >>= 1; } (void)bits; return n; }
 
 static const char* kPopc  = R"(
 extern "C" __global__ void popc(int* out, const int* in, int n) {
@@ -54,6 +56,21 @@ static const char* kClz = R"(
 extern "C" __global__ void clzk(int* out, const int* in, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = __clz(in[i]);
+})";
+static const char* kBrev = R"(
+extern "C" __global__ void brevk(int* out, const int* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __brev(in[i]);
+})";
+static const char* kFfs = R"(
+extern "C" __global__ void ffsk(int* out, const int* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __ffs(in[i]);
+})";
+static const char* kFfsll = R"(
+extern "C" __global__ void ffsllk(int* out, const long* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __ffsll(in[i]);
 })";
 // The idiom: count how many lanes in the warp have in[i] > 0.
 static const char* kWarpCount = R"(
@@ -105,6 +122,48 @@ int main() {
         for (int i = 0; i < N; ++i) if (out[i] != refClz32((uint32_t)in[i])) { ok = false;
             std::printf("  i=%d in=%08x got=%d want=%d\n", i, (uint32_t)in[i], out[i], refClz32((uint32_t)in[i])); break; }
         CHECK(ok, "__clz == 32-bit leading-zero count (0 -> 32)");
+    }
+
+    // ── __brev (32-bit) ──────────────────────────────────────────────────────
+    {
+        const int N = 64;
+        std::vector<int> in(N), out(N, -1);
+        for (int i = 0; i < N; ++i) in[i] = (int)(i * 2654435761u + 12345u);
+        void* op = out.data(); void* ip = in.data(); int n = N;
+        void* args[] = {&op, &ip, &n};
+        CHECK(runInterp(kBrev, "brevk", 2, 32, args, 3), "brev runs");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) if ((uint32_t)out[i] != refBrev32((uint32_t)in[i])) { ok = false;
+            std::printf("  i=%d got=%08x want=%08x\n", i, (uint32_t)out[i], refBrev32((uint32_t)in[i])); break; }
+        CHECK(ok, "__brev == 32-bit bit reversal");
+    }
+
+    // ── __ffs (32-bit), including 0 → 0 ──────────────────────────────────────
+    {
+        const int N = 64;
+        std::vector<int> in(N), out(N, -1);
+        for (int i = 0; i < N; ++i) in[i] = (i == 0) ? 0 : (int)((3u << (i % 30)) | 0);  // varied low bit
+        void* op = out.data(); void* ip = in.data(); int n = N;
+        void* args[] = {&op, &ip, &n};
+        CHECK(runInterp(kFfs, "ffsk", 2, 32, args, 3), "ffs runs");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) if (out[i] != refFfs((uint32_t)in[i], 32)) { ok = false;
+            std::printf("  i=%d in=%08x got=%d want=%d\n", i, (uint32_t)in[i], out[i], refFfs((uint32_t)in[i], 32)); break; }
+        CHECK(ok, "__ffs == 1-indexed lowest set bit (0 -> 0)");
+    }
+
+    // ── __ffsll (64-bit) ─────────────────────────────────────────────────────
+    {
+        const int N = 64;
+        std::vector<int64_t> in(N); std::vector<int> out(N, -1);
+        for (int i = 0; i < N; ++i) in[i] = (i == 0) ? 0 : (int64_t)((uint64_t)5 << (i % 60));
+        void* op = out.data(); void* ip = in.data(); int n = N;
+        void* args[] = {&op, &ip, &n};
+        CHECK(runInterp(kFfsll, "ffsllk", 2, 32, args, 3), "ffsll runs");
+        bool ok = true;
+        for (int i = 0; i < N; ++i) if (out[i] != refFfs((uint64_t)in[i], 64)) { ok = false;
+            std::printf("  i=%d got=%d want=%d\n", i, out[i], refFfs((uint64_t)in[i], 64)); break; }
+        CHECK(ok, "__ffsll == 1-indexed lowest set bit of a 64-bit value");
     }
 
     // ── __popc(__ballot_sync(...)) : active-lane count ───────────────────────
