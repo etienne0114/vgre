@@ -1112,6 +1112,14 @@ target_link_libraries(test_cuda_warp_shuffle PRIVATE vgre Threads::Threads)
 add_test(NAME CudaWarpShuffle COMMAND test_cuda_warp_shuffle)
 set_tests_properties(CudaWarpShuffle PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: 64-bit warp shuffle (double / long) — split into two .b32
+# shuffles + recombine. Frontend-only (interpreter), so it runs in the LLVM-free
+# build too.
+add_executable(test_cuda_warp_shuffle64 compiler/test_cuda_warp_shuffle64.cpp)
+target_link_libraries(test_cuda_warp_shuffle64 PRIVATE vgre Threads::Threads)
+add_test(NAME CudaWarpShuffle64 COMMAND test_cuda_warp_shuffle64)
+set_tests_properties(CudaWarpShuffle64 PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

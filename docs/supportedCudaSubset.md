@@ -74,7 +74,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | **multi-dimensional** arrays (`float As[16][16]`, `As[ty][tx]`) | ✅ N-D declarations + N-D indexing flatten to row-major offsets, so textbook tiled kernels compile verbatim. Works for both `__shared__` and local arrays. |
 | `__shared__` arrays + `__syncthreads()` | ✅ (Tier-0 interpreter, now parallel across CTAs; the compiled tier defers barrier/`__shared__` kernels to Tier-0) |
 | `threadIdx/blockIdx/blockDim/gridDim.{x,y,z}` | ✅ (full 3D) |
-| **warp shuffle** — `__shfl_sync`, `__shfl_up_sync`, `__shfl_down_sync`, `__shfl_xor_sync` | ✅ Tier-0 interpreter (32-lane warp rendezvous; optional power-of-two `width`; 32-bit values). Warp-cooperative, so the compiled tier defers these to Tier-0. |
+| **warp shuffle** — `__shfl_sync`, `__shfl_up_sync`, `__shfl_down_sync`, `__shfl_xor_sync` | ✅ Tier-0 interpreter (32-lane warp rendezvous; optional power-of-two `width`). **32-bit and 64-bit** values: `double`/`long` shuffle as two `.b32` words (low/high) recombined — bit-exact (a `double` moves through an integer register, shuffling its raw IEEE-754 bits). Warp-cooperative, so the compiled tier defers these to Tier-0. |
 
 ## Intrinsics
 `sqrt`, `rsqrt`, `fabs`, `abs` (int/float, width-preserving), `exp`/`__expf`,
@@ -98,8 +98,9 @@ workload runs on the from-scratch front-end.
 ## Not yet supported (returns an error, falls back to JIT when available)
 - templates, recursion
 - texture/surface intrinsics
-- warp shuffle of 64-bit values, and `__shfl`/`__ballot` predicate/vote variants
-  beyond the four `__shfl_*_sync` forms
+- warp **vote/ballot** intrinsics (`__ballot_sync`, `__any_sync`, `__all_sync`)
+  and `__shfl` predicate variants beyond the four `__shfl_*_sync` forms
+  (64-bit `__shfl_*_sync` of `double`/`long` **is** now supported)
 
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier

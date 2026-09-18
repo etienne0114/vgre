@@ -705,13 +705,13 @@ struct Codegen {
 
     // Warp shuffle: __shfl[_up|_down|_xor]_sync(mask, var, lane [, width]).
     // Lowers to `shfl.sync.<mode>.b32 d, var, lane, <width>, mask` — the c operand
-    // carries the subwarp width (our interpreter's encoding). Only 32-bit values.
+    // carries the subwarp width (our interpreter's encoding). 32-bit values shuffle
+    // directly; 64-bit values (double / long) split into two .b32 shuffles.
     Val emitShfl(const Expr& e) {
         const std::string& fn = e.str;
         if (e.args.size() < 3 || e.args.size() > 4) { fail("'" + fn + "' expects (mask, var, lane[, width])"); return {}; }
         Val mask = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
         Val var  = emitExpr(*e.args[1]);                    if (failed) return {};
-        if (is64BitScalar(var.type)) { fail("warp shuffle of 64-bit values is unsupported"); return {}; }
         Val lane = coerce(emitExpr(*e.args[2]), intType()); if (failed) return {};
         int width = 32;
         if (e.args.size() == 4) {
@@ -721,10 +721,45 @@ struct Codegen {
         }
         const char* mode = fn == "__shfl_sync" ? "idx" : fn == "__shfl_up_sync" ? "up" :
                            fn == "__shfl_down_sync" ? "down" : "bfly";
-        std::string d = fresh(classOf(var.type));
-        emit("shfl.sync." + std::string(mode) + ".b32 " + d + ", " + var.reg + ", " +
-             lane.reg + ", " + std::to_string(width) + ", " + mask.reg + ";");
-        return {d, var.type};
+        const std::string wc = std::to_string(width);
+        auto shfl32 = [&](const std::string& dst, const std::string& srcReg) {
+            emit("shfl.sync." + std::string(mode) + ".b32 " + dst + ", " + srcReg + ", " +
+                 lane.reg + ", " + wc + ", " + mask.reg + ";");
+        };
+
+        if (!is64BitScalar(var.type)) {                     // 32-bit: shuffle directly
+            std::string d = fresh(classOf(var.type));
+            shfl32(d, var.reg);
+            return {d, var.type};
+        }
+
+        // 64-bit shuffle: shfl is a .b32 operation on real hardware, so shuffle the
+        // low and high 32-bit words separately (same mask/lane/width) and recombine.
+        // The result is bit-exact for any 64-bit type; a double is moved through an
+        // integer register (mov.b64 is a bit reinterpret) so the two halves are its
+        // raw IEEE-754 bits.
+        const bool isF64 = (var.type.base == Type::Double);
+        std::string bits = var.reg;
+        if (isF64) { bits = fresh(RC::RD64); emit("mov.b64 " + bits + ", " + var.reg + ";"); }
+
+        std::string lo = fresh(RC::R32), hitmp = fresh(RC::RD64), hi = fresh(RC::R32);
+        emit("cvt.u32.u64 " + lo + ", " + bits + ";");           // low 32 bits (truncate)
+        emit("shr.u64 " + hitmp + ", " + bits + ", 32;");
+        emit("cvt.u32.u64 " + hi + ", " + hitmp + ";");          // high 32 bits
+
+        std::string los = fresh(RC::R32), his = fresh(RC::R32);
+        shfl32(los, lo);
+        shfl32(his, hi);
+
+        std::string lo64 = fresh(RC::RD64), hi64 = fresh(RC::RD64),
+                    hish = fresh(RC::RD64), res = fresh(RC::RD64);
+        emit("cvt.u64.u32 " + lo64 + ", " + los + ";");          // zero-extend
+        emit("cvt.u64.u32 " + hi64 + ", " + his + ";");
+        emit("shl.b64 " + hish + ", " + hi64 + ", 32;");
+        emit("or.b64 " + res + ", " + lo64 + ", " + hish + ";");
+
+        if (isF64) { std::string fres = fresh(RC::F64); emit("mov.b64 " + fres + ", " + res + ";"); return {fres, var.type}; }
+        return {res, var.type};
     }
 
     Val emitCall(const Expr& e) {
