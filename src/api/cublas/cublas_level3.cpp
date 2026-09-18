@@ -31,14 +31,21 @@ static void sgemm_nn_avx2(int M, int N, int K,
         float*       Cm = C + m * ldc;
         int n = 0;
         for (; n + 7 < N; n += 8) {
-            __m256 vc = betaZ ? _mm256_setzero_ps()
-                               : _mm256_mul_ps(_mm256_loadu_ps(Cm + n), vbeta);
+            // Accumulate the raw dot products A*B, then form the GEMM result
+            // alpha*(A*B) + beta*C_old. Folding beta*C_old into the accumulator
+            // BEFORE the final *alpha would multiply the C_old term by alpha too
+            // (yielding alpha*A*B + alpha*beta*C_old), which is wrong whenever
+            // alpha != 1 and beta != 0 — matching the scalar tail below.
+            __m256 vc = _mm256_setzero_ps();
             for (int k = 0; k < K; ++k) {
                 __m256 va = _mm256_set1_ps(Am[k]);
                 __m256 vb = _mm256_loadu_ps(B + k * ldb + n);
                 vc = _mm256_fmadd_ps(va, vb, vc);
             }
-            _mm256_storeu_ps(Cm + n, _mm256_mul_ps(vc, valpha));
+            __m256 res = _mm256_mul_ps(vc, valpha);            // alpha*(A*B)
+            if (!betaZ)                                        // + beta*C_old
+                res = _mm256_fmadd_ps(vbeta, _mm256_loadu_ps(Cm + n), res);
+            _mm256_storeu_ps(Cm + n, res);
         }
         for (; n < N; ++n) {
             float acc = 0.f;
@@ -233,14 +240,18 @@ static void dgemm_nn_avx2(int M, int N, int K,
         double*       Cm = C + m * ldc;
         int n = 0;
         for (; n + 3 < N; n += 4) {
-            __m256d vc = betaZ ? _mm256_setzero_pd()
-                                : _mm256_mul_pd(_mm256_loadu_pd(Cm + n), vbeta);
+            // See the SGEMM note: accumulate A*B, then alpha*(A*B) + beta*C_old,
+            // so the C_old term is NOT scaled by alpha.
+            __m256d vc = _mm256_setzero_pd();
             for (int k = 0; k < K; ++k) {
                 __m256d va = _mm256_set1_pd(Am[k]);
                 __m256d vb = _mm256_loadu_pd(B + k * ldb + n);
                 vc = _mm256_fmadd_pd(va, vb, vc);
             }
-            _mm256_storeu_pd(Cm + n, _mm256_mul_pd(vc, valpha));
+            __m256d res = _mm256_mul_pd(vc, valpha);           // alpha*(A*B)
+            if (!betaZ)                                        // + beta*C_old
+                res = _mm256_fmadd_pd(vbeta, _mm256_loadu_pd(Cm + n), res);
+            _mm256_storeu_pd(Cm + n, res);
         }
         for (; n < N; ++n) {
             double acc = 0.0;
