@@ -12,6 +12,14 @@ Run via ctest (sets LD_LIBRARY_PATH + PYTHONPATH) or:
 import os
 import random
 import sys
+# Force UTF-8 stdout/stderr so the arrows/box-drawing in this test's output do
+# not crash on Windows, whose default console encoding (cp1252) cannot encode
+# them (UnicodeEncodeError). No-op where the streams are already UTF-8.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 import tempfile
 
 # Allow running from the source tree without installing the wheel.
