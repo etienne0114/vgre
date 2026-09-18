@@ -1127,6 +1127,13 @@ target_link_libraries(test_cuda_warp_vote PRIVATE vgre Threads::Threads)
 add_test(NAME CudaWarpVote COMMAND test_cuda_warp_vote)
 set_tests_properties(CudaWarpVote PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: bit-count intrinsics (__popc/__popcll/__clz/__clzll) +
+# the ballot-popc active-lane-count idiom. Frontend + interpreter, LLVM-free too.
+add_executable(test_cuda_bit_intrinsics compiler/test_cuda_bit_intrinsics.cpp)
+target_link_libraries(test_cuda_bit_intrinsics PRIVATE vgre Threads::Threads)
+add_test(NAME CudaBitIntrinsics COMMAND test_cuda_bit_intrinsics)
+set_tests_properties(CudaBitIntrinsics PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

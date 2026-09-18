@@ -808,6 +808,17 @@ struct Codegen {
                      " " + d + ", " + a.reg + ";");
                 return {d, a.type};
             }
+            // Bit-count intrinsics — population count / count-leading-zeros. The
+            // `ll` forms take a 64-bit operand; all return a 32-bit int (as in CUDA).
+            // __popc(__ballot_sync(...)) is the canonical active-lane count.
+            if (fn == "__popc" || fn == "__popcll" || fn == "__clz" || fn == "__clzll") {
+                const bool ll = (fn == "__popcll" || fn == "__clzll");
+                const std::string op = (fn == "__popc" || fn == "__popcll") ? "popc" : "clz";
+                Val a = coerce(emitExpr(*e.args[0]), ll ? longType() : intType()); if (failed) return {};
+                std::string d = fresh(RC::R32);
+                emit(op + (ll ? ".b64 " : ".b32 ") + d + ", " + a.reg + ";");
+                return {d, intType()};
+            }
             if (fn == "floorf" || fn == "floor" || fn == "ceilf" || fn == "ceil") {
                 const bool dbl = (fn == "floor" || fn == "ceil");
                 const std::string suf = dbl ? "f64" : "f32";

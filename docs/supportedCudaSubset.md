@@ -86,6 +86,12 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …) evaluated at the operand's width; the compiled
 tier uses libm.
 
+**Bit-count intrinsics:** `__popc`/`__popcll` (population count) and
+`__clz`/`__clzll` (count leading zeros; `clz(0)` = bit width) → PTX
+`popc.b{32,64}` / `clz.b{32,64}`, returning a 32-bit `int`. `__popc(__ballot_sync
+(mask, pred))` — the canonical count of lanes whose predicate is set — works end
+to end.
+
 ## Worked example: FlashAttention
 
 These pieces compose. `tests/compiler/test_cuda_flash_attention.cpp` compiles a

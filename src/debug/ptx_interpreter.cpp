@@ -82,6 +82,20 @@ double asF64(uint64_t v) { double d; std::memcpy(&d, &v, 8); return d; }
 uint64_t fromF32(float f)  { uint32_t u; std::memcpy(&u, &f, 4); return u; }
 uint64_t fromF64(double d) { uint64_t u; std::memcpy(&u, &d, 8); return u; }
 
+// Portable population count / count-leading-zeros over the low `bits` of v (no
+// compiler builtins, so this stays correct on every toolchain the engine builds
+// with). clz of 0 is the full width (matches PTX clz.b{32,64}).
+int popcountBits(uint64_t v, int bits) {
+    if (bits < 64) v &= (uint64_t(1) << bits) - 1;
+    int c = 0; while (v) { v &= v - 1; ++c; } return c;
+}
+int clzBits(uint64_t v, int bits) {
+    if (bits < 64) v &= (uint64_t(1) << bits) - 1;
+    if (v == 0) return bits;
+    int n = 0; uint64_t m = uint64_t(1) << (bits - 1);
+    while (!(v & m)) { ++n; m >>= 1; } return n;
+}
+
 int64_t signExtend(uint64_t v, int bytes) {
     switch (bytes) {
         case 1: return (int8_t)v;
@@ -896,6 +910,12 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
     } else if (mnem == "abs") {
         if (isF) setF(A(0), std::fabs(fval(1)));
         else setReg(A(0), (uint64_t)std::llabs(ival(1)));
+    } else if (mnem == "popc") {
+        // popc.b{32,64}: population count of the source → 32-bit result (__popc/ll).
+        setReg(A(0), (uint64_t)popcountBits(val(1), size * 8));
+    } else if (mnem == "clz") {
+        // clz.b{32,64}: leading-zero count of the source → 32-bit result (__clz/ll).
+        setReg(A(0), (uint64_t)clzBits(val(1), size * 8));
     } else if (mnem == "sqrt")  { setF(A(0), std::sqrt(fval(1)));
     } else if (mnem == "rsqrt") { setF(A(0), 1.0 / std::sqrt(fval(1)));
     } else if (mnem == "rcp")   { setF(A(0), 1.0 / fval(1));
