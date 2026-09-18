@@ -832,8 +832,48 @@ struct Codegen {
         return {d, intType()};
     }
 
+    // __half <-> float helpers (used by the half arithmetic intrinsics, which all
+    // promote to float, compute, then narrow back to __half).
+    Val h2f(const Val& h) { std::string d = fresh(RC::F32); emit("cvt.f32.f16 " + d + ", " + h.reg + ";"); return {d, floatType()}; }
+    Val f2h(const Val& f) { std::string d = fresh(RC::R32); emit("cvt.rn.f16.f32 " + d + ", " + f.reg + ";"); return {d, halfType()}; }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
+        // ── Half arithmetic: compute in float, result __half (or bool for cmp) ──
+        if (e.args.size() == 2 &&
+            (fn == "__hadd" || fn == "__hsub" || fn == "__hmul" || fn == "__hdiv" ||
+             fn == "__hmax" || fn == "__hmin")) {
+            Val a = h2f(emitExpr(*e.args[0])); if (failed) return {};
+            Val b = h2f(emitExpr(*e.args[1])); if (failed) return {};
+            const std::string op = fn.substr(3);          // __h(add/sub/mul/div/max/min)
+            std::string rf = fresh(RC::F32);
+            emit((op == "div" ? "div.rn.f32 " : op + ".f32 ") + rf + ", " + a.reg + ", " + b.reg + ";");
+            return f2h({rf, floatType()});
+        }
+        if (e.args.size() == 2 &&
+            (fn == "__heq" || fn == "__hne" || fn == "__hlt" || fn == "__hle" ||
+             fn == "__hgt" || fn == "__hge")) {
+            Val a = h2f(emitExpr(*e.args[0])); if (failed) return {};
+            Val b = h2f(emitExpr(*e.args[1])); if (failed) return {};
+            std::string p = fresh(RC::Pred), d = fresh(RC::R32);
+            emit("setp." + fn.substr(3) + ".f32 " + p + ", " + a.reg + ", " + b.reg + ";");
+            emit("selp.b32 " + d + ", 1, 0, " + p + ";");   // __half compare → int 0/1
+            return {d, intType()};
+        }
+        if (e.args.size() == 3 && fn == "__hfma") {
+            Val a = h2f(emitExpr(*e.args[0])); if (failed) return {};
+            Val b = h2f(emitExpr(*e.args[1])); if (failed) return {};
+            Val c = h2f(emitExpr(*e.args[2])); if (failed) return {};
+            std::string rf = fresh(RC::F32);
+            emit("fma.rn.f32 " + rf + ", " + a.reg + ", " + b.reg + ", " + c.reg + ";");
+            return f2h({rf, floatType()});
+        }
+        if (e.args.size() == 1 && fn == "__hneg") {
+            Val a = h2f(emitExpr(*e.args[0])); if (failed) return {};
+            std::string rf = fresh(RC::F32);
+            emit("neg.f32 " + rf + ", " + a.reg + ";");
+            return f2h({rf, floatType()});
+        }
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
         if (fn == "__syncwarp" && e.args.size() <= 1) {   // warp barrier (default: full mask)
             std::string mask = "0xffffffff";

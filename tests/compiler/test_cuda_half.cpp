@@ -60,6 +60,27 @@ extern "C" __global__ void hrt(float* out, const float* in, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[i] = __half2float(__float2half(in[i]));
 })";
+// Half arithmetic: result stored as __half (bits), or int for a comparison.
+#define HBIN(nm, expr) R"(
+extern "C" __global__ void )" #nm R"((__half* out, const __half* a, const __half* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = )" expr R"(;
+})"
+static const char* kHadd = HBIN(hadd, "__hadd(a[i], b[i])");
+static const char* kHsub = HBIN(hsub, "__hsub(a[i], b[i])");
+static const char* kHmul = HBIN(hmul, "__hmul(a[i], b[i])");
+static const char* kHmax = HBIN(hmax, "__hmax(a[i], b[i])");
+static const char* kHneg = R"(
+extern "C" __global__ void hneg(__half* out, const __half* a, const __half* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    (void)b;
+    if (i < n) out[i] = __hneg(a[i]);
+})";
+static const char* kHlt = R"(
+extern "C" __global__ void hlt(int* out, const __half* a, const __half* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __hlt(a[i], b[i]);
+})";
 
 int main() {
     const int N = 96;
@@ -104,7 +125,49 @@ int main() {
         CHECK(ok, "__half2float(__float2half(x)) == fp16-rounded x");
     }
 
+    // ── Half arithmetic (compute in float, narrow to fp16) ───────────────────
+    {
+        std::vector<uint16_t> a(N), b(N);
+        for (int i = 0; i < N; ++i) { a[i] = f32_to_f16((i - 48) * 0.25f); b[i] = f32_to_f16((i % 13) * 0.5f - 3.0f); }
+        auto hbin = [&](const char* src, const char* nm, auto fop) -> bool {
+            std::vector<uint16_t> out(N, 0);
+            void* op = out.data(); void* ap = a.data(); void* bp = b.data(); int n = N;
+            void* args[] = {&op, &ap, &bp, &n};
+            if (!runInterp(src, nm, 3, 32, args, 4)) { std::printf("  %s did not run\n", nm); return false; }
+            for (int i = 0; i < N; ++i) {
+                uint16_t want = f32_to_f16(fop(f16_to_f32(a[i]), f16_to_f32(b[i])));
+                if (out[i] != want) { std::printf("  %s i=%d got=%04x want=%04x\n", nm, i, out[i], want); return false; }
+            }
+            return true;
+        };
+        CHECK(hbin(kHadd, "hadd", [](float x, float y){ return x + y; }), "__hadd == fp16(a+b)");
+        CHECK(hbin(kHsub, "hsub", [](float x, float y){ return x - y; }), "__hsub == fp16(a-b)");
+        CHECK(hbin(kHmul, "hmul", [](float x, float y){ return x * y; }), "__hmul == fp16(a*b)");
+        CHECK(hbin(kHmax, "hmax", [](float x, float y){ return x > y ? x : y; }), "__hmax == fp16(max(a,b))");
+
+        // __hneg
+        {
+            std::vector<uint16_t> out(N, 0);
+            void* op = out.data(); void* ap = a.data(); void* bp = b.data(); int n = N;
+            void* args[] = {&op, &ap, &bp, &n};
+            CHECK(runInterp(kHneg, "hneg", 3, 32, args, 4), "hneg runs");
+            bool ok = true;
+            for (int i = 0; i < N; ++i) if (out[i] != f32_to_f16(-f16_to_f32(a[i]))) { ok = false; break; }
+            CHECK(ok, "__hneg == fp16(-a)");
+        }
+        // __hlt -> int 0/1
+        {
+            std::vector<int> out(N, -1);
+            void* op = out.data(); void* ap = a.data(); void* bp = b.data(); int n = N;
+            void* args[] = {&op, &ap, &bp, &n};
+            CHECK(runInterp(kHlt, "hlt", 3, 32, args, 4), "hlt runs");
+            bool ok = true;
+            for (int i = 0; i < N; ++i) if ((out[i] != 0) != (f16_to_f32(a[i]) < f16_to_f32(b[i]))) { ok = false; break; }
+            CHECK(ok, "__hlt == (a < b)");
+        }
+    }
+
     if (g_fail == 0)
-        std::printf("PASS: __half (float2half / half2float / round trip)\n");
+        std::printf("PASS: __half (float2half / half2float / round trip / arithmetic)\n");
     return g_fail ? 1 : 0;
 }
