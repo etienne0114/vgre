@@ -934,6 +934,30 @@ struct Codegen {
                 emit("mov.b64 " + d + ", " + a.reg + ";");
                 return {d, doubleType()};
             }
+            // Rounding-mode conversions f32 -> int32 (rn=nearest, rz=toward-zero,
+            // ru=+inf, rd=-inf) — these VALUE conversions differ from the bit
+            // reinterprets above.
+            if (fn == "__float2int_rn"  || fn == "__float2int_rz"  ||
+                fn == "__float2int_ru"  || fn == "__float2int_rd"  ||
+                fn == "__float2uint_rn" || fn == "__float2uint_rz" ||
+                fn == "__float2uint_ru" || fn == "__float2uint_rd") {
+                const bool uns = (fn.find("uint") != std::string::npos);
+                const char m = fn.back();       // n / z / u / d
+                const std::string rnd = (m == 'n') ? "rni" : (m == 'z') ? "rzi"
+                                      : (m == 'u') ? "rpi" : "rmi";
+                Val a = coerce(emitExpr(*e.args[0]), floatType()); if (failed) return {};
+                std::string d = fresh(RC::R32);
+                emit("cvt." + rnd + "." + std::string(uns ? "u32" : "s32") + ".f32 " + d + ", " + a.reg + ";");
+                return {d, intType()};
+            }
+            // int32/uint32 -> f32 (round to nearest even).
+            if (fn == "__int2float_rn" || fn == "__uint2float_rn") {
+                const bool uns = (fn.find("uint") != std::string::npos);
+                Val a = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+                std::string d = fresh(RC::F32);
+                emit("cvt.rn.f32." + std::string(uns ? "u32" : "s32") + " " + d + ", " + a.reg + ";");
+                return {d, floatType()};
+            }
             // Round-to-integer-in-float. cvt rounding modes: .rmi=floor, .rpi=ceil,
             // .rzi=trunc (toward zero), .rni=rint/nearbyint (nearest, ties to even).
             // (CUDA's round() — ties away from zero — is intentionally NOT mapped

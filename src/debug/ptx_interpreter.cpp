@@ -1048,7 +1048,12 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
             out = typeSize(dstT) == 8 ? fromF64(d) : fromF32((float)d);
         } else if (isFloatType(srcT)) {                              // float → int
             double d = ss == 8 ? asF64(raw) : (double)asF32(raw);
-            double r = has("rni") ? std::nearbyint(d) : std::trunc(d);   // rzi default
+            // Integer rounding mode: rni=nearest-even, rmi=floor, rpi=ceil,
+            // rzi=toward-zero (default).
+            double r = has("rni") ? std::nearbyint(d)
+                     : has("rmi") ? std::floor(d)
+                     : has("rpi") ? std::ceil(d)
+                     :              std::trunc(d);
             out = isSignedType(dstT) ? (uint64_t)(int64_t)r : (uint64_t)r;
             out = zeroExtend(out, typeSize(dstT));
         } else if (isFloatType(dstT)) {                              // int → float

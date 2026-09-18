@@ -97,6 +97,11 @@ tier uses libm.
 — copy the raw bits between a float and a same-width integer register (`mov.b32`/
 `mov.b64`). Used for fast-math bit tricks and float atomics via `atomicCAS`.
 
+**Rounding-mode conversions (value casts):** `__float2int_{rn,rz,ru,rd}` and
+`__float2uint_{rn,rz,ru,rd}` → PTX `cvt.{rni,rzi,rpi,rmi}.{s32,u32}.f32`
+(nearest-even / toward-zero / +∞ / −∞); `__int2float_rn` / `__uint2float_rn` →
+`cvt.rn.f32.{s32,u32}`. Common in quantization / mixed-precision code.
+
 **Bit intrinsics:** `__popc`/`__popcll` (population count), `__clz`/`__clzll`
 (count leading zeros; `clz(0)` = bit width), `__brev`/`__brevll` (bit reversal,
 width-preserving), and `__ffs`/`__ffsll` (1-indexed lowest set bit, `0` for a zero
