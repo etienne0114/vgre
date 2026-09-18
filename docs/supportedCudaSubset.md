@@ -38,7 +38,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | `int`, `unsigned`, `bool`, `char`, `short` (32-bit) | ✅ | ✅ |
 | `float` | ✅ | ✅ |
 | `double`, `long` (64-bit) | ✅ full f64 / i64 (real `.f64`/`.s64` PTX, `cvt`, 64-bit literals) | ✅ full f64 / i64 |
-| pointers (`T*`, `const T* __restrict__`) | ✅ | ✅ |
+| pointers (`T*`, `const T* __restrict__`) | ✅ incl. pointer arithmetic `p ± i` (element-scaled, 64-bit) and cache-hinted loads/stores `__ldg`/`__ldca`/`__ldcs`/`__ldcg`/`__ldlu`/`__ldcv`/`__ldg_nc` and `__stwb`/`__stcg`/`__stcs`/`__stwt` (plain `ld.global`/`st.global` on the CPU — no cache hierarchy) | ✅ |
 | `__half` (fp16, 16-bit storage) | ✅ `__half` variables + `__half*` load/store (`ld/st.b16`); `__float2half`/`__half2float` (`cvt.rn.f16.f32` / `cvt.f32.f16`, IEEE binary16 round-to-nearest-even); and half **arithmetic** `__hadd`/`__hsub`/`__hmul`/`__hdiv`/`__hfma`/`__hneg`/`__hmax`/`__hmin` + comparisons `__heq`/`__hne`/`__hlt`/`__hle`/`__hgt`/`__hge`, each computed in float and narrowed back to fp16 (result rounds to fp16, comparisons return `int`); and the half **unary math** family `hsqrt`/`hrsqrt`/`hrcp`/`__habs`/`hceil`/`hfloor`/`htrunc`/`hrint`/`hexp`/`hexp2`/`hexp10`/`hlog`/`hlog2`/`hlog10`/`hsin`/`hcos` (promote to float, apply the f32 op, narrow to fp16). | defers to interpreter |
 | by-value `struct` params (scalar members, `.member` reads) | ✅ | defers to interpreter |
 

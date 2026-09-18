@@ -575,6 +575,25 @@ struct Codegen {
             emit(std::string(ins) + d + ", " + a.reg + ", " + b.reg + ";");
             return {d, intType()};
         }
+
+        // Pointer arithmetic: p + i / i + p / p - i scale the integer index by
+        // the pointee size and keep 64-bit addressing (and the pointer's memory
+        // space), matching C pointer semantics. This mirrors the address folding
+        // that a[i] does, but for an explicit pointer value.
+        if ((op == "+" || op == "-") && (a.type.isPointer() || b.type.isPointer())) {
+            const bool aPtr = a.type.isPointer();
+            if (a.type.isPointer() && b.type.isPointer()) { fail("pointer - pointer arithmetic is unsupported"); return {}; }
+            if (op == "-" && !aPtr) { fail("cannot subtract a pointer from an integer"); return {}; }
+            const Val& ptr = aPtr ? a : b;
+            const Val& idx = aPtr ? b : a;
+            Type pointee = ptr.type; pointee.ptr -= 1;
+            Val i32 = coerce(idx, intType()); if (failed) return {};
+            std::string off = fresh(RC::RD64), res = fresh(RC::RD64);
+            emit("mul.wide.s32 " + off + ", " + i32.reg + ", " + std::to_string(pointee.elemBytes()) + ";");
+            emit(std::string(op == "+" ? "add.s64 " : "sub.s64 ") + res + ", " + ptr.reg + ", " + off + ";");
+            Val r; r.reg = res; r.type = ptr.type; r.space = ptr.space;
+            return r;
+        }
         return emitArith(op, a, b);
     }
 
@@ -837,8 +856,58 @@ struct Codegen {
     Val h2f(const Val& h) { std::string d = fresh(RC::F32); emit("cvt.f32.f16 " + d + ", " + h.reg + ";"); return {d, floatType()}; }
     Val f2h(const Val& f) { std::string d = fresh(RC::R32); emit("cvt.rn.f16.f32 " + d + ", " + f.reg + ";"); return {d, halfType()}; }
 
+    // __ldg / cache-hinted loads (__ldca/__ldcs/__ldcg/__ldlu/__ldcv/__ldg_nc):
+    // read-only / cache-hinted global loads. A CPU interpreter has no cache
+    // hierarchy, so the hint is a no-op and each is a plain load of the pointed-to
+    // element. Common forms: __ldg(&a[i]) and __ldg(p) (p a pointer variable).
+    Val emitCachedLoad(const Expr& e) {
+        const std::string& fn = e.str;
+        if (e.args.size() != 1) { fail("'" + fn + "' expects one pointer argument"); return {}; }
+        const Expr& arg = *e.args[0];
+        if (arg.kind == Expr::Unary && arg.str == "&" && !arg.args.empty())
+            return emitLoad(*arg.args[0]);            // __ldg(&a[i]) → load a[i]
+        Val p = emitExpr(arg);                        // __ldg(p): p is a pointer
+        if (failed) return {};
+        if (!p.type.isPointer()) { fail("'" + fn + "' requires a pointer argument"); return {}; }
+        Type pointee = p.type; pointee.ptr -= 1;
+        std::string d = fresh(classOf(pointee));
+        emit("ld." + std::string(p.space == Space::Shared ? "shared." : "global.") +
+             memSuffix(pointee) + " " + d + ", [" + p.reg + "];");
+        return {d, pointee};
+    }
+
+    // Cache-hinted stores (__stwb/__stcg/__stcs/__stwt): plain stores here (the
+    // write-back/streaming hints have no meaning without a cache). __stcg(&a[i], v).
+    Val emitCachedStore(const Expr& e) {
+        const std::string& fn = e.str;
+        if (e.args.size() != 2) { fail("'" + fn + "' expects (pointer, value)"); return {}; }
+        const Expr& ptr = *e.args[0];
+        if (ptr.kind == Expr::Unary && ptr.str == "&" && !ptr.args.empty()) {
+            const Expr& idx = *ptr.args[0];
+            Val v = coerce(emitExpr(*e.args[1]), indexPointee(idx));  // __stcg(&a[i], v)
+            if (failed) return {};
+            emitStore(idx, v);
+            return {};
+        }
+        Val p = emitExpr(ptr);
+        if (failed) return {};
+        if (!p.type.isPointer()) { fail("'" + fn + "' requires a pointer argument"); return {}; }
+        Type pointee = p.type; pointee.ptr -= 1;
+        Val v = coerce(emitExpr(*e.args[1]), pointee);
+        if (failed) return {};
+        emit("st." + std::string(p.space == Space::Shared ? "shared." : "global.") +
+             memSuffix(pointee) + " [" + p.reg + "], " + v.reg + ";");
+        return {};
+    }
+
     Val emitCall(const Expr& e) {
         const std::string& fn = e.str;
+        // ── Cache-hinted global loads/stores: plain load/store on the CPU ──
+        if (fn == "__ldg" || fn == "__ldca" || fn == "__ldcs" || fn == "__ldcg" ||
+            fn == "__ldlu" || fn == "__ldcv" || fn == "__ldg_nc")
+            return emitCachedLoad(e);
+        if (fn == "__stwb" || fn == "__stcg" || fn == "__stcs" || fn == "__stwt")
+            return emitCachedStore(e);
         // ── Half arithmetic: compute in float, result __half (or bool for cmp) ──
         if (e.args.size() == 2 &&
             (fn == "__hadd" || fn == "__hsub" || fn == "__hmul" || fn == "__hdiv" ||
