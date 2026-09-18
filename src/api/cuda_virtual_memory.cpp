@@ -463,6 +463,10 @@ CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
         }
         if (!found) return CUDA_ERROR_INVALID_VALUE;
     }
+    // isWholeReservation is consumed only by the Windows placeholder-split path
+    // below; on Linux/macOS the range is validated above (found) and promoted via
+    // mprotect, so mark it used to satisfy -Werror=unused-but-set-variable.
+    (void)isWholeReservation;
 
     // Fix (Gap 2): compute physical backing address = physAlloc.ptr + offset.
     // Invariant: offset + size <= physAlloc.size (caller's contract per CUDA spec).

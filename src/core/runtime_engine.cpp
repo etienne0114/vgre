@@ -1259,8 +1259,22 @@ VirtualGPUDevice &RuntimeEngine::getDevice(DeviceId id) {
 
 // ── Singleton ──────────────────────────────────────────────────────────────
 RuntimeEngine &RuntimeEngine::instance() {
-  static RuntimeEngine inst;
-  return inst;
+  // Deliberately leaked (heap-allocated, never destroyed). The atexit-registered
+  // vgreAtExitShutdown() locks mutex_ during process teardown; as a Meyers
+  // singleton this object could be destroyed BEFORE that handler runs, because
+  // the handler is registered by initialize(), which a *local* RuntimeEngine may
+  // call before the singleton is ever constructed — so the singleton's
+  // construction, and hence its LIFO destruction, can be ordered AFTER the atexit
+  // handler. Locking an already-destroyed std::recursive_mutex is undefined; on
+  // macOS the pthread_mutex signature is cleared by the destructor and
+  // pthread_mutex_lock returns EINVAL, which libc++ raises as an uncaught
+  // std::system_error that aborts the process (glibc happens to tolerate it,
+  // which is why only macOS crashed). Never destroying the object keeps mutex_
+  // valid throughout teardown; the OS reclaims the memory at exit anyway, and the
+  // destructor is empty (all real cleanup goes through shutdown()), so nothing is
+  // lost. The static pointer stays reachable, so leak detectors do not flag it.
+  static RuntimeEngine* inst = new RuntimeEngine();
+  return *inst;
 }
 
 } // namespace core
