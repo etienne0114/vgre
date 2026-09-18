@@ -92,6 +92,11 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …) evaluated at the operand's width; the compiled
 tier uses libm.
 
+**Bit-reinterpret (type-punning):** `__float_as_int`/`__float_as_uint`,
+`__int_as_float`/`__uint_as_float`, `__double_as_longlong`, `__longlong_as_double`
+— copy the raw bits between a float and a same-width integer register (`mov.b32`/
+`mov.b64`). Used for fast-math bit tricks and float atomics via `atomicCAS`.
+
 **Bit intrinsics:** `__popc`/`__popcll` (population count), `__clz`/`__clzll`
 (count leading zeros; `clz(0)` = bit width), `__brev`/`__brevll` (bit reversal,
 width-preserving), and `__ffs`/`__ffsll` (1-indexed lowest set bit, `0` for a zero

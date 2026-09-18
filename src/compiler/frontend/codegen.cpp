@@ -907,6 +907,33 @@ struct Codegen {
                 emit("selp.b32 " + d + ", 0, " + tmp + ", " + p + ";");   // x==0 ? 0 : clz+1
                 return {d, intType()};
             }
+            // Type-punning reinterprets: copy the raw bits between a float and an
+            // integer register of the same width (mov.b{32,64} is a bit cast). Used
+            // for fast-math bit tricks and float atomics via CAS.
+            if (fn == "__float_as_int" || fn == "__float_as_uint") {
+                Val a = coerce(emitExpr(*e.args[0]), floatType()); if (failed) return {};
+                std::string d = fresh(RC::R32);
+                emit("mov.b32 " + d + ", " + a.reg + ";");
+                return {d, intType()};
+            }
+            if (fn == "__int_as_float" || fn == "__uint_as_float") {
+                Val a = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+                std::string d = fresh(RC::F32);
+                emit("mov.b32 " + d + ", " + a.reg + ";");
+                return {d, floatType()};
+            }
+            if (fn == "__double_as_longlong") {
+                Val a = coerce(emitExpr(*e.args[0]), doubleType()); if (failed) return {};
+                std::string d = fresh(RC::RD64);
+                emit("mov.b64 " + d + ", " + a.reg + ";");
+                return {d, longType()};
+            }
+            if (fn == "__longlong_as_double") {
+                Val a = coerce(emitExpr(*e.args[0]), longType()); if (failed) return {};
+                std::string d = fresh(RC::F64);
+                emit("mov.b64 " + d + ", " + a.reg + ";");
+                return {d, doubleType()};
+            }
             // Round-to-integer-in-float. cvt rounding modes: .rmi=floor, .rpi=ceil,
             // .rzi=trunc (toward zero), .rni=rint/nearbyint (nearest, ties to even).
             // (CUDA's round() — ties away from zero — is intentionally NOT mapped

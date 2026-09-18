@@ -1155,6 +1155,13 @@ target_link_libraries(test_cuda_warp_sync PRIVATE vgre Threads::Threads)
 add_test(NAME CudaWarpSync COMMAND test_cuda_warp_sync)
 set_tests_properties(CudaWarpSync PROPERTIES TIMEOUT 30)
 
+# Track Z / Stage 3.2: bit-reinterpret intrinsics (__float_as_int/int_as_float/…).
+# Frontend-only (mov.b bitcast); runs in the LLVM-free build too.
+add_executable(test_cuda_reinterpret compiler/test_cuda_reinterpret.cpp)
+target_link_libraries(test_cuda_reinterpret PRIVATE vgre Threads::Threads)
+add_test(NAME CudaReinterpret COMMAND test_cuda_reinterpret)
+set_tests_properties(CudaReinterpret PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
