@@ -289,8 +289,32 @@ struct Codegen {
         return "nctaid";  // gridDim
     }
 
+    // Emit an integer constant of type `t` as a single immediate mov.
+    Val emitConstInt(int64_t v, const Type& t) {
+        if (is64BitScalar(t) || t.base == Type::Long) {
+            std::string d = fresh(RC::RD64);
+            emit("mov.u64 " + d + ", " + std::to_string(v) + ";");
+            return {d, t};
+        }
+        std::string d = fresh(RC::R32);
+        emit("mov.u32 " + d + ", " + std::to_string((int32_t)v) + ";");
+        return {d, t};
+    }
+
     Val emitExpr(const Expr& e) {
         line = e.line; col = e.col;
+        // Constant folding: an integer constant *expression* (side-effect-free by
+        // construction) collapses to one immediate — smaller PTX, fewer registers.
+        // Only for compound nodes (a lone literal/ident is already minimal) and only
+        // when the result is integer-typed (so a float/pointer isn't mistyped).
+        if (e.kind == Expr::Binary || e.kind == Expr::Unary ||
+            e.kind == Expr::Cast || e.kind == Expr::Ternary) {
+            Type t = estimateType(e);
+            if (!t.isFloating() && !t.isPointer() && t.base != Type::Half && t.base != Type::Struct) {
+                int64_t cv;
+                if (constEval(e, cv)) return emitConstInt(cv, t);
+            }
+        }
         switch (e.kind) {
             case Expr::IntLit: {
                 if (e.wide || e.ival > 2147483647LL || e.ival < -2147483648LL) {
@@ -445,8 +469,24 @@ struct Codegen {
         switch (e.kind) {
             case Expr::IntLit: out = e.ival; return true;
             case Expr::Cast: {
+                const Type& ct = e.castType;
+                // Only an integer-typed cast yields an integer constant; a cast to
+                // float/half/pointer/struct is not a compile-time integer here.
+                if (ct.isFloating() || ct.base == Type::Half || ct.isPointer() || ct.isStruct())
+                    return false;
                 int64_t v; if (!constEval(*e.args[0], v)) return false;
-                out = v; return true;   // integer constant cast (case labels are int)
+                switch (ct.base) {   // narrow to the cast's integer width
+                    case Type::Bool:  out = (v != 0); break;
+                    case Type::Char:  out = ct.isUnsigned ? (int64_t)(uint8_t)v  : (int64_t)(int8_t)v;  break;
+                    case Type::Short: out = ct.isUnsigned ? (int64_t)(uint16_t)v : (int64_t)(int16_t)v; break;
+                    case Type::Int:   out = ct.isUnsigned ? (int64_t)(uint32_t)v : (int64_t)(int32_t)v; break;
+                    default:          out = v; break;   // long
+                }
+                return true;
+            }
+            case Expr::Ternary: {
+                int64_t c; if (!constEval(*e.args[0], c)) return false;
+                return constEval(c ? *e.args[1] : *e.args[2], out);
             }
             case Expr::Unary: {
                 int64_t v; if (!constEval(*e.args[0], v)) return false;

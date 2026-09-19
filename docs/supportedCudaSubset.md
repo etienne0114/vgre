@@ -6,10 +6,12 @@ VGRE's own CUDA-C front-end (`src/compiler/frontend/`: lexer → parser → PTX
 codegen) compiles kernels with **no Clang/LLVM**. This is the compiler used when
 `-DVGRE_ENABLE_JIT=OFF`, and whenever `VGRE_EXEC_BACKEND` selects a non-JIT
 backend. It targets the practical subset of CUDA-C that real compute kernels use;
-anything outside it returns a **located error** (never wrong code). Every emitted
-kernel is run through a **structural PTX verifier** (labels resolve, registers are
-declared and in range, no malformed operands) as a self-check, so a codegen bug
-surfaces as an internal error instead of bad PTX at runtime. The PTX header's
+anything outside it returns a **located error** (never wrong code). Integer constant
+subexpressions are **constant-folded** to a single immediate (`5*5*5*5` → `625`;
+array indices and integer casts fold too). Every emitted kernel is run through a
+**structural PTX verifier** (labels resolve, registers are declared and in range,
+no malformed operands) as a self-check, so a codegen bug surfaces as an internal
+error instead of bad PTX at runtime. The PTX header's
 `.target` (SM arch), `.version` (PTX ISA) and `.address_size` are configurable via
 `CodegenOptions` (defaults `sm_52` / `7.0` / `64`). And — in a JIT-enabled build —
 falls back to the LLVM path.
