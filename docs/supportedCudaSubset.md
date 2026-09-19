@@ -6,7 +6,8 @@ VGRE's own CUDA-C front-end (`src/compiler/frontend/`: lexer → parser → PTX
 codegen) compiles kernels with **no Clang/LLVM**. This is the compiler used when
 `-DVGRE_ENABLE_JIT=OFF`, and whenever `VGRE_EXEC_BACKEND` selects a non-JIT
 backend. It targets the practical subset of CUDA-C that real compute kernels use;
-anything outside it returns a **located error** (never wrong code). Integer constant
+anything outside it returns a **located error** (never wrong code) — enriched with
+the offending source line and a caret under the column. Integer constant
 subexpressions are **constant-folded** to a single immediate (`5*5*5*5` → `625`;
 array indices and integer casts fold too). Every emitted kernel is run through a
 **structural PTX verifier** (labels resolve, registers are declared and in range,

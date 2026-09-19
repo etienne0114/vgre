@@ -2277,11 +2277,39 @@ CodegenResult generatePtx(const Kernel& kernel, const CodegenOptions& opts) {
     return generatePtx(kernel, empty, opts);
 }
 
+// Enrich a "line:col: message" diagnostic with the offending source line and a
+// caret under the column, e.g.
+//     3:14: use of undeclared identifier 'foo'
+//         out[i] = foo(i);
+//                  ^
+// Returns the error unchanged if it has no parseable location.
+static std::string withSourceSnippet(const std::string& source, const std::string& err) {
+    size_t c1 = err.find(':');
+    if (c1 == std::string::npos || c1 == 0) return err;
+    size_t c2 = err.find(':', c1 + 1);
+    if (c2 == std::string::npos) return err;
+    long ln = std::strtol(err.substr(0, c1).c_str(), nullptr, 10);
+    long col = std::strtol(err.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 10);
+    if (ln <= 0 || col <= 0) return err;
+    // Locate 1-based line `ln`.
+    size_t pos = 0; long cur = 1;
+    while (cur < ln && pos < source.size()) { if (source[pos] == '\n') ++cur; ++pos; }
+    if (cur != ln) return err;
+    size_t eol = source.find('\n', pos);
+    std::string srcLine = source.substr(pos, (eol == std::string::npos ? source.size() : eol) - pos);
+    // Caret line: copy the source's leading whitespace so tabs stay aligned.
+    std::string caret;
+    for (long i = 0; i + 1 < col && i < (long)srcLine.size(); ++i)
+        caret.push_back(srcLine[i] == '\t' ? '\t' : ' ');
+    caret.push_back('^');
+    return err + "\n    " + srcLine + "\n    " + caret;
+}
+
 CodegenResult compileToPtx(const std::string& source, const std::string& name,
                            const CodegenOptions& opts) {
     CodegenResult r;
     ParseResult pr = parse(source);
-    if (!pr.ok) { r.error = pr.error; return r; }
+    if (!pr.ok) { r.error = withSourceSnippet(source, pr.error); return r; }
     // Collect device-callable helpers (not __global__, not __host__-only) for
     // inlining, and pick the __global__ entry `name` (first __global__ if empty).
     std::unordered_map<std::string, const Kernel*> deviceFns;
@@ -2299,7 +2327,7 @@ CodegenResult compileToPtx(const std::string& source, const std::string& name,
     }
     Codegen cg(*target, &deviceFns, pr.module.get(), opts);
     std::string ptx = cg.run();
-    if (cg.failed) { r.error = cg.err; return r; }
+    if (cg.failed) { r.error = withSourceSnippet(source, cg.err); return r; }
     PtxVerifyResult v = verifyPtx(ptx);   // self-check: a failure is a codegen bug
     if (!v.ok) { r.error = v.error; return r; }
     r.ptx = std::move(ptx);

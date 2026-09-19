@@ -1343,6 +1343,11 @@ target_link_libraries(test_cuda_const_fold PRIVATE vgre Threads::Threads)
 add_test(NAME CudaConstFold COMMAND test_cuda_const_fold)
 set_tests_properties(CudaConstFold PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_diagnostics compiler/test_cuda_diagnostics.cpp)
+target_link_libraries(test_cuda_diagnostics PRIVATE vgre Threads::Threads)
+add_test(NAME CudaDiagnostics COMMAND test_cuda_diagnostics)
+set_tests_properties(CudaDiagnostics PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
