@@ -22,6 +22,9 @@ const char* opSpelling(TokenKind k) {
         case TokenKind::PlusEq: return "+="; case TokenKind::MinusEq: return "-=";
         case TokenKind::StarEq: return "*="; case TokenKind::SlashEq: return "/=";
         case TokenKind::PercentEq: return "%=";
+        case TokenKind::AmpEq: return "&="; case TokenKind::PipeEq: return "|=";
+        case TokenKind::CaretEq: return "^="; case TokenKind::ShlEq: return "<<=";
+        case TokenKind::ShrEq: return ">>=";
         case TokenKind::Plus: return "+"; case TokenKind::Minus: return "-";
         case TokenKind::Star: return "*"; case TokenKind::Slash: return "/";
         case TokenKind::Percent: return "%";
@@ -56,7 +59,9 @@ int binPrec(TokenKind k) {
 
 bool isAssignOp(TokenKind k) {
     return k == TokenKind::Assign || k == TokenKind::PlusEq || k == TokenKind::MinusEq ||
-           k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq;
+           k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq ||
+           k == TokenKind::AmpEq || k == TokenKind::PipeEq || k == TokenKind::CaretEq ||
+           k == TokenKind::ShlEq || k == TokenKind::ShrEq;
 }
 
 bool isTypeStart(TokenKind k) {

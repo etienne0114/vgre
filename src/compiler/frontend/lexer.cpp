@@ -62,6 +62,11 @@ const char* tokenKindName(TokenKind k) {
         case TokenKind::StarEq:       return "*=";
         case TokenKind::SlashEq:      return "/=";
         case TokenKind::PercentEq:    return "%=";
+        case TokenKind::AmpEq:        return "&=";
+        case TokenKind::PipeEq:       return "|=";
+        case TokenKind::CaretEq:      return "^=";
+        case TokenKind::ShlEq:        return "<<=";
+        case TokenKind::ShrEq:        return ">>=";
         case TokenKind::Inc:          return "++";
         case TokenKind::Dec:          return "--";
         case TokenKind::Eq:           return "==";
@@ -135,6 +140,16 @@ struct Lexer {
         if (*p == a && p + 1 < end && p[1] == b) {
             push(twoKind, twoStr, l, c);
             advance(2);
+            return true;
+        }
+        return false;
+    }
+
+    // Three-character operator (e.g. <<=, >>=); checked before its two-char prefix.
+    bool three(char a, char b, char d, TokenKind kind, const char* str, int l, int c) {
+        if (*p == a && p + 2 < end && p[1] == b && p[2] == d) {
+            push(kind, str, l, c);
+            advance(3);
             return true;
         }
         return false;
@@ -237,8 +252,14 @@ struct Lexer {
             if (two('>', '=', TokenKind::Ge, ">=", l, c)) continue;
             if (two('&', '&', TokenKind::AndAnd, "&&", l, c)) continue;
             if (two('|', '|', TokenKind::OrOr, "||", l, c)) continue;
+            // Shift-assign (3 chars) must be tried before the 2-char shift.
+            if (three('<', '<', '=', TokenKind::ShlEq, "<<=", l, c)) continue;
+            if (three('>', '>', '=', TokenKind::ShrEq, ">>=", l, c)) continue;
             if (two('<', '<', TokenKind::Shl, "<<", l, c)) continue;
             if (two('>', '>', TokenKind::Shr, ">>", l, c)) continue;
+            if (two('&', '=', TokenKind::AmpEq, "&=", l, c)) continue;
+            if (two('|', '=', TokenKind::PipeEq, "|=", l, c)) continue;
+            if (two('^', '=', TokenKind::CaretEq, "^=", l, c)) continue;
 
             // Single-char tokens.
             TokenKind k = TokenKind::Unknown;

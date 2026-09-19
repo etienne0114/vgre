@@ -645,7 +645,7 @@ struct Codegen {
             Val rhs = emitExpr(*e.args[1]);
             if (failed) return {};
             if (op == "=") return rhs;
-            std::string bop(1, op[0]);  // "+=" -> "+"
+            std::string bop = op.substr(0, op.size() - 1);  // "+="->"+", "<<="->"<<", "&="->"&"
             return emitArith(bop, lhsVal, rhs);   // shared width-aware arithmetic
         };
 

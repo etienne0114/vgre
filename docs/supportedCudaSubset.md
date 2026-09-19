@@ -49,7 +49,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | arithmetic `+ - * / %` | ✅ |
 | comparison `== != < <= > >=` | ✅ |
 | logical `&& || !`, bitwise `& \| ^ ~ << >>` | ✅ |
-| assignment `=` and compound `+= -= *= /= %=` | ✅ |
+| assignment `=` and compound `+= -= *= /= %= &= \|= ^= <<= >>=` | ✅ (compound op is honored for the LHS's type, incl. unsigned) |
 | pre/post increment/decrement `++ --` | ✅ |
 | ternary `cond ? a : b` (nested) | ✅ |
 | C-style casts `(int)x`, `(float)y` | ✅ |

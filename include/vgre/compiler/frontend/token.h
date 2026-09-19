@@ -37,6 +37,7 @@ enum class TokenKind {
     Assign,                                   // =
     Plus, Minus, Star, Slash, Percent,        // + - * / %
     PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
+    AmpEq, PipeEq, CaretEq, ShlEq, ShrEq,     // &= |= ^= <<= >>=
     Inc, Dec,                                 // ++ --
     Eq, Ne, Lt, Le, Gt, Ge,                   // == != < <= > >=
     AndAnd, OrOr, Not,                        // && || !
