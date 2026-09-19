@@ -46,6 +46,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | Feature | Status |
 |---|---|
 | int/float literals (hex, suffixes) | ✅ |
+| character literals `'a'`, `'\n'`, `'\x41'`; `true` / `false` / `nullptr` | ✅ (char → its int value; `true`/`false` → 1/0; `nullptr` → null pointer constant) |
 | arithmetic `+ - * / %` | ✅ |
 | comparison `== != < <= > >=` | ✅ |
 | logical `&& || !`, bitwise `& \| ^ ~ << >>` | ✅ |

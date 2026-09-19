@@ -2,6 +2,7 @@
 # parser (-> AST) and PTX code generation land here next, each in its own file
 # so nothing mixes. LLVM-free — this is what replaces the Clang front-end.
 add_library(vgre_frontend OBJECT
+    token.cpp
     lexer.cpp
     parser.cpp
     codegen.cpp

@@ -3,130 +3,29 @@
 #include "vgre/compiler/frontend/lexer.h"
 
 #include <cctype>
-#include <unordered_map>
 
 namespace vgre {
 namespace compiler {
 namespace frontend {
 
-const char* tokenKindName(TokenKind k) {
-    switch (k) {
-        case TokenKind::End:          return "End";
-        case TokenKind::Identifier:   return "Identifier";
-        case TokenKind::IntLiteral:   return "IntLiteral";
-        case TokenKind::FloatLiteral: return "FloatLiteral";
-        case TokenKind::StringLiteral: return "StringLiteral";
-        case TokenKind::KwGlobal:     return "__global__";
-        case TokenKind::KwDevice:     return "__device__";
-        case TokenKind::KwShared:     return "__shared__";
-        case TokenKind::KwExtern:     return "extern";
-        case TokenKind::KwConst:      return "const";
-        case TokenKind::KwRestrict:   return "__restrict__";
-        case TokenKind::KwVoid:       return "void";
-        case TokenKind::KwBool:       return "bool";
-        case TokenKind::KwChar:       return "char";
-        case TokenKind::KwShort:      return "short";
-        case TokenKind::KwInt:        return "int";
-        case TokenKind::KwLong:       return "long";
-        case TokenKind::KwFloat:      return "float";
-        case TokenKind::KwDouble:     return "double";
-        case TokenKind::KwHalf:       return "__half";
-        case TokenKind::KwUnsigned:   return "unsigned";
-        case TokenKind::KwSigned:     return "signed";
-        case TokenKind::KwStruct:     return "struct";
-        case TokenKind::KwIf:         return "if";
-        case TokenKind::KwElse:       return "else";
-        case TokenKind::KwFor:        return "for";
-        case TokenKind::KwWhile:      return "while";
-        case TokenKind::KwDo:         return "do";
-        case TokenKind::KwBreak:      return "break";
-        case TokenKind::KwContinue:   return "continue";
-        case TokenKind::KwSwitch:     return "switch";
-        case TokenKind::KwCase:       return "case";
-        case TokenKind::KwDefault:    return "default";
-        case TokenKind::KwReturn:     return "return";
-        case TokenKind::LParen:       return "(";
-        case TokenKind::RParen:       return ")";
-        case TokenKind::LBrace:       return "{";
-        case TokenKind::RBrace:       return "}";
-        case TokenKind::LBracket:     return "[";
-        case TokenKind::RBracket:     return "]";
-        case TokenKind::Semicolon:    return ";";
-        case TokenKind::Comma:        return ",";
-        case TokenKind::Dot:          return ".";
-        case TokenKind::Assign:       return "=";
-        case TokenKind::Plus:         return "+";
-        case TokenKind::Minus:        return "-";
-        case TokenKind::Star:         return "*";
-        case TokenKind::Slash:        return "/";
-        case TokenKind::Percent:      return "%";
-        case TokenKind::PlusEq:       return "+=";
-        case TokenKind::MinusEq:      return "-=";
-        case TokenKind::StarEq:       return "*=";
-        case TokenKind::SlashEq:      return "/=";
-        case TokenKind::PercentEq:    return "%=";
-        case TokenKind::AmpEq:        return "&=";
-        case TokenKind::PipeEq:       return "|=";
-        case TokenKind::CaretEq:      return "^=";
-        case TokenKind::ShlEq:        return "<<=";
-        case TokenKind::ShrEq:        return ">>=";
-        case TokenKind::Inc:          return "++";
-        case TokenKind::Dec:          return "--";
-        case TokenKind::Eq:           return "==";
-        case TokenKind::Ne:           return "!=";
-        case TokenKind::Lt:           return "<";
-        case TokenKind::Le:           return "<=";
-        case TokenKind::Gt:           return ">";
-        case TokenKind::Ge:           return ">=";
-        case TokenKind::AndAnd:       return "&&";
-        case TokenKind::OrOr:         return "||";
-        case TokenKind::Not:          return "!";
-        case TokenKind::Amp:          return "&";
-        case TokenKind::Pipe:         return "|";
-        case TokenKind::Caret:        return "^";
-        case TokenKind::Tilde:        return "~";
-        case TokenKind::Shl:          return "<<";
-        case TokenKind::Shr:          return ">>";
-        case TokenKind::Question:     return "?";
-        case TokenKind::Colon:        return ":";
-        case TokenKind::Unknown:      return "Unknown";
-    }
-    return "?";
-}
+// tokenKindName / tokenSpelling / keywordLookup live in token.cpp (the single
+// source of truth for the token vocabulary); this file only produces tokens.
 
 namespace {
-
-const std::unordered_map<std::string, TokenKind>& keywords() {
-    static const std::unordered_map<std::string, TokenKind> kw = {
-        {"__global__", TokenKind::KwGlobal}, {"__device__", TokenKind::KwDevice},
-        {"__shared__", TokenKind::KwShared}, {"extern", TokenKind::KwExtern},
-        {"const", TokenKind::KwConst},
-        {"__restrict__", TokenKind::KwRestrict}, {"__restrict", TokenKind::KwRestrict},
-        {"void", TokenKind::KwVoid}, {"bool", TokenKind::KwBool}, {"char", TokenKind::KwChar},
-        {"short", TokenKind::KwShort}, {"int", TokenKind::KwInt}, {"long", TokenKind::KwLong},
-        {"float", TokenKind::KwFloat}, {"double", TokenKind::KwDouble},
-        {"__half", TokenKind::KwHalf},
-        {"unsigned", TokenKind::KwUnsigned}, {"signed", TokenKind::KwSigned},
-        {"struct", TokenKind::KwStruct},
-        {"if", TokenKind::KwIf}, {"else", TokenKind::KwElse}, {"for", TokenKind::KwFor},
-        {"while", TokenKind::KwWhile}, {"do", TokenKind::KwDo},
-        {"break", TokenKind::KwBreak}, {"continue", TokenKind::KwContinue},
-        {"switch", TokenKind::KwSwitch}, {"case", TokenKind::KwCase},
-        {"default", TokenKind::KwDefault}, {"return", TokenKind::KwReturn},
-    };
-    return kw;
-}
 
 bool isIdentStart(char c) { return std::isalpha((unsigned char)c) || c == '_'; }
 bool isIdentCont(char c)  { return std::isalnum((unsigned char)c) || c == '_'; }
 
 struct Lexer {
+    const char* base;   // first byte of the source (for byte-span offsets)
     const char* p;
     const char* end;
     int line = 1, col = 1;
+    int tokBegin = 0;   // byte offset of the token currently being produced
     std::vector<Token> out;
 
-    explicit Lexer(const std::string& s) : p(s.data()), end(s.data() + s.size()) {}
+    explicit Lexer(const std::string& s)
+        : base(s.data()), p(s.data()), end(s.data() + s.size()) {}
 
     void advance(int n = 1) {
         for (int i = 0; i < n && p < end; ++i) {
@@ -135,15 +34,17 @@ struct Lexer {
         }
     }
 
+    // Push the token spanning [tokBegin, current p). Callers consume the token's
+    // characters (advance) *before* pushing, so the byte span is exact.
     void push(TokenKind k, const std::string& text, int l, int c) {
-        out.push_back(Token{k, text, l, c});
+        out.push_back(Token{k, text, l, c, tokBegin, int(p - base)});
     }
 
-    // Two-character operator if p[0]==a && p[1]==b; else fall back to `one`.
+    // Fixed-length operator if p[0..n-1] match; consumes then pushes (span exact).
     bool two(char a, char b, TokenKind twoKind, const char* twoStr, int l, int c) {
         if (*p == a && p + 1 < end && p[1] == b) {
-            push(twoKind, twoStr, l, c);
             advance(2);
+            push(twoKind, twoStr, l, c);
             return true;
         }
         return false;
@@ -152,8 +53,19 @@ struct Lexer {
     // Three-character operator (e.g. <<=, >>=); checked before its two-char prefix.
     bool three(char a, char b, char d, TokenKind kind, const char* str, int l, int c) {
         if (*p == a && p + 2 < end && p[1] == b && p[2] == d) {
-            push(kind, str, l, c);
             advance(3);
+            push(kind, str, l, c);
+            return true;
+        }
+        return false;
+    }
+
+    // Four-character operator prefix (the launch operators <<< and >>> are 3, but
+    // this handles their disambiguation cleanly alongside <<= / >>=).
+    bool threeSame(char a, TokenKind kind, const char* str, int l, int c) {
+        if (*p == a && p + 2 < end && p[1] == a && p[2] == a) {
+            advance(3);
+            push(kind, str, l, c);
             return true;
         }
         return false;
@@ -212,6 +124,7 @@ struct Lexer {
     void run() {
         for (;;) {
             skipTrivia();
+            tokBegin = int(p - base);              // byte offset of the next token
             if (p >= end) { push(TokenKind::End, "", line, col); return; }
             const int l = line, c = col;
             char ch = *p;
@@ -220,8 +133,7 @@ struct Lexer {
                 const char* start = p;
                 while (p < end && isIdentCont(*p)) advance();
                 std::string id(start, p);
-                auto it = keywords().find(id);
-                push(it != keywords().end() ? it->second : TokenKind::Identifier, id, l, c);
+                push(keywordLookup(id), id, l, c);   // centralized keyword vocabulary
                 continue;
             }
             if (std::isdigit((unsigned char)ch) ||
@@ -241,8 +153,28 @@ struct Lexer {
                 push(TokenKind::StringLiteral, s, l, c);
                 continue;
             }
+            if (ch == '\'') {                      // character literal 'a', '\n', '\x41'
+                advance();                         // opening quote
+                std::string s;
+                while (p < end && *p != '\'') {
+                    if (*p == '\\' && p + 1 < end) { s.push_back(*p); advance(); }
+                    s.push_back(*p);
+                    advance();
+                }
+                if (p < end) advance();            // closing quote
+                push(TokenKind::CharLiteral, s, l, c);
+                continue;
+            }
+
+            // Launch operators <<< / >>> before the (assign-)shift operators, so a
+            // kernel launch is not mis-lexed as two shifts.
+            if (threeSame('<', TokenKind::TripleLt, "<<<", l, c)) continue;
+            if (threeSame('>', TokenKind::TripleGt, ">>>", l, c)) continue;
 
             // Multi-char operators first.
+            if (three('.', '.', '.', TokenKind::Ellipsis, "...", l, c)) continue;
+            if (two('-', '>', TokenKind::Arrow, "->", l, c)) continue;
+            if (two(':', ':', TokenKind::ColonColon, "::", l, c)) continue;
             if (two('+', '+', TokenKind::Inc, "++", l, c)) continue;
             if (two('-', '-', TokenKind::Dec, "--", l, c)) continue;
             if (two('+', '=', TokenKind::PlusEq, "+=", l, c)) continue;
@@ -294,8 +226,8 @@ struct Lexer {
                 case ':': k = TokenKind::Colon; break;
                 default:  k = TokenKind::Unknown; break;
             }
+            advance();                             // consume, then push (span exact)
             push(k, std::string(1, ch), l, c);
-            advance();
         }
     }
 };

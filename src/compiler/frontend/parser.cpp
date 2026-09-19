@@ -57,6 +57,26 @@ int binPrec(TokenKind k) {
     }
 }
 
+// Decode the body of a character literal (quotes already stripped by the lexer):
+// a plain char, or an escape \n \t \r \0 \\ \' \" \xHH \NNN(octal). Yields the
+// character's integer value (C's `int` char-constant semantics).
+int64_t decodeCharLiteral(const std::string& s) {
+    if (s.empty()) return 0;
+    if (s[0] != '\\') return (unsigned char)s[0];
+    if (s.size() < 2) return '\\';
+    char e = s[1];
+    switch (e) {
+        case 'n': return '\n'; case 't': return '\t'; case 'r': return '\r';
+        case '0': return (s.size() == 2) ? 0 : (int64_t)std::strtoll(s.c_str() + 1, nullptr, 8);
+        case '\\': return '\\'; case '\'': return '\''; case '"': return '"';
+        case 'a': return '\a'; case 'b': return '\b'; case 'f': return '\f'; case 'v': return '\v';
+        case 'x': return (int64_t)std::strtoll(s.c_str() + 2, nullptr, 16);   // \xHH
+        default:
+            if (e >= '1' && e <= '7') return (int64_t)std::strtoll(s.c_str() + 1, nullptr, 8);  // octal
+            return (unsigned char)e;   // unknown escape → the literal char
+    }
+}
+
 bool isAssignOp(TokenKind k) {
     return k == TokenKind::Assign || k == TokenKind::PlusEq || k == TokenKind::MinusEq ||
            k == TokenKind::StarEq || k == TokenKind::SlashEq || k == TokenKind::PercentEq ||
@@ -313,6 +333,25 @@ struct Parser {
                 e->fval = std::strtod(txt.c_str(), nullptr);
                 // `double` unless it has an f/F suffix (C default is double).
                 e->wide = txt.find_first_of("fF") == std::string::npos;
+                return e;
+            }
+            case TokenKind::CharLiteral: {
+                auto e = mkExpr(Expr::IntLit);
+                e->ival = decodeCharLiteral(advance().text);   // 'a' -> 97, '\n' -> 10
+                e->wide = false;
+                return e;
+            }
+            case TokenKind::KwTrue: case TokenKind::KwFalse: {
+                auto e = mkExpr(Expr::IntLit);
+                e->ival = (kind() == TokenKind::KwTrue) ? 1 : 0;
+                advance();
+                e->wide = false;
+                return e;
+            }
+            case TokenKind::KwNullptr: {                        // null pointer constant (value 0)
+                auto e = mkExpr(Expr::IntLit);
+                advance();
+                e->ival = 0; e->wide = false;
                 return e;
             }
             case TokenKind::Identifier: {
