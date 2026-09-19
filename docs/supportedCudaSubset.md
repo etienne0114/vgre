@@ -35,7 +35,7 @@ an 8-worker pool, both bit-identical to the serial result.
 ## Types
 | Type | Interpreter tier | Compiled tier |
 |---|---|---|
-| `int`, `unsigned`, `bool`, `char`, `short` (32-bit) | ✅ — **unsigned semantics** honored: ordered compares (`< <= > >=`), division, remainder, right shift (logical), integer `min`/`max`, and widening conversions all use unsigned rules when an operand is unsigned (C usual arithmetic conversions), not the signed default | ✅ |
+| `int`, `unsigned`, `bool`, `char`, `short` | ✅ — **unsigned semantics** honored (ordered compares, `/ % >>`, `min`/`max`, widening use unsigned rules when an operand is unsigned); `char`/`short`/`bool` load and store at their **real width** (1/2 bytes) with signed loads **sign-extended** and unsigned/bool zero-extended (`ld.s8`/`u8`/`s16`/`u16`, `st.u8`/`u16`) — so `char*`/`short*` buffers and narrow struct members are correct | ✅ |
 | `float` | ✅ | ✅ |
 | `double`, `long` (64-bit) | ✅ full f64 / i64 (real `.f64`/`.s64` PTX, `cvt`, 64-bit literals) | ✅ full f64 / i64 |
 | pointers (`T*`, `const T* __restrict__`) | ✅ incl. pointer arithmetic `p ± i` (element-scaled, 64-bit) and cache-hinted loads/stores `__ldg`/`__ldca`/`__ldcs`/`__ldcg`/`__ldlu`/`__ldcv`/`__ldg_nc` and `__stwb`/`__stcg`/`__stcs`/`__stwt` (plain `ld.global`/`st.global` on the CPU — no cache hierarchy) | ✅ |

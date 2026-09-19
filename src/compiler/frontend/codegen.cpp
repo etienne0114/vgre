@@ -28,7 +28,7 @@ namespace {
 // addressed by its PTX name with 32-bit offsets (ld.shared/st.shared); Local = a
 // per-thread array (register-scratch), same 32-bit symbol addressing but in the
 // .local space (ld.local/st.local).
-enum class Space { Value, Global, Shared, Local, ParamStruct };
+enum class Space { Value, Global, Shared, Local, ParamStruct, LocalStruct };
 
 // A computed value: the register holding it and its type (+ memory space for
 // pointers/arrays). For a by-value struct param, space==ParamStruct and
@@ -67,6 +67,9 @@ struct Codegen {
     int nR = 0, nF = 0, nRd = 0, nFd = 0, nP = 0, nLbl = 0;
     std::unordered_map<std::string, Val> vars;  // name -> value (single mutable reg)
     std::unordered_map<std::string, std::vector<int>> arrayDims_;  // declared array -> dim sizes
+    // Local struct variables: each scalar member lives in its own register, keyed
+    // by struct-var name → member name. (Struct params stay in .param; see ParamStruct.)
+    std::unordered_map<std::string, std::unordered_map<std::string, Val>> localStructMembers_;
     // Enclosing loops for break/continue: (continueTarget, breakTarget) labels.
     // `continue` branches to the first, `break` to the second, of the innermost.
     std::vector<std::pair<std::string, std::string>> loopCtx_;
@@ -141,12 +144,34 @@ struct Codegen {
     bool ensureSupported(const Type&) { return true; }
 
     // PTX ld/st/param type suffix for a scalar (pointee) type — width-aware.
+    // NOTE: this collapses all sub-32-bit ints to u32; use ldSuffix/stSuffix for
+    // real memory accesses so char/short honor their true 1/2-byte width.
     static std::string memSuffix(const Type& t) {
         if (t.base == Type::Double) return "f64";
         if (t.base == Type::Half) return "b16";   // __half: 16-bit raw storage
         if (t.isFloating()) return "f32";
         if (t.base == Type::Long) return "u64";
         return "u32";
+    }
+
+    // Load suffix: a narrow integer loads at its real width and extends into the
+    // 32-bit register — signed char/short SIGN-extend (s8/s16), unsigned and bool
+    // ZERO-extend (u8/u16). 32/64-bit and float fall back to memSuffix. This fixes
+    // char*/short* accesses, which otherwise read 4 bytes at a 1/2-byte stride.
+    static std::string ldSuffix(const Type& t) {
+        if (t.isPointer()) return "u64";
+        if (t.base == Type::Bool) return "u8";
+        if (t.base == Type::Char) return t.isUnsigned ? "u8" : "s8";
+        if (t.base == Type::Short) return t.isUnsigned ? "u16" : "s16";
+        return memSuffix(t);
+    }
+    // Store suffix: a narrow integer stores only its low byte(s); signedness is
+    // irrelevant on a store, so bool/char use u8 and short uses u16.
+    static std::string stSuffix(const Type& t) {
+        if (t.isPointer()) return "u64";
+        if (t.base == Type::Bool || t.base == Type::Char) return "u8";
+        if (t.base == Type::Short) return "u16";
+        return memSuffix(t);
     }
 
     // Signed-int PTX suffix for cvt / arithmetic (s32 or s64).
@@ -265,7 +290,7 @@ struct Codegen {
                         const StructMember* m = def ? def->find(e.str) : nullptr;
                         if (!m) { fail("no member '." + e.str + "' in struct '" + it->second.type.structName + "'"); return {}; }
                         std::string d = fresh(classOf(m->type));
-                        emit("ld.param." + std::string(memSuffix(m->type)) + " " + d + ", [" +
+                        emit("ld.param." + std::string(ldSuffix(m->type)) + " " + d + ", [" +
                              it->second.paramName + "+" + std::to_string(m->offset) + "];");
                         return {d, m->type};
                     }
@@ -463,7 +488,7 @@ struct Codegen {
         Addr a = emitAddress(index);
         if (failed) return {};
         std::string d = fresh(classOf(a.pointee));
-        emit("ld." + spacePrefix(a) + memSuffix(a.pointee) +
+        emit("ld." + spacePrefix(a) + ldSuffix(a.pointee) +
              " " + d + ", [" + a.reg + "];");
         return {d, a.pointee};
     }
@@ -490,7 +515,7 @@ struct Codegen {
     void emitStore(const Expr& lhs, const Val& value) {
         Addr a = emitAddress(lhs);
         if (failed) return;
-        emit("st." + spacePrefix(a) + memSuffix(a.pointee) +
+        emit("st." + spacePrefix(a) + stSuffix(a.pointee) +
              " [" + a.reg + "], " + value.reg + ";");
     }
 
@@ -948,7 +973,7 @@ struct Codegen {
         Type pointee = p.type; pointee.ptr -= 1;
         std::string d = fresh(classOf(pointee));
         emit("ld." + std::string(p.space == Space::Shared ? "shared." : "global.") +
-             memSuffix(pointee) + " " + d + ", [" + p.reg + "];");
+             ldSuffix(pointee) + " " + d + ", [" + p.reg + "];");
         return {d, pointee};
     }
 
@@ -972,7 +997,7 @@ struct Codegen {
         Val v = coerce(emitExpr(*e.args[1]), pointee);
         if (failed) return {};
         emit("st." + std::string(p.space == Space::Shared ? "shared." : "global.") +
-             memSuffix(pointee) + " [" + p.reg + "], " + v.reg + ";");
+             stSuffix(pointee) + " [" + p.reg + "], " + v.reg + ";");
         return {};
     }
 
