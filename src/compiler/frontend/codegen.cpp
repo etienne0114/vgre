@@ -1546,6 +1546,52 @@ struct Codegen {
                 emit("min.f32 " + d + ", " + t + ", 0f3F800000;");       // min(_, 1.0f)
                 return {d, floatType()};
             }
+            // Composite unary math built from ex2/lg2 (both tiers support these):
+            //   exp10, log10, sinh, cosh, expm1, log1p — f32 (`…f`) and f64 (bare C).
+            {
+                const bool cdbl = fn.empty() || fn.back() != 'f';
+                const std::string cc = cdbl ? fn : fn.substr(0, fn.size() - 1);
+                static const std::set<std::string> comp =
+                    {"exp10", "log10", "sinh", "cosh", "expm1", "log1p"};
+                if (comp.count(cc)) {
+                    const Type ft = cdbl ? doubleType() : floatType();
+                    const std::string suf = cdbl ? "f64" : "f32";
+                    auto lit = [&](double v) { return cdbl ? f64imm(v) : f32imm(v); };
+                    Val a = coerce(emitExpr(*e.args[0]), ft); if (failed) return {};
+                    auto expOf = [&](const std::string& x) {                 // e^x = 2^(x*log2 e)
+                        std::string t = fresh(classOf(ft)), d = fresh(classOf(ft));
+                        emit("mul." + suf + " " + t + ", " + x + ", " + lit(1.4426950408889634) + ";");
+                        emit("ex2.approx." + suf + " " + d + ", " + t + ";");
+                        return d;
+                    };
+                    std::string d = fresh(classOf(ft));
+                    if (cc == "exp10") {                                      // 10^x = 2^(x*log2 10)
+                        std::string t = fresh(classOf(ft));
+                        emit("mul." + suf + " " + t + ", " + a.reg + ", " + lit(3.3219280948873623) + ";");
+                        emit("ex2.approx." + suf + " " + d + ", " + t + ";");
+                    } else if (cc == "log10") {                              // log2(x)*log10(2)
+                        std::string t = fresh(classOf(ft));
+                        emit("lg2.approx." + suf + " " + t + ", " + a.reg + ";");
+                        emit("mul." + suf + " " + d + ", " + t + ", " + lit(0.3010299956639812) + ";");
+                    } else if (cc == "expm1") {                              // e^x - 1
+                        std::string e = expOf(a.reg);
+                        emit("sub." + suf + " " + d + ", " + e + ", " + lit(1.0) + ";");
+                    } else if (cc == "log1p") {                              // log(1+x) = lg2(1+x)*ln2
+                        std::string opx = fresh(classOf(ft)), lg = fresh(classOf(ft));
+                        emit("add." + suf + " " + opx + ", " + a.reg + ", " + lit(1.0) + ";");
+                        emit("lg2.approx." + suf + " " + lg + ", " + opx + ";");
+                        emit("mul." + suf + " " + d + ", " + lg + ", " + lit(0.6931471805599453) + ";");
+                    } else {                                                 // sinh/cosh = (e^x ± e^-x)/2
+                        std::string nx = fresh(classOf(ft));
+                        emit("neg." + suf + " " + nx + ", " + a.reg + ";");
+                        std::string ep = expOf(a.reg), en = expOf(nx), s = fresh(classOf(ft));
+                        emit(std::string(cc == "sinh" ? "sub." : "add.") + suf + " " + s + ", " + ep + ", " + en + ";");
+                        emit("mul." + suf + " " + d + ", " + s + ", " + lit(0.5) + ";");
+                    }
+                    return {d, ft};
+                }
+            }
+
             // Float math intrinsic: the `f`-suffixed name is f32, the bare C name
             // is f64 (double). `__expf`/`__logf` are the f32 fast variants.
             std::string canon; bool dbl;

@@ -107,6 +107,10 @@ On the interpreter tier the transcendentals use PTX approximate ops
 (`sin.approx`, `ex2.approx`, …) evaluated at the operand's width; the compiled
 tier uses libm.
 
+**Extended math (built by composition, so both tiers support them):** `exp10`,
+`log10`, `sinh`, `cosh`, `expm1`, `log1p` — each in the f32 (`…f`) and f64 spelling
+— lowered via `ex2`/`lg2` (e.g. `sinh(x)=(e^x−e^−x)/2`, `log1p(x)=log2(1+x)·ln2`).
+
 **Explicit-rounding arithmetic:** `__fadd`/`__fsub`/`__fmul`/`__fdiv`,
 `__fmaf`, `__frcp`, `__fsqrt`, `__frsqrt` (f32) and `__dadd`/`__dsub`/`__dmul`/
 `__ddiv`, `__fma`, `__drcp`, `__dsqrt` (f64), each in the `_rn`/`_rz`/`_ru`/`_rd`
