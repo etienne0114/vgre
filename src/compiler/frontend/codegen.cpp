@@ -97,6 +97,19 @@ struct Codegen {
         return d ? d->size : 0;
     }
 
+    // Element size of a pointee type for addressing/pointer-arithmetic strides.
+    // A struct pointee's size comes from the struct table (Type::elemBytes() can't
+    // know it and returns 0), so struct arrays and `struct*` arithmetic stride
+    // correctly.
+    int pointeeBytes(const Type& pointee) const {
+        if (pointee.base == Type::Struct && pointee.ptr == 0) {
+            int s = structSize(pointee.structName);
+            return s > 0 ? s : 1;
+        }
+        int e = pointee.elemBytes();
+        return e > 0 ? e : 1;
+    }
+
     static const char* movFor(const Type& t) {
         if (t.base == Type::Double) return "mov.f64 ";
         if (t.isFloating()) return "mov.f32 ";
@@ -309,6 +322,17 @@ struct Codegen {
                     emit("mov.u32 " + d + ", %" + sregOf(obj.str) + "." + e.str + ";");
                     return {d, intType()};
                 }
+                // `p->field` — member through a pointer-to-struct: load from memory.
+                {
+                    MemberAddr ma = structPtrMember(obj, e.str);
+                    if (failed) return {};
+                    if (ma.ok) {
+                        std::string d = fresh(classOf(ma.type));
+                        emit("ld." + std::string(ma.space == Space::Shared ? "shared." : "global.") +
+                             ldSuffix(ma.type) + " " + d + ", [" + ma.reg + "];");
+                        return {d, ma.type};
+                    }
+                }
                 // Struct member read.
                 if (obj.kind == Expr::Ident) {
                     auto it = vars.find(obj.str);
@@ -356,6 +380,14 @@ struct Codegen {
             case Expr::Ident: { auto it = vars.find(e.str); return it != vars.end() ? it->second.type : intType(); }
             case Expr::Member: {
                 const Expr& obj = *e.args[0];
+                {   // p->field: member of a pointer-to-struct.
+                    Type ot = estimateType(obj);
+                    if (ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1) {
+                        const StructDef* def = mod_ ? mod_->findStruct(ot.structName) : nullptr;
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (m) return m->type;
+                    }
+                }
                 if (obj.kind == Expr::Ident) {
                     auto it = vars.find(obj.str);
                     if (it != vars.end() && it->second.space == Space::LocalStruct) {
@@ -512,7 +544,7 @@ struct Codegen {
             }
         }
 
-        const int elem = a.pointee.elemBytes();
+        const int elem = pointeeBytes(a.pointee);
         if (b.space == Space::Shared || b.space == Space::Local) {
             (b.space == Space::Shared ? a.shared : a.local) = true;
             const std::string& sym = (b.space == Space::Shared) ? b.sharedName : b.localName;
@@ -580,7 +612,7 @@ struct Codegen {
         if (var.type.isPointer()) {
             if (arrayDims_.count(operand.str)) { fail("cannot '++'/'--' an array"); return {}; }
             Type pointee = var.type; pointee.ptr -= 1;
-            const int step = pointee.elemBytes() < 1 ? 1 : pointee.elemBytes();
+            const int step = pointeeBytes(pointee);
             Val old;
             if (!pre) { old.type = var.type; old.reg = fresh(RC::RD64); emit("mov.u64 " + old.reg + ", " + var.reg + ";"); }
             emit(std::string(inc ? "add.s64 " : "sub.s64 ") + var.reg + ", " + var.reg + ", " + std::to_string(step) + ";");
@@ -799,7 +831,7 @@ struct Codegen {
             if (a.type.isPointer() && b.type.isPointer()) {
                 if (op != "-") { fail("cannot add two pointers"); return {}; }
                 Type pointee = a.type; pointee.ptr -= 1;
-                const int elem = pointee.elemBytes() < 1 ? 1 : pointee.elemBytes();
+                const int elem = pointeeBytes(pointee);
                 std::string bd = fresh(RC::RD64), res = fresh(RC::RD64);
                 emit("sub.s64 " + bd + ", " + a.reg + ", " + b.reg + ";");
                 emit("div.s64 " + res + ", " + bd + ", " + std::to_string(elem) + ";");
@@ -812,12 +844,32 @@ struct Codegen {
             Type pointee = ptr.type; pointee.ptr -= 1;
             Val i32 = coerce(idx, intType()); if (failed) return {};
             std::string off = fresh(RC::RD64), res = fresh(RC::RD64);
-            emit("mul.wide.s32 " + off + ", " + i32.reg + ", " + std::to_string(pointee.elemBytes()) + ";");
+            emit("mul.wide.s32 " + off + ", " + i32.reg + ", " + std::to_string(pointeeBytes(pointee)) + ";");
             emit(std::string(op == "+" ? "add.s64 " : "sub.s64 ") + res + ", " + ptr.reg + ", " + off + ";");
             Val r; r.reg = res; r.type = ptr.type; r.space = ptr.space;
             return r;
         }
         return emitArith(op, a, b);
+    }
+
+    // For `p->field` (p a pointer-to-struct in memory): compute the member's
+    // address (ptr + byte offset) and its type/space. `.ok` is false (with no code
+    // emitted) when `obj` is not a struct pointer, so callers can fall through to
+    // the struct-value handling.
+    struct MemberAddr { std::string reg; Type type; Space space = Space::Global; bool ok = false; };
+    MemberAddr structPtrMember(const Expr& obj, const std::string& field) {
+        MemberAddr r;
+        Type ot = estimateType(obj);
+        if (!(ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1)) return r;  // not a struct ptr
+        Val pv = emitExpr(obj);
+        if (failed) return r;
+        const StructDef* def = mod_ ? mod_->findStruct(ot.structName) : nullptr;
+        const StructMember* m = def ? def->find(field) : nullptr;
+        if (!m) { fail("no member '->" + field + "' in struct '" + ot.structName + "'"); return r; }
+        std::string addr = fresh(RC::RD64);
+        emit("add.s64 " + addr + ", " + pv.reg + ", " + std::to_string(m->offset) + ";");
+        r.reg = addr; r.type = m->type; r.space = pv.space; r.ok = true;
+        return r;
     }
 
     // Copy every member of a struct value (a local-struct or by-value param
@@ -918,6 +970,26 @@ struct Codegen {
             value = coerce(value, pointee);
             emit("st." + ptrSpacePrefix(p) + stSuffix(pointee) + " [" + p.reg + "], " + value.reg + ";");
             return value;
+        }
+        // Write through a struct pointer: `p->field = v` (and compound `p->field += v`).
+        if (lhs.kind == Expr::Member) {
+            MemberAddr ma = structPtrMember(*lhs.args[0], lhs.str);
+            if (failed) return {};
+            if (ma.ok) {
+                const std::string sp = ma.space == Space::Shared ? "shared." : "global.";
+                Val value;
+                if (op == "=") {
+                    value = emitExpr(*e.args[1]);
+                } else {
+                    std::string cur = fresh(classOf(ma.type));
+                    emit("ld." + sp + ldSuffix(ma.type) + " " + cur + ", [" + ma.reg + "];");
+                    value = computeRhs({cur, ma.type});
+                }
+                if (failed) return {};
+                value = coerce(value, ma.type);
+                emit("st." + sp + stSuffix(ma.type) + " [" + ma.reg + "], " + value.reg + ";");
+                return value;
+            }
         }
         // Write a local-struct member: `s.field = v` (and compound `s.field += v`).
         if (lhs.kind == Expr::Member && lhs.args[0]->kind == Expr::Ident) {

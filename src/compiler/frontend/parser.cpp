@@ -325,6 +325,12 @@ struct Parser {
                 node->str = advance().text;
                 node->args.push_back(std::move(e));
                 e = std::move(node);
+            } else if (accept(TokenKind::Arrow)) {      // e->field (member through a pointer)
+                auto node = mkExpr(Expr::Member);
+                if (!at(TokenKind::Identifier)) { fail("expected member name after '->'"); return nullptr; }
+                node->str = advance().text;
+                node->args.push_back(std::move(e));
+                e = std::move(node);   // codegen dispatches on the object's type (struct value vs pointer)
             } else if (accept(TokenKind::LParen)) {     // callee(args…)  (e must be an Ident)
                 auto node = mkExpr(Expr::Call);
                 if (e->kind != Expr::Ident) { fail("call of non-function"); return nullptr; }
