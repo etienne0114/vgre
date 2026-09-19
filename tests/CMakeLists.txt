@@ -1278,6 +1278,11 @@ target_link_libraries(test_cuda_deref PRIVATE vgre Threads::Threads)
 add_test(NAME CudaDeref COMMAND test_cuda_deref)
 set_tests_properties(CudaDeref PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_ptr_arith compiler/test_cuda_ptr_arith.cpp)
+target_link_libraries(test_cuda_ptr_arith PRIVATE vgre Threads::Threads)
+add_test(NAME CudaPtrArith COMMAND test_cuda_ptr_arith)
+set_tests_properties(CudaPtrArith PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

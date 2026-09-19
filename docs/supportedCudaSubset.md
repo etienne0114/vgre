@@ -51,7 +51,8 @@ an 8-worker pool, both bit-identical to the serial result.
 | comparison `== != < <= > >=` | ✅ |
 | logical `&& || !`, bitwise `& \| ^ ~ << >>` | ✅ — `&&`/`||` are true C logical ops (each side tested for truthiness `!= 0`, result 0/1) and **short-circuit** the RHS (`p && p->x` won't deref a null `p`; `a != 0 && 100/a > 3` won't divide by zero) |
 | assignment `=` and compound `+= -= *= /= %= &= \|= ^= <<= >>=` | ✅ (compound op is honored for the LHS's type, incl. unsigned) |
-| pre/post increment/decrement `++ --` | ✅ |
+| pre/post increment/decrement `++ --` | ✅ incl. **pointers** (`p++`/`p--` advance/retreat by one element) |
+| pointer `-` pointer (ptrdiff) | ✅ element-count difference (byte difference ÷ element size) |
 | ternary `cond ? a : b` (nested) | ✅ |
 | C-style casts `(int)x`, `(float)y` | ✅ |
 | `sizeof(type)` | ✅ folds to the type's byte size at parse time (`sizeof(float)`→4, `sizeof(double)`→8, any pointer→8); `sizeof expr` is a located error (no type inference) |

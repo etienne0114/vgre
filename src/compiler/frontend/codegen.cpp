@@ -558,9 +558,20 @@ struct Codegen {
         auto it = vars.find(operand.str);
         if (it == vars.end()) { fail("'++'/'--' of undeclared '" + operand.str + "'"); return {}; }
         Val& var = it->second;
-        if (var.type.isPointer()) { fail("'++'/'--' on a pointer is unsupported"); return {}; }
         const bool inc = e.str.find("++") != std::string::npos;
         const bool pre = e.str.compare(0, 3, "pre") == 0;
+
+        // Pointer ++ / -- advances/retreats by one element (pointee size), 64-bit.
+        // Arrays are not modifiable lvalues, so reject those.
+        if (var.type.isPointer()) {
+            if (arrayDims_.count(operand.str)) { fail("cannot '++'/'--' an array"); return {}; }
+            Type pointee = var.type; pointee.ptr -= 1;
+            const int step = pointee.elemBytes() < 1 ? 1 : pointee.elemBytes();
+            Val old;
+            if (!pre) { old.type = var.type; old.reg = fresh(RC::RD64); emit("mov.u64 " + old.reg + ", " + var.reg + ";"); }
+            emit(std::string(inc ? "add.s64 " : "sub.s64 ") + var.reg + ", " + var.reg + ", " + std::to_string(step) + ";");
+            return pre ? var : old;
+        }
         const std::string one = !var.type.isFloating() ? "1"
                               : (var.type.base == Type::Double ? f64imm(1.0) : "0f3F800000");
         const std::string addsub = std::string(inc ? "add." : "sub.") + arithSuffix(var.type);
@@ -770,8 +781,17 @@ struct Codegen {
         // space), matching C pointer semantics. This mirrors the address folding
         // that a[i] does, but for an explicit pointer value.
         if ((op == "+" || op == "-") && (a.type.isPointer() || b.type.isPointer())) {
+            // pointer - pointer → element-count difference (ptrdiff): byte diff / size.
+            if (a.type.isPointer() && b.type.isPointer()) {
+                if (op != "-") { fail("cannot add two pointers"); return {}; }
+                Type pointee = a.type; pointee.ptr -= 1;
+                const int elem = pointee.elemBytes() < 1 ? 1 : pointee.elemBytes();
+                std::string bd = fresh(RC::RD64), res = fresh(RC::RD64);
+                emit("sub.s64 " + bd + ", " + a.reg + ", " + b.reg + ";");
+                emit("div.s64 " + res + ", " + bd + ", " + std::to_string(elem) + ";");
+                return {res, longType()};
+            }
             const bool aPtr = a.type.isPointer();
-            if (a.type.isPointer() && b.type.isPointer()) { fail("pointer - pointer arithmetic is unsupported"); return {}; }
             if (op == "-" && !aPtr) { fail("cannot subtract a pointer from an integer"); return {}; }
             const Val& ptr = aPtr ? a : b;
             const Val& idx = aPtr ? b : a;
