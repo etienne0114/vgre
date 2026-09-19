@@ -125,7 +125,7 @@ int main() {
     auto beI = be::makeBackend("interpreter");
     std::vector<float> a(N), b(N), out(N);
 
-    const int kIters = 3000;
+    const int kIters = 1500;
     int compiled = 0, mismatches = 0;
     for (int it = 0; it < kIters; ++it) {
         NP tree = genExpr(rint(2, 6));

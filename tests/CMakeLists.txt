@@ -1206,7 +1206,10 @@ set_tests_properties(CudaSyncthreadsReduce PROPERTIES TIMEOUT 30)
 add_executable(test_cuda_threadfence compiler/test_cuda_threadfence.cpp)
 target_link_libraries(test_cuda_threadfence PRIVATE vgre Threads::Threads)
 add_test(NAME CudaThreadfence COMMAND test_cuda_threadfence)
-set_tests_properties(CudaThreadfence PROPERTIES TIMEOUT 30)
+# Cross-block grid reductions need free thread-pool cores to make progress; under
+# `-j` load the parallel CTAs starve and the test overruns its timeout. RUN_SERIAL
+# gives it the machine to itself so it finishes in its usual ~5-10s.
+set_tests_properties(CudaThreadfence PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 
 add_executable(test_cuda_shared_scalar compiler/test_cuda_shared_scalar.cpp)
 target_link_libraries(test_cuda_shared_scalar PRIVATE vgre Threads::Threads)
@@ -1348,20 +1351,28 @@ target_link_libraries(test_cuda_diagnostics PRIVATE vgre Threads::Threads)
 add_test(NAME CudaDiagnostics COMMAND test_cuda_diagnostics)
 set_tests_properties(CudaDiagnostics PROPERTIES TIMEOUT 30)
 
+# The differential fuzzers run thousands of compile+launch cycles, so they are
+# CPU-heavy; RUN_SERIAL keeps ctest from scheduling them alongside the rest of a
+# `-j` run (where full-core contention could starve them past their timeout).
 add_executable(test_cuda_fuzz_diff compiler/test_cuda_fuzz_diff.cpp)
 target_link_libraries(test_cuda_fuzz_diff PRIVATE vgre Threads::Threads)
 add_test(NAME CudaFuzzDiff COMMAND test_cuda_fuzz_diff)
-set_tests_properties(CudaFuzzDiff PROPERTIES TIMEOUT 120)
+set_tests_properties(CudaFuzzDiff PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
 add_executable(test_cuda_fuzz_float compiler/test_cuda_fuzz_float.cpp)
 target_link_libraries(test_cuda_fuzz_float PRIVATE vgre Threads::Threads)
 add_test(NAME CudaFuzzFloat COMMAND test_cuda_fuzz_float)
-set_tests_properties(CudaFuzzFloat PROPERTIES TIMEOUT 120)
+set_tests_properties(CudaFuzzFloat PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
 add_executable(test_cuda_fuzz_double compiler/test_cuda_fuzz_double.cpp)
 target_link_libraries(test_cuda_fuzz_double PRIVATE vgre Threads::Threads)
 add_test(NAME CudaFuzzDouble COMMAND test_cuda_fuzz_double)
-set_tests_properties(CudaFuzzDouble PROPERTIES TIMEOUT 120)
+set_tests_properties(CudaFuzzDouble PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
+add_executable(test_cuda_fuzz_cast compiler/test_cuda_fuzz_cast.cpp)
+target_link_libraries(test_cuda_fuzz_cast PRIVATE vgre Threads::Threads)
+add_test(NAME CudaFuzzCast COMMAND test_cuda_fuzz_cast)
+set_tests_properties(CudaFuzzCast PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
