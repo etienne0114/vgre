@@ -70,7 +70,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | variable declarations (with init) | ✅ incl. multiple declarators (`int a, b = 1, c;`) |
 | `if` / `else` (chained) | ✅ |
 | `for`, `while`, `do`-`while` | ✅ |
-| `switch` / `case` / `default` | ✅ integer selector; C fall-through (no implicit break); `default` optional; `break` exits the switch |
+| `switch` / `case` / `default` | ✅ integer selector; C fall-through (no implicit break); `default` optional; `break` exits the switch. **Validated:** `case` labels are constant-folded (constant expressions like `case 1+2:` work); duplicate case values, a non-constant label, or more than one `default` are located errors. |
 | `break`, `continue` | ✅ `break` exits the nearest loop **or** switch; `continue` targets the nearest enclosing loop (`for`-increment / `while`-retest), skipping switches; misuse outside a loop/switch is a located error |
 | `return` | ✅ |
 | blocks / scopes | ✅ (single flat scope) |

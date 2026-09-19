@@ -433,6 +433,42 @@ struct Codegen {
     }
     bool isFloatExpr(const Expr& e) { return estimateType(e).isFloating(); }
 
+    // Fold an integer constant expression (for switch case labels, which C requires
+    // to be compile-time constants). Returns true and sets `out`, or false if `e`
+    // isn't a constant integer. Handles literals, unary +/-/~/!, the integer binary
+    // operators, and integer casts.
+    static bool constEval(const Expr& e, int64_t& out) {
+        switch (e.kind) {
+            case Expr::IntLit: out = e.ival; return true;
+            case Expr::Cast: {
+                int64_t v; if (!constEval(*e.args[0], v)) return false;
+                out = v; return true;   // integer constant cast (case labels are int)
+            }
+            case Expr::Unary: {
+                int64_t v; if (!constEval(*e.args[0], v)) return false;
+                if (e.str == "-") out = -v; else if (e.str == "+") out = v;
+                else if (e.str == "~") out = ~v; else if (e.str == "!") out = !v;
+                else return false;
+                return true;
+            }
+            case Expr::Binary: {
+                int64_t a, b;
+                if (!constEval(*e.args[0], a) || !constEval(*e.args[1], b)) return false;
+                const std::string& o = e.str;
+                if (o == "+") out = a + b; else if (o == "-") out = a - b;
+                else if (o == "*") out = a * b;
+                else if (o == "/") { if (!b) return false; out = a / b; }
+                else if (o == "%") { if (!b) return false; out = a % b; }
+                else if (o == "&") out = a & b; else if (o == "|") out = a | b;
+                else if (o == "^") out = a ^ b;
+                else if (o == "<<") out = a << (b & 63); else if (o == ">>") out = a >> (b & 63);
+                else return false;
+                return true;
+            }
+            default: return false;
+        }
+    }
+
     Val emitCast(const Expr& e) {
         if (!ensureSupported(e.castType)) return {};
         Val v = emitExpr(*e.args[0]);
@@ -2043,22 +2079,31 @@ struct Codegen {
                 Val c = coerce(emitExpr(*s.expr), intType());
                 if (failed) return;
                 std::string end = label();
-                // Label each case/default marker in body order.
+                // Label each case/default marker, folding case labels to constants
+                // and validating: labels must be constant integers, no duplicate
+                // case value, at most one default (C rules).
                 std::vector<std::string> labels(s.body.size());
+                std::vector<int64_t> caseVal(s.body.size(), 0);
                 std::string defaultLabel;
+                std::set<int64_t> seen;
+                int defaults = 0;
                 for (size_t i = 0; i < s.body.size(); ++i) {
-                    if (s.body[i]->kind == Stmt::Case || s.body[i]->kind == Stmt::Default) {
+                    if (s.body[i]->kind == Stmt::Case) {
                         labels[i] = label();
-                        if (s.body[i]->kind == Stmt::Default) defaultLabel = labels[i];
+                        line = s.body[i]->line; col = s.body[i]->col;
+                        if (!constEval(*s.body[i]->expr, caseVal[i])) { fail("case label must be a constant integer"); return; }
+                        if (!seen.insert(caseVal[i]).second) { fail("duplicate case label '" + std::to_string(caseVal[i]) + "'"); return; }
+                    } else if (s.body[i]->kind == Stmt::Default) {
+                        labels[i] = label();
+                        if (++defaults > 1) { line = s.body[i]->line; col = s.body[i]->col; fail("multiple 'default' labels in one switch"); return; }
+                        defaultLabel = labels[i];
                     }
                 }
-                // Comparison chain: jump to the first matching case value.
+                // Comparison chain: jump to the first matching (constant) case value.
                 for (size_t i = 0; i < s.body.size(); ++i) {
                     if (s.body[i]->kind != Stmt::Case) continue;
-                    Val cv = coerce(emitExpr(*s.body[i]->expr), intType());
-                    if (failed) return;
                     std::string p = fresh(RC::Pred);
-                    emit("setp.eq.s32 " + p + ", " + c.reg + ", " + cv.reg + ";");
+                    emit("setp.eq.s32 " + p + ", " + c.reg + ", " + std::to_string((int32_t)caseVal[i]) + ";");
                     emit("@" + p + " bra " + labels[i] + ";");
                 }
                 emit("bra " + (defaultLabel.empty() ? end : defaultLabel) + ";");
