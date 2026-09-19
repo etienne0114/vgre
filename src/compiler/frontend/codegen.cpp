@@ -1031,6 +1031,20 @@ struct Codegen {
         Addr addr = emitAddress(*a0.args[0]);
         if (failed) return {};
         const Type pt = addr.pointee;
+
+        // Type/op validation — reject combinations that have no CUDA atomic (and
+        // would otherwise emit invalid or nonsensical PTX). Atomics act on 32- or
+        // 64-bit types only; min/max and the bitwise ops require an integer type.
+        const int atomBytes = pt.isPointer() ? 8 : pt.elemBytes();
+        if (atomBytes != 4 && atomBytes != 8) {
+            fail("atomic" + op + " requires a 32- or 64-bit type (got a " +
+                 std::to_string(atomBytes * 8) + "-bit type)"); return {};
+        }
+        if (pt.isFloating() && (op == "min" || op == "max" || op == "and" ||
+                                op == "or" || op == "xor")) {
+            fail("atomic" + op + " is not defined for floating-point types"); return {};
+        }
+
         const bool w64 = is64BitScalar(pt) || pt.base == Type::Long || pt.isPointer();
         const bool bitOp = (op == "exch" || op == "and" || op == "or" || op == "xor" || isCas);
         const std::string bitSuf = w64 ? "b64" : "b32";

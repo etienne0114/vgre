@@ -1308,6 +1308,11 @@ target_link_libraries(test_cuda_hostdevice PRIVATE vgre Threads::Threads)
 add_test(NAME CudaHostDevice COMMAND test_cuda_hostdevice)
 set_tests_properties(CudaHostDevice PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_atomic_validation compiler/test_cuda_atomic_validation.cpp)
+target_link_libraries(test_cuda_atomic_validation PRIVATE vgre Threads::Threads)
+add_test(NAME CudaAtomicValidation COMMAND test_cuda_atomic_validation)
+set_tests_properties(CudaAtomicValidation PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
