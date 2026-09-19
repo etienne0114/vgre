@@ -915,6 +915,11 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         for (int L = warpBase; L < warpEnd; ++L)
             if (!threads_[L].done) mask |= (1u << (L - warpBase));
         setReg(A(0), mask);
+    } else if (mnem == "membar" || mnem == "fence") {
+        // Memory fence (membar.{cta,gl,sys} / fence.*) — the __threadfence family.
+        // The cooperative scheduler executes memory ops in program order against a
+        // single shared address space, so every prior write is already visible to
+        // all threads: the fence is a no-op here. Falls through to advance pc.
     } else if (mnem == "shfl") {
         // Warp shuffle: park at this instruction offering our value; the last
         // lane of the warp to arrive performs the exchange for everyone. pc is

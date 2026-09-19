@@ -1037,6 +1037,13 @@ struct Codegen {
             return f2h({rf, floatType()});
         }
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
+        // Memory fences: order this thread's memory ops at block / device / system
+        // scope. On the cooperative interpreter these are no-ops (see membar), but
+        // the compiled tier lowers them to real membar so producer/consumer kernels
+        // compile and run unchanged.
+        if (fn == "__threadfence_block"  && e.args.empty()) { emit("membar.cta;"); return {}; }
+        if (fn == "__threadfence"        && e.args.empty()) { emit("membar.gl;");  return {}; }
+        if (fn == "__threadfence_system" && e.args.empty()) { emit("membar.sys;"); return {}; }
         // Barrier + block-wide predicate reduction: __syncthreads_count returns the
         // number of threads with a nonzero predicate; __syncthreads_and/_or return
         // nonzero iff the predicate holds for all / any thread. bar.red rendezvous
