@@ -162,6 +162,7 @@ private:
         int pc = 0;
         bool done = false;
         bool atBarrier = false;
+        bool atBarrierRed = false; // parked at a bar.red (__syncthreads_count/and/or)
         bool atShfl = false;       // parked at a warp-shuffle rendezvous
         bool atVote = false;       // parked at a warp-vote (ballot/any/all) rendezvous
         bool atWarpSync = false;   // parked at a __syncwarp (bar.warp.sync) rendezvous
@@ -174,7 +175,7 @@ private:
     // A thread that can still execute an instruction right now (not exited, not
     // parked at a barrier or a warp-shuffle / warp-vote rendezvous).
     static bool runnable(const Thread& t) {
-        return !t.done && !t.atBarrier && !t.atShfl && !t.atVote && !t.atWarpSync;
+        return !t.done && !t.atBarrier && !t.atBarrierRed && !t.atShfl && !t.atVote && !t.atWarpSync;
     }
 
     // Non-throwing parse: fills kernel_/regNames_ and returns true, or leaves a
@@ -193,6 +194,10 @@ private:
     // barrier without advancing.
     bool execOne(Thread& t, int tid);
     void releaseBarrierIfReady();
+    // CTA-wide barrier-reduce (bar.red → __syncthreads_count/and/or): once every
+    // thread of the block has arrived, reduce over their predicates (popc count /
+    // logical AND / logical OR) and write each thread's result, then release all.
+    void releaseBarrierRedIfReady();
     // When every active lane of `anyTid`'s warp has reached the shuffle, perform
     // the cross-lane exchange and advance them all (a warp-wide rendezvous).
     void releaseShflIfReady(int anyTid);

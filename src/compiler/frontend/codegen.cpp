@@ -1037,6 +1037,26 @@ struct Codegen {
             return f2h({rf, floatType()});
         }
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
+        // Barrier + block-wide predicate reduction: __syncthreads_count returns the
+        // number of threads with a nonzero predicate; __syncthreads_and/_or return
+        // nonzero iff the predicate holds for all / any thread. bar.red rendezvous
+        // the whole CTA, so these run on the Tier-0 interpreter.
+        if (e.args.size() == 1 &&
+            (fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or")) {
+            Val pv = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+            std::string p = fresh(RC::Pred);
+            emit("setp.ne.s32 " + p + ", " + pv.reg + ", 0;");
+            if (fn == "__syncthreads_count") {
+                std::string d = fresh(RC::R32);
+                emit("bar.red.popc.u32 " + d + ", 0, " + p + ";");   // count of set predicates
+                return {d, intType()};
+            }
+            const char* rop = (fn == "__syncthreads_and") ? "and" : "or";
+            std::string pd = fresh(RC::Pred), d = fresh(RC::R32);
+            emit("bar.red." + std::string(rop) + ".pred " + pd + ", 0, " + p + ";");
+            emit("selp.b32 " + d + ", 1, 0, " + pd + ";");           // block-vote → int 0/1
+            return {d, intType()};
+        }
         if (fn == "__syncwarp" && e.args.size() <= 1) {   // warp barrier (default: full mask)
             std::string mask = "0xffffffff";
             if (e.args.size() == 1) { Val m = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {}; mask = m.reg; }

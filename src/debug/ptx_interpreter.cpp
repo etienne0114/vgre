@@ -404,6 +404,7 @@ bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* cons
         startCta(cta);
         while (true) {
             releaseBarrierIfReady();
+            releaseBarrierRedIfReady();
             bool progressed = false;
             for (int tid = 0; tid < (int)threads_.size(); ++tid) {
                 Thread& t = threads_[tid];
@@ -415,6 +416,7 @@ bool PtxInterpreter::runCtaRange(const Dim3& grid, const Dim3& block, void* cons
             if (ctaFinished()) break;
             if (!progressed) {
                 releaseBarrierIfReady();
+                releaseBarrierRedIfReady();
                 bool anyRunnable = false;
                 for (const auto& t : threads_)
                     if (runnable(t)) { anyRunnable = true; break; }
@@ -458,6 +460,43 @@ void PtxInterpreter::releaseBarrierIfReady() {
     for (const auto& t : threads_)
         if (!t.done && !t.atBarrier) return;
     for (auto& t : threads_) t.atBarrier = false;
+}
+
+void PtxInterpreter::releaseBarrierRedIfReady() {
+    // CTA-wide: ready only when every non-exited thread has reached the bar.red.
+    for (const auto& t : threads_)
+        if (!t.done && !t.atBarrierRed) return;
+
+    // Read each parked thread's source predicate (the last operand, optionally
+    // negated with '!'), reducing over the whole block.
+    auto srcPred = [&](Thread& t) -> bool {
+        const PtxInstr& I = kernel_.code[t.pc];
+        std::string s = I.args.back();
+        bool neg = !s.empty() && s[0] == '!';
+        if (neg) s = s.substr(1);
+        auto it = t.preds.find(s);
+        bool v = (it != t.preds.end()) ? it->second : false;
+        return neg ? !v : v;
+    };
+    uint32_t count = 0; bool anyTrue = false, allTrue = true;
+    for (auto& t : threads_) {
+        if (!t.atBarrierRed) continue;                 // an exited thread
+        bool p = srcPred(t);
+        if (p) { ++count; anyTrue = true; } else allTrue = false;
+    }
+
+    for (auto& t : threads_) {
+        if (!t.atBarrierRed) continue;
+        const PtxInstr& I = kernel_.code[t.pc];
+        std::vector<std::string> parts = splitDots(I.op);   // bar.red.<op>.<type>
+        const std::string op = parts.size() > 2 ? parts[2] : "popc";
+        if (op == "popc") t.regs[I.args[0]].u = zeroExtend(count, 4);  // count → u32 dest
+        else if (op == "and") t.preds[I.args[0]] = allTrue;           // all → pred dest
+        else                  t.preds[I.args[0]] = anyTrue;           // or  → pred dest
+        t.atBarrierRed = false;
+        ++t.pc;
+        if (t.pc >= (int)kernel_.code.size()) t.done = true;
+    }
 }
 
 void PtxInterpreter::releaseShflIfReady(int anyTid) {
@@ -577,6 +616,7 @@ StopReason PtxInterpreter::resume() {
     }
     while (true) {
         releaseBarrierIfReady();
+        releaseBarrierRedIfReady();
         bool progressed = false;
         for (int tid = 0; tid < (int)threads_.size(); ++tid) {
             Thread& t = threads_[tid];
@@ -593,6 +633,7 @@ StopReason PtxInterpreter::resume() {
         }
         if (!progressed) {
             releaseBarrierIfReady();
+            releaseBarrierRedIfReady();
             for (const auto& t : threads_)
                 if (runnable(t)) goto again;   // barrier/shuffle released
             throw std::runtime_error("PTX: deadlock — threads blocked at bar.sync / shfl.sync");
@@ -607,7 +648,8 @@ StopReason PtxInterpreter::stepThread(int thread) {
     stoppedThread_ = thread;
     if (t.done) return StopReason::Step;
     if (t.atBarrier) releaseBarrierIfReady();
-    if (!t.atBarrier) execOne(t, thread);
+    if (t.atBarrierRed) releaseBarrierRedIfReady();
+    if (runnable(t)) execOne(t, thread);
     if (ctaFinished() && cta_ + 1 >= gridTotal_) { exited_ = true; return StopReason::Exited; }
     return StopReason::Step;
 }
@@ -853,6 +895,11 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
             t.atWarpSync = true;
             ++t.pc;
             releaseWarpSyncIfReady(tid);
+        } else if (has("red")) {    // bar.red — CTA-wide barrier + predicate reduction
+            // Park WITHOUT advancing pc: the reduction reads this instruction's
+            // operands and writes its result when the whole block has arrived.
+            t.atBarrierRed = true;
+            releaseBarrierRedIfReady();
         } else {                    // bar.sync — CTA-wide barrier (__syncthreads)
             t.atBarrier = true;
             ++t.pc;
