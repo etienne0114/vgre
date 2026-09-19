@@ -473,9 +473,20 @@ struct Codegen {
         if (!ensureSupported(e.castType)) return {};
         Val v = emitExpr(*e.args[0]);
         if (failed) return {};
-        Val r = coerce(v, e.castType);
-        r.type = e.castType;
-        if (e.castType.isPointer()) r.space = v.space;
+        const Type& to = e.castType;
+        // Reject casts with no meaning in the subset (rather than silently
+        // relabeling registers): structs aren't scalar-convertible, and a floating
+        // value and a pointer can't be cast to each other (that needs a bit
+        // reinterpret, e.g. __float_as_int, not a value cast).
+        if (to.isStruct() || v.type.isStruct()) { fail("cannot cast to or from a struct type"); return {}; }
+        const bool toFloat = to.isFloating() || to.base == Type::Half;
+        const bool fromFloat = v.type.isFloating() || v.type.base == Type::Half;
+        if ((toFloat && v.type.isPointer()) || (to.isPointer() && fromFloat)) {
+            fail("cannot cast between a floating-point type and a pointer"); return {};
+        }
+        Val r = coerce(v, to);
+        r.type = to;
+        if (to.isPointer()) r.space = v.space;
         return r;
     }
 

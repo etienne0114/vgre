@@ -56,7 +56,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | pre/post increment/decrement `++ --` | ✅ incl. **pointers** (`p++`/`p--` advance/retreat by one element) |
 | pointer `-` pointer (ptrdiff) | ✅ element-count difference (byte difference ÷ element size) |
 | ternary `cond ? a : b` (nested) | ✅ |
-| C-style casts `(int)x`, `(float)y` | ✅ |
+| C-style casts `(int)x`, `(float)y` | ✅ numeric conversions, `int`↔pointer, and pointer↔pointer. **Validated:** casts to/from a `struct`, or between a floating type and a pointer (which need a bit reinterpret like `__float_as_int`, not a value cast), are located errors. |
 | `sizeof(type)` | ✅ folds to the type's byte size at parse time (`sizeof(float)`→4, `sizeof(double)`→8, any pointer→8); `sizeof expr` is a located error (no type inference) |
 | declaration qualifiers `static` / `inline` / `volatile`; function qualifiers `__host__` / `__forceinline__` / `__noinline__` / `__inline_hint__` / `__launch_bounds__(…)` | ✅ accepted (no effect on lowering) — so `static __shared__`, `volatile` locals, and `__host__ __device__` helpers compile verbatim |
 | indexing `p[i]`, member `threadIdx.x` | ✅ |
