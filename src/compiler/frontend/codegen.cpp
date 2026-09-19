@@ -224,6 +224,16 @@ struct Codegen {
             Val r; r.reg = d; r.type = want; r.space = v.space; return r;
         }
         if (v.type.isPointer()) { Val r = v; r.type = want; return r; }  // ptr → int: relabel
+
+        // __half is a 16-bit float kept in a 32-bit register; isFloating() excludes
+        // it, so the int/float paths below would reinterpret its bits. Convert via
+        // f32: half→T promotes to float first; T→half narrows from float.
+        const bool vHalf = v.type.base == Type::Half && v.type.ptr == 0;
+        const bool wHalf = want.base == Type::Half && want.ptr == 0;
+        if (vHalf && wHalf) { Val r = v; r.type = want; return r; }   // half → half: relabel
+        if (vHalf) return coerce(h2f(v), want);                       // half → T
+        if (wHalf) { Val r = f2h(coerce(v, floatType())); r.type = want; return r; }  // T → half
+
         const bool vf = v.type.isFloating(), wf = want.isFloating();
         const bool v64 = is64BitScalar(v.type), w64 = is64BitScalar(want);
         if (vf == wf && v64 == w64) { Val r = v; r.type = want; return r; }  // same kind+width
@@ -597,7 +607,11 @@ struct Codegen {
         if (a.isPointer()) return a;
         if (b.isPointer()) return b;
         if (a.base == Type::Double || b.base == Type::Double) return doubleType();
-        if (a.isFloating() || b.isFloating()) return floatType();
+        // __half promotes to float for arithmetic (as C++ half operators do), so
+        // `h1 + h2` computes in f32 rather than integer-adding the raw fp16 bits;
+        // assigning the result back to a __half narrows it via coerce.
+        if (a.isFloating() || b.isFloating() ||
+            a.base == Type::Half || b.base == Type::Half) return floatType();
         Type r = (a.base == Type::Long || b.base == Type::Long) ? longType() : intType();
         // C usual arithmetic conversions: if either operand is unsigned, the
         // common type is unsigned (so div/rem/shift/compare use unsigned semantics).
