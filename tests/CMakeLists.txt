@@ -1293,6 +1293,11 @@ target_link_libraries(test_cuda_math_ext PRIVATE vgre Threads::Threads)
 add_test(NAME CudaMathExt COMMAND test_cuda_math_ext)
 set_tests_properties(CudaMathExt PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_math_trig compiler/test_cuda_math_trig.cpp)
+target_link_libraries(test_cuda_math_trig PRIVATE vgre Threads::Threads)
+add_test(NAME CudaMathTrig COMMAND test_cuda_math_trig)
+set_tests_properties(CudaMathTrig PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

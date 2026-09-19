@@ -1592,6 +1592,22 @@ struct Codegen {
                 }
             }
 
+            // Interpreter-tier unary math with no PTX approx op — inverse trig,
+            // cbrt, erf. Emitted as `<op>.approx.<ty>`; the Tier-0 interpreter
+            // computes them via libm (so these are interpreter-tier only).
+            {
+                const bool idbl = fn.empty() || fn.back() != 'f';
+                const std::string ic = idbl ? fn : fn.substr(0, fn.size() - 1);
+                static const std::set<std::string> itr = {"atan", "asin", "acos", "cbrt", "erf"};
+                if (itr.count(ic)) {
+                    const Type ft = idbl ? doubleType() : floatType();
+                    Val a = coerce(emitExpr(*e.args[0]), ft); if (failed) return {};
+                    std::string d = fresh(classOf(ft));
+                    emit(ic + ".approx." + std::string(idbl ? "f64" : "f32") + " " + d + ", " + a.reg + ";");
+                    return {d, ft};
+                }
+            }
+
             // Float math intrinsic: the `f`-suffixed name is f32, the bare C name
             // is f64 (double). `__expf`/`__logf` are the f32 fast variants.
             std::string canon; bool dbl;
@@ -1659,6 +1675,15 @@ struct Codegen {
                 emit("lg2.approx." + suf + " " + lg + ", " + a.reg + ";");
                 emit("mul." + suf + " " + mul + ", " + b.reg + ", " + lg + ";");
                 emit("ex2.approx." + suf + " " + d + ", " + mul + ";");
+                return {d, ft};
+            }
+            if (fn == "atan2f" || fn == "atan2") {      // atan2(y, x) — interpreter-tier
+                const bool dbl = (fn == "atan2");
+                const Type ft = dbl ? doubleType() : floatType();
+                const std::string suf = dbl ? "f64" : "f32";
+                a = coerce(a, ft); b = coerce(b, ft);
+                std::string d = fresh(classOf(ft));
+                emit("atan2.approx." + suf + " " + d + ", " + a.reg + ", " + b.reg + ";");
                 return {d, ft};
             }
             if (fn == "hypotf" || fn == "hypot") {      // sqrt(x*x + y*y)

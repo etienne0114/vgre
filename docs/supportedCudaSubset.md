@@ -111,6 +111,11 @@ tier uses libm.
 `log10`, `sinh`, `cosh`, `expm1`, `log1p` — each in the f32 (`…f`) and f64 spelling
 — lowered via `ex2`/`lg2` (e.g. `sinh(x)=(e^x−e^−x)/2`, `log1p(x)=log2(1+x)·ln2`).
 
+**Inverse trig / special (interpreter-tier — the interpreter computes these via
+libm; no PTX approx op exists):** `atan`, `asin`, `acos`, `atan2`, `cbrt`, `erf`
+(f32 and f64). Emitted as `<op>.approx.<ty>`; usable on the always-available Tier-0
+interpreter (the compiled tier does not provide these).
+
 **Explicit-rounding arithmetic:** `__fadd`/`__fsub`/`__fmul`/`__fdiv`,
 `__fmaf`, `__frcp`, `__fsqrt`, `__frsqrt` (f32) and `__dadd`/`__dsub`/`__dmul`/
 `__ddiv`, `__fma`, `__drcp`, `__dsqrt` (f64), each in the `_rn`/`_rz`/`_ru`/`_rd`

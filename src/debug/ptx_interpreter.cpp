@@ -1086,6 +1086,14 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
     } else if (mnem == "sin")   { setF(A(0), std::sin(fval(1)));
     } else if (mnem == "cos")   { setF(A(0), std::cos(fval(1)));
     } else if (mnem == "tanh")  { setF(A(0), std::tanh(fval(1)));
+    // Interpreter-tier math (no PTX approx op exists): inverse trig, cbrt, erf,
+    // and the two-argument atan2. Emitted by the front-end as <op>.approx.<ty>.
+    } else if (mnem == "atan")  { setF(A(0), std::atan(fval(1)));
+    } else if (mnem == "asin")  { setF(A(0), std::asin(fval(1)));
+    } else if (mnem == "acos")  { setF(A(0), std::acos(fval(1)));
+    } else if (mnem == "cbrt")  { setF(A(0), std::cbrt(fval(1)));
+    } else if (mnem == "erf")   { setF(A(0), std::erf(fval(1)));
+    } else if (mnem == "atan2") { setF(A(0), std::atan2(fval(1), fval(2)));
     } else if (mnem == "and" || mnem == "or" || mnem == "xor") {
         uint64_t a = val(1), b = val(2);
         uint64_t r = (mnem == "and") ? (a & b) : (mnem == "or") ? (a | b) : (a ^ b);
