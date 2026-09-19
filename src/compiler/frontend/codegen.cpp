@@ -309,10 +309,17 @@ struct Codegen {
                     emit("mov.u32 " + d + ", %" + sregOf(obj.str) + "." + e.str + ";");
                     return {d, intType()};
                 }
-                // Struct member read: obj is a by-value struct param → load the
-                // member scalar from its .param byte array at the member offset.
+                // Struct member read.
                 if (obj.kind == Expr::Ident) {
                     auto it = vars.find(obj.str);
+                    // Local struct: each member is a register.
+                    if (it != vars.end() && it->second.space == Space::LocalStruct) {
+                        auto& members = localStructMembers_[obj.str];
+                        auto mit = members.find(e.str);
+                        if (mit == members.end()) { fail("no member '." + e.str + "' in struct '" + it->second.type.structName + "'"); return {}; }
+                        return mit->second;
+                    }
+                    // By-value struct param → load the member from its .param bytes.
                     if (it != vars.end() && it->second.space == Space::ParamStruct) {
                         const StructDef* def = mod_ ? mod_->findStruct(it->second.type.structName) : nullptr;
                         const StructMember* m = def ? def->find(e.str) : nullptr;
@@ -351,6 +358,13 @@ struct Codegen {
                 const Expr& obj = *e.args[0];
                 if (obj.kind == Expr::Ident) {
                     auto it = vars.find(obj.str);
+                    if (it != vars.end() && it->second.space == Space::LocalStruct) {
+                        auto mit = localStructMembers_.find(obj.str);
+                        if (mit != localStructMembers_.end()) {
+                            auto m = mit->second.find(e.str);
+                            if (m != mit->second.end()) return m->second.type;
+                        }
+                    }
                     if (it != vars.end() && it->second.space == Space::ParamStruct) {
                         const StructDef* def = mod_ ? mod_->findStruct(it->second.type.structName) : nullptr;
                         const StructMember* m = def ? def->find(e.str) : nullptr;
@@ -806,6 +820,34 @@ struct Codegen {
         return emitArith(op, a, b);
     }
 
+    // Copy every member of a struct value (a local-struct or by-value param
+    // struct named by `srcExpr`) into the local struct `dst`.
+    void emitStructCopy(const std::string& dst, const Expr& srcExpr) {
+        if (srcExpr.kind != Expr::Ident) { fail("a struct can only be copied from a struct variable"); return; }
+        auto sit = vars.find(srcExpr.str);
+        if (sit == vars.end()) { fail("use of undeclared identifier '" + srcExpr.str + "'"); return; }
+        const Val src = sit->second;
+        auto& dmembers = localStructMembers_[dst];
+        if (src.space == Space::LocalStruct) {
+            auto smembers = localStructMembers_[srcExpr.str];   // by value (avoid rehash aliasing)
+            for (auto& kv : dmembers) {
+                auto s = smembers.find(kv.first);
+                if (s == smembers.end()) { fail("struct member mismatch copying '" + srcExpr.str + "'"); return; }
+                emit(std::string(movFor(kv.second.type)) + kv.second.reg + ", " + s->second.reg + ";");
+            }
+        } else if (src.space == Space::ParamStruct) {
+            const StructDef* def = mod_ ? mod_->findStruct(src.type.structName) : nullptr;
+            for (auto& kv : dmembers) {
+                const StructMember* m = def ? def->find(kv.first) : nullptr;
+                if (!m) { fail("struct member mismatch copying param '" + srcExpr.str + "'"); return; }
+                emit("ld.param." + std::string(ldSuffix(m->type)) + " " + kv.second.reg + ", [" +
+                     src.paramName + "+" + std::to_string(m->offset) + "];");
+            }
+        } else {
+            fail("cannot initialize a struct from a non-struct value");
+        }
+    }
+
     Val emitAssign(const Expr& e) {
         const Expr& lhs = *e.args[0];
         const std::string& op = e.str;
@@ -823,6 +865,11 @@ struct Codegen {
             auto it = vars.find(lhs.str);
             if (it == vars.end()) { line = lhs.line; col = lhs.col; fail("assignment to undeclared '" + lhs.str + "'"); return {}; }
             Val& var = it->second;
+            if (var.space == Space::LocalStruct) {   // whole-struct copy: s1 = s2
+                if (op != "=") { fail("compound assignment on a struct is unsupported"); return {}; }
+                emitStructCopy(lhs.str, *e.args[1]);
+                return var;
+            }
             if (isScalarShared(var)) {
                 // Compound (+= etc.) reads the current shared value first.
                 Val cur = (op == "=") ? Val{} : loadSharedScalar(var);
@@ -871,6 +918,21 @@ struct Codegen {
             value = coerce(value, pointee);
             emit("st." + ptrSpacePrefix(p) + stSuffix(pointee) + " [" + p.reg + "], " + value.reg + ";");
             return value;
+        }
+        // Write a local-struct member: `s.field = v` (and compound `s.field += v`).
+        if (lhs.kind == Expr::Member && lhs.args[0]->kind == Expr::Ident) {
+            auto it = vars.find(lhs.args[0]->str);
+            if (it != vars.end() && it->second.space == Space::LocalStruct) {
+                auto& members = localStructMembers_[lhs.args[0]->str];
+                auto mit = members.find(lhs.str);
+                if (mit == members.end()) { fail("no member '." + lhs.str + "' in struct '" + it->second.type.structName + "'"); return {}; }
+                const Val member = mit->second;   // reg name is stable; copy to avoid rehash aliasing
+                Val rhs = computeRhs(member);
+                if (failed) return {};
+                rhs = coerce(rhs, member.type);
+                emit(std::string(movFor(member.type)) + member.reg + ", " + rhs.reg + ";");
+                return member;
+            }
         }
         fail("invalid assignment target");
         return {};
@@ -1696,6 +1758,26 @@ struct Codegen {
                     sharedDecls += "\t.shared .align 4 .b8 " + sym + "[" + std::to_string(bytes) + "];\n";
                     Val v; v.type = s.type; v.space = Space::Shared; v.sharedName = sym;
                     vars[s.name] = v;
+                    return;
+                }
+                // Local struct: each scalar member lives in its own register
+                // (register-per-field). Members are read/written as `s.field`.
+                if (s.type.isStruct()) {
+                    const StructDef* def = mod_ ? mod_->findStruct(s.type.structName) : nullptr;
+                    if (!def) { fail("unknown struct type '" + s.type.structName + "'"); return; }
+                    auto& members = localStructMembers_[s.name];
+                    members.clear();
+                    for (const auto& m : def->members) {
+                        Val mv; mv.type = m.type; mv.reg = fresh(classOf(m.type));
+                        if (m.type.isPointer()) mv.space = Space::Global;
+                        members[m.name] = mv;
+                    }
+                    Val v; v.type = s.type; v.space = Space::LocalStruct;
+                    vars[s.name] = v;
+                    if (s.expr) {   // struct copy-init: `Foo b = a;`
+                        emitStructCopy(s.name, *s.expr);
+                        if (failed) return;
+                    }
                     return;
                 }
                 Val v; v.type = s.type; v.reg = fresh(classOf(s.type));

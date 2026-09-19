@@ -428,8 +428,9 @@ struct Parser {
             default: break;
         }
         if (isTypeStart(kind()) || at(TokenKind::KwCudaShared) || at(TokenKind::KwExtern) ||
-            at(TokenKind::KwStatic) || at(TokenKind::KwInline))
-            return parseVarDecl();   // (static) (extern) __shared__ …, volatile T x, etc.
+            at(TokenKind::KwStatic) || at(TokenKind::KwInline) || at(TokenKind::KwStruct) ||
+            (at(TokenKind::Identifier) && mod_ && mod_->findStruct(cur().text)))
+            return parseVarDecl();   // (static) (extern) __shared__ …, volatile T x, `Vec p;`, etc.
         // expression statement
         auto s = mkStmt(Stmt::ExprStmt);
         s->expr = parseExpr();
