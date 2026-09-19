@@ -20,15 +20,25 @@ struct CodegenResult {
     std::string error;  // "line:col: message" on failure
 };
 
+// Target configuration for the emitted PTX header. Defaults match what VGRE's
+// interpreter/compiled backends expect; override to target a different SM
+// architecture or PTX ISA version (e.g. for a newer feature or a real ptxas).
+struct CodegenOptions {
+    std::string ptxVersion = "7.0";   // .version  (PTX ISA version)
+    std::string target     = "sm_52"; // .target   (SM architecture)
+    int         addressSize = 64;     // .address_size
+};
+
 // Emit PTX for a single kernel. The no-module overload works for kernels without
 // struct parameters (it rejects struct params with a located error, since their
 // layout can't be resolved without the module); pass the Module to support them.
-CodegenResult generatePtx(const Kernel& kernel);
-CodegenResult generatePtx(const Kernel& kernel, const Module& module);
+CodegenResult generatePtx(const Kernel& kernel, const CodegenOptions& opts = {});
+CodegenResult generatePtx(const Kernel& kernel, const Module& module, const CodegenOptions& opts = {});
 
 // Convenience: lex + parse `source`, then emit PTX for kernel `name` (or the
 // first kernel if `name` is empty).
-CodegenResult compileToPtx(const std::string& source, const std::string& name = "");
+CodegenResult compileToPtx(const std::string& source, const std::string& name = "",
+                           const CodegenOptions& opts = {});
 
 }  // namespace frontend
 }  // namespace compiler

@@ -86,10 +86,13 @@ struct Codegen {
     std::vector<InlineCtx> inlineCtx_;
     std::set<std::string> inlining_;  // recursion guard
 
+    CodegenOptions opts_;             // target/version for the PTX header
+
     explicit Codegen(const Kernel& kernel,
                      const std::unordered_map<std::string, const Kernel*>* deviceFns = nullptr,
-                     const Module* mod = nullptr)
-        : k(kernel), deviceFns_(deviceFns), mod_(mod) {}
+                     const Module* mod = nullptr,
+                     const CodegenOptions& opts = {})
+        : k(kernel), deviceFns_(deviceFns), mod_(mod), opts_(opts) {}
 
     // Struct byte-size from the module's struct table (0 if unknown).
     int structSize(const std::string& name) const {
@@ -2171,7 +2174,8 @@ struct Codegen {
 
         // Assemble: header + signature + reg decls + body.
         std::string out;
-        out += ".version 7.0\n.target sm_52\n.address_size 64\n\n";
+        out += ".version " + opts_.ptxVersion + "\n.target " + opts_.target +
+               "\n.address_size " + std::to_string(opts_.addressSize) + "\n\n";
         out += ".visible .entry " + k.name + "(\n";
         for (size_t i = 0; i < k.params.size(); ++i) {
             const Type& pt = k.params[i].type;
@@ -2205,9 +2209,9 @@ struct Codegen {
 
 // With a module (so struct types resolve). This is the complete path for a
 // single kernel; the no-module overload below forwards here with an empty module.
-CodegenResult generatePtx(const Kernel& kernel, const Module& module) {
+CodegenResult generatePtx(const Kernel& kernel, const Module& module, const CodegenOptions& opts) {
     CodegenResult r;
-    Codegen cg(kernel, nullptr, &module);
+    Codegen cg(kernel, nullptr, &module, opts);
     std::string ptx = cg.run();
     if (cg.failed) { r.ok = false; r.error = cg.err; return r; }
     r.ptx = std::move(ptx);
@@ -2215,7 +2219,7 @@ CodegenResult generatePtx(const Kernel& kernel, const Module& module) {
     return r;
 }
 
-CodegenResult generatePtx(const Kernel& kernel) {
+CodegenResult generatePtx(const Kernel& kernel, const CodegenOptions& opts) {
     // No struct table is available here, so a struct parameter (or return) cannot
     // be laid out — reject it with a clear pointer to the module-aware path rather
     // than emitting wrong PTX (a struct param would otherwise get a 1-byte slot).
@@ -2227,10 +2231,11 @@ CodegenResult generatePtx(const Kernel& kernel) {
             return r;
         }
     Module empty;
-    return generatePtx(kernel, empty);
+    return generatePtx(kernel, empty, opts);
 }
 
-CodegenResult compileToPtx(const std::string& source, const std::string& name) {
+CodegenResult compileToPtx(const std::string& source, const std::string& name,
+                           const CodegenOptions& opts) {
     CodegenResult r;
     ParseResult pr = parse(source);
     if (!pr.ok) { r.error = pr.error; return r; }
@@ -2249,7 +2254,7 @@ CodegenResult compileToPtx(const std::string& source, const std::string& name) {
                                : ("__global__ kernel not found: " + name);
         return r;
     }
-    Codegen cg(*target, &deviceFns, pr.module.get());
+    Codegen cg(*target, &deviceFns, pr.module.get(), opts);
     std::string ptx = cg.run();
     if (cg.failed) { r.error = cg.err; return r; }
     r.ptx = std::move(ptx);
