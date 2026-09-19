@@ -541,16 +541,27 @@ struct Codegen {
         if (var.type.isPointer()) { fail("'++'/'--' on a pointer is unsupported"); return {}; }
         const bool inc = e.str.find("++") != std::string::npos;
         const bool pre = e.str.compare(0, 3, "pre") == 0;
+        const std::string one = !var.type.isFloating() ? "1"
+                              : (var.type.base == Type::Double ? f64imm(1.0) : "0f3F800000");
+        const std::string addsub = std::string(inc ? "add." : "sub.") + arithSuffix(var.type);
+
+        // A scalar __shared__ variable has no register — read/modify/write it
+        // through ld.shared/st.shared (a register RMW would emit `add , , 1`).
+        if (isScalarShared(var)) {
+            Val cur = loadSharedScalar(var);
+            std::string nv = fresh(classOf(var.type));
+            emit(addsub + " " + nv + ", " + cur.reg + ", " + one + ";");
+            storeSharedScalar(var, {nv, var.type});
+            return pre ? Val{nv, var.type} : cur;   // prefix → new value, postfix → old
+        }
+
         Val old;
         if (!pre) {  // postfix: capture the value before the update
             old.type = var.type;
             old.reg = fresh(classOf(var.type));
             emit(std::string(movFor(var.type)) + old.reg + ", " + var.reg + ";");
         }
-        const std::string one = !var.type.isFloating() ? "1"
-                              : (var.type.base == Type::Double ? f64imm(1.0) : "0f3F800000");
-        emit(std::string(inc ? "add." : "sub.") + arithSuffix(var.type) + " " +
-             var.reg + ", " + var.reg + ", " + one + ";");
+        emit(addsub + " " + var.reg + ", " + var.reg + ", " + one + ";");
         return pre ? var : old;
     }
 
