@@ -48,7 +48,7 @@ int main() {
     // Header: extern "C" __global__ void vecAdd (
     CHECK(t[0].kind == TokenKind::KwExtern, "first token is extern");
     CHECK(t[1].kind == TokenKind::StringLiteral && t[1].text == "C", "extern \"C\" string literal");
-    CHECK(t[2].kind == TokenKind::KwGlobal, "__global__ keyword");
+    CHECK(t[2].kind == TokenKind::KwCudaGlobal, "__global__ keyword");
     CHECK(t[3].kind == TokenKind::KwVoid, "void keyword");
     CHECK(t[4].kind == TokenKind::Identifier && t[4].text == "vecAdd", "kernel name identifier");
     CHECK(t[5].kind == TokenKind::LParen, "opening paren");

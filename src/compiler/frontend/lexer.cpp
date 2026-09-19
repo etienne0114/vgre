@@ -168,13 +168,16 @@ struct Lexer {
 
             // Launch operators <<< / >>> before the (assign-)shift operators, so a
             // kernel launch is not mis-lexed as two shifts.
-            if (threeSame('<', TokenKind::TripleLt, "<<<", l, c)) continue;
-            if (threeSame('>', TokenKind::TripleGt, ">>>", l, c)) continue;
+            if (threeSame('<', TokenKind::LaunchOpen, "<<<", l, c)) continue;
+            if (threeSame('>', TokenKind::LaunchClose, ">>>", l, c)) continue;
 
-            // Multi-char operators first.
+            // Multi-char operators first (longest match wins — 3-char before 2).
             if (three('.', '.', '.', TokenKind::Ellipsis, "...", l, c)) continue;
+            if (three('<', '=', '>', TokenKind::Spaceship, "<=>", l, c)) continue;
+            if (three('-', '>', '*', TokenKind::ArrowStar, "->*", l, c)) continue;
             if (two('-', '>', TokenKind::Arrow, "->", l, c)) continue;
-            if (two(':', ':', TokenKind::ColonColon, "::", l, c)) continue;
+            if (two('.', '*', TokenKind::DotStar, ".*", l, c)) continue;
+            if (two(':', ':', TokenKind::Scope, "::", l, c)) continue;
             if (two('+', '+', TokenKind::Inc, "++", l, c)) continue;
             if (two('-', '-', TokenKind::Dec, "--", l, c)) continue;
             if (two('+', '=', TokenKind::PlusEq, "+=", l, c)) continue;

@@ -89,7 +89,7 @@ bool isTypeStart(TokenKind k) {
         case TokenKind::KwConst: case TokenKind::KwUnsigned: case TokenKind::KwSigned:
         case TokenKind::KwVoid: case TokenKind::KwBool: case TokenKind::KwChar:
         case TokenKind::KwShort: case TokenKind::KwInt: case TokenKind::KwLong:
-        case TokenKind::KwFloat: case TokenKind::KwDouble: case TokenKind::KwHalf:
+        case TokenKind::KwFloat: case TokenKind::KwDouble: case TokenKind::KwCudaHalf:
             return true;
         default: return false;
     }
@@ -142,7 +142,7 @@ struct Parser {
             out.structName = advance().text;
             while (accept(TokenKind::Star)) {
                 out.ptr++;
-                while (accept(TokenKind::KwConst) || accept(TokenKind::KwRestrict)) { /* qualifier */ }
+                while (accept(TokenKind::KwConst) || accept(TokenKind::KwCudaRestrict)) { /* qualifier */ }
             }
             return true;
         }
@@ -164,7 +164,7 @@ struct Parser {
             case TokenKind::KwLong:   out.base = Type::Long;  advance(); break;
             case TokenKind::KwFloat:  out.base = Type::Float; advance(); break;
             case TokenKind::KwDouble: out.base = Type::Double; advance(); break;
-            case TokenKind::KwHalf:   out.base = Type::Half;  advance(); break;
+            case TokenKind::KwCudaHalf:   out.base = Type::Half;  advance(); break;
             default:
                 // "unsigned"/"const" alone implies int.
                 out.base = Type::Int; break;
@@ -172,7 +172,7 @@ struct Parser {
         // pointer stars with trailing const/__restrict__ qualifiers
         while (accept(TokenKind::Star)) {
             out.ptr++;
-            while (accept(TokenKind::KwConst) || accept(TokenKind::KwRestrict)) { /* qualifier */ }
+            while (accept(TokenKind::KwConst) || accept(TokenKind::KwCudaRestrict)) { /* qualifier */ }
         }
         return true;
     }
@@ -391,7 +391,7 @@ struct Parser {
             case TokenKind::Semicolon:  { auto s = mkStmt(Stmt::Empty); advance(); return s; }
             default: break;
         }
-        if (isTypeStart(kind()) || at(TokenKind::KwShared) ||
+        if (isTypeStart(kind()) || at(TokenKind::KwCudaShared) ||
             at(TokenKind::KwExtern)) return parseVarDecl();   // extern __shared__ …
         // expression statement
         auto s = mkStmt(Stmt::ExprStmt);
@@ -416,7 +416,7 @@ struct Parser {
         bool isExternShared = false, isShared = false;
         // `extern __shared__ T name[];` — dynamic shared memory (size from launch).
         if (accept(TokenKind::KwExtern)) { isExternShared = true; isShared = true; }
-        if (accept(TokenKind::KwShared)) isShared = true;   // __shared__ [type] name[N];
+        if (accept(TokenKind::KwCudaShared)) isShared = true;   // __shared__ [type] name[N];
         Type base;
         if (!parseType(base)) { fail("expected a type"); return nullptr; }
 
@@ -589,8 +589,8 @@ struct Parser {
         if (accept(TokenKind::KwExtern)) accept(TokenKind::StringLiteral);
         // Qualifiers: __global__ / __device__ (order-insensitive with the return type).
         for (;;) {
-            if (accept(TokenKind::KwGlobal)) { k->isGlobal = true; continue; }
-            if (accept(TokenKind::KwDevice)) { continue; }
+            if (accept(TokenKind::KwCudaGlobal)) { k->isGlobal = true; continue; }
+            if (accept(TokenKind::KwCudaDevice)) { continue; }
             break;
         }
         Type ret;

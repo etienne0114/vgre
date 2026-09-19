@@ -70,6 +70,8 @@ an 8-worker pool, both bit-identical to the serial result.
 | blocks / scopes | ✅ (single flat scope) |
 | `__device__` helper functions | ✅ (inlined; nested calls OK; recursion rejected) |
 
+**Token vocabulary:** the lexer recognizes the **complete** C++ reserved-keyword set (through C++26, incl. the alternative operator spellings `and`/`or`/…), every CUDA qualifier/annotation (`__host__`/`__device__`/`__global__`/`__shared__`/`__constant__`/`__managed__`/`__restrict__`/`__forceinline__`/`__launch_bounds__`/`__grid_constant__`/`__cluster_dims__`/…), all operators and punctuators (`-> :: ... .* ->* <=> <<< >>>` included), character literals and `true`/`false`/`nullptr`. Each token carries a source byte span; the keyword table, spellings, names and classifiers are centralized in `token.cpp`. Tokens outside the parsed subset lex cleanly and produce a **located** error if used — never wrong code.
+
 ## Memory & builtins
 | Feature | Status |
 |---|---|

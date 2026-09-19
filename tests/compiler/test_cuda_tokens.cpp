@@ -94,12 +94,12 @@ int main() {
     // ── Centralized keyword lookup + classification helpers ─────────────────────
     {
         CHECK(keywordLookup("switch") == TokenKind::KwSwitch, "keywordLookup(switch)");
-        CHECK(keywordLookup("__constant__") == TokenKind::KwConstant, "keywordLookup(__constant__)");
+        CHECK(keywordLookup("__constant__") == TokenKind::KwCudaConstant, "keywordLookup(__constant__)");
         CHECK(keywordLookup("notakeyword") == TokenKind::Identifier, "keywordLookup(non-keyword) -> Identifier");
         CHECK(isKeyword(TokenKind::KwFor) && !isKeyword(TokenKind::Plus), "isKeyword");
         CHECK(isAssignmentOperator(TokenKind::ShlEq) && !isAssignmentOperator(TokenKind::Eq), "isAssignmentOperator");
         CHECK(isLiteral(TokenKind::CharLiteral) && isLiteral(TokenKind::KwTrue), "isLiteral");
-        CHECK(isLaunchOperator(TokenKind::TripleLt) && !isOperator(TokenKind::TripleLt), "launch op is not a value operator");
+        CHECK(isLaunchOperator(TokenKind::LaunchOpen) && !isOperator(TokenKind::LaunchOpen), "launch op is not a value operator");
         CHECK(std::string(tokenSpelling(TokenKind::ShlEq)) == "<<=", "tokenSpelling(<<=)");
         CHECK(tokenSpelling(TokenKind::Identifier) == nullptr, "tokenSpelling(Identifier) is null");
     }
@@ -109,9 +109,45 @@ int main() {
         std::vector<Token> t = lex("a -> b :: c ... k<<<g,b>>>(x)");
         auto has = [&](TokenKind k) { for (auto& tk : t) if (tk.kind == k) return true; return false; };
         CHECK(has(TokenKind::Arrow), "-> lexed");
-        CHECK(has(TokenKind::ColonColon), ":: lexed");
+        CHECK(has(TokenKind::Scope), ":: lexed");
         CHECK(has(TokenKind::Ellipsis), "... lexed");
-        CHECK(has(TokenKind::TripleLt) && has(TokenKind::TripleGt), "<<< >>> lexed (not shifts)");
+        CHECK(has(TokenKind::LaunchOpen) && has(TokenKind::LaunchClose), "<<< >>> lexed (not shifts)");
+    }
+
+    // ── Completeness: every kind is named; every keyword round-trips; every ──────
+    // operator/punctuator has a spelling. The enum is contiguous [End, Spaceship].
+    {
+        int checked = 0, keywords = 0;
+        for (int i = (int)TokenKind::End; i <= (int)TokenKind::Spaceship; ++i) {
+            TokenKind k = (TokenKind)i;
+            ++checked;
+            const char* sp = tokenSpelling(k);
+            // Only End/Unknown and the variable-text tokens (Identifier + literals)
+            // may lack a fixed spelling; every keyword/operator/punctuator must have one.
+            const bool variableText = (k == TokenKind::End || k == TokenKind::Unknown ||
+                                       k == TokenKind::Identifier || k == TokenKind::IntLiteral ||
+                                       k == TokenKind::FloatLiteral || k == TokenKind::CharLiteral ||
+                                       k == TokenKind::StringLiteral);
+            if (!variableText && !sp) { std::printf("  kind %d has no spelling\n", i); ++g_fail; }
+            if (tokenKindName(k) == nullptr) { std::printf("  kind %d has no name\n", i); ++g_fail; }
+            if (isKeyword(k)) {
+                ++keywords;
+                // Keyword ⇒ has a fixed spelling that maps back to the same kind.
+                if (!sp) { std::printf("  keyword %d has no spelling\n", i); ++g_fail; continue; }
+                if (keywordLookup(sp) != k) {
+                    std::printf("  keyword '%s' does not round-trip (kind %d)\n", sp, i); ++g_fail;
+                }
+            }
+        }
+        CHECK(checked > 150, "enum fully walked");
+        CHECK(keywords >= 90, "the full C++ + CUDA keyword set is present");
+        // Aliased spelling still resolves.
+        CHECK(keywordLookup("__restrict") == TokenKind::KwCudaRestrict, "__restrict alias");
+        CHECK(keywordLookup("char16_t") == TokenKind::KwChar16, "char16_t present");
+        CHECK(keywordLookup("co_await") == TokenKind::KwCoAwait, "C++20 co_await present");
+        CHECK(keywordLookup("__cluster_dims__") == TokenKind::KwCudaClusterDims, "CUDA __cluster_dims__ present");
+        CHECK(std::string(tokenSpelling(TokenKind::Spaceship)) == "<=>", "spaceship spelled");
+        CHECK(std::string(tokenSpelling(TokenKind::ArrowStar)) == "->*", "->* spelled");
     }
 
     if (g_fail == 0)

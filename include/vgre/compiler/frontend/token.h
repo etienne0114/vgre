@@ -4,9 +4,12 @@
 // docs/zeroBurdenRoadmap.md.
 //
 // This header is the single source of truth for the token vocabulary: the kind
-// enum, the Token record (with line/column AND a source byte span), and the
-// centralized keyword lookup / fixed spelling / classification helpers. The lexer
-// and parser use these rather than duplicating keyword tables or spelling chains.
+// enum (the full C++ reserved-keyword set plus CUDA qualifiers/annotations and
+// every operator/punctuator), the Token record (line/column AND a source byte
+// span), and the centralized keyword lookup / fixed spelling / classification
+// helpers. The lexer and parser use these rather than duplicating tables. Not
+// every kind is yet handled by the parser's grammar — kinds outside the supported
+// subset lex cleanly and surface a *located* error if used, never wrong code.
 #ifndef VGRE_COMPILER_FRONTEND_TOKEN_H
 #define VGRE_COMPILER_FRONTEND_TOKEN_H
 
@@ -17,69 +20,216 @@ namespace compiler {
 namespace frontend {
 
 enum class TokenKind {
-    End,            // end of input
-    Identifier,     // foo, threadIdx, blockIdx, …
+    // ── Special ─────────────────────────────────────────────────────────────────
+    End,
+    Unknown,
 
-    // Literals.
-    IntLiteral,     // 42, 0x1f, 0
-    FloatLiteral,   // 1.5, 3.0f, 1e-3
-    StringLiteral,  // "C" in extern "C" (text excludes the quotes)
-    CharLiteral,    // 'a', '\n', '\x41' (text excludes the quotes)
+    // ── Identifiers / literals ──────────────────────────────────────────────────
+    Identifier,
+    IntLiteral,
+    FloatLiteral,
+    CharLiteral,
+    StringLiteral,
 
-    // ── Keywords (the supported CUDA-C subset) ──────────────────────────────────
-    // Function / storage qualifiers.
-    KwGlobal,       // __global__
-    KwDevice,       // __device__
-    KwHost,         // __host__
-    KwShared,       // __shared__
-    KwConstant,     // __constant__
-    KwManaged,      // __managed__
-    KwForceInline,  // __forceinline__
-    KwLaunchBounds, // __launch_bounds__
-    KwExtern,       // extern
-    KwStatic,       // static
-    KwInline,       // inline
-    KwConst,        // const
-    KwVolatile,     // volatile
-    KwRestrict,     // __restrict__ / __restrict
-    KwTypedef,      // typedef
-
-    // Type keywords.
-    KwVoid, KwBool, KwChar, KwShort, KwInt, KwLong, KwFloat, KwDouble, KwHalf, KwUnsigned, KwSigned,
-    KwStruct,
-
-    // Statement / expression keywords.
-    KwIf, KwElse, KwFor, KwWhile, KwDo, KwBreak, KwContinue, KwReturn,
-    KwSwitch, KwCase, KwDefault,
+    // ── C++ standard keywords (complete reserved set) ───────────────────────────
+    KwAlignas,
+    KwAlignof,
+    KwAsm,
+    KwAuto,
+    KwBool,
+    KwBreak,
+    KwCase,
+    KwCatch,
+    KwChar,
+    KwChar8,
+    KwChar16,
+    KwChar32,
+    KwClass,
+    KwConst,
+    KwConstCast,
+    KwContinue,
+    KwDecltype,
+    KwDefault,
+    KwDelete,
+    KwDo,
+    KwDouble,
+    KwDynamicCast,
+    KwElse,
+    KwEnum,
+    KwExplicit,
+    KwExport,
+    KwExtern,
+    KwFalse,
+    KwFloat,
+    KwFor,
+    KwFriend,
+    KwGoto,
+    KwIf,
+    KwInline,
+    KwInt,
+    KwLong,
+    KwMutable,
+    KwNamespace,
+    KwNew,
+    KwNoexcept,
+    KwNullptr,
+    KwOperator,
+    KwPrivate,
+    KwProtected,
+    KwPublic,
+    KwRegister,
+    KwReinterpretCast,
+    KwReturn,
+    KwShort,
+    KwSigned,
     KwSizeof,
+    KwStatic,
+    KwStaticAssert,
+    KwStaticCast,
+    KwStruct,
+    KwSwitch,
+    KwTemplate,
+    KwThis,
+    KwThreadLocal,
+    KwThrow,
+    KwTrue,
+    KwTry,
+    KwTypedef,
+    KwTypeid,
+    KwTypename,
+    KwUnion,
+    KwUnsigned,
+    KwUsing,
+    KwVirtual,
+    KwVoid,
+    KwVolatile,
+    KwWchar,
+    KwWhile,
 
-    // Constant keywords.
-    KwTrue, KwFalse, KwNullptr,
+    // C++ alternative operator representations.
+    KwAnd,
+    KwAndEq,
+    KwBitand,
+    KwBitor,
+    KwCompl,
+    KwNot,
+    KwNotEq,
+    KwOr,
+    KwOrEq,
+    KwXor,
+    KwXorEq,
 
-    // ── Punctuation / delimiters ────────────────────────────────────────────────
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Semicolon, Comma, Dot,
-    Arrow,          // ->
-    ColonColon,     // ::
-    Ellipsis,       // ...
+    // C++20.
+    KwConcept,
+    KwConsteval,
+    KwConstexpr,
+    KwConstinit,
+    KwCoAwait,
+    KwCoReturn,
+    KwCoYield,
+    KwRequires,
 
-    // ── Operators (assignment, arithmetic, comparison, logical, bitwise) ────────
-    Assign,                                   // =
-    Plus, Minus, Star, Slash, Percent,        // + - * / %
-    PlusEq, MinusEq, StarEq, SlashEq, PercentEq,
-    AmpEq, PipeEq, CaretEq, ShlEq, ShrEq,     // &= |= ^= <<= >>=
-    Inc, Dec,                                 // ++ --
-    Eq, Ne, Lt, Le, Gt, Ge,                   // == != < <= > >=
-    AndAnd, OrOr, Not,                        // && || !
-    Amp, Pipe, Caret, Tilde, Shl, Shr,        // & | ^ ~ << >>
-    Question, Colon,                          // ?:
+    // C++26.
+    KwContractAssert,
 
-    // CUDA kernel-launch operators — distinct from the shift operators, so a
-    // launch `k<<<grid, block>>>(...)` is not confused with `a << b`.
-    TripleLt,       // <<<
-    TripleGt,       // >>>
+    // ── CUDA-specific keywords / qualifiers / annotations ───────────────────────
+    // Execution-space specifiers.
+    KwCudaHost,          // __host__
+    KwCudaDevice,        // __device__
+    KwCudaGlobal,        // __global__
+    KwCudaTile,          // __tile__
+    KwCudaTileGlobal,    // __tile_global__
 
-    Unknown,        // an unrecognized character (lex error marker)
+    // Memory-space specifiers.
+    KwCudaShared,        // __shared__
+    KwCudaConstant,      // __constant__
+    KwCudaManaged,       // __managed__
+
+    // CUDA type specifiers.
+    KwCudaHalf,          // __half (VGRE fp16 storage type)
+
+    // Function optimization / aliasing.
+    KwCudaNoinline,      // __noinline__
+    KwCudaForceinline,   // __forceinline__
+    KwCudaInlineHint,    // __inline_hint__
+    KwCudaRestrict,      // __restrict__ / __restrict
+
+    // Kernel / function annotations.
+    KwCudaGridConstant,  // __grid_constant__
+    KwCudaLaunchBounds,  // __launch_bounds__
+    KwCudaMaxNReg,       // __maxnreg__
+    KwCudaClusterDims,   // __cluster_dims__
+
+    // ── Punctuation ─────────────────────────────────────────────────────────────
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+
+    Semicolon,
+    Comma,
+    Dot,
+
+    Ellipsis,          // ...
+
+    Arrow,             // ->
+    Scope,             // ::
+
+    DotStar,           // .*
+    ArrowStar,         // ->*
+
+    // ── Kernel launch ───────────────────────────────────────────────────────────
+    LaunchOpen,        // <<<
+    LaunchClose,       // >>>
+
+    // ── Operators ───────────────────────────────────────────────────────────────
+    Assign,            // =
+
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
+
+    Inc,
+    Dec,
+
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+
+    AndAnd,
+    OrOr,
+    Not,
+
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+
+    Question,
+    Colon,
+
+    Spaceship,         // <=>
 };
 
 // A lexed token. Carries its exact source spelling, a 1-based line/column for
@@ -111,9 +261,10 @@ TokenKind keywordLookup(const std::string& id);
 
 // Classification helpers.
 bool isKeyword(TokenKind k);
+bool isCudaKeyword(TokenKind k);          // the __host__/__device__/… family
 bool isLiteral(TokenKind k);              // Int/Float/String/Char + true/false/nullptr
 bool isOperator(TokenKind k);             // any arithmetic/logical/bitwise/compare/assign operator
-bool isAssignmentOperator(TokenKind k);   // = += -= *= /= %= &= |= ^= <<= >>=
+bool isAssignmentOperator(TokenKind k);   // = += -= *= /= %= &= |= ^= <<= >>= (and and_eq/or_eq/xor_eq)
 bool isLaunchOperator(TokenKind k);       // <<< or >>>
 
 }  // namespace frontend
