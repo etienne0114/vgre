@@ -232,6 +232,7 @@ struct Codegen {
             case Expr::Ident: {
                 auto it = vars.find(e.str);
                 if (it == vars.end()) { fail("use of undeclared identifier '" + e.str + "'"); return {}; }
+                if (isScalarShared(it->second)) return loadSharedScalar(it->second);
                 return it->second;
             }
             case Expr::Member: {
@@ -454,6 +455,24 @@ struct Codegen {
         return {d, a.pointee};
     }
 
+    // A scalar `__shared__` variable (e.g. `__shared__ int flag;`): lives in
+    // shared memory as a 1-element cell, addressed by its PTX symbol, so a write
+    // by one thread is seen block-wide — unlike a register, which is per-thread.
+    // Shared *arrays* decay to a pointer (isPointer), so a non-pointer Shared Val
+    // is exactly a scalar shared variable.
+    static bool isScalarShared(const Val& v) { return v.space == Space::Shared && !v.type.isPointer(); }
+    Val loadSharedScalar(const Val& v) {
+        std::string addr = fresh(RC::R32), d = fresh(classOf(v.type));
+        emit("mov.u32 " + addr + ", " + v.sharedName + ";");
+        emit("ld.shared." + std::string(memSuffix(v.type)) + " " + d + ", [" + addr + "];");
+        return {d, v.type};
+    }
+    void storeSharedScalar(const Val& v, const Val& val) {
+        std::string addr = fresh(RC::R32);
+        emit("mov.u32 " + addr + ", " + v.sharedName + ";");
+        emit("st.shared." + std::string(memSuffix(v.type)) + " [" + addr + "], " + val.reg + ";");
+    }
+
     // Store `value` (already coerced) to the address of index-expr `lhs`.
     void emitStore(const Expr& lhs, const Val& value) {
         Addr a = emitAddress(lhs);
@@ -614,6 +633,15 @@ struct Codegen {
             auto it = vars.find(lhs.str);
             if (it == vars.end()) { line = lhs.line; col = lhs.col; fail("assignment to undeclared '" + lhs.str + "'"); return {}; }
             Val& var = it->second;
+            if (isScalarShared(var)) {
+                // Compound (+= etc.) reads the current shared value first.
+                Val cur = (op == "=") ? Val{} : loadSharedScalar(var);
+                Val rhs = computeRhs(cur);
+                if (failed) return {};
+                rhs = coerce(rhs, var.type);
+                storeSharedScalar(var, rhs);
+                return rhs;
+            }
             Val rhs = computeRhs(var);
             if (failed) return {};
             rhs = coerce(rhs, var.type);
@@ -1038,9 +1066,10 @@ struct Codegen {
         }
         if (fn == "__syncthreads" && e.args.empty()) { emit("bar.sync 0;"); return {}; }
         // Memory fences: order this thread's memory ops at block / device / system
-        // scope. On the cooperative interpreter these are no-ops (see membar), but
-        // the compiled tier lowers them to real membar so producer/consumer kernels
-        // compile and run unchanged.
+        // scope. Lowered to real PTX membar; the interpreter issues an actual CPU
+        // barrier (device/system scope orders global memory across the concurrently
+        // scheduled CTAs), so producer/consumer and grid-reduction kernels are
+        // correct, not just accepted.
         if (fn == "__threadfence_block"  && e.args.empty()) { emit("membar.cta;"); return {}; }
         if (fn == "__threadfence"        && e.args.empty()) { emit("membar.gl;");  return {}; }
         if (fn == "__threadfence_system" && e.args.empty()) { emit("membar.sys;"); return {}; }
@@ -1429,6 +1458,18 @@ struct Codegen {
                     vars[s.name] = v;
                     arrayDims_[s.name] = s.arrayDims.empty()
                                              ? std::vector<int>{s.arraySize} : s.arrayDims;
+                    return;
+                }
+                if (s.isShared) {
+                    // Scalar __shared__ T name;  ->  .shared .align 4 .b8 name[sizeof(T)].
+                    // One block-wide cell (not a per-thread register): a write by any
+                    // thread is visible to the whole CTA. CUDA forbids an initializer
+                    // on a shared variable, so there is none to emit.
+                    if (s.expr) { fail("a __shared__ variable cannot have an initializer"); return; }
+                    int bytes = s.type.elemBytes();
+                    sharedDecls += "\t.shared .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
+                    Val v; v.type = s.type; v.space = Space::Shared; v.sharedName = s.name;
+                    vars[s.name] = v;
                     return;
                 }
                 Val v; v.type = s.type; v.reg = fresh(classOf(s.type));

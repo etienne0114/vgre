@@ -1,10 +1,11 @@
 // Track Z / Stage 3.2: memory-fence intrinsics __threadfence_block /
 // __threadfence / __threadfence_system. These order a thread's memory ops at
 // block / device / system scope; the front-end lowers them to PTX
-// membar.{cta,gl,sys}. The cooperative Tier-0 interpreter executes memory ops in
-// program order over one shared address space, so a fence is a semantic no-op
-// there — but real producer/consumer kernels that name it must still compile and
-// run, which this checks (including a shared-memory exchange). No LLVM.
+// membar.{cta,gl,sys}, and the interpreter issues a real CPU barrier. Because the
+// backend schedules different CTAs on parallel host threads, a device-scope fence
+// does real ordering work: this checks the canonical cross-block grid-reduction
+// pattern (last block, chosen by an atomic counter, sums every block's fenced
+// partial) alongside intra-block producer/consumer exchanges. No LLVM.
 //
 // Tests build in Release (-DNDEBUG); asserts must stay real.
 #undef NDEBUG
@@ -74,6 +75,45 @@ extern "C" __global__ void fence_block(int* out, const int* a, int n) {
     if (i < n) out[i] = nb;
 })";
 
+// Canonical device-scope __threadfence() use: a single-pass grid reduction. Each
+// block reduces its slice into partials[blockIdx], __threadfence() to publish it
+// device-wide, then atomicAdd a counter; the block that observes the full count is
+// last and sums every partial. Correctness depends on the fence ordering each
+// block's partial write before its counter increment as seen by the last block —
+// which runs on a different host thread under the parallel CTA scheduler.
+static const char* kGridReduce = R"(
+extern "C" __global__ void grid_reduce(int* result, int* partials, unsigned* counter,
+                                       const int* in, int n) {
+    __shared__ int s[128];
+    __shared__ int isLast;
+    int t = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + t;
+    s[t] = (i < n) ? in[i] : 0;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride = stride / 2) {
+        if (t < stride) s[t] = s[t] + s[t + stride];
+        __syncthreads();
+    }
+    if (t == 0) {
+        partials[blockIdx.x] = s[0];
+        __threadfence();                          // publish partial device-wide
+        unsigned old = atomicAdd(&counter[0], 1u);
+        isLast = (old == gridDim.x - 1) ? 1 : 0;  // last block to arrive
+    }
+    __syncthreads();
+    if (isLast != 0) {
+        int sum = 0;
+        for (int b = t; b < gridDim.x; b += blockDim.x) sum = sum + partials[b];
+        s[t] = sum;
+        __syncthreads();
+        for (int stride = blockDim.x / 2; stride > 0; stride = stride / 2) {
+            if (t < stride) s[t] = s[t] + s[t + stride];
+            __syncthreads();
+        }
+        if (t == 0) result[0] = s[0];
+    }
+})";
+
 int main() {
     const int block = 32, grid = 3, N = grid * block;
     std::vector<int> a(N);
@@ -113,6 +153,32 @@ int main() {
                 std::printf("  fence_block i=%d got=%d want=%d\n", i, out[i], want); break; }
         }
         CHECK(ok, "__threadfence_block: shared producer/consumer exchange");
+    }
+
+    // Cross-block grid reduction driven by __threadfence() + an atomic counter.
+    // Run it repeatedly: the parallel CTA scheduler varies block interleaving, so
+    // a broken fence/ordering would surface as an occasional wrong or missing sum.
+    {
+        const int rblock = 64, rgrid = 16, rN = rblock * rgrid;
+        std::vector<int> in(rN);
+        long long want = 0;
+        for (int i = 0; i < rN; ++i) { in[i] = (i % 17) - 5; want += in[i]; }
+        bool ok = true;
+        for (int rep = 0; rep < 64 && ok; ++rep) {
+            std::vector<int> result(1, 0x7fffffff), partials(rgrid, 0x7fffffff);
+            std::vector<unsigned> counter(1, 0);
+            void* rp = result.data(); void* pp = partials.data(); void* cp = counter.data();
+            void* ip = in.data(); int n = rN;
+            void* args[] = {&rp, &pp, &cp, &ip, &n};
+            if (!runInterp(kGridReduce, "grid_reduce", rgrid, rblock, args, 5)) {
+                std::printf("  grid_reduce did not run (rep %d)\n", rep); ok = false; break;
+            }
+            if (result[0] != (int)want) {
+                std::printf("  grid_reduce rep=%d got=%d want=%lld\n", rep, result[0], want);
+                ok = false; break;
+            }
+        }
+        CHECK(ok, "__threadfence: cross-block grid reduction == total sum (64 reps)");
     }
 
     if (g_fail == 0)

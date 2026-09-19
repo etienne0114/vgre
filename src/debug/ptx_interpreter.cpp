@@ -6,6 +6,7 @@
 #include "vgre/xla/half.h"   // f16<->f32 codec (header-only, dependency-free)
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -917,9 +918,17 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         setReg(A(0), mask);
     } else if (mnem == "membar" || mnem == "fence") {
         // Memory fence (membar.{cta,gl,sys} / fence.*) — the __threadfence family.
-        // The cooperative scheduler executes memory ops in program order against a
-        // single shared address space, so every prior write is already visible to
-        // all threads: the fence is a no-op here. Falls through to advance pc.
+        // Within one CTA the cooperative scheduler already runs a thread's memory
+        // ops in program order, but the backend executes different CTAs on parallel
+        // host threads (ThreadPool), so a device/system-scope fence orders global
+        // memory that a concurrently-running block observes. Issue a real CPU
+        // barrier: device/system scope → a full seq_cst fence (mfence on x86);
+        // block scope → acquire-release (intra-CTA ordering only). This makes a
+        // producer's writes-before-fence precede its writes-after-fence as seen by
+        // another block, exactly as membar specifies.
+        const bool blockScope = has("cta");
+        std::atomic_thread_fence(blockScope ? std::memory_order_acq_rel
+                                            : std::memory_order_seq_cst);
     } else if (mnem == "shfl") {
         // Warp shuffle: park at this instruction offering our value; the last
         // lane of the warp to arrive performs the exchange for everyone. pc is
