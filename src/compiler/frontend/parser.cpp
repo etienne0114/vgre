@@ -639,7 +639,8 @@ struct Parser {
         for (;;) {
             if (accept(TokenKind::KwExtern)) { accept(TokenKind::StringLiteral); continue; }
             if (accept(TokenKind::KwCudaGlobal)) { k->isGlobal = true; continue; }
-            if (accept(TokenKind::KwCudaDevice) || accept(TokenKind::KwCudaHost)) continue;
+            if (accept(TokenKind::KwCudaDevice)) { k->isDevice = true; continue; }
+            if (accept(TokenKind::KwCudaHost)) { k->isHost = true; continue; }
             if (accept(TokenKind::KwCudaForceinline) || accept(TokenKind::KwCudaNoinline) ||
                 accept(TokenKind::KwCudaInlineHint)) continue;
             if (accept(TokenKind::KwStatic) || accept(TokenKind::KwInline)) continue;

@@ -2126,9 +2126,11 @@ struct Codegen {
 
 }  // namespace
 
-CodegenResult generatePtx(const Kernel& kernel) {
+// With a module (so struct types resolve). This is the complete path for a
+// single kernel; the no-module overload below forwards here with an empty module.
+CodegenResult generatePtx(const Kernel& kernel, const Module& module) {
     CodegenResult r;
-    Codegen cg(kernel);
+    Codegen cg(kernel, nullptr, &module);
     std::string ptx = cg.run();
     if (cg.failed) { r.ok = false; r.error = cg.err; return r; }
     r.ptx = std::move(ptx);
@@ -2136,19 +2138,40 @@ CodegenResult generatePtx(const Kernel& kernel) {
     return r;
 }
 
+CodegenResult generatePtx(const Kernel& kernel) {
+    // No struct table is available here, so a struct parameter (or return) cannot
+    // be laid out — reject it with a clear pointer to the module-aware path rather
+    // than emitting wrong PTX (a struct param would otherwise get a 1-byte slot).
+    for (const Param& p : kernel.params)
+        if (p.type.isStruct()) {
+            CodegenResult r;
+            r.error = "kernel '" + kernel.name + "' has a struct parameter; use "
+                      "generatePtx(kernel, module) or compileToPtx() so struct layouts resolve";
+            return r;
+        }
+    Module empty;
+    return generatePtx(kernel, empty);
+}
+
 CodegenResult compileToPtx(const std::string& source, const std::string& name) {
     CodegenResult r;
     ParseResult pr = parse(source);
     if (!pr.ok) { r.error = pr.error; return r; }
-    // Collect __device__ helper functions (non-__global__ kernels) for inlining,
-    // and pick the __global__ entry kernel `name` (first __global__ if empty).
+    // Collect device-callable helpers (not __global__, not __host__-only) for
+    // inlining, and pick the __global__ entry `name` (first __global__ if empty).
     std::unordered_map<std::string, const Kernel*> deviceFns;
     const Kernel* target = nullptr;
     for (auto& kp : pr.module->kernels) {
-        if (!kp->isGlobal) deviceFns[kp->name] = kp.get();
-        if (!target && (name.empty() ? kp->isGlobal : kp->name == name)) target = kp.get();
+        if (kp->isDeviceCallable()) deviceFns[kp->name] = kp.get();
+        // The entry must be a __global__ kernel; a named __device__/__host__
+        // helper is never selected as the launch target.
+        if (!target && kp->isGlobal && (name.empty() || kp->name == name)) target = kp.get();
     }
-    if (!target) { r.error = "kernel not found: " + (name.empty() ? std::string("<first>") : name); return r; }
+    if (!target) {
+        r.error = name.empty() ? "no __global__ kernel found"
+                               : ("__global__ kernel not found: " + name);
+        return r;
+    }
     Codegen cg(*target, &deviceFns, pr.module.get());
     std::string ptx = cg.run();
     if (cg.failed) { r.error = cg.err; return r; }

@@ -20,8 +20,11 @@ struct CodegenResult {
     std::string error;  // "line:col: message" on failure
 };
 
-// Emit PTX for a single kernel.
+// Emit PTX for a single kernel. The no-module overload works for kernels without
+// struct parameters (it rejects struct params with a located error, since their
+// layout can't be resolved without the module); pass the Module to support them.
 CodegenResult generatePtx(const Kernel& kernel);
+CodegenResult generatePtx(const Kernel& kernel, const Module& module);
 
 // Convenience: lex + parse `source`, then emit PTX for kernel `name` (or the
 // first kernel if `name` is empty).

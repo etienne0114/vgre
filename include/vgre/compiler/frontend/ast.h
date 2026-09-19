@@ -111,7 +111,12 @@ struct Kernel {
     Type returnType;              // void for __global__; the real type for __device__
     std::vector<Param> params;
     std::vector<StmtPtr> body;
-    bool isGlobal = false;        // had __global__ (vs __device__ helper function)
+    bool isGlobal = false;        // had __global__ (a kernel entry)
+    bool isDevice = false;        // had __device__ (callable/inlinable from device code)
+    bool isHost   = false;        // had __host__
+    // A device-callable helper: an inlinable function usable from a kernel. A
+    // __host__-only function (isHost && !isDevice && !isGlobal) is NOT one.
+    bool isDeviceCallable() const { return !isGlobal && !(isHost && !isDevice); }
 };
 
 struct Module {
