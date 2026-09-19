@@ -361,7 +361,11 @@ struct Codegen {
             }
             case Expr::Index: return indexPointee(e);
             case Expr::Cast:  return e.castType;
-            case Expr::Unary: return e.str == "!" ? intType() : estimateType(*e.args[0]);
+            case Expr::Unary:
+                if (e.str == "!") return intType();
+                if (e.str == "*") { Type t = estimateType(*e.args[0]); if (t.ptr > 0) t.ptr--; return t; }
+                if (e.str == "&") { Type t = estimateType(*e.args[0]); t.ptr++; return t; }
+                return estimateType(*e.args[0]);
             case Expr::Binary: {
                 const std::string& o = e.str;
                 if (o == "<" || o == "<=" || o == ">" || o == ">=" || o == "==" || o == "!=" ||
@@ -581,10 +585,45 @@ struct Codegen {
         return pre ? var : old;
     }
 
+    // PTX space prefix for a load/store through a pointer value (shared vs global).
+    static std::string ptrSpacePrefix(const Val& p) {
+        return p.space == Space::Shared ? "shared." : p.space == Space::Local ? "local." : "global.";
+    }
+
+    // Dereference a pointer value: load the pointed-to element (`*p`, `*(a+i)`).
+    Val emitDeref(const Val& p) {
+        if (!p.type.isPointer()) { fail("cannot dereference a non-pointer"); return {}; }
+        Type pointee = p.type; pointee.ptr -= 1;
+        std::string d = fresh(classOf(pointee));
+        emit("ld." + ptrSpacePrefix(p) + ldSuffix(pointee) + " " + d + ", [" + p.reg + "];");
+        return {d, pointee};
+    }
+
     Val emitUnary(const Expr& e) {
         if (e.str == "pre++" || e.str == "pre--" || e.str == "post++" || e.str == "post--")
             return emitIncDec(e);
         if (e.str == "+") return emitExpr(*e.args[0]);
+
+        // Dereference: `*p` / `*(a+i)`.
+        if (e.str == "*") {
+            Val p = emitExpr(*e.args[0]);
+            if (failed) return {};
+            return emitDeref(p);
+        }
+        // Address-of an array element: `&a[i]` → a pointer to the element. (A plain
+        // scalar local has no memory address in this register model, so `&scalar`
+        // is a located error; `&global[i]` yields a 64-bit global address.)
+        if (e.str == "&") {
+            const Expr& operand = *e.args[0];
+            if (operand.kind != Expr::Index) { fail("'&' requires an array element (e.g. &a[i])"); return {}; }
+            Addr a = emitAddress(operand);
+            if (failed) return {};
+            if (a.shared || a.local) { fail("'&' of a __shared__/local element is unsupported"); return {}; }
+            Type ptr = a.pointee; ptr.ptr += 1;
+            Val r; r.reg = a.reg; r.type = ptr; r.space = Space::Global;
+            return r;
+        }
+
         Val v = emitExpr(*e.args[0]);
         if (failed) return {};
         if (e.str == "-") {
@@ -792,6 +831,25 @@ struct Codegen {
             if (failed) return {};
             value = coerce(value, pointee);
             emitStore(lhs, value);
+            return value;
+        }
+        // Store through a dereferenced pointer: `*p = v` (and compound `*p += v`).
+        if (lhs.kind == Expr::Unary && lhs.str == "*") {
+            Val p = emitExpr(*lhs.args[0]);
+            if (failed) return {};
+            if (!p.type.isPointer()) { fail("cannot dereference a non-pointer"); return {}; }
+            Type pointee = p.type; pointee.ptr -= 1;
+            Val value;
+            if (op == "=") {
+                value = emitExpr(*e.args[1]);
+            } else {                       // compound: load current through p, combine
+                std::string cur = fresh(classOf(pointee));
+                emit("ld." + ptrSpacePrefix(p) + ldSuffix(pointee) + " " + cur + ", [" + p.reg + "];");
+                value = computeRhs({cur, pointee});
+            }
+            if (failed) return {};
+            value = coerce(value, pointee);
+            emit("st." + ptrSpacePrefix(p) + stSuffix(pointee) + " [" + p.reg + "], " + value.reg + ";");
             return value;
         }
         fail("invalid assignment target");
