@@ -603,6 +603,25 @@ struct Codegen {
         return {d, ct};
     }
 
+    // A predicate that is true iff `v` is non-zero (C truthiness), handling every
+    // scalar kind: int/long (`!= 0`), pointer (`!= 0` as u64), float/double
+    // (`!= 0.0`), and __half (promoted to float first so -0.0 is correctly falsy).
+    std::string emitToPred(const Val& v) {
+        std::string p = fresh(RC::Pred);
+        if (v.type.base == Type::Half) {
+            Val f = h2f(v);
+            emit("setp.ne.f32 " + p + ", " + f.reg + ", " + f32imm(0.0) + ";");
+        } else if (v.type.isPointer()) {
+            emit("setp.ne.u64 " + p + ", " + v.reg + ", 0;");
+        } else if (v.type.isFloating()) {
+            std::string z = v.type.base == Type::Double ? f64imm(0.0) : f32imm(0.0);
+            emit("setp.ne." + floatSuffix(v.type) + " " + p + ", " + v.reg + ", " + z + ";");
+        } else {
+            emit("setp.ne." + intSuffix(v.type) + " " + p + ", " + v.reg + ", 0;");
+        }
+        return p;
+    }
+
     // Materialize a comparison as an int 0/1 (predicated mov, no selp needed).
     Val emitCompare(const std::string& op, Val a, Val b) {
         Type ct = promote(a.type, b.type);
@@ -628,17 +647,29 @@ struct Codegen {
             Val b = emitExpr(*e.args[1]); if (failed) return {};
             return emitCompare(op, a, b);
         }
-        Val a = emitExpr(*e.args[0]); if (failed) return {};
-        Val b = emitExpr(*e.args[1]); if (failed) return {};
 
+        // Logical && / || — real C semantics: each side is tested for truthiness
+        // (not bit-and'd), the result is 0/1, and the RHS is short-circuited (so
+        // `p && p->x` never dereferences a null `p`). The LHS is evaluated first;
+        // the RHS only on the path where it can change the result.
         if (op == "&&" || op == "||") {
-            // Non-short-circuit (subset is side-effect-free in conditions); the
-            // comparison operands are already int 0/1, so a 32-bit op is right.
-            const char* ins = op == "&&" ? "and.b32 " : "or.b32 ";
-            std::string d = fresh(RC::R32);
-            emit(std::string(ins) + d + ", " + a.reg + ", " + b.reg + ";");
+            std::string d = fresh(RC::R32), endL = label();
+            Val a = emitExpr(*e.args[0]); if (failed) return {};
+            std::string pa = emitToPred(a);
+            emit("selp.b32 " + d + ", 1, 0, " + pa + ";");        // d = (a != 0)
+            std::string skip = fresh(RC::Pred);
+            // &&: LHS false ⇒ result 0, skip RHS. ||: LHS true ⇒ result 1, skip RHS.
+            emit("setp." + std::string(op == "&&" ? "eq" : "ne") + ".s32 " + skip + ", " + d + ", 0;");
+            emit("@" + skip + " bra " + endL + ";");
+            Val b = emitExpr(*e.args[1]); if (failed) return {};
+            std::string pb = emitToPred(b);
+            emit("selp.b32 " + d + ", 1, 0, " + pb + ";");        // d = (b != 0)
+            emitLabel(endL);
             return {d, intType()};
         }
+
+        Val a = emitExpr(*e.args[0]); if (failed) return {};
+        Val b = emitExpr(*e.args[1]); if (failed) return {};
 
         // Pointer arithmetic: p + i / i + p / p - i scale the integer index by
         // the pointee size and keep 64-bit addressing (and the pointer's memory

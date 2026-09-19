@@ -49,7 +49,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | character literals `'a'`, `'\n'`, `'\x41'`; `true` / `false` / `nullptr` | ✅ (char → its int value; `true`/`false` → 1/0; `nullptr` → null pointer constant) |
 | arithmetic `+ - * / %` | ✅ |
 | comparison `== != < <= > >=` | ✅ |
-| logical `&& || !`, bitwise `& \| ^ ~ << >>` | ✅ |
+| logical `&& || !`, bitwise `& \| ^ ~ << >>` | ✅ — `&&`/`||` are true C logical ops (each side tested for truthiness `!= 0`, result 0/1) and **short-circuit** the RHS (`p && p->x` won't deref a null `p`; `a != 0 && 100/a > 3` won't divide by zero) |
 | assignment `=` and compound `+= -= *= /= %= &= \|= ^= <<= >>=` | ✅ (compound op is honored for the LHS's type, incl. unsigned) |
 | pre/post increment/decrement `++ --` | ✅ |
 | ternary `cond ? a : b` (nested) | ✅ |

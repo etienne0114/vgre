@@ -1248,6 +1248,11 @@ target_link_libraries(test_cuda_narrow_types PRIVATE vgre Threads::Threads)
 add_test(NAME CudaNarrowTypes COMMAND test_cuda_narrow_types)
 set_tests_properties(CudaNarrowTypes PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_logical compiler/test_cuda_logical.cpp)
+target_link_libraries(test_cuda_logical PRIVATE vgre Threads::Threads)
+add_test(NAME CudaLogical COMMAND test_cuda_logical)
+set_tests_properties(CudaLogical PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
