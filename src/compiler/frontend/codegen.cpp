@@ -310,9 +310,13 @@ struct Codegen {
         if (e.kind == Expr::Binary || e.kind == Expr::Unary ||
             e.kind == Expr::Cast || e.kind == Expr::Ternary) {
             Type t = estimateType(e);
-            if (!t.isFloating() && !t.isPointer() && t.base != Type::Half && t.base != Type::Struct) {
-                int64_t cv;
-                if (constEval(e, cv)) return emitConstInt(cv, t);
+            // Only fold signed integer expressions: constEval uses signed semantics,
+            // so an unsigned-typed result (differing only for /, %, >>, comparisons)
+            // is left to normal codegen rather than mis-folded.
+            if (!t.isFloating() && !t.isPointer() && t.base != Type::Half &&
+                t.base != Type::Struct && !t.isUnsigned) {
+                int64_t cv; bool cw;
+                if (constEval(e, cv, cw)) return emitConstInt(cv, t);
             }
         }
         switch (e.kind) {
@@ -461,52 +465,78 @@ struct Codegen {
     }
     bool isFloatExpr(const Expr& e) { return estimateType(e).isFloating(); }
 
-    // Fold an integer constant expression (for switch case labels, which C requires
-    // to be compile-time constants). Returns true and sets `out`, or false if `e`
-    // isn't a constant integer. Handles literals, unary +/-/~/!, the integer binary
-    // operators, and integer casts.
-    static bool constEval(const Expr& e, int64_t& out) {
+    // Wrap a value to a 32- or 64-bit two's-complement result (`wide` = 64-bit).
+    static int64_t wrapTo(int64_t v, bool wide) { return wide ? v : (int64_t)(int32_t)v; }
+
+    // Fold a *signed* integer constant expression. Returns true and sets `out` and
+    // `wide` (result is 64-bit long vs 32-bit int), or false if `e` isn't a constant
+    // integer. Critically, every operation wraps to its result width — a 32-bit
+    // subexpression wraps at 32 bits — so the folded value matches the runtime's
+    // 32-bit ops (e.g. `(big << 3) >> 10` overflows int32 exactly as at runtime).
+    static bool constEval(const Expr& e, int64_t& out, bool& wide) {
         switch (e.kind) {
-            case Expr::IntLit: out = e.ival; return true;
+            case Expr::IntLit:
+                out = e.ival;
+                wide = e.wide || e.ival > 2147483647LL || e.ival < -2147483648LL;
+                return true;
             case Expr::Cast: {
                 const Type& ct = e.castType;
-                // Only an integer-typed cast yields an integer constant; a cast to
-                // float/half/pointer/struct is not a compile-time integer here.
                 if (ct.isFloating() || ct.base == Type::Half || ct.isPointer() || ct.isStruct())
-                    return false;
-                int64_t v; if (!constEval(*e.args[0], v)) return false;
+                    return false;   // not an integer constant
+                int64_t v; bool vw; if (!constEval(*e.args[0], v, vw)) return false;
                 switch (ct.base) {   // narrow to the cast's integer width
-                    case Type::Bool:  out = (v != 0); break;
-                    case Type::Char:  out = ct.isUnsigned ? (int64_t)(uint8_t)v  : (int64_t)(int8_t)v;  break;
-                    case Type::Short: out = ct.isUnsigned ? (int64_t)(uint16_t)v : (int64_t)(int16_t)v; break;
-                    case Type::Int:   out = ct.isUnsigned ? (int64_t)(uint32_t)v : (int64_t)(int32_t)v; break;
-                    default:          out = v; break;   // long
+                    case Type::Bool:  out = (v != 0); wide = false; break;
+                    case Type::Char:  out = ct.isUnsigned ? (int64_t)(uint8_t)v  : (int64_t)(int8_t)v;  wide = false; break;
+                    case Type::Short: out = ct.isUnsigned ? (int64_t)(uint16_t)v : (int64_t)(int16_t)v; wide = false; break;
+                    case Type::Int:   out = ct.isUnsigned ? (int64_t)(uint32_t)v : (int64_t)(int32_t)v; wide = false; break;
+                    default:          out = v; wide = true; break;   // long
                 }
                 return true;
             }
             case Expr::Ternary: {
-                int64_t c; if (!constEval(*e.args[0], c)) return false;
-                return constEval(c ? *e.args[1] : *e.args[2], out);
+                int64_t c; bool cw; if (!constEval(*e.args[0], c, cw)) return false;
+                return constEval(c ? *e.args[1] : *e.args[2], out, wide);
             }
             case Expr::Unary: {
-                int64_t v; if (!constEval(*e.args[0], v)) return false;
-                if (e.str == "-") out = -v; else if (e.str == "+") out = v;
-                else if (e.str == "~") out = ~v; else if (e.str == "!") out = !v;
+                int64_t v; bool vw; if (!constEval(*e.args[0], v, vw)) return false;
+                if (e.str == "!") { out = !v; wide = false; return true; }
+                wide = vw;
+                if (e.str == "-")      out = wrapTo((int64_t)(0u - (uint64_t)v), wide);
+                else if (e.str == "+") out = v;
+                else if (e.str == "~") out = wrapTo((int64_t)~(uint64_t)v, wide);
                 else return false;
                 return true;
             }
             case Expr::Binary: {
-                int64_t a, b;
-                if (!constEval(*e.args[0], a) || !constEval(*e.args[1], b)) return false;
+                int64_t a, b; bool aw, bw;
+                if (!constEval(*e.args[0], a, aw) || !constEval(*e.args[1], b, bw)) return false;
                 const std::string& o = e.str;
-                if (o == "+") out = a + b; else if (o == "-") out = a - b;
-                else if (o == "*") out = a * b;
-                else if (o == "/") { if (!b) return false; out = a / b; }
-                else if (o == "%") { if (!b) return false; out = a % b; }
-                else if (o == "&") out = a & b; else if (o == "|") out = a | b;
-                else if (o == "^") out = a ^ b;
-                else if (o == "<<") out = a << (b & 63); else if (o == ">>") out = a >> (b & 63);
+                // Comparisons and logical operators produce an int 0/1.
+                wide = false;
+                if (o == "==") { out = (a == b); return true; }
+                if (o == "!=") { out = (a != b); return true; }
+                if (o == "<")  { out = (a < b);  return true; }
+                if (o == "<=") { out = (a <= b); return true; }
+                if (o == ">")  { out = (a > b);  return true; }
+                if (o == ">=") { out = (a >= b); return true; }
+                if (o == "&&") { out = (a != 0) && (b != 0); return true; }
+                if (o == "||") { out = (a != 0) || (b != 0); return true; }
+                // Shifts: the result type is the (promoted) left operand's.
+                if (o == "<<") { wide = aw; int s = (int)(b & (wide ? 63 : 31)); out = wrapTo((int64_t)((uint64_t)a << s), wide); return true; }
+                if (o == ">>") { wide = aw; int s = (int)(b & (wide ? 63 : 31)); out = wide ? (a >> s) : (int64_t)((int32_t)a >> s); return true; }
+                // Arithmetic / bitwise: promote to 64-bit if either operand is.
+                wide = aw || bw;
+                int64_t res;
+                if (o == "+")      res = (int64_t)((uint64_t)a + (uint64_t)b);
+                else if (o == "-") res = (int64_t)((uint64_t)a - (uint64_t)b);
+                else if (o == "*") res = (int64_t)((uint64_t)a * (uint64_t)b);
+                else if (o == "/") { if (!b) return false; res = a / b; }
+                else if (o == "%") { if (!b) return false; res = a % b; }
+                else if (o == "&") res = a & b;
+                else if (o == "|") res = a | b;
+                else if (o == "^") res = a ^ b;
                 else return false;
+                out = wrapTo(res, wide);
                 return true;
             }
             default: return false;
@@ -2153,7 +2183,8 @@ struct Codegen {
                     if (s.body[i]->kind == Stmt::Case) {
                         labels[i] = label();
                         line = s.body[i]->line; col = s.body[i]->col;
-                        if (!constEval(*s.body[i]->expr, caseVal[i])) { fail("case label must be a constant integer"); return; }
+                        bool cw;
+                        if (!constEval(*s.body[i]->expr, caseVal[i], cw)) { fail("case label must be a constant integer"); return; }
                         if (!seen.insert(caseVal[i]).second) { fail("duplicate case label '" + std::to_string(caseVal[i]) + "'"); return; }
                     } else if (s.body[i]->kind == Stmt::Default) {
                         labels[i] = label();

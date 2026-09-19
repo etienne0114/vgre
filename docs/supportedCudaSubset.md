@@ -1,6 +1,6 @@
 # Supported CUDA-C subset (the from-scratch front-end)
 
-**Updated:** 2026-09-08
+**Updated:** 2026-09-19
 
 VGRE's own CUDA-C front-end (`src/compiler/frontend/`: lexer → parser → PTX
 codegen) compiles kernels with **no Clang/LLVM**. This is the compiler used when
@@ -12,7 +12,14 @@ subexpressions are **constant-folded** to a single immediate (`5*5*5*5` → `625
 array indices and integer casts fold too). Every emitted kernel is run through a
 **structural PTX verifier** (labels resolve, registers are declared and in range,
 no malformed operands) as a self-check, so a codegen bug surfaces as an internal
-error instead of bad PTX at runtime. The PTX header's
+error instead of bad PTX at runtime. Folding is **width-correct**: a 32-bit
+subexpression wraps at 32 bits exactly as the runtime does (e.g.
+`(1131161835 << 3) >> 10` overflows `int` identically whether folded or computed
+at runtime), and only signed integer expressions fold. This is continuously
+checked by a **differential fuzzer** (`tests/compiler/test_cuda_fuzz_diff.cpp`):
+thousands of random valid integer kernels are compiled, run on the interpreter,
+and compared element-by-element against an independent reference evaluation — so
+a silently-wrong codegen or fold is a test failure, not a latent bug. The PTX header's
 `.target` (SM arch), `.version` (PTX ISA) and `.address_size` are configurable via
 `CodegenOptions` (defaults `sm_52` / `7.0` / `64`). And — in a JIT-enabled build —
 falls back to the LLVM path.
@@ -177,13 +184,13 @@ Grow this set test-first: add a kernel test under `tests/compiler/`, implement i
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 (`compiled_kernel.cpp`), and verify both tiers against a reference.
 
-## Test status of the two builds (2026-09-08)
+## Test status of the two builds (2026-09-19)
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **322 / 322 pass** — full LLVM JIT + from-scratch backends (`XlaBlasGemm` is a heavy `-j`-load timing flake: passes in isolation) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **302 / 302 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **302 / 302 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **370 / 370 pass** — full LLVM JIT + from-scratch backends (`CudaThreadfence`/`XlaBlasGemm` are heavy `-j`-load timing flakes: pass in isolation) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **350 / 350 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **350 / 350 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
