@@ -1022,6 +1022,16 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         } else if (mnem == "mul" && has("wide")) {
             int64_t a = ival(1), b = ival(2);
             t.regs[A(0)].u = (uint64_t)(a * b);       // result is 2× width
+        } else if (!isS && (mnem == "div" || mnem == "rem" || mnem == "min" || mnem == "max")) {
+            // Unsigned div/rem/min/max: these are the integer ops whose result
+            // differs by signedness (add/sub/mul.lo are identical in two's
+            // complement). Operate on zero-extended magnitudes.
+            uint64_t a = zeroExtend(val(1), size), b = zeroExtend(val(2), size), r = 0;
+            if (mnem == "div") { if (!b) throw std::runtime_error("PTX: div by zero"); r = a / b; }
+            else if (mnem == "rem") { if (!b) throw std::runtime_error("PTX: rem by zero"); r = a % b; }
+            else if (mnem == "min") r = a < b ? a : b;
+            else r = a > b ? a : b;
+            setReg(A(0), r);
         } else {
             int64_t a = ival(1), b = ival(2), r = 0;
             if (mnem == "add") r = a + b;

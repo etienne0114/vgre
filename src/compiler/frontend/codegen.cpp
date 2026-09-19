@@ -148,6 +148,13 @@ struct Codegen {
 
     // Signed-int PTX suffix for cvt / arithmetic (s32 or s64).
     static std::string intSuffix(const Type& t) { return is64BitScalar(t) || t.base == Type::Long ? "s64" : "s32"; }
+    // Signedness-aware int suffix: u32/u64 for unsigned types, else s32/s64. Used
+    // for the ops whose result differs by signedness — ordered compares, division,
+    // remainder, right shift (logical vs arithmetic), integer min/max.
+    static std::string uIntSuffix(const Type& t) {
+        const bool w64 = is64BitScalar(t) || t.base == Type::Long;
+        return std::string(t.isUnsigned ? "u" : "s") + (w64 ? "64" : "32");
+    }
     // Float PTX suffix (f32 or f64).
     static std::string floatSuffix(const Type& t) { return t.base == Type::Double ? "f64" : "f32"; }
     // Arithmetic op suffix: f64/f32 for floats, s64/s32 for ints.
@@ -182,11 +189,14 @@ struct Codegen {
         if (vf == wf && v64 == w64) { Val r = v; r.type = want; return r; }  // same kind+width
         std::string d = fresh(classOf(want));
         if (!vf && !wf) {                                         // int -> int (width)
-            emit("cvt." + intSuffix(want) + "." + intSuffix(v.type) + " " + d + ", " + v.reg + ";");
+            // Signedness of the SOURCE controls extension (u32->u64 zero-extends,
+            // s32->s64 sign-extends), so an unsigned value widens without spurious
+            // sign bits — e.g. (unsigned)x promoted to 64-bit against a large literal.
+            emit("cvt." + uIntSuffix(want) + "." + uIntSuffix(v.type) + " " + d + ", " + v.reg + ";");
         } else if (!vf && wf) {                                   // int -> float
-            emit("cvt.rn." + floatSuffix(want) + "." + intSuffix(v.type) + " " + d + ", " + v.reg + ";");
+            emit("cvt.rn." + floatSuffix(want) + "." + uIntSuffix(v.type) + " " + d + ", " + v.reg + ";");
         } else if (vf && !wf) {                                   // float -> int
-            emit("cvt.rzi." + intSuffix(want) + "." + floatSuffix(v.type) + " " + d + ", " + v.reg + ";");
+            emit("cvt.rzi." + uIntSuffix(want) + "." + floatSuffix(v.type) + " " + d + ", " + v.reg + ";");
         } else {                                                  // float -> float (width)
             // Widening f32->f64 is exact; narrowing f64->f32 needs a rounding mode.
             const std::string rnd = w64 ? "" : "rn.";
@@ -532,8 +542,11 @@ struct Codegen {
     static Type promote(const Type& a, const Type& b) {
         if (a.base == Type::Double || b.base == Type::Double) return doubleType();
         if (a.isFloating() || b.isFloating()) return floatType();
-        if (a.base == Type::Long || b.base == Type::Long) return longType();
-        return intType();
+        Type r = (a.base == Type::Long || b.base == Type::Long) ? longType() : intType();
+        // C usual arithmetic conversions: if either operand is unsigned, the
+        // common type is unsigned (so div/rem/shift/compare use unsigned semantics).
+        if (a.isUnsigned || b.isUnsigned) r.isUnsigned = true;
+        return r;
     }
 
     // Emit a binary arithmetic/bitwise op, promoting both operands to their
@@ -549,13 +562,13 @@ struct Codegen {
         if (op == "+") ins = "add." + suf;
         else if (op == "-") ins = "sub." + suf;
         else if (op == "*") ins = fp ? ("mul." + suf) : ("mul.lo." + suf);
-        else if (op == "/") ins = fp ? ("div.rn." + suf) : ("div." + suf);
-        else if (op == "%") { if (fp) { fail("'%' on a floating type"); return {}; } ins = "rem." + suf; }
+        else if (op == "/") ins = fp ? ("div.rn." + suf) : ("div." + uIntSuffix(ct));
+        else if (op == "%") { if (fp) { fail("'%' on a floating type"); return {}; } ins = "rem." + uIntSuffix(ct); }
         else if (op == "&") ins = "and." + bitSuffix(ct);
         else if (op == "|") ins = "or." + bitSuffix(ct);
         else if (op == "^") ins = "xor." + bitSuffix(ct);
         else if (op == "<<") ins = "shl." + bitSuffix(ct);
-        else if (op == ">>") ins = std::string("shr.") + (ct.base == Type::Long ? "s64" : "s32");
+        else if (op == ">>") ins = "shr." + uIntSuffix(ct);   // logical for unsigned, arithmetic for signed
         else { fail("unsupported binary operator '" + op + "'"); return {}; }
         std::string d = fresh(classOf(ct));
         emit(ins + " " + d + ", " + a.reg + ", " + b.reg + ";");
@@ -569,8 +582,12 @@ struct Codegen {
         if (failed) return {};
         const char* cc = op == "<" ? "lt" : op == "<=" ? "le" : op == ">" ? "gt" :
                          op == ">=" ? "ge" : op == "==" ? "eq" : "ne";
+        // Ordered integer compares honor unsignedness (u32/u64); ==/!= are
+        // sign-agnostic (bit-equal), and floats use the float suffix.
+        const std::string suf = ct.isFloating() ? floatSuffix(ct)
+                              : (op == "==" || op == "!=") ? intSuffix(ct) : uIntSuffix(ct);
         std::string p = fresh(RC::Pred), d = fresh(RC::R32);
-        emit("setp." + std::string(cc) + "." + arithSuffix(ct) + " " + p + ", " + a.reg + ", " + b.reg + ";");
+        emit("setp." + std::string(cc) + "." + suf + " " + p + ", " + a.reg + ", " + b.reg + ";");
         emit("mov.u32 " + d + ", 0;");
         emit("@" + p + " mov.u32 " + d + ", 1;");
         return {d, intType()};
@@ -1314,7 +1331,7 @@ struct Codegen {
                 Type ct = promote(a.type, b.type);
                 a = coerce(a, ct); b = coerce(b, ct);
                 std::string d = fresh(classOf(ct));
-                emit(std::string(fn == "min" ? "min." : "max.") + (fp ? floatSuffix(ct) : intSuffix(ct)) +
+                emit(std::string(fn == "min" ? "min." : "max.") + (fp ? floatSuffix(ct) : uIntSuffix(ct)) +
                      " " + d + ", " + a.reg + ", " + b.reg + ";");
                 return {d, ct};
             }
@@ -1411,8 +1428,11 @@ struct Codegen {
             const std::string& o = cond.str;
             const char* inv = o == "<" ? "ge" : o == "<=" ? "gt" : o == ">" ? "le" :
                               o == ">=" ? "lt" : o == "==" ? "ne" : "eq";
+            // Ordered integer compares honor unsignedness; ==/!= are sign-agnostic.
+            const std::string suf = ct.isFloating() ? floatSuffix(ct)
+                                  : (o == "==" || o == "!=") ? intSuffix(ct) : uIntSuffix(ct);
             std::string p = fresh(RC::Pred);
-            emit("setp." + std::string(inv) + "." + arithSuffix(ct) + " " + p + ", " + a.reg + ", " + b.reg + ";");
+            emit("setp." + std::string(inv) + "." + suf + " " + p + ", " + a.reg + ", " + b.reg + ";");
             emit("@" + p + " bra " + lbl + ";");
             return;
         }
