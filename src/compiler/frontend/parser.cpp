@@ -339,7 +339,10 @@ struct Parser {
             case TokenKind::KwIf:       return parseIf();
             case TokenKind::KwFor:      return parseFor();
             case TokenKind::KwWhile:    return parseWhile();
+            case TokenKind::KwDo:       return parseDoWhile();
             case TokenKind::KwReturn:   return parseReturn();
+            case TokenKind::KwBreak:    { auto s = mkStmt(Stmt::Break); advance(); expect(TokenKind::Semicolon, "';'"); return failed ? nullptr : std::move(s); }
+            case TokenKind::KwContinue: { auto s = mkStmt(Stmt::Continue); advance(); expect(TokenKind::Semicolon, "';'"); return failed ? nullptr : std::move(s); }
             case TokenKind::Semicolon:  { auto s = mkStmt(Stmt::Empty); advance(); return s; }
             default: break;
         }
@@ -365,35 +368,59 @@ struct Parser {
     }
 
     StmtPtr parseVarDecl() {
-        auto s = mkStmt(Stmt::VarDecl);
+        bool isExternShared = false, isShared = false;
         // `extern __shared__ T name[];` — dynamic shared memory (size from launch).
-        if (accept(TokenKind::KwExtern)) { s->isExternShared = true; s->isShared = true; }
-        if (accept(TokenKind::KwShared)) s->isShared = true;   // __shared__ [type] name[N];
-        if (!parseType(s->type)) { fail("expected a type"); return nullptr; }
-        if (!at(TokenKind::Identifier)) { fail("expected a variable name"); return nullptr; }
-        s->name = advance().text;
-        while (accept(TokenKind::LBracket)) {                  // array declarator name[N][M]…
-            if (at(TokenKind::RBracket)) {                     // empty [] — dynamic extern shared
-                if (!s->isExternShared) { fail("only 'extern __shared__' may use an unsized []"); return nullptr; }
-                advance();  // ]
-                continue;
+        if (accept(TokenKind::KwExtern)) { isExternShared = true; isShared = true; }
+        if (accept(TokenKind::KwShared)) isShared = true;   // __shared__ [type] name[N];
+        Type base;
+        if (!parseType(base)) { fail("expected a type"); return nullptr; }
+
+        // Parse one declarator (name [dims] [= init]) sharing the base type. C allows
+        // several comma-separated declarators in one statement (`int a, b = 1;`); we
+        // emit one VarDecl each and wrap them in a Block when there is more than one.
+        auto parseDeclarator = [&]() -> StmtPtr {
+            auto s = mkStmt(Stmt::VarDecl);
+            s->type = base; s->isExternShared = isExternShared; s->isShared = isShared;
+            if (!at(TokenKind::Identifier)) { fail("expected a variable name"); return nullptr; }
+            s->name = advance().text;
+            while (accept(TokenKind::LBracket)) {              // array declarator name[N][M]…
+                if (at(TokenKind::RBracket)) {                 // empty [] — dynamic extern shared
+                    if (!s->isExternShared) { fail("only 'extern __shared__' may use an unsized []"); return nullptr; }
+                    advance();  // ]
+                    continue;
+                }
+                if (!at(TokenKind::IntLiteral)) { fail("expected an array size"); return nullptr; }
+                int dim = static_cast<int>(std::strtoll(advance().text.c_str(), nullptr, 0));
+                expect(TokenKind::RBracket, "']'");
+                if (dim <= 0) { fail("array size must be positive"); return nullptr; }
+                s->arrayDims.push_back(dim);
             }
-            if (!at(TokenKind::IntLiteral)) { fail("expected an array size"); return nullptr; }
-            int dim = static_cast<int>(std::strtoll(advance().text.c_str(), nullptr, 0));
-            expect(TokenKind::RBracket, "']'");
-            if (dim <= 0) { fail("array size must be positive"); return nullptr; }
-            s->arrayDims.push_back(dim);
+            if (!s->arrayDims.empty()) {
+                s->arraySize = 1;
+                for (int d : s->arrayDims) s->arraySize *= d;  // total element count
+            }
+            if (accept(TokenKind::Assign)) {
+                s->expr = parseExpr();
+                if (!s->expr) return nullptr;
+            }
+            return s;
+        };
+
+        StmtPtr first = parseDeclarator();
+        if (!first) return nullptr;
+        if (!at(TokenKind::Comma)) {                           // single declarator (common case)
+            expect(TokenKind::Semicolon, "';'");
+            return failed ? nullptr : std::move(first);
         }
-        if (!s->arrayDims.empty()) {
-            s->arraySize = 1;
-            for (int d : s->arrayDims) s->arraySize *= d;      // total element count
-        }
-        if (accept(TokenKind::Assign)) {
-            s->expr = parseExpr();
-            if (!s->expr) return nullptr;
+        auto blk = mkStmt(Stmt::Block);                        // `T a, b, …;` → a block of decls
+        blk->body.push_back(std::move(first));
+        while (accept(TokenKind::Comma)) {
+            StmtPtr d = parseDeclarator();
+            if (!d) return nullptr;
+            blk->body.push_back(std::move(d));
         }
         expect(TokenKind::Semicolon, "';'");
-        return failed ? nullptr : std::move(s);
+        return failed ? nullptr : std::move(blk);
     }
 
     StmtPtr parseIf() {
@@ -425,6 +452,20 @@ struct Parser {
         if (!body) return nullptr;
         s->body.push_back(std::move(body));
         return s;
+    }
+
+    StmtPtr parseDoWhile() {
+        auto s = mkStmt(Stmt::DoWhile);
+        advance();  // do
+        StmtPtr body = parseStmt();
+        if (!body) return nullptr;
+        s->body.push_back(std::move(body));
+        expect(TokenKind::KwWhile, "'while'");
+        expect(TokenKind::LParen, "'('");
+        s->expr = parseExpr();
+        expect(TokenKind::RParen, "')'");
+        expect(TokenKind::Semicolon, "';'");
+        return failed ? nullptr : std::move(s);
     }
 
     StmtPtr parseFor() {

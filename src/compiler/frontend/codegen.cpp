@@ -67,6 +67,9 @@ struct Codegen {
     int nR = 0, nF = 0, nRd = 0, nFd = 0, nP = 0, nLbl = 0;
     std::unordered_map<std::string, Val> vars;  // name -> value (single mutable reg)
     std::unordered_map<std::string, std::vector<int>> arrayDims_;  // declared array -> dim sizes
+    // Enclosing loops for break/continue: (continueTarget, breakTarget) labels.
+    // `continue` branches to the first, `break` to the second, of the innermost.
+    std::vector<std::pair<std::string, std::string>> loopCtx_;
     bool failed = false;
     std::string err;
     int line = 0, col = 0;
@@ -1540,24 +1543,55 @@ struct Codegen {
                 return;
             }
             case Stmt::While: {
+                // continue → re-test the condition (top); break → end.
                 std::string top = label(), end = label();
                 emitLabel(top);
                 emitCondBranchFalse(*s.expr, end);
                 if (failed) return;
-                for (auto& st : s.body) { emitStmt(*st); if (failed) return; }
+                loopCtx_.push_back({top, end});
+                for (auto& st : s.body) { emitStmt(*st); if (failed) { loopCtx_.pop_back(); return; } }
+                loopCtx_.pop_back();
                 emit("bra " + top + ";");
+                emitLabel(end);
+                return;
+            }
+            case Stmt::DoWhile: {
+                // Body runs once before the test. continue → the test (cont); break → end.
+                std::string top = label(), cont = label(), end = label();
+                emitLabel(top);
+                loopCtx_.push_back({cont, end});
+                for (auto& st : s.body) { emitStmt(*st); if (failed) { loopCtx_.pop_back(); return; } }
+                loopCtx_.pop_back();
+                emitLabel(cont);
+                emitCondBranchFalse(*s.expr, end);   // !cond → exit
+                if (failed) return;
+                emit("bra " + top + ";");            // cond → loop again
                 emitLabel(end);
                 return;
             }
             case Stmt::For: {
                 if (s.forInit) { emitStmt(*s.forInit); if (failed) return; }
-                std::string top = label(), end = label();
+                // continue → the increment (cont), not the top, so the loop advances.
+                std::string top = label(), cont = label(), end = label();
                 emitLabel(top);
                 if (s.forCond) { emitCondBranchFalse(*s.forCond, end); if (failed) return; }
-                for (auto& st : s.body) { emitStmt(*st); if (failed) return; }
+                loopCtx_.push_back({cont, end});
+                for (auto& st : s.body) { emitStmt(*st); if (failed) { loopCtx_.pop_back(); return; } }
+                loopCtx_.pop_back();
+                emitLabel(cont);
                 if (s.forIncr) { emitExpr(*s.forIncr); if (failed) return; }
                 emit("bra " + top + ";");
                 emitLabel(end);
+                return;
+            }
+            case Stmt::Break: {
+                if (loopCtx_.empty()) { line = s.line; col = s.col; fail("'break' outside a loop"); return; }
+                emit("bra " + loopCtx_.back().second + ";");
+                return;
+            }
+            case Stmt::Continue: {
+                if (loopCtx_.empty()) { line = s.line; col = s.col; fail("'continue' outside a loop"); return; }
+                emit("bra " + loopCtx_.back().first + ";");
                 return;
             }
         }

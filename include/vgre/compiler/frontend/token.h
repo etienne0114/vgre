@@ -27,7 +27,7 @@ enum class TokenKind {
     KwRestrict,     // __restrict__ / __restrict
     KwVoid, KwBool, KwChar, KwShort, KwInt, KwLong, KwFloat, KwDouble, KwHalf, KwUnsigned, KwSigned,
     KwStruct,
-    KwIf, KwElse, KwFor, KwWhile, KwReturn,
+    KwIf, KwElse, KwFor, KwWhile, KwDo, KwBreak, KwContinue, KwReturn,
 
     // Punctuation / delimiters.
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
