@@ -750,10 +750,17 @@ struct Codegen {
         // assigning the result back to a __half narrows it via coerce.
         if (a.isFloating() || b.isFloating() ||
             a.base == Type::Half || b.base == Type::Half) return floatType();
-        Type r = (a.base == Type::Long || b.base == Type::Long) ? longType() : intType();
-        // C usual arithmetic conversions: if either operand is unsigned, the
-        // common type is unsigned (so div/rem/shift/compare use unsigned semantics).
-        if (a.isUnsigned || b.isUnsigned) r.isUnsigned = true;
+        // Integer operands smaller than int (char/short/bool) undergo the integer
+        // promotion to int; the common type is int, or long if either operand is
+        // long-rank. (Values already sit sign/zero-extended in 32-bit registers.)
+        const bool resultLong = (a.base == Type::Long || b.base == Type::Long);
+        Type r = resultLong ? longType() : intType();
+        // Unsigned propagates only from an operand AT the result's rank: e.g.
+        // `unsigned int + long` (64-bit) is *signed* long (long represents every
+        // unsigned int), while `unsigned long + int` is unsigned long.
+        auto atResultRank = [&](const Type& t) { return (t.base == Type::Long) == resultLong; };
+        if ((a.isUnsigned && atResultRank(a)) || (b.isUnsigned && atResultRank(b)))
+            r.isUnsigned = true;
         return r;
     }
 
