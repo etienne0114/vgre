@@ -211,7 +211,19 @@ struct Codegen {
     // Coerce `v` to `want`, emitting the right cvt for any int/float/width change
     // (int32/int64/f32/f64). Pointers pass through unchanged.
     Val coerce(const Val& v, const Type& want) {
-        if (want.isPointer() || v.type.isPointer()) { Val r = v; r.type = want; return r; }
+        if (want.isPointer()) {
+            if (v.type.isPointer()) { Val r = v; r.type = want; return r; }  // ptr → ptr: relabel
+            // integer → pointer (a null constant `0`, or a `(T*)intExpr` cast):
+            // materialize a full 64-bit address register so pointer compares and
+            // stores use the whole width, not a stray 32-bit register.
+            std::string d = fresh(RC::RD64);
+            if (is64BitScalar(v.type) || v.type.base == Type::Long)
+                emit("mov.u64 " + d + ", " + v.reg + ";");
+            else
+                emit("cvt.u64.u32 " + d + ", " + v.reg + ";");   // zero-extend 32-bit
+            Val r; r.reg = d; r.type = want; r.space = v.space; return r;
+        }
+        if (v.type.isPointer()) { Val r = v; r.type = want; return r; }  // ptr → int: relabel
         const bool vf = v.type.isFloating(), wf = want.isFloating();
         const bool v64 = is64BitScalar(v.type), w64 = is64BitScalar(want);
         if (vf == wf && v64 == w64) { Val r = v; r.type = want; return r; }  // same kind+width
@@ -568,6 +580,11 @@ struct Codegen {
 
     // C-style usual arithmetic conversions across the supported scalar types.
     static Type promote(const Type& a, const Type& b) {
+        // A pointer participates as itself (64-bit addressing): this is what makes
+        // pointer comparisons and `cond ? p : q` use the full 64-bit width and the
+        // pointer register class, rather than collapsing to a 32-bit int.
+        if (a.isPointer()) return a;
+        if (b.isPointer()) return b;
         if (a.base == Type::Double || b.base == Type::Double) return doubleType();
         if (a.isFloating() || b.isFloating()) return floatType();
         Type r = (a.base == Type::Long || b.base == Type::Long) ? longType() : intType();
@@ -575,6 +592,16 @@ struct Codegen {
         // common type is unsigned (so div/rem/shift/compare use unsigned semantics).
         if (a.isUnsigned || b.isUnsigned) r.isUnsigned = true;
         return r;
+    }
+
+    // setp suffix for comparing two values of common type `ct` with operator `o`:
+    // pointers compare as unsigned 64-bit addresses; ==/!= are sign-agnostic;
+    // ordered integer compares honor unsignedness.
+    static std::string cmpSuffix(const Type& ct, const std::string& o) {
+        if (ct.isPointer()) return "u64";
+        if (ct.isFloating()) return floatSuffix(ct);
+        if (o == "==" || o == "!=") return intSuffix(ct);
+        return uIntSuffix(ct);
     }
 
     // Emit a binary arithmetic/bitwise op, promoting both operands to their
@@ -629,10 +656,7 @@ struct Codegen {
         if (failed) return {};
         const char* cc = op == "<" ? "lt" : op == "<=" ? "le" : op == ">" ? "gt" :
                          op == ">=" ? "ge" : op == "==" ? "eq" : "ne";
-        // Ordered integer compares honor unsignedness (u32/u64); ==/!= are
-        // sign-agnostic (bit-equal), and floats use the float suffix.
-        const std::string suf = ct.isFloating() ? floatSuffix(ct)
-                              : (op == "==" || op == "!=") ? intSuffix(ct) : uIntSuffix(ct);
+        const std::string suf = cmpSuffix(ct, op);
         std::string p = fresh(RC::Pred), d = fresh(RC::R32);
         emit("setp." + std::string(cc) + "." + suf + " " + p + ", " + a.reg + ", " + b.reg + ";");
         emit("mov.u32 " + d + ", 0;");
@@ -1487,9 +1511,7 @@ struct Codegen {
             const std::string& o = cond.str;
             const char* inv = o == "<" ? "ge" : o == "<=" ? "gt" : o == ">" ? "le" :
                               o == ">=" ? "lt" : o == "==" ? "ne" : "eq";
-            // Ordered integer compares honor unsignedness; ==/!= are sign-agnostic.
-            const std::string suf = ct.isFloating() ? floatSuffix(ct)
-                                  : (o == "==" || o == "!=") ? intSuffix(ct) : uIntSuffix(ct);
+            const std::string suf = cmpSuffix(ct, o);
             std::string p = fresh(RC::Pred);
             emit("setp." + std::string(inv) + "." + suf + " " + p + ", " + a.reg + ", " + b.reg + ";");
             emit("@" + p + " bra " + lbl + ";");
@@ -1497,11 +1519,10 @@ struct Codegen {
         }
         Val c = emitExpr(cond);
         if (failed) return;
-        std::string p = fresh(RC::Pred);
-        std::string zero = !c.type.isFloating() ? "0"
-                         : (c.type.base == Type::Double ? f64imm(0.0) : f32imm(0.0));
-        emit("setp.eq." + arithSuffix(c.type) + " " + p + ", " + c.reg + ", " + zero + ";");
-        emit("@" + p + " bra " + lbl + ";");
+        // `if (x)` / `while (x)` etc. — branch when x is NOT truthy. Reuse the
+        // truthiness predicate (handles pointers/float/half correctly) and invert.
+        std::string p = emitToPred(c);
+        emit("@!" + p + " bra " + lbl + ";");
     }
 
     // ── Statements ──────────────────────────────────────────────────────────────
