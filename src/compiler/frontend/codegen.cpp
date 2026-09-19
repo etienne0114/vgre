@@ -8,6 +8,7 @@
 #include "vgre/compiler/frontend/codegen.h"
 
 #include "vgre/compiler/frontend/parser.h"
+#include "vgre/compiler/frontend/ptx_verifier.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -2214,6 +2215,8 @@ CodegenResult generatePtx(const Kernel& kernel, const Module& module, const Code
     Codegen cg(kernel, nullptr, &module, opts);
     std::string ptx = cg.run();
     if (cg.failed) { r.ok = false; r.error = cg.err; return r; }
+    PtxVerifyResult v = verifyPtx(ptx);   // self-check: a failure is a codegen bug
+    if (!v.ok) { r.ok = false; r.error = v.error; return r; }
     r.ptx = std::move(ptx);
     r.ok = true;
     return r;
@@ -2257,6 +2260,8 @@ CodegenResult compileToPtx(const std::string& source, const std::string& name,
     Codegen cg(*target, &deviceFns, pr.module.get(), opts);
     std::string ptx = cg.run();
     if (cg.failed) { r.error = cg.err; return r; }
+    PtxVerifyResult v = verifyPtx(ptx);   // self-check: a failure is a codegen bug
+    if (!v.ok) { r.error = v.error; return r; }
     r.ptx = std::move(ptx);
     r.ok = true;
     return r;

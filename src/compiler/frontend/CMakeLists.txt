@@ -6,6 +6,7 @@ add_library(vgre_frontend OBJECT
     lexer.cpp
     parser.cpp
     codegen.cpp
+    ptx_verifier.cpp
     compiled_kernel.cpp
 )
 
