@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -1161,7 +1162,22 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
                      : has("rmi") ? std::floor(d)
                      : has("rpi") ? std::ceil(d)
                      :              std::trunc(d);
-            out = isSignedType(dstT) ? (uint64_t)(int64_t)r : (uint64_t)r;
+            // PTX float→int conversions SATURATE to the destination range and map
+            // NaN to 0 — unlike a C cast, which is undefined out of range. Clamp
+            // before the narrowing cast so an out-of-range magnitude (or a division
+            // by zero producing ±inf) yields INT_MAX/INT_MIN, not wrapped garbage.
+            const int dbits = typeSize(dstT) * 8;
+            if (std::isnan(r)) {
+                out = 0;
+            } else if (isSignedType(dstT)) {
+                const int64_t hi = dbits >= 64 ? INT64_MAX : (((int64_t)1 << (dbits - 1)) - 1);
+                const int64_t lo = dbits >= 64 ? INT64_MIN : -((int64_t)1 << (dbits - 1));
+                int64_t sv = r >= (double)hi ? hi : r <= (double)lo ? lo : (int64_t)r;
+                out = (uint64_t)sv;
+            } else {
+                const uint64_t hi = dbits >= 64 ? UINT64_MAX : (((uint64_t)1 << dbits) - 1);
+                out = r <= 0.0 ? 0 : r >= (double)hi ? hi : (uint64_t)r;
+            }
             out = zeroExtend(out, typeSize(dstT));
         } else if (isFloatType(dstT)) {                              // int → float
             int64_t v = isSignedType(srcT) ? signExtend(raw, ss) : (int64_t)zeroExtend(raw, ss);
