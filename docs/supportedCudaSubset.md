@@ -54,6 +54,8 @@ an 8-worker pool, both bit-identical to the serial result.
 | pre/post increment/decrement `++ --` | ✅ |
 | ternary `cond ? a : b` (nested) | ✅ |
 | C-style casts `(int)x`, `(float)y` | ✅ |
+| `sizeof(type)` | ✅ folds to the type's byte size at parse time (`sizeof(float)`→4, `sizeof(double)`→8, any pointer→8); `sizeof expr` is a located error (no type inference) |
+| declaration qualifiers `static` / `inline` / `volatile`; function qualifiers `__host__` / `__forceinline__` / `__noinline__` / `__inline_hint__` / `__launch_bounds__(…)` | ✅ accepted (no effect on lowering) — so `static __shared__`, `volatile` locals, and `__host__ __device__` helpers compile verbatim |
 | indexing `p[i]`, member `threadIdx.x` | ✅ |
 | `atomicAdd`, `atomicSub`, `atomicMin`, `atomicMax`, `atomicExch`, `atomicAnd`, `atomicOr`, `atomicXor` (`&p[i], v`) and `atomicCAS(&p[i], cmp, v)` | ✅ real lock-free RMW on both tiers — correct under parallel CTAs; each returns the OLD value. add/sub take int **or** float; min/max are integer (signed/unsigned by the pointee); exch/and/or/xor/cas are 32/64-bit. On `__shared__`/local memory they lower to a sequential ld/compute/st (already atomic within a CTA). |
 | address-of `&p[i]` (as an atomic target) | ✅ |

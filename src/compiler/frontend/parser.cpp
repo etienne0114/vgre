@@ -86,7 +86,8 @@ bool isAssignOp(TokenKind k) {
 
 bool isTypeStart(TokenKind k) {
     switch (k) {
-        case TokenKind::KwConst: case TokenKind::KwUnsigned: case TokenKind::KwSigned:
+        case TokenKind::KwConst: case TokenKind::KwVolatile:
+        case TokenKind::KwUnsigned: case TokenKind::KwSigned:
         case TokenKind::KwVoid: case TokenKind::KwBool: case TokenKind::KwChar:
         case TokenKind::KwShort: case TokenKind::KwInt: case TokenKind::KwLong:
         case TokenKind::KwFloat: case TokenKind::KwDouble: case TokenKind::KwCudaHalf:
@@ -94,6 +95,9 @@ bool isTypeStart(TokenKind k) {
         default: return false;
     }
 }
+
+// Byte size of a type (for sizeof): any pointer is 8; scalars use elemBytes().
+int64_t sizeofType(const Type& t) { return t.ptr > 0 ? 8 : (int64_t)t.elemBytes(); }
 
 struct Parser {
     std::vector<Token> toks;
@@ -120,6 +124,17 @@ struct Parser {
     }
     bool accept(TokenKind k) { if (at(k)) { advance(); return true; } return false; }
     void expect(TokenKind k, const char* what) { if (!accept(k)) fail(std::string("expected ") + what); }
+
+    // Consume a balanced parenthesized group (annotation args like __launch_bounds__(256)).
+    void skipParenGroup() {
+        if (!accept(TokenKind::LParen)) return;
+        int depth = 1;
+        while (depth > 0 && !at(TokenKind::End)) {
+            if (at(TokenKind::LParen)) ++depth;
+            else if (at(TokenKind::RParen)) --depth;
+            advance();
+        }
+    }
 
     ExprPtr mkExpr(Expr::Kind k) {
         auto e = std::make_unique<Expr>();
@@ -151,6 +166,7 @@ struct Parser {
         // qualifiers / sign, in any leading order
         for (;;) {
             if (accept(TokenKind::KwConst)) { out.isConst = true; continue; }
+            if (accept(TokenKind::KwVolatile)) { /* accepted, no effect on lowering */ continue; }
             if (accept(TokenKind::KwUnsigned)) { out.isUnsigned = true; continue; }
             if (accept(TokenKind::KwSigned)) { out.isUnsigned = false; continue; }
             break;
@@ -169,10 +185,11 @@ struct Parser {
                 // "unsigned"/"const" alone implies int.
                 out.base = Type::Int; break;
         }
-        // pointer stars with trailing const/__restrict__ qualifiers
+        // pointer stars with trailing const/volatile/__restrict__ qualifiers
         while (accept(TokenKind::Star)) {
             out.ptr++;
-            while (accept(TokenKind::KwConst) || accept(TokenKind::KwCudaRestrict)) { /* qualifier */ }
+            while (accept(TokenKind::KwConst) || accept(TokenKind::KwVolatile) ||
+                   accept(TokenKind::KwCudaRestrict)) { /* qualifier */ }
         }
         return true;
     }
@@ -236,6 +253,25 @@ struct Parser {
 
     ExprPtr parseUnary() {
         TokenKind k = kind();
+        // sizeof: `sizeof(type)` folds to the type's byte size at parse time (a
+        // compile-time integer constant). `sizeof expr` is not supported (the
+        // parser has no type inference) — a located error, never wrong code.
+        if (k == TokenKind::KwSizeof) {
+            advance();  // sizeof
+            if (at(TokenKind::LParen) && pos + 1 < toks.size() && isTypeStart(toks[pos + 1].kind)) {
+                advance();  // '('
+                Type t;
+                if (!parseType(t)) { fail("expected a type in sizeof"); return nullptr; }
+                expect(TokenKind::RParen, "')'");
+                if (failed) return nullptr;
+                auto e = mkExpr(Expr::IntLit);
+                e->ival = sizeofType(t);
+                e->wide = false;
+                return e;
+            }
+            fail("sizeof requires a parenthesized type, e.g. sizeof(float)");
+            return nullptr;
+        }
         // C-style cast: '(' <type> ')' <unary>. Distinguished from a parenthesized
         // expression by a type keyword right after '('.
         if (k == TokenKind::LParen && pos + 1 < toks.size() && isTypeStart(toks[pos + 1].kind)) {
@@ -391,8 +427,9 @@ struct Parser {
             case TokenKind::Semicolon:  { auto s = mkStmt(Stmt::Empty); advance(); return s; }
             default: break;
         }
-        if (isTypeStart(kind()) || at(TokenKind::KwCudaShared) ||
-            at(TokenKind::KwExtern)) return parseVarDecl();   // extern __shared__ …
+        if (isTypeStart(kind()) || at(TokenKind::KwCudaShared) || at(TokenKind::KwExtern) ||
+            at(TokenKind::KwStatic) || at(TokenKind::KwInline))
+            return parseVarDecl();   // (static) (extern) __shared__ …, volatile T x, etc.
         // expression statement
         auto s = mkStmt(Stmt::ExprStmt);
         s->expr = parseExpr();
@@ -414,9 +451,13 @@ struct Parser {
 
     StmtPtr parseVarDecl() {
         bool isExternShared = false, isShared = false;
+        // Leading storage-class qualifiers (accepted, no effect on lowering):
+        // `static __shared__ T s[N];`, `inline`, etc.
+        while (accept(TokenKind::KwStatic) || accept(TokenKind::KwInline)) { /* qualifier */ }
         // `extern __shared__ T name[];` — dynamic shared memory (size from launch).
         if (accept(TokenKind::KwExtern)) { isExternShared = true; isShared = true; }
         if (accept(TokenKind::KwCudaShared)) isShared = true;   // __shared__ [type] name[N];
+        if (accept(TokenKind::KwStatic) || accept(TokenKind::KwInline)) { /* e.g. __shared__ static */ }
         Type base;
         if (!parseType(base)) { fail("expected a type"); return nullptr; }
 
@@ -585,12 +626,17 @@ struct Parser {
     // ── Kernel / module ─────────────────────────────────────────────────────────
     std::unique_ptr<Kernel> parseKernel() {
         auto k = std::make_unique<Kernel>();
-        // Optional linkage: extern "C"
-        if (accept(TokenKind::KwExtern)) accept(TokenKind::StringLiteral);
-        // Qualifiers: __global__ / __device__ (order-insensitive with the return type).
+        // Leading qualifiers in any order: extern "C", the execution-space specifiers,
+        // and inline/storage hints. Only __global__ changes lowering (it marks the
+        // entry); __device__ helpers are inlined; the rest are accepted and ignored.
         for (;;) {
+            if (accept(TokenKind::KwExtern)) { accept(TokenKind::StringLiteral); continue; }
             if (accept(TokenKind::KwCudaGlobal)) { k->isGlobal = true; continue; }
-            if (accept(TokenKind::KwCudaDevice)) { continue; }
+            if (accept(TokenKind::KwCudaDevice) || accept(TokenKind::KwCudaHost)) continue;
+            if (accept(TokenKind::KwCudaForceinline) || accept(TokenKind::KwCudaNoinline) ||
+                accept(TokenKind::KwCudaInlineHint)) continue;
+            if (accept(TokenKind::KwStatic) || accept(TokenKind::KwInline)) continue;
+            if (accept(TokenKind::KwCudaLaunchBounds)) { skipParenGroup(); continue; }  // __launch_bounds__(...)
             break;
         }
         Type ret;
