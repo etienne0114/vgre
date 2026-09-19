@@ -28,6 +28,7 @@ enum class TokenKind {
     KwVoid, KwBool, KwChar, KwShort, KwInt, KwLong, KwFloat, KwDouble, KwHalf, KwUnsigned, KwSigned,
     KwStruct,
     KwIf, KwElse, KwFor, KwWhile, KwDo, KwBreak, KwContinue, KwReturn,
+    KwSwitch, KwCase, KwDefault,
 
     // Punctuation / delimiters.
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,

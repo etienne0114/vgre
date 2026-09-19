@@ -1585,15 +1585,53 @@ struct Codegen {
                 return;
             }
             case Stmt::Break: {
-                if (loopCtx_.empty()) { line = s.line; col = s.col; fail("'break' outside a loop"); return; }
+                // Nearest enclosing loop OR switch (both set a break target).
+                if (loopCtx_.empty()) { line = s.line; col = s.col; fail("'break' outside a loop or switch"); return; }
                 emit("bra " + loopCtx_.back().second + ";");
                 return;
             }
             case Stmt::Continue: {
-                if (loopCtx_.empty()) { line = s.line; col = s.col; fail("'continue' outside a loop"); return; }
-                emit("bra " + loopCtx_.back().first + ";");
+                // Nearest enclosing LOOP: switch entries carry an empty continue label.
+                for (auto it = loopCtx_.rbegin(); it != loopCtx_.rend(); ++it)
+                    if (!it->first.empty()) { emit("bra " + it->first + ";"); return; }
+                line = s.line; col = s.col; fail("'continue' outside a loop");
                 return;
             }
+            case Stmt::Switch: {
+                Val c = coerce(emitExpr(*s.expr), intType());
+                if (failed) return;
+                std::string end = label();
+                // Label each case/default marker in body order.
+                std::vector<std::string> labels(s.body.size());
+                std::string defaultLabel;
+                for (size_t i = 0; i < s.body.size(); ++i) {
+                    if (s.body[i]->kind == Stmt::Case || s.body[i]->kind == Stmt::Default) {
+                        labels[i] = label();
+                        if (s.body[i]->kind == Stmt::Default) defaultLabel = labels[i];
+                    }
+                }
+                // Comparison chain: jump to the first matching case value.
+                for (size_t i = 0; i < s.body.size(); ++i) {
+                    if (s.body[i]->kind != Stmt::Case) continue;
+                    Val cv = coerce(emitExpr(*s.body[i]->expr), intType());
+                    if (failed) return;
+                    std::string p = fresh(RC::Pred);
+                    emit("setp.eq.s32 " + p + ", " + c.reg + ", " + cv.reg + ";");
+                    emit("@" + p + " bra " + labels[i] + ";");
+                }
+                emit("bra " + (defaultLabel.empty() ? end : defaultLabel) + ";");
+                // Bodies in order with C fall-through; break → end.
+                loopCtx_.push_back({"", end});
+                for (size_t i = 0; i < s.body.size(); ++i) {
+                    if (s.body[i]->kind == Stmt::Case || s.body[i]->kind == Stmt::Default)
+                        emitLabel(labels[i]);
+                    else { emitStmt(*s.body[i]); if (failed) { loopCtx_.pop_back(); return; } }
+                }
+                loopCtx_.pop_back();
+                emitLabel(end);
+                return;
+            }
+            case Stmt::Case: case Stmt::Default: return;   // only meaningful inside a Switch
         }
     }
 

@@ -75,7 +75,8 @@ using ExprPtr = std::unique_ptr<Expr>;
 
 // ── Statements ────────────────────────────────────────────────────────────────
 struct Stmt {
-    enum Kind { VarDecl, ExprStmt, If, For, While, DoWhile, Break, Continue, Block, Return, Empty };
+    enum Kind { VarDecl, ExprStmt, If, For, While, DoWhile, Break, Continue,
+                Switch, Case, Default, Block, Return, Empty };
     Kind kind;
     int line = 0, col = 0;
 

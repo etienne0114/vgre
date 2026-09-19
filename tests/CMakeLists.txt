@@ -1228,6 +1228,11 @@ target_link_libraries(test_cuda_compound_assign PRIVATE vgre Threads::Threads)
 add_test(NAME CudaCompoundAssign COMMAND test_cuda_compound_assign)
 set_tests_properties(CudaCompoundAssign PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_switch compiler/test_cuda_switch.cpp)
+target_link_libraries(test_cuda_switch PRIVATE vgre Threads::Threads)
+add_test(NAME CudaSwitch COMMAND test_cuda_switch)
+set_tests_properties(CudaSwitch PROPERTIES TIMEOUT 30)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

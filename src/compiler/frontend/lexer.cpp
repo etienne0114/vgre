@@ -41,6 +41,9 @@ const char* tokenKindName(TokenKind k) {
         case TokenKind::KwDo:         return "do";
         case TokenKind::KwBreak:      return "break";
         case TokenKind::KwContinue:   return "continue";
+        case TokenKind::KwSwitch:     return "switch";
+        case TokenKind::KwCase:       return "case";
+        case TokenKind::KwDefault:    return "default";
         case TokenKind::KwReturn:     return "return";
         case TokenKind::LParen:       return "(";
         case TokenKind::RParen:       return ")";
@@ -108,7 +111,8 @@ const std::unordered_map<std::string, TokenKind>& keywords() {
         {"if", TokenKind::KwIf}, {"else", TokenKind::KwElse}, {"for", TokenKind::KwFor},
         {"while", TokenKind::KwWhile}, {"do", TokenKind::KwDo},
         {"break", TokenKind::KwBreak}, {"continue", TokenKind::KwContinue},
-        {"return", TokenKind::KwReturn},
+        {"switch", TokenKind::KwSwitch}, {"case", TokenKind::KwCase},
+        {"default", TokenKind::KwDefault}, {"return", TokenKind::KwReturn},
     };
     return kw;
 }

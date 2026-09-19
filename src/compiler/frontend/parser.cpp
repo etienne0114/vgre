@@ -345,6 +345,7 @@ struct Parser {
             case TokenKind::KwFor:      return parseFor();
             case TokenKind::KwWhile:    return parseWhile();
             case TokenKind::KwDo:       return parseDoWhile();
+            case TokenKind::KwSwitch:   return parseSwitch();
             case TokenKind::KwReturn:   return parseReturn();
             case TokenKind::KwBreak:    { auto s = mkStmt(Stmt::Break); advance(); expect(TokenKind::Semicolon, "';'"); return failed ? nullptr : std::move(s); }
             case TokenKind::KwContinue: { auto s = mkStmt(Stmt::Continue); advance(); expect(TokenKind::Semicolon, "';'"); return failed ? nullptr : std::move(s); }
@@ -457,6 +458,40 @@ struct Parser {
         if (!body) return nullptr;
         s->body.push_back(std::move(body));
         return s;
+    }
+
+    StmtPtr parseSwitch() {
+        auto s = mkStmt(Stmt::Switch);
+        advance();  // switch
+        expect(TokenKind::LParen, "'('");
+        s->expr = parseExpr();
+        expect(TokenKind::RParen, "')'");
+        expect(TokenKind::LBrace, "'{'");
+        if (failed) return nullptr;
+        // Body is a flat list of statements with `case N:` / `default:` markers
+        // interleaved (C fall-through semantics; codegen wires the jumps).
+        while (!at(TokenKind::RBrace) && !at(TokenKind::End) && !failed) {
+            if (at(TokenKind::KwCase)) {
+                auto c = mkStmt(Stmt::Case);
+                advance();  // case
+                c->expr = parseExpr();       // constant label expression
+                expect(TokenKind::Colon, "':'");
+                if (failed) return nullptr;
+                s->body.push_back(std::move(c));
+            } else if (at(TokenKind::KwDefault)) {
+                auto d = mkStmt(Stmt::Default);
+                advance();  // default
+                expect(TokenKind::Colon, "':'");
+                if (failed) return nullptr;
+                s->body.push_back(std::move(d));
+            } else {
+                StmtPtr st = parseStmt();
+                if (!st) return nullptr;
+                s->body.push_back(std::move(st));
+            }
+        }
+        expect(TokenKind::RBrace, "'}'");
+        return failed ? nullptr : std::move(s);
     }
 
     StmtPtr parseDoWhile() {

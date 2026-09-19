@@ -63,7 +63,8 @@ an 8-worker pool, both bit-identical to the serial result.
 | variable declarations (with init) | ✅ incl. multiple declarators (`int a, b = 1, c;`) |
 | `if` / `else` (chained) | ✅ |
 | `for`, `while`, `do`-`while` | ✅ |
-| `break`, `continue` | ✅ (innermost loop; `continue` targets the `for`-increment / `while`-retest; misuse outside a loop is a located error) |
+| `switch` / `case` / `default` | ✅ integer selector; C fall-through (no implicit break); `default` optional; `break` exits the switch |
+| `break`, `continue` | ✅ `break` exits the nearest loop **or** switch; `continue` targets the nearest enclosing loop (`for`-increment / `while`-retest), skipping switches; misuse outside a loop/switch is a located error |
 | `return` | ✅ |
 | blocks / scopes | ✅ (single flat scope) |
 | `__device__` helper functions | ✅ (inlined; nested calls OK; recursion rejected) |
