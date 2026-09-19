@@ -122,6 +122,12 @@ struct Codegen {
     }
     std::string label() { return "$L" + std::to_string(nLbl++); }
 
+    // A globally-unique PTX symbol for a named local/shared array. Two inlinings of
+    // the same __device__ helper (or a caller and helper that share an array name)
+    // must not emit the same .local/.shared symbol, or the declarations collide.
+    int symSeq_ = 0;
+    std::string uniqueSym(const std::string& base) { return base + "$" + std::to_string(symSeq_++); }
+
     void emit(const std::string& s) {
         // Defensive cap: a codegen bug (e.g. runaway inlining) must fail cleanly,
         // never OOM. 16 MB of PTX text is far beyond any real kernel.
@@ -889,16 +895,31 @@ struct Codegen {
 
         const Type rt = fn.returnType;
         std::string retReg = (rt.base == Type::Void) ? std::string() : fresh(classOf(rt));
+        // Define retReg up front: if the body falls through without a `return`
+        // (a missing return on some path — UB in C++), the caller still reads a
+        // defined 0 rather than an uninitialized register.
+        if (rt.base != Type::Void) {
+            std::string z = rt.isFloating() ? (rt.base == Type::Double ? f64imm(0.0) : f32imm(0.0)) : "0";
+            emit(std::string(movFor(rt)) + retReg + ", " + z + ";");
+        }
         std::string endL = label();
         inlineCtx_.push_back({retReg, endL, rt});
         inlining_.insert(fn.name);
 
+        // The inlined body gets its own variable scope AND its own array/struct
+        // symbol tables, so its locals never collide with the caller's (or with a
+        // second inlining of the same helper). Local/shared array PTX symbols are
+        // uniquified at declaration (uniqueSym), so the .local/.shared decls differ.
         std::unordered_map<std::string, Val> savedVars;
         savedVars.swap(vars);
         vars = std::move(inlineScope);
+        auto savedDims = std::move(arrayDims_); arrayDims_.clear();
+        auto savedStructs = std::move(localStructMembers_); localStructMembers_.clear();
         for (const auto& st : fn.body) { emitStmt(*st); if (failed) break; }
         emitLabel(endL);
         vars = std::move(savedVars);
+        arrayDims_ = std::move(savedDims);
+        localStructMembers_ = std::move(savedStructs);
 
         inlining_.erase(fn.name);
         inlineCtx_.pop_back();
@@ -1570,15 +1591,16 @@ struct Codegen {
                 if (s.arraySize > 0) {
                     int bytes = s.arraySize * s.type.elemBytes();
                     Type ptr = s.type; ptr.ptr = 1;   // the array decays to a pointer-to-element
+                    const std::string sym = uniqueSym(s.name);   // hygienic PTX symbol
                     Val v; v.type = ptr;
                     if (s.isShared) {
-                        // __shared__ T name[N]  ->  .shared .align 4 .b8 name[N*sizeof(T)]
-                        sharedDecls += "\t.shared .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
-                        v.space = Space::Shared; v.sharedName = s.name;
+                        // __shared__ T name[N]  ->  .shared .align 4 .b8 sym[N*sizeof(T)]
+                        sharedDecls += "\t.shared .align 4 .b8 " + sym + "[" + std::to_string(bytes) + "];\n";
+                        v.space = Space::Shared; v.sharedName = sym;
                     } else {
-                        // T name[N]  ->  .local .align 4 .b8 name[N*sizeof(T)] (per-thread scratch)
-                        localDecls += "\t.local .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
-                        v.space = Space::Local; v.localName = s.name;
+                        // T name[N]  ->  .local .align 4 .b8 sym[N*sizeof(T)] (per-thread scratch)
+                        localDecls += "\t.local .align 4 .b8 " + sym + "[" + std::to_string(bytes) + "];\n";
+                        v.space = Space::Local; v.localName = sym;
                     }
                     vars[s.name] = v;
                     arrayDims_[s.name] = s.arrayDims.empty()
@@ -1592,8 +1614,9 @@ struct Codegen {
                     // on a shared variable, so there is none to emit.
                     if (s.expr) { fail("a __shared__ variable cannot have an initializer"); return; }
                     int bytes = s.type.elemBytes();
-                    sharedDecls += "\t.shared .align 4 .b8 " + s.name + "[" + std::to_string(bytes) + "];\n";
-                    Val v; v.type = s.type; v.space = Space::Shared; v.sharedName = s.name;
+                    const std::string sym = uniqueSym(s.name);   // hygienic PTX symbol
+                    sharedDecls += "\t.shared .align 4 .b8 " + sym + "[" + std::to_string(bytes) + "];\n";
+                    Val v; v.type = s.type; v.space = Space::Shared; v.sharedName = sym;
                     vars[s.name] = v;
                     return;
                 }
