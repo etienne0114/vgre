@@ -1424,6 +1424,15 @@ target_link_libraries(test_cuda_fuzz_ptr PRIVATE vgre Threads::Threads)
 add_test(NAME CudaFuzzPtr COMMAND test_cuda_fuzz_ptr)
 set_tests_properties(CudaFuzzPtr PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Track Z (native tier): from-scratch x86-64 JIT — real machine code for the
+# elementwise idiom. Differential-fuzzed against the Tier-1 compiled backend
+# (bit-exact) plus a saxpy correctness check. On non-x86-64/Linux hosts the
+# native tier compiles nothing and the test passes trivially. CPU-heavy: serial.
+add_executable(test_cuda_native compiler/test_cuda_native.cpp)
+target_link_libraries(test_cuda_native PRIVATE vgre Threads::Threads)
+add_test(NAME CudaNative COMMAND test_cuda_native)
+set_tests_properties(CudaNative PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

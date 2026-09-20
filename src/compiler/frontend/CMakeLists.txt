@@ -8,6 +8,7 @@ add_library(vgre_frontend OBJECT
     codegen.cpp
     ptx_verifier.cpp
     compiled_kernel.cpp
+    native_kernel_x64.cpp
 )
 
 target_include_directories(vgre_frontend PUBLIC
