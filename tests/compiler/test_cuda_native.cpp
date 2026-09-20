@@ -43,6 +43,23 @@ static std::string genIntSubStr(int d) {
     return "(" + genIntSubStr(d - 1) + ops[rnd() % 3] + genIntSubStr(d - 1) + ")";
 }
 
+// A random float expression over x[i], y[i], a/b, float consts AND the first
+// `nloc` scalar locals t0..t{nloc-1}. Rendered directly to a string.
+static std::string genLocExpr(int d, int nloc) {
+    if (d <= 0 || rnd() % 3 == 0) {
+        int w = rnd() % (5 + nloc);
+        if (w == 0) return "x[i]";
+        if (w == 1) return "y[i]";
+        if (w == 2) return "a";
+        if (w == 3) return "b";
+        if (w == 4) { char b[40]; std::snprintf(b, sizeof b, "(%.9ef)", (double)randFloat()); return b; }
+        return "t" + std::to_string(w - 5);
+    }
+    if (rnd() % 5 == 0) return "(-" + genLocExpr(d - 1, nloc) + ")";
+    static const char* ops[] = {"+", "-", "*", "/"};
+    return "(" + genLocExpr(d - 1, nloc) + ops[rnd() % 4] + genLocExpr(d - 1, nloc) + ")";
+}
+
 // A random float expression over x[i], y[i], scalars a/b, and float constants.
 // Tern is `(cond) ? then : else` where cond is a float comparison (kind Cmp).
 // FCastI holds a pre-rendered `(float)(<int expr>)` string in `name`.
@@ -216,6 +233,44 @@ int main() {
         std::printf("  quant (saturating float->int cast) native == reference (%d elems)\n", N);
     }
 
+    // Correctness: scalar float locals (compute-once-reuse) vs reference.
+    {
+        const char* k = "extern \"C\" __global__ void fma3(const float* x, const float* y, float a, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){"
+                        " float t = a*x[i]; float u = t + y[i]; out[i] = t*u + u; } }";
+        auto nk = NativeKernel::compileSource(k, "fma3", err);
+        if (!nk) { std::printf("FAIL: fma3 native compile: %s\n", err.c_str()); return 1; }
+        float a = 1.75f; std::vector<float> x(N), y(N), out(N, -9.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat(); y[i] = randFloat(); }
+        float* xp = x.data(); float* yp = y.data(); float* op = out.data();
+        void* args[] = {&xp, &yp, &a, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 5)) { std::printf("FAIL: fma3 native launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { float t = a * x[i], u = t + y[i]; if (out[i] != t * u + u) ++bad; }
+        if (bad) { std::printf("FAIL: fma3 native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  fma3 (float locals) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: scalar int locals (32-bit wrapping) vs reference.
+    {
+        const char* k = "extern \"C\" __global__ void ic(const int* x, int* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){"
+                        " int k = x[i]*3 + 1; out[i] = k*k - k; } }";
+        auto nk = NativeKernel::compileSource(k, "ic", err);
+        if (!nk) { std::printf("FAIL: ic native compile: %s\n", err.c_str()); return 1; }
+        std::vector<int> x(N), out(N, -1);
+        for (int i = 0; i < N; ++i) x[i] = (int)rnd();
+        int* xp = x.data(); int* op = out.data();
+        void* args[] = {&xp, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 3)) { std::printf("FAIL: ic native launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { int kk = x[i] * 3 + 1; if (out[i] != kk * kk - kk) ++bad; }
+        if (bad) { std::printf("FAIL: ic native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  ic (int locals) native == reference (%d elems)\n", N);
+    }
+
     // Differential fuzz: random elementwise kernels, native vs the compiled tier.
     const int kIters = 800;
     int both = 0, mismatches = 0;
@@ -341,6 +396,53 @@ int main() {
     if (qboth < 200) { std::printf("FAIL: too few native quant kernels compiled (%d)\n", qboth); return 1; }
     if (qmis) { std::printf("FAIL: %d native/compiled quant mismatches\n", qmis); return 1; }
 
-    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int + %d quant kernels\n", both, iboth, qboth);
+    // Differential fuzz: kernels with 1-3 scalar float locals feeding the store,
+    // native vs compiled tier (compute-once-reuse shape).
+    int lboth = 0, lmis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        int nloc = rint(1, 3);
+        std::string k =
+            "extern \"C\" __global__ void fz(float a, float b, const float* x, const float* y, float* out, int n) {\n"
+            "  int i = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  if (i < n) {\n";
+        for (int j = 0; j < nloc; ++j)
+            k += "    float t" + std::to_string(j) + " = " + genLocExpr(rint(1, 3), j) + ";\n";
+        k += "    out[i] = " + genLocExpr(rint(1, 3), nloc) + ";\n  }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++lboth;
+
+        float a = randFloat(), b = randFloat();
+        std::vector<float> x(N), y(N), on(N, -1.f), oc(N, -2.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat(); y[i] = randFloat(); }
+        float* xp = x.data(); float* yp = y.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+
+        void* an[] = {&a, &b, &xp, &yp, &onp, &N};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native locals launch\n  %s\n", k.c_str()); ++lmis; if (lmis > 8) break; continue; }
+        void* ac[] = {&a, &b, &xp, &yp, &ocp, &N};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled locals launch\n"); ++lmis; if (lmis > 8) break; continue; }
+
+        for (int i = 0; i < N; ++i) {
+            uint32_t bn, bc; std::memcpy(&bn, &on[i], 4); std::memcpy(&bc, &oc[i], 4);
+            const bool nan = (bn & 0x7fffffff) > 0x7f800000 && (bc & 0x7fffffff) > 0x7f800000;
+            if (on[i] != oc[i] && !nan) {
+                std::printf("NATIVE/COMPILED LOCALS MISMATCH it=%d i=%d  native=%.9g compiled=%.9g\n  %s\n",
+                            it, i, (double)on[i], (double)oc[i], k.c_str());
+                ++lmis; break;
+            }
+        }
+        if (lmis > 8) break;
+    }
+
+    std::printf("native locals differential: %d elementwise kernels, %d mismatches\n", lboth, lmis);
+    if (lboth < 200) { std::printf("FAIL: too few native locals kernels compiled (%d)\n", lboth); return 1; }
+    if (lmis) { std::printf("FAIL: %d native/compiled locals mismatches\n", lmis); return 1; }
+
+    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int + %d quant + %d locals kernels\n",
+                both, iboth, qboth, lboth);
     return 0;
 }

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(__x86_64__) && defined(__linux__)
@@ -65,6 +66,7 @@ struct X64 {
     void movStoreIdxEax(int base) { u8(0x89); u8(0x04); u8((uint8_t)(0x80 | (6 << 3) | base)); } // mov [base + rsi*4], eax
     void spillEax(int off) { u8(0x89); u8(0x44); u8(0x24); u8((uint8_t)(-off)); }   // mov [rsp-off], eax
     void reloadEcx(int off) { u8(0x8B); u8(0x4C); u8(0x24); u8((uint8_t)(-off)); }  // mov ecx, [rsp-off]
+    void movEaxFromSlot(int off) { u8(0x8B); u8(0x44); u8(0x24); u8((uint8_t)(-off)); }  // mov eax, [rsp-off]
     void addEaxEcx() { u8(0x01); u8(0xC8); }                       // add eax, ecx   (eax = eax + ecx)
     void subEcxEaxToEax() { u8(0x29); u8(0xC1); u8(0x89); u8(0xC8); } // sub ecx,eax ; mov eax,ecx  (eax = ecx - eax)
     void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
@@ -108,6 +110,13 @@ struct Lowerer {
     bool ok = true;
     std::string err;
 
+    // Per-thread scalar locals live in the red zone at [rsp - off]; expression
+    // scratch spills sit above them (offsets ≥ scratchBase), so the two never alias.
+    struct Local { bool isFloat; int off; };
+    std::unordered_map<std::string, Local> locals;
+    int scratchBase = 0;                 // = 8 * (number of locals)
+    int evalSlot(int depth) const { return scratchBase + 8 * (depth + 1); }
+
     Lowerer(const Kernel& kern) : k(kern) {}
     void fail(const std::string& m) { if (ok) { ok = false; err = m; } }
 
@@ -144,6 +153,8 @@ struct Lowerer {
             case Expr::FloatLit: return false;
             case Expr::Ident: {
                 if (e.str == idxVar) return true;
+                auto it = locals.find(e.str);
+                if (it != locals.end()) return !it->second.isFloat;
                 const Param* p = param(e.str);
                 return p && !p->type.isPointer() && p->type.base == Type::Int;
             }
@@ -165,7 +176,7 @@ struct Lowerer {
     // Emit a float expression into xmm0. `depth` picks the red-zone spill slot.
     void emitFloat(const Expr& e, int depth) {
         if (!ok) return;
-        if (depth > 14) { fail("native: expression too deep"); return; }
+        if (evalSlot(depth) > 120) { fail("native: expression too deep"); return; }
         switch (e.kind) {
             case Expr::FloatLit: {
                 float f = (float)e.fval; uint32_t bits; std::memcpy(&bits, &f, 4);
@@ -175,7 +186,12 @@ struct Lowerer {
                 float f = (float)e.ival; uint32_t bits; std::memcpy(&bits, &f, 4);
                 asm_.movImmEax(bits); asm_.movdXmmFromEax(0); return;
             }
-            case Expr::Ident: {    // a scalar `float` param
+            case Expr::Ident: {    // a scalar `float` param or a float local
+                auto it = locals.find(e.str);
+                if (it != locals.end()) {
+                    if (!it->second.isFloat) { fail("native: int local '" + e.str + "' in float context (needs a cast)"); return; }
+                    asm_.reloadXmm(0, it->second.off); return;   // xmm0 = [rsp - off]
+                }
                 const Param* p = param(e.str);
                 if (!p || p->type.isPointer() || p->type.base != Type::Float) { fail("native: unsupported identifier '" + e.str + "'"); return; }
                 asm_.movArg(1, paramIndex(e.str)); asm_.movssLoad(0, 1);   // rcx=&value; xmm0=[rcx]
@@ -208,7 +224,7 @@ struct Lowerer {
             case Expr::Binary: {
                 uint8_t opc = e.str == "+" ? 0x58 : e.str == "-" ? 0x5C : e.str == "*" ? 0x59 : e.str == "/" ? 0x5E : 0;
                 if (!opc) { fail("native: operator '" + e.str + "'"); return; }
-                const int off = 8 * (depth + 1);
+                const int off = evalSlot(depth);
                 emitFloat(*e.args[0], depth);       // L → xmm0
                 asm_.spillXmm(0, off);              // [rsp-off] = L
                 emitFloat(*e.args[1], depth + 1);   // R → xmm0
@@ -231,10 +247,10 @@ struct Lowerer {
                 else { fail("native: ternary needs a comparison condition"); return; }
 
                 // Reserve two red-zone slots for this level; sub-exprs use deeper slots.
-                const int slotMask = 8 * (depth + 1);
-                const int slotThen = 8 * (depth + 2);
+                const int slotMask = evalSlot(depth);
+                const int slotThen = evalSlot(depth + 1);
                 const int cd = depth + 2;
-                if (cd > 14) { fail("native: expression too deep"); return; }
+                if (evalSlot(cd) > 120) { fail("native: expression too deep"); return; }
 
                 emitFloat(*c.args[0], cd); asm_.spillXmm(0, slotMask);   // [mask] = cl
                 emitFloat(*c.args[1], cd); asm_.reloadXmm(1, slotMask);  // xmm1 = cl, xmm0 = cr
@@ -278,13 +294,18 @@ struct Lowerer {
         if (!ok) return;
         // Int and float share one depth→red-zone-offset map (8-byte stride) so a
         // cast that nests int eval inside float eval never aliases a live slot.
-        if (depth > 14) { fail("native: expression too deep"); return; }
+        if (evalSlot(depth) > 120) { fail("native: expression too deep"); return; }
         switch (e.kind) {
             case Expr::IntLit: {
                 asm_.movImmEax((uint32_t)(int32_t)e.ival); return;
             }
-            case Expr::Ident: {    // the induction var `i`, or a scalar `int` param
+            case Expr::Ident: {    // the induction var `i`, an int local, or a scalar `int` param
                 if (e.str == idxVar) { asm_.movEaxEsi(); return; }
+                auto it = locals.find(e.str);
+                if (it != locals.end()) {
+                    if (it->second.isFloat) { fail("native: float local '" + e.str + "' in int context (needs a cast)"); return; }
+                    asm_.movEaxFromSlot(it->second.off); return;   // eax = [rsp - off]
+                }
                 const Param* p = param(e.str);
                 if (!p || p->type.isPointer() || p->type.base != Type::Int) { fail("native: unsupported int identifier '" + e.str + "'"); return; }
                 asm_.movArg(1, paramIndex(e.str)); asm_.movEaxMem(1);   // rcx=&value; eax=[rcx]
@@ -315,7 +336,7 @@ struct Lowerer {
             case Expr::Binary: {
                 const bool add = e.str == "+", sub = e.str == "-", mul = e.str == "*";
                 if (!add && !sub && !mul) { fail("native: int operator '" + e.str + "'"); return; }
-                const int off = 8 * (depth + 1);
+                const int off = evalSlot(depth);
                 emitInt(*e.args[0], depth);        // L → eax
                 asm_.spillEax(off);               // [rsp-off] = L
                 emitInt(*e.args[1], depth + 1);    // R → eax
@@ -361,13 +382,37 @@ struct Lowerer {
         asm_.cmpEsiEax();
         size_t jmp = asm_.jgePlaceholder();
 
-        // Body: a sequence of `p[i] = <float expr>;` stores. A braced `{ … }` body
-        // parses as a single Block wrapping the statements — unwrap it.
-        const std::vector<StmtPtr>& stores =
+        // Body: scalar-local declarations interleaved with `p[i] = <expr>;` stores.
+        // A braced `{ … }` body parses as a single Block wrapping the statements.
+        const std::vector<StmtPtr>& body =
             (gate.body.size() == 1 && gate.body[0]->kind == Stmt::Block) ? gate.body[0]->body : gate.body;
-        for (const StmtPtr& s : stores) {
+
+        // Pre-pass: lay out per-thread scalar locals in the red zone (each an
+        // 8-byte slot) so their types/offsets are known before any expression is
+        // emitted; expression scratch then sits above them at ≥ scratchBase.
+        int nLocals = 0;
+        for (const StmtPtr& s : body) {
+            if (s->kind != Stmt::VarDecl) continue;
+            if (s->type.ptr != 0 || s->arraySize != 0 || !s->expr ||
+                (s->type.base != Type::Float && s->type.base != Type::Int)) {
+                err = "native: only scalar float/int locals with an initializer"; return false;
+            }
+            if (nLocals >= 8) { err = "native: too many locals"; return false; }
+            locals[s->name] = Local{s->type.base == Type::Float, 8 * (nLocals + 1)};
+            ++nLocals;
+        }
+        scratchBase = 8 * nLocals;
+
+        // Emit pass.
+        for (const StmtPtr& s : body) {
+            if (s->kind == Stmt::VarDecl) {   // local: evaluate the initializer, store to its slot
+                const Local& L = locals[s->name];
+                if (L.isFloat) { emitFloat(*s->expr, 0); if (!ok) { err = err.empty() ? "native: bad local init" : err; return false; } asm_.spillXmm(0, L.off); }
+                else           { emitInt(*s->expr, 0);   if (!ok) { err = err.empty() ? "native: bad local init" : err; return false; } asm_.spillEax(L.off); }
+                continue;
+            }
             if (s->kind != Stmt::ExprStmt || !s->expr || s->expr->kind != Expr::Assign || s->expr->str != "=") {
-                err = "native: only `p[i] = expr;` stores in the body"; return false;
+                err = "native: body statements must be scalar locals or `p[i] = expr;` stores"; return false;
             }
             const Expr& lhs = *s->expr->args[0];
             if (lhs.kind != Expr::Index || lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident ||
