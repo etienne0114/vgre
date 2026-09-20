@@ -31,7 +31,7 @@ exact or single-rounded). `test_cuda_fuzz_toint.cpp` covers **float/double → i
 which is *not* a plain truncation: PTX `cvt.rzi.s32.f32` rounds toward zero then
 **saturates** to the destination range and maps NaN → 0 (so `(int)3e9f` is
 `INT_MAX`, `(int)(1.0f/0.0f)` is `INT_MAX`, `(int)nanf` is `0`), and the
-interpreter implements exactly that. Finally five cross-tier fuzzers run each random
+interpreter implements exactly that. Finally six cross-tier fuzzers run each random
 kernel on **both** execution tiers — the Tier-0 interpreter and the Tier-1
 compiled backend — and require identical output, holding the compiled tier to the
 same bit-exact standard (float32 arithmetic rounds to float, 32-bit int ops wrap,
@@ -45,7 +45,9 @@ cross-CTA **`atomicAdd`** histogram/scatter pattern (256 threads contending on a
 few bins across parallel CTAs — integer, so the bin sums are order-independent
 and must equal a serial reference on both tiers, proving no lost updates), and
 `test_cuda_fuzz_device.cpp` over **`__device__` helper inlining** (random helpers
-with branches, early returns and nesting). The PTX header's
+with branches, early returns and nesting), and `test_cuda_fuzz_struct.cpp` over
+**struct values** (by-value struct params + local structs, member reads/writes).
+The PTX header's
 `.target` (SM arch), `.version` (PTX ISA) and `.address_size` are configurable via
 `CodegenOptions` (defaults `sm_52` / `7.0` / `64`). And — in a JIT-enabled build —
 falls back to the LLVM path.
@@ -81,9 +83,10 @@ an 8-worker pool, both bit-identical to the serial result.
 | `double`, `long` (64-bit) | ✅ full f64 / i64 (real `.f64`/`.s64` PTX, `cvt`, 64-bit literals) | ✅ full f64 / i64 |
 | pointers (`T*`, `const T* __restrict__`) | ✅ incl. pointer arithmetic `p ± i` (element-scaled, 64-bit); **64-bit comparisons** `== != < <= > >=` and `== nullptr` (full address width, `setp.*.u64`), pointer truthiness `if (p)`, and pointer-typed `cond ? p : q`; and cache-hinted loads/stores `__ldg`/`__ldca`/`__ldcs`/`__ldcg`/`__ldlu`/`__ldcv`/`__ldg_nc` and `__stwb`/`__stcg`/`__stcs`/`__stwt` (plain `ld.global`/`st.global` on the CPU — no cache hierarchy) | ✅ |
 | `__half` (fp16, 16-bit storage) | ✅ `__half` variables + `__half*` load/store (`ld/st.b16`); `__float2half`/`__half2float` (`cvt.rn.f16.f32` / `cvt.f32.f16`, IEEE binary16 round-to-nearest-even); and half **arithmetic** `__hadd`/`__hsub`/`__hmul`/`__hdiv`/`__hfma`/`__hneg`/`__hmax`/`__hmin` + comparisons `__heq`/`__hne`/`__hlt`/`__hle`/`__hgt`/`__hge`, each computed in float and narrowed back to fp16 (result rounds to fp16, comparisons return `int`); and the half **unary math** family `hsqrt`/`hrsqrt`/`hrcp`/`__habs`/`hceil`/`hfloor`/`htrunc`/`hrint`/`hexp`/`hexp2`/`hexp10`/`hlog`/`hlog2`/`hlog10`/`hsin`/`hcos` (promote to float, apply the f32 op, narrow to fp16). **Implicit conversions** work too: `float f = h;` and `__half h = f;` convert through f32 (not a bit reinterpret), and a plain operator on `__half` (`a + b`) promotes to float, computes, and narrows back on assignment. | defers to interpreter |
-| by-value `struct` params (scalar members, `.member` reads) | ✅ | defers to interpreter |
-| **local** `struct` variables (`Vec p;`) | ✅ register-per-field: `p.x` read, `p.x = …`/`p.x += …` write, and whole-struct copy `Vec q = p;` (from a local or by-value-param struct). Scalar members. | defers to interpreter |
-| `struct*` in memory — `p->field`, struct arrays (`data[i]`, `data + i`) | ✅ `p->x` loads / `p->y = v` stores at `ptr + member_offset`; struct-array indexing and `struct*` arithmetic stride by the struct size (from the layout table). | defers to interpreter |
+| by-value `struct` params (scalar members, `.member` reads) | ✅ | ✅ member slots (bytes loaded at each member's offset) |
+| **local** `struct` variables (`Vec p;`) | ✅ register-per-field: `p.x` read, `p.x = …`/`p.x += …` write, and whole-struct copy `Vec q = p;` (from a local or by-value-param struct). Scalar members. | ✅ one Cell slot per member; `p.x` read/write and `Vec q = p;` copy |
+| `struct*` in memory — `p->field` | ✅ `p->x` loads / `p->y = v` stores at `ptr + member_offset` | ✅ same (scalar load/store at `ptr + offset`) |
+| struct arrays (`data[i].field`) | ⚠️ **not yet** — `arr[i].field` is a located error on **both** tiers (use `p->field` on a single struct pointer). A future front-end increment adds struct-array element access. | ⚠️ not yet |
 
 ## Expressions
 | Feature | Status |
@@ -214,9 +217,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **379 / 379 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **359 / 359 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **359 / 359 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **380 / 380 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **360 / 360 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **360 / 360 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +

@@ -100,6 +100,42 @@ Cell coerce(const Cell& v, const Type& t) {
     }
 }
 
+// Scalar load/store of a value of type `t` at a raw host address — used for
+// struct-pointer members (`p->field`), width- and sign-correct (1/2/4/8 bytes).
+Cell memLoad(int64_t addr, const Type& t) {
+    void* p = reinterpret_cast<void*>(addr);
+    if (t.isPointer()) { int64_t v; std::memcpy(&v, p, 8); return Cell::I(v); }
+    if (t.isFloating()) {
+        if (t.elemBytes() == 8) { double d; std::memcpy(&d, p, 8); return Cell::F(d); }
+        float f; std::memcpy(&f, p, 4); return Cell::F(static_cast<double>(f));
+    }
+    switch (t.elemBytes()) {
+        case 1: if (t.isUnsigned) { uint8_t v; std::memcpy(&v, p, 1); return Cell::I(v); }
+                { int8_t v;  std::memcpy(&v, p, 1); return Cell::I(v); }
+        case 2: if (t.isUnsigned) { uint16_t v; std::memcpy(&v, p, 2); return Cell::I(v); }
+                { int16_t v; std::memcpy(&v, p, 2); return Cell::I(v); }
+        case 8: { int64_t v; std::memcpy(&v, p, 8); return Cell::I(v); }
+        default: if (t.isUnsigned) { uint32_t v; std::memcpy(&v, p, 4); return Cell::I(v); }
+                { int32_t v; std::memcpy(&v, p, 4); return Cell::I(static_cast<int64_t>(v)); }
+    }
+}
+void memStore(int64_t addr, const Type& t, const Cell& v) {
+    void* p = reinterpret_cast<void*>(addr);
+    if (t.isPointer()) { int64_t x = v.asI(); std::memcpy(p, &x, 8); return; }
+    if (t.isFloating()) {
+        if (t.elemBytes() == 8) { double d = v.asF(); std::memcpy(p, &d, 8); }
+        else { float f = static_cast<float>(v.asF()); std::memcpy(p, &f, 4); }
+        return;
+    }
+    const int64_t x = v.asI();
+    switch (t.elemBytes()) {
+        case 1: { uint8_t b = (uint8_t)x;  std::memcpy(p, &b, 1); break; }
+        case 2: { uint16_t b = (uint16_t)x; std::memcpy(p, &b, 2); break; }
+        case 8: { std::memcpy(p, &x, 8); break; }
+        default: { int32_t b = (int32_t)x; std::memcpy(p, &b, 4); break; }
+    }
+}
+
 // Usual arithmetic conversions for the compiled tier's scalar subset — mirrors
 // the codegen/interpreter promote(): pointer wins, else double, else float, else
 // long/int with the unsigned-at-result-rank rule.
@@ -118,9 +154,16 @@ Type promoteT(const Type& a, const Type& b) {
     return r;
 }
 
+// One kernel parameter's slot layout. A scalar/pointer param occupies one slot
+// (`base`); a by-value struct param occupies one slot per member starting at
+// `base`, its bytes read at each member's offset from the arg pointer. The member
+// list is COPIED (not a StructDef* into the parsed module, which is freed once
+// compilation finishes) so loadParams stays valid for the kernel's lifetime.
+struct ParamInfo { Type type; size_t base = 0; std::vector<StructMember> members; };
+
 class CompiledKernelImpl : public CompiledKernel {
 public:
-    int numParams() const override { return static_cast<int>(paramTypes_.size()); }
+    int numParams() const override { return static_cast<int>(params_.size()); }
 
     bool launch(const Extent& grid, const Extent& block, void* const* args, int numArgs) override {
         if (numArgs != numParams()) return false;
@@ -162,23 +205,19 @@ public:
     }
 
     // Populated by Compiler (friend-like via public setters kept minimal).
-    std::vector<Type> paramTypes_;
+    std::vector<ParamInfo> params_;
     std::vector<StmtFn> body_;
     size_t numSlots_ = 0;
 
     void loadParams(TS& ts) const {
-        for (size_t k = 0; k < paramTypes_.size(); ++k) {
-            const void* ap = ts.args[k];
-            const Type& t = paramTypes_[k];
-            if (t.isPointer()) {
-                void* p = nullptr; std::memcpy(&p, ap, sizeof(void*));
-                ts.regs[k] = Cell::I(reinterpret_cast<int64_t>(p));
-            } else if (t.isFloating()) {
-                if (t.elemBytes() == 8) { double d; std::memcpy(&d, ap, 8); ts.regs[k] = Cell::F(d); }
-                else { float f; std::memcpy(&f, ap, 4); ts.regs[k] = Cell::F(f); }
-            } else {
-                if (t.elemBytes() == 8) { int64_t v; std::memcpy(&v, ap, 8); ts.regs[k] = Cell::I(v); }
-                else { int32_t v; std::memcpy(&v, ap, 4); ts.regs[k] = Cell::I(static_cast<int64_t>(v)); }
+        for (size_t k = 0; k < params_.size(); ++k) {
+            const ParamInfo& pi = params_[k];
+            const char* ap = reinterpret_cast<const char*>(ts.args[k]);
+            if (!pi.members.empty()) {   // by-value struct: load each member at its offset
+                for (size_t i = 0; i < pi.members.size(); ++i)
+                    ts.regs[pi.base + i] = memLoad(reinterpret_cast<int64_t>(ap + pi.members[i].offset), pi.members[i].type);
+            } else {                     // scalar / pointer: the arg points at the value
+                ts.regs[pi.base] = memLoad(reinterpret_cast<int64_t>(ap), pi.type);
             }
         }
     }
@@ -208,6 +247,59 @@ struct Compiler {
     std::vector<RetCtx> retCtx;
     std::unordered_map<std::string, int> inlining;
 
+    // Struct layouts (member offsets/types) come from the parsed module.
+    const Module* mod = nullptr;
+    const StructDef* findStruct(const std::string& n) { return mod ? mod->findStruct(n) : nullptr; }
+
+    // A struct **value** (a local `V v;` or a by-value struct param): a contiguous
+    // run of Cell slots, one per member, like a small named array.
+    struct StructVar { size_t base; const StructDef* def; };
+    std::unordered_map<std::string, StructVar> structVars;
+
+    // Reserve one slot per member for a struct variable/param.
+    void declareStructVar(const std::string& name, const Type& t) {
+        const StructDef* def = findStruct(t.structName);
+        if (!def) { fail("unknown struct '" + t.structName + "'"); return; }
+        size_t base = nextSlot;
+        nextSlot += def->members.size();
+        structVars[name] = {base, def};
+        vtype[name] = t;   // so estimateType(Ident) sees the struct type
+    }
+
+    // `v.field` on a struct value → the member's slot and type. `.ok` false (no
+    // fail) when `obj` isn't a known struct value.
+    struct ValMember { size_t slot; Type type; bool ok = false; };
+    ValMember structValueMember(const Expr& obj, const std::string& field) {
+        if (obj.kind != Expr::Ident) return {};
+        auto it = structVars.find(obj.str);
+        if (it == structVars.end()) return {};
+        const StructDef* def = it->second.def;
+        for (size_t i = 0; i < def->members.size(); ++i)
+            if (def->members[i].name == field) return { it->second.base + i, def->members[i].type, true };
+        fail("no member '." + field + "' in struct '" + def->name + "'");
+        return {};
+    }
+
+    // `p->field` on a pointer-to-struct: the member's address closure (pointer
+    // value + byte offset) and type. `.ok` false (no fail) when `obj` isn't a
+    // struct pointer. (`arr[i].field` — struct arrays — is not supported here, to
+    // match the interpreter tier, which rejects it too.)
+    struct MemAcc { ExprFn addr; Type type; bool ok = false; };
+    MemAcc structPtrMember(const Expr& member) {
+        const Expr& obj = *member.args[0];
+        Type ot = estimateType(obj);
+        if (!(ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1)) return {};
+        const StructDef* def = findStruct(ot.structName);
+        const StructMember* m = def ? def->find(member.str) : nullptr;
+        if (!m) { fail("no member '->" + member.str + "' in struct '" + ot.structName + "'"); return {}; }
+        ExprFn pv = compileExpr(obj);
+        if (failed) return {};
+        const int off = m->offset;
+        MemAcc r; r.type = m->type; r.ok = true;
+        r.addr = [pv, off](TS& ts) { return Cell::I(pv(ts).asI() + off); };
+        return r;
+    }
+
     void fail(const std::string& m) {
         if (failed) return;
         failed = true;
@@ -236,6 +328,7 @@ struct Compiler {
                 arrays[s.name] = LocalArr{base, s.type, s.arraySize, std::move(dims)};
                 return;
             }
+            if (s.type.isStruct()) { declareStructVar(s.name, s.type); return; }   // local struct value
             declare(s.name, s.type);
         }
         scanExprBarriers(s.expr.get());
@@ -314,6 +407,17 @@ struct Compiler {
             if (o == "blockDim")  return [comp](TS& ts) { return Cell::I(ts.ntid[comp]); };
             if (o == "gridDim")   return [comp](TS& ts) { return Cell::I(ts.nctaid[comp]); };
         }
+        // v.field on a struct value (local / by-value param): read the member slot.
+        ValMember vm = structValueMember(*e.args[0], e.str);
+        if (failed) return {};
+        if (vm.ok) { size_t sl = vm.slot; return [sl](TS& ts) { return ts.regs[sl]; }; }
+        // p->field on a pointer-to-struct: load the member from memory.
+        MemAcc ma = structPtrMember(e);
+        if (failed) return {};
+        if (ma.ok) {
+            ExprFn addr = std::move(ma.addr); Type mt = ma.type;
+            return [addr, mt](TS& ts) { return memLoad(addr(ts).asI(), mt); };
+        }
         fail("unsupported member access");
         return {};
     }
@@ -384,7 +488,23 @@ struct Compiler {
                 if (ar != arrays.end()) { Type t = ar->second.elem; t.ptr += 1; return t; }
                 return scalar(Type::Int);
             }
-            case Expr::Member:  return scalar(Type::Int);   // threadIdx/blockIdx/… builtins
+            case Expr::Member: {
+                const Expr& obj = *e.args[0];
+                if (obj.kind == Expr::Ident) {                       // v.field on a struct value
+                    auto sv = structVars.find(obj.str);
+                    if (sv != structVars.end()) {
+                        const StructMember* m = sv->second.def->find(e.str);
+                        if (m) return m->type;
+                    }
+                }
+                Type ot = estimateType(obj);                          // p->field on a struct pointer
+                if (ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1) {
+                    const StructDef* def = findStruct(ot.structName);
+                    const StructMember* m = def ? def->find(e.str) : nullptr;
+                    if (m) return m->type;
+                }
+                return scalar(Type::Int);   // threadIdx/blockIdx/… builtins
+            }
             case Expr::Index:   return pointee(e);
             case Expr::Cast:    return e.castType;
             case Expr::Unary:
@@ -577,6 +697,39 @@ struct Compiler {
             ExprFn stored = value;
             return [st, stored, pt](TS& ts) -> Cell { Cell v = coerce(stored(ts), pt); st(ts); return v; };
         }
+        if (lhs.kind == Expr::Member) {
+            // `v.field = …` on a struct value → write the member slot.
+            ValMember vm = structValueMember(*lhs.args[0], lhs.str);
+            if (failed) return {};
+            if (vm.ok) {
+                size_t sl = vm.slot; Type mt = vm.type;
+                ExprFn value = rhs;
+                if (op != "=") {
+                    std::string bop = op.substr(0, op.size() - 1);
+                    Type ct = promoteT(mt, estimateType(*e.args[1]));
+                    ExprFn cur = [sl](TS& ts) { return ts.regs[sl]; };
+                    value = makeBinary(cur, rhs, bop, ct);
+                }
+                return [sl, mt, value](TS& ts) -> Cell { ts.regs[sl] = coerce(value(ts), mt); return ts.regs[sl]; };
+            }
+            // `p->field = …` on a struct pointer → store the member at (pointer + offset).
+            MemAcc ma = structPtrMember(lhs);
+            if (failed) return {};
+            if (!ma.ok) { fail("unsupported assignment target (member)"); return {}; }
+            ExprFn addr = std::move(ma.addr); Type mt = ma.type;
+            ExprFn value = rhs;
+            if (op != "=") {
+                std::string bop = op.substr(0, op.size() - 1);
+                Type ct = promoteT(mt, estimateType(*e.args[1]));
+                ExprFn cur = [addr, mt](TS& ts) { return memLoad(addr(ts).asI(), mt); };
+                value = makeBinary(cur, rhs, bop, ct);
+            }
+            return [addr, mt, value](TS& ts) -> Cell {
+                Cell v = coerce(value(ts), mt);
+                memStore(addr(ts).asI(), mt, v);
+                return v;
+            };
+        }
         fail("invalid assignment target");
         return {};
     }
@@ -763,6 +916,19 @@ struct Compiler {
                     // Local array: slots reserved in scan(), zeroed by regs.resize().
                     return [](TS&) {};
                 }
+                if (s.type.isStruct()) {
+                    // `V v;` — members default-zero (regs are zero-initialised).
+                    // `V q = v;` — copy each member slot from the source struct.
+                    auto dit = structVars.find(s.name);
+                    if (dit == structVars.end()) { fail("struct variable not reserved"); return {}; }
+                    if (!s.expr) return [](TS&) {};
+                    if (s.expr->kind != Expr::Ident) { fail("a struct can only be copy-initialised from a struct variable"); return {}; }
+                    auto sit = structVars.find(s.expr->str);
+                    if (sit == structVars.end()) { fail("use of undeclared struct '" + s.expr->str + "'"); return {}; }
+                    if (sit->second.def != dit->second.def) { fail("struct copy type mismatch"); return {}; }
+                    size_t db = dit->second.base, sb = sit->second.base, cnt = dit->second.def->members.size();
+                    return [db, sb, cnt](TS& ts) { for (size_t i = 0; i < cnt; ++i) ts.regs[db + i] = ts.regs[sb + i]; };
+                }
                 size_t sl = slot[s.name];
                 Type vt = s.type;
                 if (s.expr) {
@@ -841,12 +1007,23 @@ struct Compiler {
 // Shared driver: params occupy the first slots, scan reserves local/array slots,
 // then each top-level statement is lowered to a closure.
 static std::unique_ptr<CompiledKernel> finishCompile(Compiler& c, const Kernel& k, std::string& err) {
-    for (const Param& p : k.params) c.declare(p.name.empty() ? ("__arg" + std::to_string(c.nextSlot)) : p.name, p.type);
+    auto impl = std::unique_ptr<CompiledKernelImpl>(new CompiledKernelImpl());
+    for (const Param& p : k.params) {
+        std::string nm = p.name.empty() ? ("__arg" + std::to_string(c.nextSlot)) : p.name;
+        ParamInfo pi; pi.type = p.type;
+        if (p.type.isStruct()) {                    // by-value struct param → member slots
+            c.declareStructVar(nm, p.type);
+            if (c.failed) { err = c.err; return nullptr; }
+            pi.base = c.structVars[nm].base;
+            pi.members = c.structVars[nm].def->members;   // copy (module is freed after compile)
+        } else {
+            pi.base = c.declare(nm, p.type);
+        }
+        impl->params_.push_back(pi);
+    }
     for (auto& s : k.body) c.scan(*s);
     if (c.failed) { err = c.err; return nullptr; }
 
-    auto impl = std::unique_ptr<CompiledKernelImpl>(new CompiledKernelImpl());
-    for (const Param& p : k.params) impl->paramTypes_.push_back(p.type);
     for (auto& s : k.body) {
         StmtFn f = c.compileStmt(*s);
         if (c.failed) { err = c.err; return nullptr; }
@@ -878,6 +1055,7 @@ std::unique_ptr<CompiledKernel> CompiledKernel::compileSource(const std::string&
     if (!target) { err = "kernel not found"; return nullptr; }
 
     Compiler c;
+    c.mod = pr.module.get();              // struct layouts for p->field
     for (auto& kp : pr.module->kernels)   // __device__ helpers this kernel may call
         if (kp->isDeviceCallable() && kp.get() != target) c.deviceFns[kp->name] = kp.get();
     return finishCompile(c, *target, err);

@@ -1,6 +1,6 @@
 // Track Z (Zero-Burden Engine): by-value struct kernel parameters, compiled by
-// the from-scratch front-end (no LLVM) and run on the interpreter tier (the
-// compiled tier defers struct kernels, so the engine routes them here).
+// the from-scratch front-end (no LLVM) on BOTH execution tiers — the interpreter
+// (PTX) and the Tier-1 compiled backend (member slots) — which must agree.
 //
 // Tests build in Release (-DNDEBUG); asserts must stay real.
 #undef NDEBUG
@@ -36,10 +36,19 @@ int main() {
     CHECK(std::fabs(out - 15.0f) < 1e-5f, "struct member reads sum to 15.0");
     std::printf("  struct result = %.1f\n", out);
 
-    // The compiled tier defers struct kernels cleanly (engine then uses interp).
+    // The compiled tier now runs struct kernels too (by-value params → member
+    // slots); it must produce the same result as the interpreter.
     std::string err;
-    CHECK(CompiledKernel::compileSource(kSrc, "struct_kernel", err) == nullptr,
-          "compiled tier defers struct kernels (clean null, no crash)");
+    auto ck = CompiledKernel::compileSource(kSrc, "struct_kernel", err);
+    CHECK(ck != nullptr, "compiled tier compiles the struct kernel");
+    if (ck) {
+        float cout = -1.0f; float* cop = &cout; void* cargs[] = {&data, &cop};
+        CHECK(ck->launch(Extent{1, 1, 1}, Extent{1, 1, 1}, cargs, 2), "compiled struct kernel runs");
+        CHECK(cout == out, "compiled tier matches the interpreter on the struct kernel");
+        std::printf("  compiled struct result = %.1f\n", cout);
+    } else {
+        std::printf("  compiled err: %s\n", err.c_str());
+    }
 
     if (g_fail == 0) std::printf("PASS: by-value struct kernel params (no LLVM)\n");
     else std::printf("FAILED: %d\n", g_fail);

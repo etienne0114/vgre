@@ -43,20 +43,20 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > in memory), **`__device__` helper functions**, per-thread local arrays,
 > `__shared__` + `__syncthreads`, `atomicAdd`, warp-shuffle, and the full
 > math-intrinsic surface — a complete **flash-attention** kernel compiles and runs
-> on it with no LLVM. Both execution tiers are held **bit-exact** by ten
+> on it with no LLVM. Both execution tiers are held **bit-exact** by eleven
 > differential fuzzers (int/float/double/cast/float→int-saturate on Tier-0 vs host;
-> expression/loop/array/atomic/`__device__`-inlining on Tier-0 vs Tier-1), which
-> caught four real silent-wrong bugs, now fixed.
+> expression/loop/array/atomic/`__device__`-inlining/struct on Tier-0 vs Tier-1),
+> which caught four real silent-wrong bugs, now fixed.
 >
 > **Remaining on the zero-burden track** (OpenMP is now *optional* too —
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
 > threading requirement): **Tier-1b native copy-and-patch** codegen and the
-> optional **Tier-2 SSA** backend for peak speed; extending **struct** support onto
-> the **Tier-1 compiled** tier (`__device__` helpers now inline there; struct
-> kernels still defer to the interpreter); and broader front-end coverage
-> (texture/surface ops, the remaining
-> warp/vote intrinsics, templates/recursion). Phased plan:
-> [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
+> optional **Tier-2 SSA** backend for peak speed; and broader front-end coverage
+> (**struct arrays** `arr[i].field` — a located error on *both* tiers today;
+> texture/surface ops; the remaining warp/vote intrinsics; templates/recursion).
+> (`__device__` helper inlining and structs — by-value params, local values, and
+> `p->field` — now run on the Tier-1 compiled tier too, no longer deferring to the
+> interpreter.) Phased plan: [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
 
 The rest of this file tracks the **ML feature tracks** (T1–T6 and the next
 frontier), which were delivered to the project's *real, no-stub* standard; the
@@ -84,7 +84,7 @@ self-contained HF reference forward is reproduced to ~2e-8 across
 {safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
 CPU path (batched prefill, unified int8 kernel, speculative decode).
 
-**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 379/379 with LLVM, 359/359 LLVM-free — 100% green under full `-j`.**
+**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 380/380 with LLVM, 360/360 LLVM-free — 100% green under full `-j`.**
 
 The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
 1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).
