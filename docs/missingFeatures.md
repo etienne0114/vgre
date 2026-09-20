@@ -43,9 +43,9 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > in memory), **`__device__` helper functions**, per-thread local arrays,
 > `__shared__` + `__syncthreads`, `atomicAdd`, warp-shuffle, and the full
 > math-intrinsic surface — a complete **flash-attention** kernel compiles and runs
-> on it with no LLVM. Both execution tiers are held **bit-exact** by twelve
+> on it with no LLVM. Both execution tiers are held **bit-exact** by thirteen
 > differential fuzzers (int/float/double/cast/float→int-saturate on Tier-0 vs host;
-> expression/loop/array/atomic/`__device__`-inlining/struct/struct-array on Tier-0 vs Tier-1),
+> expression/loop/array/atomic/`__device__`-inlining/struct/struct-array/pointer-arith on Tier-0 vs Tier-1),
 > which caught four real silent-wrong bugs, now fixed.
 >
 > **Remaining on the zero-burden track** (OpenMP is now *optional* too —
@@ -85,7 +85,7 @@ self-contained HF reference forward is reproduced to ~2e-8 across
 {safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
 CPU path (batched prefill, unified int8 kernel, speculative decode).
 
-**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 381/381 with LLVM, 361/361 LLVM-free — 100% green under full `-j`.**
+**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 382/382 with LLVM, 362/362 LLVM-free — 100% green under full `-j`.**
 
 The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
 1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).

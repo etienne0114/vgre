@@ -632,9 +632,28 @@ struct Compiler {
         };
     }
 
+    // Element size a pointer to `pointee` strides by (struct size from the layout
+    // table; the scalar/pointer width otherwise).
+    int64_t strideOf(const Type& pointee) {
+        if (pointee.base == Type::Struct && pointee.ptr == 0) {
+            const StructDef* def = findStruct(pointee.structName);
+            return def ? def->size : 1;
+        }
+        return pointee.elemBytes();
+    }
+
     ExprFn compileUnary(const Expr& e) {
         if (e.str == "pre++" || e.str == "pre--" || e.str == "post++" || e.str == "post--")
             return compileIncDec(e);
+        // `*p` — dereference: load the pointee value at the pointer's address.
+        if (e.str == "*") {
+            Type pt = estimateType(*e.args[0]);
+            if (!pt.isPointer()) { fail("cannot dereference a non-pointer"); return {}; }
+            ExprFn a = compileExpr(*e.args[0]);
+            if (failed) return {};
+            Type pointee = pt; pointee.ptr -= 1;
+            return [a, pointee](TS& ts) { return memLoad(a(ts).asI(), pointee); };
+        }
         ExprFn a = compileExpr(*e.args[0]);
         if (failed) return {};
         if (e.str == "+") return a;
@@ -677,10 +696,32 @@ struct Compiler {
                                       : (a(ts).asI() != 0 || b(ts).asI() != 0)) ? 1 : 0);
             };
         }
+        // Pointer arithmetic: `p ± i` scales the integer index by the pointee size
+        // (element-scaled 64-bit addressing), and `p - q` is the element-count
+        // difference — matching C and the interpreter (a raw byte add would be
+        // silently wrong).
+        Type ta = estimateType(*e.args[0]), tb = estimateType(*e.args[1]);
+        if ((op == "+" || op == "-") && (ta.isPointer() || tb.isPointer())) {
+            if (op == "-" && ta.isPointer() && tb.isPointer()) {          // p - q → ptrdiff
+                Type pointee = ta; pointee.ptr -= 1;
+                const int64_t stride = strideOf(pointee);
+                return [a, b, stride](TS& ts) -> Cell { return Cell::I((a(ts).asI() - b(ts).asI()) / stride); };
+            }
+            const bool aPtr = ta.isPointer();
+            if (op == "-" && !aPtr) { fail("cannot subtract a pointer from an integer"); return {}; }
+            ExprFn ptr = aPtr ? a : b, idx = aPtr ? b : a;              // i + p is commutative
+            Type pointee = (aPtr ? ta : tb); pointee.ptr -= 1;
+            const int64_t stride = strideOf(pointee);
+            const bool sub = (op == "-");
+            return [ptr, idx, stride, sub](TS& ts) -> Cell {
+                int64_t off = (int64_t)(int32_t)idx(ts).asI() * stride;   // index is 32-bit (mul.wide.s32)
+                return Cell::I(sub ? ptr(ts).asI() - off : ptr(ts).asI() + off);
+            };
+        }
         // Compute at the operands' common type (comparisons compare there but
         // yield int, handled by binop); narrowResult wraps the result to its own
         // static type.
-        const Type ct = promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
+        const Type ct = promoteT(ta, tb);
         return makeBinary(a, b, op, ct);
     }
 
@@ -752,6 +793,26 @@ struct Compiler {
             return [addr, mt, value](TS& ts) -> Cell {
                 Cell v = coerce(value(ts), mt);
                 memStore(addr(ts).asI(), mt, v);
+                return v;
+            };
+        }
+        if (lhs.kind == Expr::Unary && lhs.str == "*") {
+            // `*p = …` (and compound) — store the pointee value at p's address.
+            Type pt = estimateType(*lhs.args[0]);
+            if (!pt.isPointer()) { fail("cannot dereference a non-pointer"); return {}; }
+            Type pointee = pt; pointee.ptr -= 1;
+            ExprFn pv = compileExpr(*lhs.args[0]);
+            if (failed) return {};
+            ExprFn value = rhs;
+            if (op != "=") {
+                std::string bop = op.substr(0, op.size() - 1);
+                Type ct = promoteT(pointee, estimateType(*e.args[1]));
+                ExprFn cur = [pv, pointee](TS& ts) { return memLoad(pv(ts).asI(), pointee); };
+                value = makeBinary(cur, rhs, bop, ct);
+            }
+            return [pv, pointee, value](TS& ts) -> Cell {
+                Cell v = coerce(value(ts), pointee);
+                memStore(pv(ts).asI(), pointee, v);
                 return v;
             };
         }
