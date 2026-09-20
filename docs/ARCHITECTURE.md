@@ -124,12 +124,14 @@ LLVM ORC JIT (Generate high-performance host machine code)
 Executable Function Pointer (registered in kernelAddressMap_)
 ```
 
-> **Direction (Track Z — Zero-Burden Engine, in progress).** LLVM is the only
-> heavyweight build dependency left (~1 GB; the slow Windows step). It is being
-> replaced by an **in-tree, from-scratch pipeline** so the whole engine matches
-> the LLVM-free `libvgre_nn`. A **layered `ExecutionBackend`** replaces the ORC
-> JIT, selectable at runtime (`VGRE_EXEC_BACKEND`) with Tier 0 as the guaranteed
-> fallback:
+> **Direction (Track Z — Zero-Burden Engine).** LLVM was the only heavyweight
+> build dependency (~1 GB; the slow Windows step). It is now **optional**:
+> `-DVGRE_ENABLE_JIT=OFF` builds and runs with **no LLVM** via an in-tree,
+> from-scratch CUDA-C → PTX pipeline, so the whole engine can match the LLVM-free
+> `libvgre_nn` (OpenMP is optional too). A **layered `ExecutionBackend`** replaces
+> the ORC JIT, selectable at runtime (`VGRE_EXEC_BACKEND`) with Tier 0 as the
+> guaranteed fallback (Tier-1b native codegen and the Tier-2 SSA backend are the
+> remaining speed work — see `zeroBurdenRoadmap.md`):
 > - **Tier 0 — SIMD interpreter:** the existing `src/debug/ptx_interpreter.cpp`
 >   promoted to a runtime backend (zero codegen; works on every OS/arch).
 > - **Tier 1 — copy-and-patch codegen:** precompiled stencils baked at build

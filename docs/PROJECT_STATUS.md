@@ -1,8 +1,8 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-09-18 (Windows brought from build-only to full-suite in CI; cross-platform regression fixes on all three OSes)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (325 tests) on x86-64 Linux — the required CI job  
-**Build Status (Linux, LLVM-free)**: ✅ **CI-guarded zero-burden path** — a dedicated `linux-x86_64-llvm-free` job builds with `VGRE_ENABLE_JIT=OFF` + `VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**, running the 305-test JIT-free subset (JIT-only tests are gated out in CMake). Proves the lightweight, no-toolchain build stays green on every push  
+**Last Updated**: 2026-09-20 (front-end/backend differential-fuzzing hardening; test counts reconciled)  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (**378 tests**, 100% green under full `-j`) on x86-64 Linux — the required CI job  
+**Build Status (Linux, LLVM-free)**: ✅ **CI-guarded zero-burden path** — a dedicated `linux-x86_64-llvm-free` job builds with `VGRE_ENABLE_JIT=OFF` + `VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**, running the **358-test** JIT-free subset (the ~20 JIT-only tests are gated out in CMake). Proves the lightweight, no-toolchain build stays green on every push  
 **Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64). Latest fix: the process-exit `recursive_mutex` abort (an `atexit` handler locking the `RuntimeEngine` singleton after its destruction — EINVAL on macOS libc++) resolved by a leaked, never-destroyed singleton  
 **Build Status (Windows)**: ✅ **CI-green** — builds and runs the full `ctest` suite on `windows-2022` (LLVM-18 tarball cached, clang-cl), confirmed on run 35325255176 (2026-09-18, Test step = success). The bring-up fixes: AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output. Still `continue-on-error` in the workflow (may be promoted to required after a few more consecutive green runs)  
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
@@ -48,10 +48,15 @@
 >   now run over the real TCP collective in CI-shaped tests
 >   (`PythonNnDistributedMultistep`, `PythonNnTensorParallel`).
 
-> **Correction (2026-06-10):** earlier revisions of this file claimed
+> **Correction (2026-06-10) — partly superseded (2026-09):** the CI/platform half
+> below is out of date. As of 2026-09 there **is** CI, and all three OSes run the
+> full `ctest` suite green (see the header): Linux required, macOS green, Windows
+> informational. The note is kept for history; the simplified-compute-path caveats
+> it lists still stand where `missingFeatures.md` §1 marks them. Original text:
+> earlier revisions of this file claimed
 > "CI/CD-Ready", "validated across Linux, Windows, macOS", and "zero stubs".
-> That was inaccurate. The truth: the build and tests run on **Linux only**;
-> Windows/macOS code is compile-guarded but **unverified** (there is no CI). A
+> That was inaccurate at the time. The then-truth: the build and tests ran on **Linux only**;
+> Windows/macOS code was compile-guarded but **unverified** (there was no CI). A
 > handful of compute paths are deliberately **simplified** (Flash Attention
 > recomputes K/V, NCCL ring uses a barrier-per-round model, WMMA is a flat
 > dot-product — see `docs/missingFeatures.md` §1). This file now tracks the real
@@ -72,9 +77,10 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ### 1.1 Linux (x86-64) — canonical
 
-**Verified on Linux (x86-64).** The full `ctest` suite (293 tests) passes
-on Linux, exercised with property-based exploration, ThreadSanitizer race
-analysis, and static-destruction verification.
+**Verified on Linux (x86-64).** The full `ctest` suite (378 tests with LLVM,
+358 in the LLVM-free build) passes on Linux, exercised with property-based
+exploration, differential fuzzing of the CUDA-C front-end against both execution
+tiers, ThreadSanitizer race analysis, and static-destruction verification.
 
 ### 1.2 macOS (ARM64 / Intel) — build-verified
 
@@ -93,10 +99,14 @@ external semaphores via `dispatch_semaphore`, cluster TCP via BSD sockets.
 (Mach hints vs Linux affinity), no Metal Performance Shaders backend, no NVIDIA
 PMU/CUPTI counters without physical GPU hardware.
 
-### 1.3 Windows — unverified
+### 1.3 Windows — CI-green
 
-**Windows is not yet verified** — code paths are compile-guarded but have not
-been built or run in CI (Phase 2, Track 1 brings up the matrix).
+**Windows builds and runs the full `ctest` suite in CI** (`windows-2022`,
+clang-cl, LLVM-18 tarball cached), confirmed 2026-09-18 (see the header). The
+bring-up fixes were AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency
+loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output.
+The workflow keeps it `continue-on-error` (informational) pending a few more
+consecutive green runs before promotion to required.
 
 - **Linux core passes**: full regression + integration + platform suite green on x86-64.
 - **Mostly real compute, with documented exceptions**: nearly every path runs real
@@ -114,7 +124,14 @@ been built or run in CI (Phase 2, Track 1 brings up the matrix).
 
 ## 2. Genuinely Missing or Partially Implemented Features
 
-As of June 7, 2026, all software-emulatable features are implemented. The remaining gaps are hardware-level constraints where CPU emulation must naturally fall back to a high-fidelity proxy or report platform limits. 
+The CUDA-emulation feature surface is complete; remaining gaps are hardware-level
+constraints where CPU emulation falls back to a high-fidelity proxy or reports
+platform limits. **Superseded (2026-09):** the earlier "all software-emulatable
+features are done" framing predates the **zero-burden program** — making LLVM
+optional (done) and building the CUDA-C→PTX pipeline from scratch, whose own
+remaining work (Tier-1b copy-and-patch codegen, Tier-2 SSA backend, broader
+front-end coverage) is tracked in [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)
+and [`missingFeatures.md`](missingFeatures.md).
 
 For the comprehensive, definitive list of boundary conditions (such as physical PMU counters, SASS binary execution, and GPUDirect RDMA), please see [missingFeatures.md](missingFeatures.md).
 
@@ -159,18 +176,23 @@ The following components are fully implemented, verified via regression tests, a
 
 ## 4. Test Suite Summary
 
-The VGRE test suite runs 192 tests covering all aspects of memory management, compiler translation, compute libraries, and clustering:
+The VGRE test suite runs **378 CTest targets** (LLVM build) / **358** (LLVM-free
+build) covering memory management, compiler translation (incl. the from-scratch
+CUDA-C front-end + eight differential fuzzers against both execution tiers),
+compute libraries, and clustering — 100% green under full `-j`. The per-area
+breakdown below is **historical/indicative** (it predates substantial growth); the
+authoritative current count is the total above, reproduced by the build commands
+in §5.
 
-| Suite | Focus | Tests Run | Result |
-|---|---|---|---|
-| Unit | TLB, Scheduler, Concurrency, Security, Data Structures | 49 | ✅ Passed |
-| Integration | JIT, Graphs, UVM, Streams, Multi-Device, Cluster | 42 | ✅ Passed |
-| API | cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSolver, cuRAND, CUDA RT | 71 | ✅ Passed |
-| Compiler | Clang Parser, FLOP Counting, PTX Kernel Parser | 4 | ✅ Passed |
-| Core | Dirty Page Tracking, Radix Sort, Texture, VEB Tree | 7 | ✅ Passed |
-| Advanced | TCP Cluster Security, Hybrid Auth, Diagnostic Logger | 18 | ✅ Passed |
-| Platform | Cross-Platform Worker | 1 | ✅ Passed |
-| **Total** | | **192 CTest targets** | **✅ All Passed** |
+| Suite | Focus | Result |
+|---|---|---|
+| Unit | TLB, Scheduler, Concurrency, Security, Data Structures | ✅ Passed |
+| Integration | JIT, Graphs, UVM, Streams, Multi-Device, Cluster | ✅ Passed |
+| API | cuBLAS, cuDNN, cuFFT, cuSPARSE, cuSolver, cuRAND, CUDA RT | ✅ Passed |
+| Compiler | CUDA-C front-end (lexer/parser/codegen), differential fuzzers, PTX interpreter + compiled tier | ✅ Passed |
+| Core | Dirty Page Tracking, Radix Sort, Texture, VEB Tree | ✅ Passed |
+| Advanced | TCP Cluster Security, Hybrid Auth, Diagnostic Logger | ✅ Passed |
+| Platform | Cross-Platform Worker | ✅ Passed |
 
 ---
 

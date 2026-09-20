@@ -1,8 +1,12 @@
 # VGRE — Remaining Work & Advanced Roadmap
 
-**Last Updated**: 2026-09-06
+**Last Updated**: 2026-09-20
 
-This file tracks **what is not yet done**.
+This file tracks **what is not yet done**. Canonical cross-references (to avoid
+duplication): the zero-burden/LLVM-removal plan lives in
+[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md); the live CUDA-C support matrix in
+[`supportedCudaSubset.md`](supportedCudaSubset.md); platform/CI status in
+[`PROJECT_STATUS.md`](PROJECT_STATUS.md).
 
 > ## ⭐ Primary in-tree program (new, 2026-09): the Zero-Burden Engine
 >
@@ -32,14 +36,26 @@ This file tracks **what is not yet done**.
 > Tier-0 interpreter / Tier-1 compiled backends through the real C-ABI
 > (`vgre_register_kernel`/`vgre_launch_kernel`). Done with no `runtime_engine`
 > surgery via `src/compiler/jit_stubs.cpp` (no-op `LLVMTranslationEngine` + a
-> regex-delegating `ClangKernelParser`). Supported CUDA-C subset today: int/float
-> (+ double/long on the compiled tier), all operators incl. ternary/casts/`++`/
-> compound-assign, if/for/while, global + `__shared__` memory, `__syncthreads`,
-> `atomicAdd`, the `threadIdx/blockIdx/blockDim/gridDim` builtins, and the
-> `sqrtf/rsqrtf/fabsf/abs/expf/logf/sinf/cosf/floorf/ceilf/fminf/fmaxf/min/max/`
-> `fmaf/powf` intrinsics. Remaining: grow the subset (structs, device functions,
-> texture/warp ops), Tier-1b native copy-and-patch, and dropping the REQUIRED
-> OpenMP for the in-tree thread pool.
+> regex-delegating `ClangKernelParser`). The supported CUDA-C subset is kept
+> current, test-first, in [`supportedCudaSubset.md`](supportedCudaSubset.md); it now
+> covers `int`/`unsigned`/`char`/`short`/`bool`/`float`/`double`/`long`/`__half`,
+> pointers + pointer arithmetic, **structs** (by-value params, local, and `struct*`
+> in memory), **`__device__` helper functions**, per-thread local arrays,
+> `__shared__` + `__syncthreads`, `atomicAdd`, warp-shuffle, and the full
+> math-intrinsic surface — a complete **flash-attention** kernel compiles and runs
+> on it with no LLVM. Both execution tiers are held **bit-exact** by eight
+> differential fuzzers (int/float/double/cast/float→int-saturate on Tier-0 vs host;
+> expression/loop/array/atomic on Tier-0 vs Tier-1), which caught four real
+> silent-wrong bugs, now fixed.
+>
+> **Remaining on the zero-burden track** (OpenMP is now *optional* too —
+> `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
+> threading requirement): **Tier-1b native copy-and-patch** codegen and the
+> optional **Tier-2 SSA** backend for peak speed; extending struct / `__device__`
+> support onto the **Tier-1 compiled** tier (today those kernels defer to the
+> interpreter); and broader front-end coverage (texture/surface ops, the remaining
+> warp/vote intrinsics, templates/recursion). Phased plan:
+> [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
 
 The rest of this file tracks the **ML feature tracks** (T1–T6 and the next
 frontier), which were delivered to the project's *real, no-stub* standard; the
@@ -67,7 +83,7 @@ self-contained HF reference forward is reproduced to ~2e-8 across
 {safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
 CPU path (batched prefill, unified int8 kernel, speculative decode).
 
-**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite: 303/303.**
+**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 378/378 with LLVM, 358/358 LLVM-free — 100% green under full `-j`.**
 
 The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
 1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).
@@ -93,13 +109,14 @@ references**, and live in the LLVM-free `libvgre_nn`. Build steps and success cr
 
 **Narrow remainders (breadth/perf — no correctness gaps):**
 
+Only three of the six tracks have anything left, all breadth/perf (T5 SIMD-unpack
+and T6 int4/MXFP4 base were completed and are removed from this list):
+
 | Track | Left | Nature |
 |-------|------|--------|
 | T1 | GGUF `I2_S`/TL1/TL2 ternary tensor loader | needs a real BitNet-b1.58 checkpoint to verify end-to-end (**external download**) |
-| T3 | ~~KV-cache reuse + rollback on the raw C++ `generate_cached` path~~ **DONE** — `generate_speculative(prompt, n_new, k)` does lossless greedy speculative decode on the raw GPT: a **prompt-lookup** drafter (draft-model-free: copy what followed the last occurrence of the current context) proposes a run, one **batched** forward verifies it, accepted drafts keep the KV that batch already wrote (reuse), and a mismatch just advances `pos` so the stale slots are overwritten by the next decode (rollback). Emitted tokens are **bit-identical** to greedy `generate_cached` for fp32/bf16/int8 (guarded by `XlaBatchedPrefill`); measured **2.9×** on a model with repetitive output. Remaining: tree verification; early-exit self-speculative drafting | **throughput optimization** — greedy path + KV reuse/rollback + an effective drafter now land in-tree |
-| T4 | ~~depthwise short conv before the SSM~~ **DONE** (causal per-channel conv1d + SiLU in `SSMBlock`, `conv_kernel=4`; numpy-matched, causality exact); **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization |
-| T5 | ~~SIMD unpack path for the 4-bit decode~~ **DONE** — the MXFP4 GEMM now decodes each 32-element block **once** into a stack buffer reused across all M rows (M× fewer nibble decodes) with a contiguous, auto-vectorizable fp32 block-dot and a contiguous per-column accumulator: **21.4× vs the old per-(m,n) decode** (M=256,K=N=2048), bit-identical result. Portable (no arch intrinsics). | perf |
-| T6 | ~~int4 base option~~ **DONE** (`QLoRALinear(base_format="int4")`: symmetric per-column 4-bit, 4.25 bits/weight, ~11× lower reconstruction error than the 2-bit ternary base); ~~MXFP4 base~~ **DONE** (`QLoRALinear(base_format="mxfp4")`: OCP E2M1 codes + shared E8M0 power-of-two scale per 32-row block, 4.25 bits/weight, numpy-side codec mirroring `include/vgre/xla/mxfp4.h`); dequant-in-GEMM for the base path | breadth / peak-memory |
+| T3 | tree verification; early-exit self-speculative drafting | **throughput optimization** (greedy speculative decode + KV reuse/rollback + prompt-lookup drafter already land in-tree) |
+| T4 | **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization (depthwise causal conv1d before the SSM already done) |
 
 ---
 

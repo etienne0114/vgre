@@ -36,9 +36,10 @@ LLVM/Clang headers are included in **only 8 source files**; the rest of the tree
 | `src/advanced/tcp_cluster/configuration_manager_file_io.cpp` | **`llvm::json::parse` only** | trivial |
 
 LLVM components linked (`CMakeLists.txt` §7): `Core ExecutionEngine OrcJIT
-Support Target native`. It is pulled in unconditionally —
-`find_package(LLVM REQUIRED CONFIG)` — so **there is no way to build without it
-today**.
+Support Target native`. **Update (done):** this is now behind
+`option(VGRE_ENABLE_JIT)` — with `OFF`, `find_package(LLVM)` is skipped and these
+files are excluded, so VGRE builds and runs with **no LLVM at all** (the original
+"no way to build without it" is no longer true).
 
 ### 1.2 What that costs
 
@@ -130,10 +131,12 @@ track with a documented, growing "supported CUDA-C subset" list.
 **Status (2026-09-18):** Stages 0, 1, 2 and 3.1 are **done and now CI-guarded.**
 A dedicated `linux-x86_64-llvm-free` CI job builds with `VGRE_ENABLE_JIT=OFF` +
 `VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**,
-then runs the 305-test JIT-free subset to green on every push — so the
-lightweight, no-toolchain path can no longer silently regress (previously it was
-only ever built by hand). Remaining: Stage 3.2 (grow the from-scratch CUDA-C →
-PTX frontend's supported subset).
+then runs the JIT-free subset (**358 tests** as of 2026-09-20) to green on every
+push — so the lightweight, no-toolchain path can no longer silently regress
+(previously it was only ever built by hand). Remaining: Stage 3.2 (grow the
+from-scratch CUDA-C → PTX frontend's supported subset — ongoing; the current
+matrix, including a working flash-attention kernel and eight differential
+fuzzers, is in [`supportedCudaSubset.md`](supportedCudaSubset.md)).
 
 ### Effort / payoff summary
 
@@ -149,17 +152,14 @@ PTX frontend's supported subset).
 
 ## 3. Repository hygiene issues (attention needed)
 
-1. **~4.9 GB of stale local build trees** (not tracked, good): `build/`,
-   `build-asan/`, `build_asan/`, `build_jit/`, `build_local/`, `build_rdma_fix/`,
-   `build_test/`, `build-tsan/`, plus `venv/` (82 MB), stray root artifacts
-   (`libvgre.so`, `libvgre_cudart.so`, `opencl_adapter.o`, `vgre_trace.json`).
-   *Action:* delete the ones you're not using; extend `.gitignore` from the
-   current `build/` + `build_local/` to `build*/` so the ASan/TSan/test trees are
-   ignored too.
-2. **`src/backup/`** exists as a source dir — confirm it's a real module and not a
-   leftover; if leftover, remove.
-3. **Two JSON parsers in play** (`vgre::common::json` vs `llvm::json`) — Stage 0
-   consolidates onto the in-tree one.
+1. ✅ **Resolved.** `.gitignore` now ignores `build*/` (and `cmake-build-*/`), so
+   the ASan/TSan/test/experimental out-of-source trees are all ignored. (Delete
+   any local trees you're not using to reclaim disk.)
+2. ✅ **Resolved — real module.** `src/backup/` is a genuine module
+   (`backup_archive.cpp`, `backup_c_api.cpp`, `CMakeLists.txt`) behind the
+   `BackupArchive` test, not a leftover.
+3. ✅ **Resolved.** Stage 0 consolidated `src/advanced` onto the in-tree
+   `vgre::common::json`; `llvm::json` is no longer used there.
 
 ---
 

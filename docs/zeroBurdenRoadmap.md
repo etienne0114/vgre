@@ -1,6 +1,12 @@
 # VGRE Zero-Burden Roadmap — a self-contained, lightweight engine (0 → 100%)
 
-**Date:** 2026-09-06 · **Status:** master plan for the next major version.
+**Date:** 2026-09-06 (progress updated 2026-09-20) · **Status:** master plan for
+the next major version — **Phases A, B and the threading half of D are done**:
+`-DVGRE_ENABLE_JIT=OFF` builds and runs with **no LLVM**, `-DVGRE_ENABLE_OPENMP=OFF`
+builds green on the in-tree thread pool alone, and the from-scratch CUDA-C
+front-end + Tier-0/Tier-1 backends are held bit-exact by a differential-fuzzing
+suite. **What's left:** Phase C (Tier-1b copy-and-patch codegen), the Tier-2 SSA
+backend, and Phase E packaging.
 
 ## Mission (why this project exists)
 
@@ -23,16 +29,17 @@ extends that same discipline to the **whole engine**.
 
 | Dependency | Status in build | Weight | Verdict |
 |---|---|---|---|
-| **LLVM 18 + Clang** | **REQUIRED** (`find_package(LLVM REQUIRED)`) | ~1 GB; the slow/never-finishing Windows step | **eliminate** (this doc's core) |
-| OpenMP | REQUIRED | small (ships with compiler) | replace with in-tree thread pool |
+| **LLVM 18 + Clang** | **now OPTIONAL** — `option(VGRE_ENABLE_JIT)`; `OFF` skips `find_package(LLVM)` entirely | ~1 GB; the slow/never-finishing Windows step | ✅ **eliminated** in the LLVM-free build (this doc's core) |
+| OpenMP | **now OPTIONAL** — `option(VGRE_ENABLE_OPENMP)`; `OFF` uses the in-tree thread pool | small (ships with compiler) | ✅ replaced by the in-tree work-stealing thread pool |
 | A C++17 compiler | REQUIRED | unavoidable | keep (the one true dep) |
 | BLAS/LAPACK, FFTW, SuiteSparse | optional, auto-detected | medium | in-tree fallbacks (GEMM done) |
 | OpenSSL, zlib, SQLite | optional, auto-detected | small | in-tree fallbacks / vendored-lite |
 | gRPC/Protobuf, ibverbs, OpenCL, TPM, Flutter, Go | optional feature-gated | large but off by default | leave optional |
 
-**Conclusion:** the only *hard* burden worth eliminating is **LLVM**. Remove it
-and VGRE builds and runs with **just a C++ compiler**. Everything else already
-degrades gracefully or is off by default.
+**Conclusion (achieved):** the only *hard* burden worth eliminating was **LLVM**,
+and the LLVM-free build now runs with **just a C++ compiler** (OpenMP dropped
+too). Everything else already degrades gracefully or is off by default. The
+remaining work is *speed* (native copy-and-patch / SSA codegen), not *burden*.
 
 ---
 
@@ -117,28 +124,29 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
 
 ## 4. The 0 → 100% program (phased, test-first, no stubs)
 
-**Phase A — Decouple & prove the fallback (foundation).**
-1. Drop `llvm::json` → in-tree `vgre::common::json` (removes LLVM from cluster).
+**Phase A — Decouple & prove the fallback (foundation). ✅ DONE.**
+1. Drop `llvm::json` → in-tree `vgre::common::json` (removes LLVM from cluster). ✅
 2. Promote `ptx_interpreter` to a runtime `ExecutionBackend`; route
-   `runtime_engine` kernel launch through a backend interface.
-3. Add `VGRE_EXEC_BACKEND`; run the full kernel suite on the interpreter tier.
-   *Exit:* a build with **LLVM absent** passes the kernel tests (interpreter).
+   `runtime_engine` kernel launch through a backend interface. ✅
+3. Add `VGRE_EXEC_BACKEND`; run the full kernel suite on the interpreter tier. ✅
+   *Exit met:* a build with **LLVM absent** passes the kernel tests (interpreter).
 
-**Phase B — Own front-end.**
-4. Hand-written CUDA-C lexer/parser → VGRE-IR for the documented subset.
-5. Publish the "supported CUDA-C subset" matrix; grow it test-first.
-   *Exit:* the example kernels (vector add, GEMM, reductions, stencil, the docs'
-   samples) compile through VGRE-IR with no Clang.
+**Phase B — Own front-end. ✅ DONE.**
+4. Hand-written CUDA-C lexer/parser → PTX for the documented subset. ✅
+5. Publish the "supported CUDA-C subset" matrix; grow it test-first. ✅
+   (`supportedCudaSubset.md`; a full flash-attention kernel compiles with no Clang,
+   and both tiers are differential-fuzzed bit-exact.)
 
-**Phase C — Fast codegen (copy-and-patch).**
+**Phase C — Fast codegen (copy-and-patch). ⬜ REMAINING.**
 6. Stencil generator run in CI; runtime copy-and-patch emitter for VGRE-IR.
-7. Benchmark Tier 1 vs the old LLVM JIT on the kernel corpus.
-   *Exit:* Tier 1 within a target factor of the LLVM JIT on the corpus; **LLVM
-   removed from the default build.**
+7. Benchmark Tier 1b vs the old LLVM JIT on the kernel corpus.
+   *Exit:* Tier 1b within a target factor of the LLVM JIT on the corpus.
+   (The portable Tier-1 closure backend already runs ~90× faster than the
+   interpreter and is LLVM-free; 1b is the native-codegen speed step.)
 
 **Phase D — Peak backend (optional) + threading.**
-8. In-tree thread pool becomes the only threading requirement (OpenMP optional).
-9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter).
+8. In-tree thread pool becomes the only threading requirement (OpenMP optional). ✅ DONE
+9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). ⬜ REMAINING
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries

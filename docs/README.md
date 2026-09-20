@@ -84,7 +84,7 @@ VGRE is designed as a cross-platform system, utilizing platform-native bindings 
 
 | Feature | Linux | Windows | macOS |
 |---|---|---|---|
-| **Verification status** | ✅ Full `ctest` green | ⚠️ CI-unverified | ✅ Build + integration verified locally (July 2026) |
+| **Verification status** | ✅ Full `ctest` green (required CI) | ✅ Full `ctest` green (CI, informational) | ✅ Full `ctest` green (CI) |
 | **Interception** | `LD_PRELOAD` | PATH / DLL Proxy | `DYLD_INSERT_LIBRARIES` |
 | **UVM Memory Trap** | `SIGSEGV` Signal | Vectored Exception (VEH) | `SIGSEGV` / `SIGBUS` Signal |
 | **Thread Affinity** | `sched_setaffinity` | `SetThreadAffinityMask` | Mach thread policy hints |

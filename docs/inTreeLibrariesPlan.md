@@ -226,7 +226,7 @@ make the **default, no-dependency** build fast.
 
 ## Cross-cutting rules
 
-- Everything behind feature flags; `VGRE_MINIMAL` stays buildable; the 281/281 suite never regresses.
+- Everything behind feature flags; `VGRE_MINIMAL` stays buildable; the full `ctest` suite never regresses (currently 378 with LLVM / 358 LLVM-free, 100% green).
 - Each phase gated by correctness tests **and** a benchmark before the next begins.
 - No new external dependency may enter the default build — that is the whole point.
 
