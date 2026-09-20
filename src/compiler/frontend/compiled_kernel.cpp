@@ -199,6 +199,15 @@ struct Compiler {
     std::string err;
     int line = 0, col = 0;
 
+    // `__device__` helper functions callable from this kernel (name -> definition),
+    // inlined at each call site (see inlineDeviceCall). `retCtx` is the per-inline
+    // return context (the slot the value lands in + its type); `inlining` guards
+    // against recursion (unsupported when inlining).
+    std::unordered_map<std::string, const Kernel*> deviceFns;
+    struct RetCtx { size_t retSlot; Type retType; };
+    std::vector<RetCtx> retCtx;
+    std::unordered_map<std::string, int> inlining;
+
     void fail(const std::string& m) {
         if (failed) return;
         failed = true;
@@ -393,6 +402,8 @@ struct Compiler {
             case Expr::Ternary: return promoteT(estimateType(*e.args[1]), estimateType(*e.args[2]));
             case Expr::Call: {
                 const std::string& fn = e.str;
+                auto df = deviceFns.find(fn);
+                if (df != deviceFns.end()) return df->second->returnType;   // user __device__ helper
                 if (fn == "min" || fn == "max")
                     return e.args.size() < 2 ? scalar(Type::Int) : promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
                 if (fn == "abs")       return e.args.empty() ? scalar(Type::Int) : estimateType(*e.args[0]);
@@ -651,9 +662,66 @@ struct Compiler {
         };
     }
 
+    // Inline a call to a __device__ helper: bind arg closures to fresh param slots,
+    // compile the body in a fresh name scope (disjoint slot range) with a return
+    // context, then run it with ts.returned save/restored so the callee's `return`
+    // unwinds only its own body — not the caller's control flow. Non-recursive.
+    ExprFn inlineDeviceCall(const Kernel& fn, const Expr& call) {
+        if (inlining.count(fn.name)) { fail("recursive __device__ function '" + fn.name + "' unsupported on the compiled tier"); return {}; }
+        if (inlining.size() > 64) { fail("__device__ inline depth exceeded (recursion?)"); return {}; }
+        if (call.args.size() != fn.params.size()) { fail("wrong argument count for '" + fn.name + "'"); return {}; }
+
+        // Args are compiled in the CALLER's scope.
+        std::vector<ExprFn> args;
+        for (auto& a : call.args) { args.push_back(compileExpr(*a)); if (failed) return {}; }
+        std::vector<Type> ptypes; for (auto& p : fn.params) ptypes.push_back(p.type);
+
+        // Fresh name scope for the callee's params + locals (their slots are a fresh,
+        // disjoint range in the same per-thread register file).
+        auto savedSlot = std::move(slot);     slot.clear();
+        auto savedVtype = std::move(vtype);   vtype.clear();
+        auto savedArrays = std::move(arrays); arrays.clear();
+
+        std::vector<size_t> pslots;
+        for (auto& p : fn.params) pslots.push_back(declare(p.name, p.type));
+        for (auto& s : fn.body) { scan(*s); if (failed) break; }   // reserve callee local/array slots; rejects __shared__/barriers
+
+        const size_t retSlot = nextSlot++;
+        const Type rt = fn.returnType;
+        StmtFn bodyFn;
+        if (!failed) {
+            retCtx.push_back({retSlot, rt});
+            inlining[fn.name] = 1;
+            bodyFn = compileBody(fn.body);
+            inlining.erase(fn.name);
+            retCtx.pop_back();
+        }
+
+        // Restore the caller's scope.
+        slot = std::move(savedSlot);
+        vtype = std::move(savedVtype);
+        arrays = std::move(savedArrays);
+        if (failed) return {};
+
+        const bool isVoid = (rt.base == Type::Void);
+        const Cell zero = rt.isFloating() ? Cell::F(0.0) : Cell::I(0);
+        return [args, pslots, ptypes, bodyFn, retSlot, rt, isVoid, zero](TS& ts) -> Cell {
+            std::vector<Cell> av; av.reserve(args.size());
+            for (auto& a : args) av.push_back(a(ts));
+            for (size_t i = 0; i < pslots.size(); ++i) ts.regs[pslots[i]] = coerce(av[i], ptypes[i]);
+            ts.regs[retSlot] = zero;                     // defined value if the body falls through
+            const bool saved = ts.returned; ts.returned = false;
+            if (bodyFn) bodyFn(ts);
+            ts.returned = saved;
+            return isVoid ? Cell::I(0) : ts.regs[retSlot];
+        };
+    }
+
     ExprFn compileCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
+        auto dfit = deviceFns.find(fn);
+        if (dfit != deviceFns.end()) return inlineDeviceCall(*dfit->second, e);   // user __device__ helper
         if (e.args.size() == 1) {
             ExprFn a = compileExpr(*e.args[0]); if (failed) return {};
             // Intrinsics compute in double; narrowResult rounds the f32 spellings
@@ -711,7 +779,20 @@ struct Compiler {
                 return [ex](TS& ts) { ex(ts); };
             }
             case Stmt::Block: return compileBody(s.body);
-            case Stmt::Return: return [](TS& ts) { ts.returned = true; };
+            case Stmt::Return: {
+                // At kernel level, `return` just stops the thread. Inside an inlined
+                // __device__ body, stash the returned value in the call's slot first
+                // (the call closure saves/restores ts.returned so only the callee's
+                // body unwinds, not the caller's control flow).
+                if (retCtx.empty()) return [](TS& ts) { ts.returned = true; };
+                RetCtx ctx = retCtx.back();
+                ExprFn re = s.expr ? compileExpr(*s.expr) : ExprFn();
+                if (failed) return {};
+                return [ctx, re](TS& ts) {
+                    if (re) ts.regs[ctx.retSlot] = coerce(re(ts), ctx.retType);
+                    ts.returned = true;
+                };
+            }
             case Stmt::Empty: return [](TS&) {};
             case Stmt::If: {
                 ExprFn cond = compileExpr(*s.expr);
@@ -757,11 +838,9 @@ struct Compiler {
     }
 };
 
-}  // namespace
-
-std::unique_ptr<CompiledKernel> CompiledKernel::compile(const Kernel& k, std::string& err) {
-    Compiler c;
-    // Params occupy the first slots (slot index == param index).
+// Shared driver: params occupy the first slots, scan reserves local/array slots,
+// then each top-level statement is lowered to a closure.
+static std::unique_ptr<CompiledKernel> finishCompile(Compiler& c, const Kernel& k, std::string& err) {
     for (const Param& p : k.params) c.declare(p.name.empty() ? ("__arg" + std::to_string(c.nextSlot)) : p.name, p.type);
     for (auto& s : k.body) c.scan(*s);
     if (c.failed) { err = c.err; return nullptr; }
@@ -777,16 +856,31 @@ std::unique_ptr<CompiledKernel> CompiledKernel::compile(const Kernel& k, std::st
     return impl;
 }
 
+}  // namespace
+
+std::unique_ptr<CompiledKernel> CompiledKernel::compile(const Kernel& k, std::string& err) {
+    Compiler c;   // no module context: calls to __device__ helpers won't resolve
+    return finishCompile(c, k, err);
+}
+
 std::unique_ptr<CompiledKernel> CompiledKernel::compileSource(const std::string& source,
                                                              const std::string& name,
                                                              std::string& err) {
     ParseResult pr = parse(source);
     if (!pr.ok) { err = pr.error; return nullptr; }
     const Kernel* target = nullptr;
-    for (auto& kp : pr.module->kernels)
-        if (name.empty() || kp->name == name) { target = kp.get(); break; }
+    if (!name.empty()) {
+        for (auto& kp : pr.module->kernels) if (kp->name == name) { target = kp.get(); break; }
+    } else {
+        for (auto& kp : pr.module->kernels) if (kp->isGlobal) { target = kp.get(); break; }  // entry point
+        if (!target && !pr.module->kernels.empty()) target = pr.module->kernels.front().get();
+    }
     if (!target) { err = "kernel not found"; return nullptr; }
-    return compile(*target, err);
+
+    Compiler c;
+    for (auto& kp : pr.module->kernels)   // __device__ helpers this kernel may call
+        if (kp->isDeviceCallable() && kp.get() != target) c.deviceFns[kp->name] = kp.get();
+    return finishCompile(c, *target, err);
 }
 
 }  // namespace frontend

@@ -1399,6 +1399,11 @@ target_link_libraries(test_cuda_fuzz_atomic PRIVATE vgre Threads::Threads)
 add_test(NAME CudaFuzzAtomic COMMAND test_cuda_fuzz_atomic)
 set_tests_properties(CudaFuzzAtomic PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+add_executable(test_cuda_fuzz_device compiler/test_cuda_fuzz_device.cpp)
+target_link_libraries(test_cuda_fuzz_device PRIVATE vgre Threads::Threads)
+add_test(NAME CudaFuzzDevice COMMAND test_cuda_fuzz_device)
+set_tests_properties(CudaFuzzDevice PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

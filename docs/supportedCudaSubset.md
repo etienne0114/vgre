@@ -31,7 +31,7 @@ exact or single-rounded). `test_cuda_fuzz_toint.cpp` covers **float/double → i
 which is *not* a plain truncation: PTX `cvt.rzi.s32.f32` rounds toward zero then
 **saturates** to the destination range and maps NaN → 0 (so `(int)3e9f` is
 `INT_MAX`, `(int)(1.0f/0.0f)` is `INT_MAX`, `(int)nanf` is `0`), and the
-interpreter implements exactly that. Finally two cross-tier fuzzers run each random
+interpreter implements exactly that. Finally five cross-tier fuzzers run each random
 kernel on **both** execution tiers — the Tier-0 interpreter and the Tier-1
 compiled backend — and require identical output, holding the compiled tier to the
 same bit-exact standard (float32 arithmetic rounds to float, 32-bit int ops wrap,
@@ -40,10 +40,12 @@ float→int saturates, usual-arithmetic-conversions applied per op):
 the reduction / accumulator-in-a-`for`-loop shape real compute kernels are built
 from (local vars, `if`, `for`, compound assignment), `test_cuda_fuzz_array.cpp`
 over per-thread **local arrays** (`float acc[M]` — the register-tile shape of
-flash-attention / GEMM blocks), and `test_cuda_fuzz_atomic.cpp` over the
+flash-attention / GEMM blocks), `test_cuda_fuzz_atomic.cpp` over the
 cross-CTA **`atomicAdd`** histogram/scatter pattern (256 threads contending on a
 few bins across parallel CTAs — integer, so the bin sums are order-independent
-and must equal a serial reference on both tiers, proving no lost updates). The PTX header's
+and must equal a serial reference on both tiers, proving no lost updates), and
+`test_cuda_fuzz_device.cpp` over **`__device__` helper inlining** (random helpers
+with branches, early returns and nesting). The PTX header's
 `.target` (SM arch), `.version` (PTX ISA) and `.address_size` are configurable via
 `CodegenOptions` (defaults `sm_52` / `7.0` / `64`). And — in a JIT-enabled build —
 falls back to the LLVM path.
@@ -113,7 +115,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | `break`, `continue` | ✅ `break` exits the nearest loop **or** switch; `continue` targets the nearest enclosing loop (`for`-increment / `while`-retest), skipping switches; misuse outside a loop/switch is a located error |
 | `return` | ✅ |
 | blocks / scopes | ✅ (single flat scope) |
-| `__device__` / `__host__ __device__` helper functions | ✅ (inlined; nested calls OK; recursion rejected). Hygienic: each inline gets its own variable/array scope and unique PTX symbols; a non-void helper that falls through without a `return` yields a defined 0. A `__host__`-only function is **not** device-callable (calling it from a kernel is a located error); the launch entry must be a `__global__` kernel. |
+| `__device__` / `__host__ __device__` helper functions | ✅ **on both tiers** (inlined; nested calls OK; recursion rejected). The interpreter inlines into PTX; the **Tier-1 compiled** backend inlines into closures — a fresh param/local slot range per call site, the return value stashed in a slot, `ts.returned` saved/restored so `return` unwinds only the callee — and `test_cuda_fuzz_device.cpp` proves the two tiers agree bit-for-bit over random helpers (branches, early returns, nesting, mixed types). Hygienic: each inline gets its own variable/array scope; a non-void helper that falls through without a `return` yields a defined 0. A `__host__`-only function is **not** device-callable (calling it from a kernel is a located error); the launch entry must be a `__global__` kernel. |
 
 **Token vocabulary:** the lexer recognizes the **complete** C++ reserved-keyword set (through C++26, incl. the alternative operator spellings `and`/`or`/…), every CUDA qualifier/annotation (`__host__`/`__device__`/`__global__`/`__shared__`/`__constant__`/`__managed__`/`__restrict__`/`__forceinline__`/`__launch_bounds__`/`__grid_constant__`/`__cluster_dims__`/…), all operators and punctuators (`-> :: ... .* ->* <=> <<< >>>` included), character literals and `true`/`false`/`nullptr`. Each token carries a source byte span; the keyword table, spellings, names and classifiers are centralized in `token.cpp`. Tokens outside the parsed subset lex cleanly and produce a **located** error if used — never wrong code.
 
@@ -212,9 +214,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **378 / 378 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **358 / 358 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **358 / 358 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **379 / 379 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **359 / 359 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **359 / 359 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
