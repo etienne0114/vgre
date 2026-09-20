@@ -38,9 +38,12 @@ same bit-exact standard (float32 arithmetic rounds to float, 32-bit int ops wrap
 float→int saturates, usual-arithmetic-conversions applied per op):
 `test_cuda_fuzz_compiled.cpp` over expressions, `test_cuda_fuzz_loop.cpp` over
 the reduction / accumulator-in-a-`for`-loop shape real compute kernels are built
-from (local vars, `if`, `for`, compound assignment), and `test_cuda_fuzz_array.cpp`
+from (local vars, `if`, `for`, compound assignment), `test_cuda_fuzz_array.cpp`
 over per-thread **local arrays** (`float acc[M]` — the register-tile shape of
-flash-attention / GEMM blocks). The PTX header's
+flash-attention / GEMM blocks), and `test_cuda_fuzz_atomic.cpp` over the
+cross-CTA **`atomicAdd`** histogram/scatter pattern (256 threads contending on a
+few bins across parallel CTAs — integer, so the bin sums are order-independent
+and must equal a serial reference on both tiers, proving no lost updates). The PTX header's
 `.target` (SM arch), `.version` (PTX ISA) and `.address_size` are configurable via
 `CodegenOptions` (defaults `sm_52` / `7.0` / `64`). And — in a JIT-enabled build —
 falls back to the LLVM path.
@@ -209,9 +212,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **377 / 377 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **357 / 357 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **357 / 357 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **378 / 378 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **358 / 358 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **358 / 358 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
