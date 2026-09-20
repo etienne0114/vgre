@@ -106,7 +106,7 @@ int main() {
             writes += "    out[i].m" + std::to_string(m) + " = (" + src(gen(rint(1, 3), types).get(), names) + ");\n";
 
         std::string k = sdecl +
-            "extern \"C\" __global__ void fz(S* out, S* in, const int* iv, const float* fv, const double* dv, int n) {\n"
+            "extern \"C\" __global__ void fz(S* out, const S* in, const int* iv, const float* fv, const double* dv, int n) {\n"
             "  int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
             "  if (i < n) {\n"
             "    int I = iv[i]; float F = fv[i]; double D = dv[i];\n" + writes +

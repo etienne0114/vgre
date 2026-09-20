@@ -52,9 +52,8 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
 > threading requirement): **Tier-1b native copy-and-patch** codegen and the
 > optional **Tier-2 SSA** backend for peak speed; and broader front-end coverage
-> (texture/surface ops; the remaining warp/vote intrinsics; a `const`-qualified
-> struct-pointer parameter — `const S*` — which the parser currently rejects;
-> templates/recursion). (`__device__` helper inlining and **all** the struct forms
+> (texture/surface ops; the remaining warp/vote intrinsics; templates/recursion).
+> (`__device__` helper inlining and **all** the struct forms
 > the interpreter supports — by-value params, local values, `p->field`, and
 > `arr[i].field` struct arrays — now run on the Tier-1 compiled tier too, no longer
 > deferring to the interpreter.) Phased plan:

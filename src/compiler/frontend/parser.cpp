@@ -171,6 +171,23 @@ struct Parser {
             if (accept(TokenKind::KwSigned)) { out.isUnsigned = false; continue; }
             break;
         }
+        // A struct type can follow leading qualifiers too (e.g. `const Vec*`): the
+        // base-type switch below only knows primitives, so catch a struct name here
+        // (keeping the `isConst` we just parsed).
+        if (kind() == TokenKind::KwStruct ||
+            (kind() == TokenKind::Identifier && mod_ && mod_->findStruct(cur().text))) {
+            if (kind() == TokenKind::KwStruct) advance();
+            if (kind() != TokenKind::Identifier || !mod_ || !mod_->findStruct(cur().text)) {
+                fail("unknown struct type"); return false;
+            }
+            out.base = Type::Struct;
+            out.structName = advance().text;
+            while (accept(TokenKind::Star)) {
+                out.ptr++;
+                while (accept(TokenKind::KwConst) || accept(TokenKind::KwCudaRestrict)) { /* qualifier */ }
+            }
+            return true;
+        }
         switch (kind()) {
             case TokenKind::KwVoid:   out.base = Type::Void;  advance(); break;
             case TokenKind::KwBool:   out.base = Type::Bool;  advance(); break;
