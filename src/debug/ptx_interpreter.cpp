@@ -559,6 +559,53 @@ void PtxInterpreter::releaseVoteIfReady(int anyTid) {
     for (int L = warpBase; L < warpEnd; ++L)
         if (!threads_[L].done && !threads_[L].atVote) return;
 
+    // Warp reduce (redux.sync.<op>.<type> d, a, membermask): the parked lanes are
+    // warp-synchronous, so if the first one is at a redux they all are — each
+    // participating lane gets the fold of `a` over the lanes its membermask selects.
+    {
+        int firstParked = -1;
+        for (int L = warpBase; L < warpEnd; ++L) if (threads_[L].atVote) { firstParked = L; break; }
+        if (firstParked >= 0 && splitDots(kernel_.code[threads_[firstParked].pc].op)[0] == "redux") {
+            // Pass 1: compute every parked lane's fold while ALL lanes are still
+            // parked (so clearing atVote below can't drop a lane from a later fold).
+            std::vector<uint32_t> result(warpEnd - warpBase, 0);
+            for (int L = warpBase; L < warpEnd; ++L) {
+                Thread& t = threads_[L];
+                if (!t.atVote) continue;
+                const PtxInstr& I = kernel_.code[t.pc];
+                std::vector<std::string> parts = splitDots(I.op);   // redux.sync.<op>.<type>
+                const std::string op = parts.size() > 2 ? parts[2] : "add";
+                const bool sgn = parts.size() > 3 && parts[3] == "s32";
+                const uint32_t memMask = (uint32_t)evalOperand(t, L, I.args[2], 4);
+                bool first = true; int64_t acc = 0;
+                for (int M = warpBase; M < warpEnd; ++M) {
+                    if (!threads_[M].atVote) continue;
+                    if (!(memMask & (1u << (M - warpBase)))) continue;
+                    const uint32_t raw = (uint32_t)evalOperand(threads_[M], M, kernel_.code[threads_[M].pc].args[1], 4);
+                    const int64_t v = sgn ? (int64_t)(int32_t)raw : (int64_t)raw;
+                    if (first) { acc = v; first = false; continue; }
+                    if (op == "add")      acc = v + acc;
+                    else if (op == "min") acc = std::min(acc, v);
+                    else if (op == "max") acc = std::max(acc, v);
+                    else if (op == "and") acc &= v;
+                    else if (op == "or")  acc |= v;
+                    else if (op == "xor") acc ^= v;
+                }
+                result[L - warpBase] = (uint32_t)acc;
+            }
+            // Pass 2: write results, release the lanes, advance.
+            for (int L = warpBase; L < warpEnd; ++L) {
+                Thread& t = threads_[L];
+                if (!t.atVote) continue;
+                t.regs[kernel_.code[t.pc].args[0]].u = zeroExtend(result[L - warpBase], 4);   // 32-bit result
+                t.atVote = false;
+                ++t.pc;
+                if (t.pc >= (int)kernel_.code.size()) t.done = true;
+            }
+            return;
+        }
+    }
+
     // Build the raw ballot: bit `lane` set iff that lane is voting and its
     // predicate is true. activeMask tracks which lanes actually voted (for `all`).
     uint32_t predBallot = 0, activeMask = 0;
@@ -942,6 +989,12 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         // Warp vote (vote.sync.{ballot,any,all}): park offering our predicate; the
         // last active lane of the warp performs the reduction for everyone. pc is
         // NOT advanced here — releaseVoteIfReady writes the results and advances.
+        t.atVote = true;
+        releaseVoteIfReady(tid);
+        return true;
+    } else if (mnem == "redux") {
+        // Warp reduce (redux.sync.<op>): park like a vote; releaseVoteIfReady detects
+        // the redux and folds `a` across the warp's participating lanes for everyone.
         t.atVote = true;
         releaseVoteIfReady(tid);
         return true;

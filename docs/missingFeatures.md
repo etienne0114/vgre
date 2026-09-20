@@ -52,7 +52,8 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
 > threading requirement): **Tier-1b native copy-and-patch** codegen and the
 > optional **Tier-2 SSA** backend for peak speed; and broader front-end coverage
-> (texture/surface ops; the remaining warp/vote intrinsics; templates/recursion).
+> (texture/surface ops; the maskless warp-vote/`__match` variants; templates/recursion).
+> (warp **shuffle**, **vote**, and **reduce** `__reduce_*_sync` are done.)
 > (`__device__` helper inlining and **all** the struct forms
 > the interpreter supports — by-value params, local values, `p->field`, and
 > `arr[i].field` struct arrays — now run on the Tier-1 compiled tier too, no longer
@@ -85,7 +86,7 @@ self-contained HF reference forward is reproduced to ~2e-8 across
 {safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
 CPU path (batched prefill, unified int8 kernel, speculative decode).
 
-**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 382/382 with LLVM, 362/362 LLVM-free — 100% green under full `-j`.**
+**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 383/383 with LLVM, 363/363 LLVM-free — 100% green under full `-j`.**
 
 The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
 1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).

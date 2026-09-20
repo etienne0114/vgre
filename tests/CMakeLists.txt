@@ -1203,6 +1203,11 @@ target_link_libraries(test_cuda_syncthreads_reduce PRIVATE vgre Threads::Threads
 add_test(NAME CudaSyncthreadsReduce COMMAND test_cuda_syncthreads_reduce)
 set_tests_properties(CudaSyncthreadsReduce PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_warp_reduce compiler/test_cuda_warp_reduce.cpp)
+target_link_libraries(test_cuda_warp_reduce PRIVATE vgre Threads::Threads)
+add_test(NAME CudaWarpReduce COMMAND test_cuda_warp_reduce)
+set_tests_properties(CudaWarpReduce PROPERTIES TIMEOUT 30)
+
 add_executable(test_cuda_threadfence compiler/test_cuda_threadfence.cpp)
 target_link_libraries(test_cuda_threadfence PRIVATE vgre Threads::Threads)
 add_test(NAME CudaThreadfence COMMAND test_cuda_threadfence)

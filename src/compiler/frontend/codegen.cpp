@@ -1474,6 +1474,27 @@ struct Codegen {
         return {d, intType()};
     }
 
+    // Warp reduce: __reduce_{add,min,max,and,or,xor}_sync(mask, value). Lowers to
+    // `redux.sync.<op>.<type> d, value, mask` — every lane in `mask` receives the
+    // reduction of `value` across those lanes. add/min/max honour the value's
+    // signedness (s32 vs u32); the bitwise ops use b32. Warp-cooperative, so (like
+    // shuffle/vote) it runs on the Tier-0 interpreter.
+    Val emitReduce(const Expr& e) {
+        const std::string& fn = e.str;
+        if (e.args.size() != 2) { fail("'" + fn + "' expects (mask, value)"); return {}; }
+        Val mask = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+        Val val  = emitExpr(*e.args[1]); if (failed) return {};
+        const bool uns = val.type.isUnsigned;
+        Type rt = intType(); rt.isUnsigned = uns;
+        val = coerce(val, rt); if (failed) return {};
+        std::string op = fn.substr(9);                      // strip "__reduce_"
+        op = op.substr(0, op.size() - 5);                   // strip "_sync" → add/min/max/and/or/xor
+        const std::string type = (op == "and" || op == "or" || op == "xor") ? "b32" : (uns ? "u32" : "s32");
+        std::string d = fresh(RC::R32);
+        emit("redux.sync." + op + "." + type + " " + d + ", " + val.reg + ", " + mask.reg + ";");
+        return {d, rt};
+    }
+
     // __half <-> float helpers (used by the half arithmetic intrinsics, which all
     // promote to float, compute, then narrow back to __half).
     Val h2f(const Val& h) { std::string d = fresh(RC::F32); emit("cvt.f32.f16 " + d + ", " + h.reg + ";"); return {d, floatType()}; }
@@ -1683,6 +1704,8 @@ struct Codegen {
         if (fn == "__shfl_sync" || fn == "__shfl_up_sync" ||
             fn == "__shfl_down_sync" || fn == "__shfl_xor_sync") return emitShfl(e);
         if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync") return emitVote(e);
+        if (fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
+            fn == "__reduce_and_sync" || fn == "__reduce_or_sync"  || fn == "__reduce_xor_sync") return emitReduce(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);
