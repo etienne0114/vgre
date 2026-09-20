@@ -76,6 +76,12 @@ struct X64 {
     // <op>ss xmm1, xmm0  (dst op= src) — add 58 / sub 5C / mul 59 / div 5E
     void arithXmm(uint8_t opc, int dst, int src) { u8(0xF3); u8(0x0F); u8(opc); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
     void movapsXmm(int dst, int src) { u8(0x0F); u8(0x28); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
+    // cmpss xmm_dst, xmm_src, imm8  → dst = all-ones/zero mask per the ordered predicate
+    // (imm: 0 EQ, 1 LT, 2 LE, 4 NEQ — all matching C's NaN behaviour).
+    void cmpss(int dst, int src, uint8_t pred) { u8(0xF3); u8(0x0F); u8(0xC2); u8((uint8_t)(0xC0 | (dst << 3) | src)); u8(pred); }
+    void andps(int dst, int src) { u8(0x0F); u8(0x54); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst &= src
+    void andnps(int dst, int src) { u8(0x0F); u8(0x55); u8((uint8_t)(0xC0 | (dst << 3) | src)); }  // dst = ~dst & src
+    void orps(int dst, int src) { u8(0x0F); u8(0x56); u8((uint8_t)(0xC0 | (dst << 3) | src)); }    // dst |= src
 
     void patchRel32(size_t at, size_t target) {
         int32_t rel = (int32_t)(target - (at + 4));
@@ -167,6 +173,42 @@ struct Lowerer {
                 asm_.reloadXmm(1, off);            // xmm1 = L
                 asm_.arithXmm(opc, 1, 0);          // xmm1 = L op R
                 asm_.movapsXmm(0, 1);              // xmm0 = result
+                return;
+            }
+            case Expr::Ternary: {   // `(<cmp>) ? t : e` — branchless SSE mask blend
+                const Expr& c = *e.args[0];
+                if (c.kind != Expr::Binary || c.args.size() != 2) { fail("native: ternary condition must be a float comparison"); return; }
+                // Pick the ordered predicate; `>`/`>=` are the swapped `<`/`<=`.
+                uint8_t pred; bool swap = false;
+                if (c.str == "<") pred = 1;
+                else if (c.str == "<=") pred = 2;
+                else if (c.str == ">") { pred = 1; swap = true; }
+                else if (c.str == ">=") { pred = 2; swap = true; }
+                else if (c.str == "==") pred = 0;
+                else if (c.str == "!=") pred = 4;
+                else { fail("native: ternary needs a comparison condition"); return; }
+
+                // Reserve two red-zone slots for this level; sub-exprs use deeper slots.
+                const int slotMask = 8 * (depth + 1);
+                const int slotThen = 8 * (depth + 2);
+                const int cd = depth + 2;
+                if (cd > 14) { fail("native: expression too deep"); return; }
+
+                emitFloat(*c.args[0], cd); asm_.spillXmm(0, slotMask);   // [mask] = cl
+                emitFloat(*c.args[1], cd); asm_.reloadXmm(1, slotMask);  // xmm1 = cl, xmm0 = cr
+                if (swap) { asm_.cmpss(0, 1, pred); asm_.movapsXmm(1, 0); }  // xmm1 = (cr ? cl) i.e. cl > / >= cr
+                else       asm_.cmpss(1, 0, pred);                          // xmm1 = cl < / <= / == / != cr
+                asm_.spillXmm(1, slotMask);                                 // [mask] = compare result
+
+                emitFloat(*e.args[1], cd); asm_.spillXmm(0, slotThen);   // [then] = t
+                emitFloat(*e.args[2], cd);                               // xmm0 = e (else)
+                if (!ok) return;
+                asm_.reloadXmm(1, slotMask);   // xmm1 = mask
+                asm_.reloadXmm(2, slotThen);   // xmm2 = t
+                asm_.andps(2, 1);              // xmm2 = t & mask
+                asm_.andnps(1, 0);            // xmm1 = ~mask & e
+                asm_.orps(2, 1);             // xmm2 = (t & mask) | (~mask & e)
+                asm_.movapsXmm(0, 2);        // xmm0 = result
                 return;
             }
             default: fail("native: unsupported expression"); return;

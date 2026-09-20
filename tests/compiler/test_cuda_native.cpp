@@ -26,7 +26,8 @@ static int rint(int lo, int hi) { return lo + (int)(rnd() % (uint32_t)(hi - lo +
 static float randFloat() { return (float)(int32_t)rnd() / (float)(1u << (rnd() % 10)); }
 
 // A random float expression over x[i], y[i], scalars a/b, and float constants.
-struct Node { enum K { Load, Scalar, Const, Bin, Neg } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r; };
+// Tern is `(cond) ? then : else` where cond is a float comparison (kind Cmp).
+struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
 using NP = std::unique_ptr<Node>;
 static NP gen(int d) {
     auto n = std::make_unique<Node>();
@@ -40,6 +41,16 @@ static NP gen(int d) {
         return n;
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
+    if (rnd() % 4 == 0) {   // a ternary select over a float comparison
+        n->k = Node::Tern;
+        n->cond = std::make_unique<Node>();
+        n->cond->k = Node::Cmp;
+        static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
+        n->cond->op = cmps[rnd() % 6];
+        n->cond->l = gen(d - 1); n->cond->r = gen(d - 1);
+        n->l = gen(d - 1); n->r = gen(d - 1);
+        return n;
+    }
     n->k = Node::Bin; static const char* ops[] = {"+", "-", "*", "/"}; n->op = ops[rnd() % 4];
     n->l = gen(d - 1); n->r = gen(d - 1); return n;
 }
@@ -49,7 +60,9 @@ static std::string src(const Node* n) {
         case Node::Scalar: return n->name;
         case Node::Const:  { char b[32]; std::snprintf(b, sizeof b, "(%.9ef)", (double)n->c); return b; }
         case Node::Neg:    return "(-" + src(n->l.get()) + ")";
+        case Node::Cmp:    return "(" + src(n->l.get()) + n->op + src(n->r.get()) + ")";
         case Node::Bin:    return "(" + src(n->l.get()) + n->op + src(n->r.get()) + ")";
+        case Node::Tern:   return "(" + src(n->cond.get()) + "?" + src(n->l.get()) + ":" + src(n->r.get()) + ")";
     }
     return "0.0f";
 }
@@ -78,6 +91,7 @@ static std::string srcI(const Node* n) {
         case Node::Const:  { char b[32]; std::snprintf(b, sizeof b, "(%d)", (int)n->c); return b; }
         case Node::Neg:    return "(-" + srcI(n->l.get()) + ")";
         case Node::Bin:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
+        default:           break;   // Cmp/Tern aren't generated for the int sweep
     }
     return "0";
 }
@@ -113,6 +127,23 @@ int main() {
         int bad = 0; for (int i = 0; i < N; ++i) if (y[i] != a * x[i] + y0[i]) ++bad;
         if (bad) { std::printf("FAIL: saxpy native has %d mismatches vs reference\n", bad); return 1; }
         std::printf("  saxpy native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: ReLU — the marquee ternary/select case.
+    {
+        const char* k = "extern \"C\" __global__ void relu(const float* x, float* y, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ y[i] = (x[i] > 0.0f) ? x[i] : 0.0f; } }";
+        auto nk = NativeKernel::compileSource(k, "relu", err);
+        if (!nk) { std::printf("FAIL: relu native compile: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(N), y(N, -7.f);
+        for (int i = 0; i < N; ++i) x[i] = randFloat() - 8.f;   // mix of signs
+        float* xp = x.data(); float* yp = y.data();
+        void* args[] = {&xp, &yp, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 3)) { std::printf("FAIL: relu native launch\n"); return 1; }
+        int bad = 0; for (int i = 0; i < N; ++i) if (y[i] != (x[i] > 0.f ? x[i] : 0.f)) ++bad;
+        if (bad) { std::printf("FAIL: relu native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  relu (ternary select) native == reference (%d elems)\n", N);
     }
 
     // Differential fuzz: random elementwise kernels, native vs the compiled tier.
