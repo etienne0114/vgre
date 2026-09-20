@@ -63,10 +63,59 @@ inline double atomicAddFloat(void* addr, int bytes, double v) {
     return static_cast<double>(common::atomicAddF32(addr, static_cast<float>(v)));
 }
 
+// PTX float→int (cvt.rzi): round toward zero, then SATURATE to the destination
+// range, NaN → 0 — not a plain C cast (which is undefined out of range). Mirrors
+// the Tier-0 interpreter so the two tiers agree.
+int64_t satFloatToInt(double d, const Type& t) {
+    const double r = std::trunc(d);
+    if (std::isnan(r)) return 0;
+    const int bits = t.elemBytes() * 8;
+    if (!t.isUnsigned) {
+        const int64_t hi = bits >= 64 ? INT64_MAX : (((int64_t)1 << (bits - 1)) - 1);
+        const int64_t lo = bits >= 64 ? INT64_MIN : -((int64_t)1 << (bits - 1));
+        return r >= (double)hi ? hi : r <= (double)lo ? lo : (int64_t)r;
+    }
+    const uint64_t hi = bits >= 64 ? UINT64_MAX : (((uint64_t)1 << bits) - 1);
+    return (int64_t)(r <= 0.0 ? 0 : r >= (double)hi ? hi : (uint64_t)r);
+}
+
+// Narrow a value to the exact scalar type `t` — the compiled tier holds every
+// float in a double Cell and every int in an int64 Cell, so without this an
+// intermediate `float` op would keep double precision and a 32-bit int op would
+// keep 64 bits (both diverging from the PTX interpreter / real hardware, which
+// round/wrap at the operand width). Pointers keep the full 64 bits.
 Cell coerce(const Cell& v, const Type& t) {
     if (t.isPointer()) return Cell::I(v.asI());
-    if (t.isFloating()) return Cell::F(v.asF());
-    return Cell::I(v.asI());
+    if (t.isFloating())
+        return t.base == Type::Double ? Cell::F(v.asF())
+                                      : Cell::F(static_cast<double>(static_cast<float>(v.asF())));
+    // float → int saturates (PTX semantics); int → int wraps to the target width.
+    const int64_t iv = v.isFloat ? satFloatToInt(v.f, t) : v.i;
+    switch (t.base) {
+        case Type::Bool:  return Cell::I(iv != 0 ? 1 : 0);
+        case Type::Char:  return Cell::I(t.isUnsigned ? (int64_t)(uint8_t)iv  : (int64_t)(int8_t)iv);
+        case Type::Short: return Cell::I(t.isUnsigned ? (int64_t)(uint16_t)iv : (int64_t)(int16_t)iv);
+        case Type::Int:   return Cell::I(t.isUnsigned ? (int64_t)(uint32_t)iv : (int64_t)(int32_t)iv);
+        default:          return Cell::I(iv);   // Long / 64-bit / other: full width
+    }
+}
+
+// Usual arithmetic conversions for the compiled tier's scalar subset — mirrors
+// the codegen/interpreter promote(): pointer wins, else double, else float, else
+// long/int with the unsigned-at-result-rank rule.
+Type promoteT(const Type& a, const Type& b) {
+    if (a.isPointer()) return a;
+    if (b.isPointer()) return b;
+    Type r;
+    if (a.base == Type::Double || b.base == Type::Double) { r.base = Type::Double; return r; }
+    if (a.isFloating() || b.isFloating() || a.base == Type::Half || b.base == Type::Half) {
+        r.base = Type::Float; return r;
+    }
+    const bool resultLong = (a.base == Type::Long || b.base == Type::Long);
+    r.base = resultLong ? Type::Long : Type::Int;
+    auto atRank = [&](const Type& t) { return (t.base == Type::Long) == resultLong; };
+    if ((a.isUnsigned && atRank(a)) || (b.isUnsigned && atRank(b))) r.isUnsigned = true;
+    return r;
 }
 
 class CompiledKernelImpl : public CompiledKernel {
@@ -202,7 +251,12 @@ struct Compiler {
         line = e.line; col = e.col;
         switch (e.kind) {
             case Expr::IntLit: { int64_t v = e.ival; return [v](TS&) { return Cell::I(v); }; }
-            case Expr::FloatLit: { double v = e.fval; return [v](TS&) { return Cell::F(v); }; }
+            // A float literal (`1.5f`, no `wide`) holds its float-rounded value, not
+            // the full double text — matching the constant the codegen emits.
+            case Expr::FloatLit: {
+                double v = e.wide ? e.fval : static_cast<double>(static_cast<float>(e.fval));
+                return [v](TS&) { return Cell::F(v); };
+            }
             case Expr::Ident: {
                 auto it = slot.find(e.str);
                 if (it == slot.end()) { fail("undeclared identifier '" + e.str + "'"); return {}; }
@@ -211,12 +265,16 @@ struct Compiler {
             }
             case Expr::Member: return compileMember(e);
             case Expr::Index:  return compileLoad(e);
-            case Expr::Unary:  return compileUnary(e);
-            case Expr::Binary: return compileBinary(e);
+            // Narrow compound-op results to their static type so intermediate
+            // float ops round to float and 32-bit int ops wrap at 32 bits — the
+            // Cell otherwise carries double/int64 and would diverge from the
+            // interpreter. (Cast/Assign already narrow via coerce.)
+            case Expr::Unary:  return narrowResult(compileUnary(e), e);
+            case Expr::Binary: return narrowResult(compileBinary(e), e);
             case Expr::Assign: return compileAssign(e);
-            case Expr::Call:   return compileCall(e);
+            case Expr::Call:   return narrowResult(compileCall(e), e);
             case Expr::Cast:   return compileCast(e);
-            case Expr::Ternary: return compileTernary(e);
+            case Expr::Ternary: return narrowResult(compileTernary(e), e);
         }
         fail("unsupported expression");
         return {};
@@ -298,6 +356,65 @@ struct Compiler {
             if (it != vtype.end() && it->second.isPointer()) { Type t = it->second; t.ptr -= 1; return t; }
         }
         Type t; t.base = Type::Int; return t;
+    }
+
+    static Type scalar(Type::Base b) { Type t; t.base = b; return t; }
+
+    // Static type of an expression — enough to know the width/precision each
+    // result must be narrowed to. Mirrors the codegen's estimateType over the
+    // subset the compiled tier accepts (no structs/half beyond pass-through).
+    Type estimateType(const Expr& e) {
+        switch (e.kind) {
+            case Expr::FloatLit: return scalar(e.wide ? Type::Double : Type::Float);
+            case Expr::IntLit:
+                return scalar((e.wide || e.ival > 2147483647LL || e.ival < -2147483648LL) ? Type::Long : Type::Int);
+            case Expr::Ident: {
+                auto it = vtype.find(e.str);
+                if (it != vtype.end()) return it->second;
+                auto ar = arrays.find(e.str);
+                if (ar != arrays.end()) { Type t = ar->second.elem; t.ptr += 1; return t; }
+                return scalar(Type::Int);
+            }
+            case Expr::Member:  return scalar(Type::Int);   // threadIdx/blockIdx/… builtins
+            case Expr::Index:   return pointee(e);
+            case Expr::Cast:    return e.castType;
+            case Expr::Unary:
+                if (e.str == "!") return scalar(Type::Int);
+                if (e.str == "*") { Type t = estimateType(*e.args[0]); if (t.ptr > 0) t.ptr--; return t; }
+                if (e.str == "&") { Type t = estimateType(*e.args[0]); t.ptr++; return t; }
+                return estimateType(*e.args[0]);
+            case Expr::Binary: {
+                const std::string& o = e.str;
+                if (o == "<" || o == "<=" || o == ">" || o == ">=" || o == "==" || o == "!=" ||
+                    o == "&&" || o == "||") return scalar(Type::Int);
+                return promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
+            }
+            case Expr::Assign:  return estimateType(*e.args[0]);
+            case Expr::Ternary: return promoteT(estimateType(*e.args[1]), estimateType(*e.args[2]));
+            case Expr::Call: {
+                const std::string& fn = e.str;
+                if (fn == "min" || fn == "max")
+                    return e.args.size() < 2 ? scalar(Type::Int) : promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
+                if (fn == "abs")       return e.args.empty() ? scalar(Type::Int) : estimateType(*e.args[0]);
+                if (fn == "atomicAdd") return e.args.size() < 2 ? scalar(Type::Int) : estimateType(*e.args[1]);
+                // Math intrinsic: the `f`-suffixed spelling returns float, else double.
+                return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
+            }
+        }
+        return scalar(Type::Int);
+    }
+
+    // Wrap a compound-op closure so its result is narrowed to the op's static
+    // type. Only floats and sub-64-bit ints need it (double/long/pointer are
+    // already the Cell's full width), so we skip the rest to avoid overhead.
+    ExprFn narrowResult(ExprFn fn, const Expr& e) {
+        if (failed || !fn) return fn;
+        Type t = estimateType(e);
+        const bool needs = t.ptr == 0 &&
+            (t.base == Type::Float || t.base == Type::Bool || t.base == Type::Char ||
+             t.base == Type::Short || t.base == Type::Int);
+        if (!needs) return fn;
+        return [fn, t](TS& ts) { return coerce(fn(ts), t); };
     }
 
     ExprFn compileLoad(const Expr& e) {
@@ -396,29 +513,35 @@ struct Compiler {
         ExprFn a = compileExpr(*e.args[0]);
         ExprFn b = compileExpr(*e.args[1]);
         if (failed) return {};
-        return [a, b, op](TS& ts) -> Cell {
-            Cell x = a(ts), y = b(ts);
-            const bool fp = x.isFloat || y.isFloat;
-            if (op == "+") return fp ? Cell::F(x.asF() + y.asF()) : Cell::I(x.asI() + y.asI());
-            if (op == "-") return fp ? Cell::F(x.asF() - y.asF()) : Cell::I(x.asI() - y.asI());
-            if (op == "*") return fp ? Cell::F(x.asF() * y.asF()) : Cell::I(x.asI() * y.asI());
-            if (op == "/") return fp ? Cell::F(x.asF() / y.asF()) : Cell::I(y.asI() ? x.asI() / y.asI() : 0);
-            if (op == "%") return Cell::I(y.asI() ? x.asI() % y.asI() : 0);
-            if (op == "<")  return Cell::I((fp ? x.asF() <  y.asF() : x.asI() <  y.asI()) ? 1 : 0);
-            if (op == "<=") return Cell::I((fp ? x.asF() <= y.asF() : x.asI() <= y.asI()) ? 1 : 0);
-            if (op == ">")  return Cell::I((fp ? x.asF() >  y.asF() : x.asI() >  y.asI()) ? 1 : 0);
-            if (op == ">=") return Cell::I((fp ? x.asF() >= y.asF() : x.asI() >= y.asI()) ? 1 : 0);
-            if (op == "==") return Cell::I((fp ? x.asF() == y.asF() : x.asI() == y.asI()) ? 1 : 0);
-            if (op == "!=") return Cell::I((fp ? x.asF() != y.asF() : x.asI() != y.asI()) ? 1 : 0);
-            if (op == "&&") return Cell::I((x.asI() && y.asI()) ? 1 : 0);
-            if (op == "||") return Cell::I((x.asI() || y.asI()) ? 1 : 0);
-            if (op == "&")  return Cell::I(x.asI() & y.asI());
-            if (op == "|")  return Cell::I(x.asI() | y.asI());
-            if (op == "^")  return Cell::I(x.asI() ^ y.asI());
-            if (op == "<<") return Cell::I(x.asI() << y.asI());
-            if (op == ">>") return Cell::I(x.asI() >> y.asI());
-            return Cell::I(0);
-        };
+        // Logical &&/|| test each side's truthiness — no arithmetic coercion.
+        if (op == "&&" || op == "||") {
+            const bool isAnd = (op == "&&");
+            return [a, b, isAnd](TS& ts) -> Cell {
+                return Cell::I((isAnd ? (a(ts).asI() != 0 && b(ts).asI() != 0)
+                                      : (a(ts).asI() != 0 || b(ts).asI() != 0)) ? 1 : 0);
+            };
+        }
+        const Type ct = promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
+        // Pointer arithmetic keeps the raw path — addresses must not be narrowed.
+        if (ct.isPointer()) return [a, b, op](TS& ts) -> Cell { return binop(op, a(ts), b(ts)); };
+        // float32 arithmetic: round both operands to float and compute in float
+        // (single IEEE-754 rounding), exactly like the interpreter's cvt.rn.f32 +
+        // f32 op — not a double computation narrowed at the end (which double-
+        // rounds division and never rounds an int operand to float first).
+        const bool arith = (op == "+" || op == "-" || op == "*" || op == "/");
+        if (arith && ct.base == Type::Float) {
+            return [a, b, op](TS& ts) -> Cell {
+                float x = static_cast<float>(a(ts).asF()), y = static_cast<float>(b(ts).asF()), r;
+                if (op == "+") r = x + y; else if (op == "-") r = x - y;
+                else if (op == "*") r = x * y; else r = x / y;
+                return Cell::F(static_cast<double>(r));
+            };
+        }
+        // Everything else (double/int arithmetic, comparisons, bitwise, shifts):
+        // coerce both operands to the common type first — so an int operand of a
+        // float compare rounds to float, ints compute at their width, etc. — then
+        // apply. narrowResult wraps the result to its static type.
+        return [a, b, op, ct](TS& ts) -> Cell { return binop(op, coerce(a(ts), ct), coerce(b(ts), ct)); };
     }
 
     // Assignment as an expression (also used by ExprStmt); returns the stored value.
@@ -460,6 +583,9 @@ struct Compiler {
         return {};
     }
 
+    // Apply `op` to two already-coerced operands (callers narrow to the common
+    // type first). Floating ops run in double here; the caller's float32 path
+    // computes those in float, and narrowResult wraps every result to its width.
     static Cell binop(const std::string& op, const Cell& x, const Cell& y) {
         const bool fp = x.isFloat || y.isFloat;
         if (op == "+") return fp ? Cell::F(x.asF() + y.asF()) : Cell::I(x.asI() + y.asI());
@@ -467,6 +593,19 @@ struct Compiler {
         if (op == "*") return fp ? Cell::F(x.asF() * y.asF()) : Cell::I(x.asI() * y.asI());
         if (op == "/") return fp ? Cell::F(x.asF() / y.asF()) : Cell::I(y.asI() ? x.asI() / y.asI() : 0);
         if (op == "%") return Cell::I(y.asI() ? x.asI() % y.asI() : 0);
+        if (op == "<")  return Cell::I((fp ? x.asF() <  y.asF() : x.asI() <  y.asI()) ? 1 : 0);
+        if (op == "<=") return Cell::I((fp ? x.asF() <= y.asF() : x.asI() <= y.asI()) ? 1 : 0);
+        if (op == ">")  return Cell::I((fp ? x.asF() >  y.asF() : x.asI() >  y.asI()) ? 1 : 0);
+        if (op == ">=") return Cell::I((fp ? x.asF() >= y.asF() : x.asI() >= y.asI()) ? 1 : 0);
+        if (op == "==") return Cell::I((fp ? x.asF() == y.asF() : x.asI() == y.asI()) ? 1 : 0);
+        if (op == "!=") return Cell::I((fp ? x.asF() != y.asF() : x.asI() != y.asI()) ? 1 : 0);
+        if (op == "&&") return Cell::I((x.asI() != 0 && y.asI() != 0) ? 1 : 0);
+        if (op == "||") return Cell::I((x.asI() != 0 || y.asI() != 0) ? 1 : 0);
+        if (op == "&")  return Cell::I(x.asI() & y.asI());
+        if (op == "|")  return Cell::I(x.asI() | y.asI());
+        if (op == "^")  return Cell::I(x.asI() ^ y.asI());
+        if (op == "<<") return Cell::I(x.asI() << y.asI());
+        if (op == ">>") return Cell::I(x.asI() >> y.asI());
         return Cell::I(0);
     }
 
