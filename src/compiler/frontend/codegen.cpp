@@ -365,6 +365,17 @@ struct Codegen {
                         return {d, ma.type};
                     }
                 }
+                // `arr[i].field` — member of a struct-array element in memory.
+                {
+                    MemberAddr ma = structArrayMember(obj, e.str);
+                    if (failed) return {};
+                    if (ma.ok) {
+                        std::string d = fresh(classOf(ma.type));
+                        emit("ld." + std::string(ma.space == Space::Shared ? "shared." : "global.") +
+                             ldSuffix(ma.type) + " " + d + ", [" + ma.reg + "];");
+                        return {d, ma.type};
+                    }
+                }
                 // Struct member read.
                 if (obj.kind == Expr::Ident) {
                     auto it = vars.find(obj.str);
@@ -416,6 +427,14 @@ struct Codegen {
                     Type ot = estimateType(obj);
                     if (ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1) {
                         const StructDef* def = mod_ ? mod_->findStruct(ot.structName) : nullptr;
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (m) return m->type;
+                    }
+                }
+                if (obj.kind == Expr::Index) {   // arr[i].field: member of a struct-array element
+                    Type et = indexPointee(obj);
+                    if (et.base == Type::Struct && et.ptr == 0) {
+                        const StructDef* def = mod_ ? mod_->findStruct(et.structName) : nullptr;
                         const StructMember* m = def ? def->find(e.str) : nullptr;
                         if (m) return m->type;
                     }
@@ -1000,6 +1019,34 @@ struct Codegen {
         return r;
     }
 
+    // For `arr[i].field` (arr a struct array in memory): the member's address is
+    // the struct element's address (arr + i*sizeof(struct), from emitAddress) plus
+    // the member's byte offset. `.ok` is false (no code emitted) when `obj` isn't
+    // an index into a struct array, so callers fall through.
+    MemberAddr structArrayMember(const Expr& obj, const std::string& field) {
+        MemberAddr r;
+        if (obj.kind != Expr::Index) return r;
+        Type et = indexPointee(obj);
+        if (!(et.base == Type::Struct && et.ptr == 0)) return r;   // element isn't a struct
+        const StructDef* def = mod_ ? mod_->findStruct(et.structName) : nullptr;
+        const StructMember* m = def ? def->find(field) : nullptr;
+        if (!m) { fail("no member '." + field + "' in struct '" + et.structName + "'"); return r; }
+        Addr a = emitAddress(obj);   // address of the struct element arr[i]
+        if (failed) return r;
+        if (a.local) { fail("member access on a local struct array is unsupported"); return r; }
+        if (a.shared) {
+            std::string addr = fresh(RC::R32);
+            emit("add.s32 " + addr + ", " + a.reg + ", " + std::to_string(m->offset) + ";");
+            r.reg = addr; r.space = Space::Shared;
+        } else {
+            std::string addr = fresh(RC::RD64);
+            emit("add.s64 " + addr + ", " + a.reg + ", " + std::to_string(m->offset) + ";");
+            r.reg = addr; r.space = Space::Global;
+        }
+        r.type = m->type; r.ok = true;
+        return r;
+    }
+
     // Copy every member of a struct value (a local-struct or by-value param
     // struct named by `srcExpr`) into the local struct `dst`.
     void emitStructCopy(const std::string& dst, const Expr& srcExpr) {
@@ -1102,6 +1149,26 @@ struct Codegen {
         // Write through a struct pointer: `p->field = v` (and compound `p->field += v`).
         if (lhs.kind == Expr::Member) {
             MemberAddr ma = structPtrMember(*lhs.args[0], lhs.str);
+            if (failed) return {};
+            if (ma.ok) {
+                const std::string sp = ma.space == Space::Shared ? "shared." : "global.";
+                Val value;
+                if (op == "=") {
+                    value = emitExpr(*e.args[1]);
+                } else {
+                    std::string cur = fresh(classOf(ma.type));
+                    emit("ld." + sp + ldSuffix(ma.type) + " " + cur + ", [" + ma.reg + "];");
+                    value = computeRhs({cur, ma.type});
+                }
+                if (failed) return {};
+                value = coerce(value, ma.type);
+                emit("st." + sp + stSuffix(ma.type) + " [" + ma.reg + "], " + value.reg + ";");
+                return value;
+            }
+        }
+        // Write a struct-array member: `arr[i].field = v` (and compound `+=`).
+        if (lhs.kind == Expr::Member) {
+            MemberAddr ma = structArrayMember(*lhs.args[0], lhs.str);
             if (failed) return {};
             if (ma.ok) {
                 const std::string sp = ma.space == Space::Shared ? "shared." : "global.";

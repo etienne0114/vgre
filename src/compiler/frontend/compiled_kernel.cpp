@@ -280,23 +280,40 @@ struct Compiler {
         return {};
     }
 
-    // `p->field` on a pointer-to-struct: the member's address closure (pointer
-    // value + byte offset) and type. `.ok` false (no fail) when `obj` isn't a
-    // struct pointer. (`arr[i].field` — struct arrays — is not supported here, to
-    // match the interpreter tier, which rejects it too.)
+    // A struct member accessed in memory. Two forms, matching the interpreter:
+    //   `p->field`     — obj a struct-pointer expression; struct is at p.
+    //   `arr[i].field` — obj is `arr[i]` with arr a struct array (struct*); the
+    //                    element is at arr + i*sizeof(struct).
+    // Returns the member's address closure + type; `.ok` false (no fail) when obj
+    // isn't a struct member reference in memory.
     struct MemAcc { ExprFn addr; Type type; bool ok = false; };
     MemAcc structPtrMember(const Expr& member) {
         const Expr& obj = *member.args[0];
+        std::function<int64_t(TS&)> base;
+        const StructDef* def = nullptr;
         Type ot = estimateType(obj);
-        if (!(ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1)) return {};
-        const StructDef* def = findStruct(ot.structName);
+        if (ot.isPointer() && ot.base == Type::Struct && ot.ptr == 1) {   // p->field
+            def = findStruct(ot.structName);
+            ExprFn pv = compileExpr(obj); if (failed) return {};
+            base = [pv](TS& ts) { return pv(ts).asI(); };
+        } else if (obj.kind == Expr::Index) {                            // arr[i].field
+            Type at = estimateType(*obj.args[0]);
+            if (!(at.isPointer() && at.base == Type::Struct && at.ptr == 1)) return {};
+            def = findStruct(at.structName);
+            if (!def) { fail("unknown struct '" + at.structName + "'"); return {}; }
+            const int64_t stride = def->size;
+            ExprFn arr = compileExpr(*obj.args[0]);
+            ExprFn idx = compileExpr(*obj.args[1]);
+            if (failed) return {};
+            base = [arr, idx, stride](TS& ts) { return arr(ts).asI() + idx(ts).asI() * stride; };
+        } else {
+            return {};
+        }
         const StructMember* m = def ? def->find(member.str) : nullptr;
-        if (!m) { fail("no member '->" + member.str + "' in struct '" + ot.structName + "'"); return {}; }
-        ExprFn pv = compileExpr(obj);
-        if (failed) return {};
+        if (!m) { fail("no member '" + member.str + "' in struct '" + (def ? def->name : "?") + "'"); return {}; }
         const int off = m->offset;
         MemAcc r; r.type = m->type; r.ok = true;
-        r.addr = [pv, off](TS& ts) { return Cell::I(pv(ts).asI() + off); };
+        r.addr = [base, off](TS& ts) { return Cell::I(base(ts) + off); };
         return r;
     }
 
@@ -502,6 +519,14 @@ struct Compiler {
                     const StructDef* def = findStruct(ot.structName);
                     const StructMember* m = def ? def->find(e.str) : nullptr;
                     if (m) return m->type;
+                }
+                if (obj.kind == Expr::Index) {                         // arr[i].field on a struct array
+                    Type at = estimateType(*obj.args[0]);
+                    if (at.isPointer() && at.base == Type::Struct && at.ptr == 1) {
+                        const StructDef* def = findStruct(at.structName);
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (m) return m->type;
+                    }
                 }
                 return scalar(Type::Int);   // threadIdx/blockIdx/… builtins
             }
