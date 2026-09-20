@@ -54,6 +54,34 @@ static std::string src(const Node* n) {
     return "0.0f";
 }
 
+// A random int32 expression over x[i], y[i], scalars a/b and int literals, using
+// only + - * (all wrap mod 2^32; division/modulo are outside the native subset).
+static NP genI(int d) {
+    auto n = std::make_unique<Node>();
+    if (d <= 0 || rnd() % 3 == 0) {
+        int w = rnd() % 5;
+        if (w == 0) { n->k = Node::Load; n->name = "x"; }
+        else if (w == 1) { n->k = Node::Load; n->name = "y"; }
+        else if (w == 2) { n->k = Node::Scalar; n->name = "a"; }
+        else if (w == 3) { n->k = Node::Scalar; n->name = "b"; }
+        else { n->k = Node::Const; n->c = (float)(int32_t)rnd(); }
+        return n;
+    }
+    if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = genI(d - 1); return n; }
+    n->k = Node::Bin; static const char* ops[] = {"+", "-", "*"}; n->op = ops[rnd() % 3];
+    n->l = genI(d - 1); n->r = genI(d - 1); return n;
+}
+static std::string srcI(const Node* n) {
+    switch (n->k) {
+        case Node::Load:   return n->name + "[i]";
+        case Node::Scalar: return n->name;
+        case Node::Const:  { char b[32]; std::snprintf(b, sizeof b, "(%d)", (int)n->c); return b; }
+        case Node::Neg:    return "(-" + srcI(n->l.get()) + ")";
+        case Node::Bin:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
+    }
+    return "0";
+}
+
 int main() {
     // First: is the native tier even available here? (Only x86-64 Linux.)
     std::string err;
@@ -126,9 +154,50 @@ int main() {
         if (mismatches > 8) break;
     }
 
-    std::printf("native differential: %d elementwise kernels, %d mismatches\n", both, mismatches);
-    if (both < 200) { std::printf("FAIL: too few native kernels compiled (%d)\n", both); return 1; }
-    if (mismatches) { std::printf("FAIL: %d native/compiled mismatches\n", mismatches); return 1; }
-    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d elementwise kernels\n", both);
+    std::printf("native float differential: %d elementwise kernels, %d mismatches\n", both, mismatches);
+    if (both < 200) { std::printf("FAIL: too few native float kernels compiled (%d)\n", both); return 1; }
+    if (mismatches) { std::printf("FAIL: %d native/compiled float mismatches\n", mismatches); return 1; }
+
+    // Differential fuzz: random int32 elementwise kernels, native vs compiled tier.
+    int iboth = 0, imis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        std::string expr = srcI(genI(rint(1, 4)).get());
+        std::string k =
+            "extern \"C\" __global__ void fz(int a, int b, const int* x, const int* y, int* out, int n) {\n"
+            "  int i = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  if (i < n) { out[i] = (" + expr + "); }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++iboth;
+
+        int a = (int)rnd(), b = (int)rnd();
+        std::vector<int> x(N), y(N), on(N, 123456), oc(N, -654321);
+        for (int i = 0; i < N; ++i) { x[i] = (int)rnd(); y[i] = (int)rnd(); }
+        int* xp = x.data(); int* yp = y.data(); int* onp = on.data(); int* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+
+        void* an[] = {&a, &b, &xp, &yp, &onp, &N};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native int launch\n  %s\n", k.c_str()); ++imis; if (imis > 8) break; continue; }
+        void* ac[] = {&a, &b, &xp, &yp, &ocp, &N};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled int launch\n"); ++imis; if (imis > 8) break; continue; }
+
+        for (int i = 0; i < N; ++i) {
+            if (on[i] != oc[i]) {
+                std::printf("NATIVE/COMPILED INT MISMATCH it=%d i=%d  native=%d compiled=%d\n  %s\n",
+                            it, i, on[i], oc[i], k.c_str());
+                ++imis; break;
+            }
+        }
+        if (imis > 8) break;
+    }
+
+    std::printf("native int differential: %d elementwise kernels, %d mismatches\n", iboth, imis);
+    if (iboth < 200) { std::printf("FAIL: too few native int kernels compiled (%d)\n", iboth); return 1; }
+    if (imis) { std::printf("FAIL: %d native/compiled int mismatches\n", imis); return 1; }
+
+    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int kernels\n", both, iboth);
     return 0;
 }

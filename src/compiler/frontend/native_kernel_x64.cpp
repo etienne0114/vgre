@@ -58,6 +58,18 @@ struct X64 {
     void reloadXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
 
     void movImmEax(uint32_t bits) { u8(0xB8); u32(bits); }        // mov eax, imm32
+
+    // ── 32-bit integer path (values in eax; temp in ecx; spill to the red zone) ──
+    void movEaxMem(int base) { u8(0x8B); u8((uint8_t)(0x00 | base)); }        // mov eax, [base]   (base rax/rcx/rdx)
+    void movEaxIdx(int base) { u8(0x8B); u8(0x04); u8((uint8_t)(0x80 | (6 << 3) | base)); }  // mov eax, [base + rsi*4]
+    void movStoreIdxEax(int base) { u8(0x89); u8(0x04); u8((uint8_t)(0x80 | (6 << 3) | base)); } // mov [base + rsi*4], eax
+    void spillEax(int off) { u8(0x89); u8(0x44); u8(0x24); u8((uint8_t)(-off)); }   // mov [rsp-off], eax
+    void reloadEcx(int off) { u8(0x8B); u8(0x4C); u8(0x24); u8((uint8_t)(-off)); }  // mov ecx, [rsp-off]
+    void addEaxEcx() { u8(0x01); u8(0xC8); }                       // add eax, ecx   (eax = eax + ecx)
+    void subEcxEaxToEax() { u8(0x29); u8(0xC1); u8(0x89); u8(0xC8); } // sub ecx,eax ; mov eax,ecx  (eax = ecx - eax)
+    void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
+    void negEax() { u8(0xF7); u8(0xD8); }                          // neg eax
+
     void movdXmmFromEax(int xmm) { u8(0x66); u8(0x0F); u8(0x6E); u8((uint8_t)(0xC0 | (xmm << 3))); }
     void movdEaxFromXmm(int xmm) { u8(0x66); u8(0x0F); u8(0x7E); u8((uint8_t)(0xC0 | (xmm << 3))); }
     void xorEaxImm(uint32_t v) { u8(0x35); u32(v); }
@@ -161,11 +173,62 @@ struct Lowerer {
         }
     }
 
+    // Emit a 32-bit integer expression into eax. All arithmetic wraps mod 2^32
+    // (x86 add/sub/imul on r32), matching the compiled tier's int32 semantics.
+    // Division/modulo are deferred (they trap on /0 and INT_MIN/-1).
+    void emitInt(const Expr& e, int depth) {
+        if (!ok) return;
+        if (depth > 20) { fail("native: expression too deep"); return; }
+        switch (e.kind) {
+            case Expr::IntLit: {
+                asm_.movImmEax((uint32_t)(int32_t)e.ival); return;
+            }
+            case Expr::Ident: {    // a scalar `int` param
+                const Param* p = param(e.str);
+                if (!p || p->type.isPointer() || p->type.base != Type::Int) { fail("native: unsupported int identifier '" + e.str + "'"); return; }
+                asm_.movArg(1, paramIndex(e.str)); asm_.movEaxMem(1);   // rcx=&value; eax=[rcx]
+                return;
+            }
+            case Expr::Index: {    // q[i] — an `int*` param indexed by the induction var
+                if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident ||
+                    e.args[1]->kind != Expr::Ident || e.args[1]->str != idxVar) { fail("native: only p[i] indexing"); return; }
+                const Param* p = param(e.args[0]->str);
+                if (!p || !(p->type.base == Type::Int && p->type.ptr == 1)) { fail("native: index base must be int*"); return; }
+                asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);  // rcx = q pointer
+                asm_.movEaxIdx(1);                                         // eax = [rcx + rsi*4]
+                return;
+            }
+            case Expr::Unary: {
+                if (e.str == "+") { emitInt(*e.args[0], depth); return; }
+                if (e.str != "-") { fail("native: int unary '" + e.str + "'"); return; }
+                emitInt(*e.args[0], depth); asm_.negEax(); return;
+            }
+            case Expr::Cast: {     // (int)x — only an int scalar cast we can fold
+                if (e.castType.base == Type::Int && e.castType.ptr == 0) { emitInt(*e.args[0], depth); return; }
+                fail("native: unsupported int cast"); return;
+            }
+            case Expr::Binary: {
+                const bool add = e.str == "+", sub = e.str == "-", mul = e.str == "*";
+                if (!add && !sub && !mul) { fail("native: int operator '" + e.str + "'"); return; }
+                const int off = 4 * (depth + 1);
+                emitInt(*e.args[0], depth);        // L → eax
+                asm_.spillEax(off);               // [rsp-off] = L
+                emitInt(*e.args[1], depth + 1);    // R → eax
+                asm_.reloadEcx(off);              // ecx = L
+                if (add) asm_.addEaxEcx();         // eax = R + L
+                else if (mul) asm_.imulEaxEcx();   // eax = R * L
+                else asm_.subEcxEaxToEax();        // eax = L - R
+                return;
+            }
+            default: fail("native: unsupported int expression"); return;
+        }
+    }
+
     // Compile the whole kernel; returns false (with err) if it isn't in the subset.
     bool compile() {
-        // Only float*/float/int params — enough for the elementwise subset.
+        // Only float*/int* pointers and float/int scalars — the elementwise subset.
         for (const Param& p : k.params) {
-            const bool okPtr = p.type.base == Type::Float && p.type.ptr == 1;
+            const bool okPtr = p.type.ptr == 1 && (p.type.base == Type::Float || p.type.base == Type::Int);
             const bool okScalar = p.type.ptr == 0 && (p.type.base == Type::Float || p.type.base == Type::Int);
             if (!okPtr && !okScalar) { err = "native: unsupported param type"; return false; }
         }
@@ -205,11 +268,21 @@ struct Lowerer {
             if (lhs.kind != Expr::Index || lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident ||
                 lhs.args[1]->kind != Expr::Ident || lhs.args[1]->str != idxVar) { err = "native: store target must be p[i]"; return false; }
             const Param* p = param(lhs.args[0]->str);
-            if (!p || !(p->type.base == Type::Float && p->type.ptr == 1)) { err = "native: store base must be float*"; return false; }
+            if (!p || p->type.ptr != 1 || (p->type.base != Type::Float && p->type.base != Type::Int)) {
+                err = "native: store base must be float* or int*"; return false;
+            }
             asm_.movArg(2, paramIndex(lhs.args[0]->str)); asm_.deref(2);   // rdx = p pointer (survives expr eval)
-            emitFloat(*s->expr->args[1], 0);                              // xmm0 = value
-            if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
-            asm_.movssStoreIdx(2, 0);                                     // [rdx + rsi*4] = xmm0
+            // The store's element type picks the evaluation path — an int* store
+            // evaluates an int32 expression, a float* store a float expression.
+            if (p->type.base == Type::Int) {
+                emitInt(*s->expr->args[1], 0);                            // eax = value
+                if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+                asm_.movStoreIdxEax(2);                                   // [rdx + rsi*4] = eax
+            } else {
+                emitFloat(*s->expr->args[1], 0);                          // xmm0 = value
+                if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+                asm_.movssStoreIdx(2, 0);                                 // [rdx + rsi*4] = xmm0
+            }
         }
         // Epilogue.
         asm_.patchRel32(jmp, asm_.code.size());
