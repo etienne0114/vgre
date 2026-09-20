@@ -521,27 +521,11 @@ struct Compiler {
                                       : (a(ts).asI() != 0 || b(ts).asI() != 0)) ? 1 : 0);
             };
         }
+        // Compute at the operands' common type (comparisons compare there but
+        // yield int, handled by binop); narrowResult wraps the result to its own
+        // static type.
         const Type ct = promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
-        // Pointer arithmetic keeps the raw path — addresses must not be narrowed.
-        if (ct.isPointer()) return [a, b, op](TS& ts) -> Cell { return binop(op, a(ts), b(ts)); };
-        // float32 arithmetic: round both operands to float and compute in float
-        // (single IEEE-754 rounding), exactly like the interpreter's cvt.rn.f32 +
-        // f32 op — not a double computation narrowed at the end (which double-
-        // rounds division and never rounds an int operand to float first).
-        const bool arith = (op == "+" || op == "-" || op == "*" || op == "/");
-        if (arith && ct.base == Type::Float) {
-            return [a, b, op](TS& ts) -> Cell {
-                float x = static_cast<float>(a(ts).asF()), y = static_cast<float>(b(ts).asF()), r;
-                if (op == "+") r = x + y; else if (op == "-") r = x - y;
-                else if (op == "*") r = x * y; else r = x / y;
-                return Cell::F(static_cast<double>(r));
-            };
-        }
-        // Everything else (double/int arithmetic, comparisons, bitwise, shifts):
-        // coerce both operands to the common type first — so an int operand of a
-        // float compare rounds to float, ints compute at their width, etc. — then
-        // apply. narrowResult wraps the result to its static type.
-        return [a, b, op, ct](TS& ts) -> Cell { return binop(op, coerce(a(ts), ct), coerce(b(ts), ct)); };
+        return makeBinary(a, b, op, ct);
     }
 
     // Assignment as an expression (also used by ExprStmt); returns the stored value.
@@ -556,22 +540,25 @@ struct Compiler {
             if (it == slot.end()) { fail("assignment to undeclared '" + lhs.str + "'"); return {}; }
             size_t s = it->second;
             Type vt = vtype[lhs.str];
-            std::string bop = op == "=" ? "" : std::string(1, op[0]);
-            return [s, rhs, vt, bop](TS& ts) -> Cell {
-                Cell r = rhs(ts);
-                if (!bop.empty()) r = binop(bop, ts.regs[s], r);
-                ts.regs[s] = coerce(r, vt);
-                return ts.regs[s];
-            };
+            // `x op= rhs` is `x = (x op rhs)` computed at the common type of x and
+            // rhs (usual arithmetic conversions), then narrowed back to x's type.
+            ExprFn value = rhs;
+            if (op != "=") {
+                std::string bop = op.substr(0, op.size() - 1);   // "+=" -> "+", "<<=" -> "<<"
+                Type ct = promoteT(vt, estimateType(*e.args[1]));
+                ExprFn cur = [s](TS& ts) { return ts.regs[s]; };
+                value = makeBinary(cur, rhs, bop, ct);
+            }
+            return [s, value, vt](TS& ts) -> Cell { ts.regs[s] = coerce(value(ts), vt); return ts.regs[s]; };
         }
         if (lhs.kind == Expr::Index) {
             Type pt = pointee(lhs);
             ExprFn value;
             if (op == "=") value = rhs;
             else {
-                ExprFn cur = compileLoad(lhs);
-                std::string bop(1, op[0]);
-                value = [cur, rhs, bop](TS& ts) { return binop(bop, cur(ts), rhs(ts)); };
+                std::string bop = op.substr(0, op.size() - 1);
+                Type ct = promoteT(pt, estimateType(*e.args[1]));
+                value = makeBinary(compileLoad(lhs), rhs, bop, ct);
             }
             StmtFn st = compileStore(lhs, [value, pt](TS& ts) { return coerce(value(ts), pt); });
             if (failed) return {};
@@ -581,6 +568,25 @@ struct Compiler {
         }
         fail("invalid assignment target");
         return {};
+    }
+
+    // Build a closure applying `op` to operands `a`,`b` at their common type `ct`
+    // — the usual-arithmetic-conversion rule the interpreter follows: coerce both
+    // operands to `ct` first (so an int operand of a float op rounds to float),
+    // and compute float32 arithmetic in float (single rounding). Shared by
+    // compileBinary and compound assignment so both convert identically.
+    static ExprFn makeBinary(ExprFn a, ExprFn b, const std::string& op, const Type& ct) {
+        const bool arith = (op == "+" || op == "-" || op == "*" || op == "/");
+        if (arith && !ct.isPointer() && ct.base == Type::Float) {
+            return [a, b, op](TS& ts) -> Cell {
+                float x = static_cast<float>(a(ts).asF()), y = static_cast<float>(b(ts).asF()), r;
+                if (op == "+") r = x + y; else if (op == "-") r = x - y;
+                else if (op == "*") r = x * y; else r = x / y;
+                return Cell::F(static_cast<double>(r));
+            };
+        }
+        if (ct.isPointer()) return [a, b, op](TS& ts) -> Cell { return binop(op, a(ts), b(ts)); };
+        return [a, b, op, ct](TS& ts) -> Cell { return binop(op, coerce(a(ts), ct), coerce(b(ts), ct)); };
     }
 
     // Apply `op` to two already-coerced operands (callers narrow to the common
@@ -650,8 +656,9 @@ struct Compiler {
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         if (e.args.size() == 1) {
             ExprFn a = compileExpr(*e.args[0]); if (failed) return {};
-            // The Cell stores every float as a double, so the f32 and f64 spellings
-            // (sqrtf/sqrt, …) compute identically here — accept both.
+            // Intrinsics compute in double; narrowResult rounds the f32 spellings
+            // (sqrtf/fabsf/…) back to float via estimateType, so f32 and f64 differ
+            // only in the final rounding, as they should.
             if (fn == "abs")   return [a](TS& ts) { Cell v = a(ts); return v.isFloat ? Cell::F(std::fabs(v.f)) : Cell::I(std::llabs((long long)v.i)); };
             if (fn == "sqrtf"  || fn == "sqrt")  return [a](TS& ts) { return Cell::F(std::sqrt(a(ts).asF())); };
             if (fn == "fabsf"  || fn == "fabs")  return [a](TS& ts) { return Cell::F(std::fabs(a(ts).asF())); };
