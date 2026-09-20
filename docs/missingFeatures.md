@@ -46,7 +46,7 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > on it with no LLVM. Both execution tiers are held **bit-exact** by thirteen
 > differential fuzzers (int/float/double/cast/float→int-saturate on Tier-0 vs host;
 > expression/loop/array/atomic/`__device__`-inlining/struct/struct-array/pointer-arith on Tier-0 vs Tier-1),
-> which caught five real silent-wrong bugs, now fixed.
+> which caught six real silent-wrong bugs, now fixed.
 >
 > **Remaining on the zero-burden track** (OpenMP is now *optional* too —
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only

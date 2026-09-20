@@ -35,6 +35,9 @@ struct Cell {
     static Cell F(double v) { Cell c; c.isFloat = true; c.f = v; return c; }
     double  asF() const { return isFloat ? f : static_cast<double>(i); }
     int64_t asI() const { return isFloat ? static_cast<int64_t>(f) : i; }
+    // C truthiness: a float is true iff != 0.0 (NOT its int truncation — 0<|x|<1
+    // is true), an int/pointer iff != 0.
+    bool truthy() const { return isFloat ? f != 0.0 : i != 0; }
 };
 
 // Per-thread execution state.
@@ -411,7 +414,7 @@ struct Compiler {
         ExprFn t = compileExpr(*e.args[1]);
         ExprFn f = compileExpr(*e.args[2]);
         if (failed) return {};
-        return [c, t, f](TS& ts) -> Cell { return c(ts).asI() != 0 ? t(ts) : f(ts); };
+        return [c, t, f](TS& ts) -> Cell { return c(ts).truthy() ? t(ts) : f(ts); };
     }
 
     ExprFn compileMember(const Expr& e) {
@@ -661,7 +664,7 @@ struct Compiler {
         return [a, op](TS& ts) -> Cell {
             Cell v = a(ts);
             if (op == "-") return v.isFloat ? Cell::F(-v.f) : Cell::I(-v.i);
-            if (op == "!") return Cell::I(v.asI() == 0 ? 1 : 0);
+            if (op == "!") return Cell::I(v.truthy() ? 0 : 1);
             if (op == "~") return Cell::I(~v.asI());
             return v;
         };
@@ -692,8 +695,8 @@ struct Compiler {
         if (op == "&&" || op == "||") {
             const bool isAnd = (op == "&&");
             return [a, b, isAnd](TS& ts) -> Cell {
-                return Cell::I((isAnd ? (a(ts).asI() != 0 && b(ts).asI() != 0)
-                                      : (a(ts).asI() != 0 || b(ts).asI() != 0)) ? 1 : 0);
+                return Cell::I((isAnd ? (a(ts).truthy() && b(ts).truthy())
+                                      : (a(ts).truthy() || b(ts).truthy())) ? 1 : 0);
             };
         }
         // Pointer arithmetic: `p ± i` scales the integer index by the pointee size
@@ -855,8 +858,8 @@ struct Compiler {
         if (op == ">=") return Cell::I((fp ? x.asF() >= y.asF() : x.asI() >= y.asI()) ? 1 : 0);
         if (op == "==") return Cell::I((fp ? x.asF() == y.asF() : x.asI() == y.asI()) ? 1 : 0);
         if (op == "!=") return Cell::I((fp ? x.asF() != y.asF() : x.asI() != y.asI()) ? 1 : 0);
-        if (op == "&&") return Cell::I((x.asI() != 0 && y.asI() != 0) ? 1 : 0);
-        if (op == "||") return Cell::I((x.asI() != 0 || y.asI() != 0) ? 1 : 0);
+        if (op == "&&") return Cell::I((x.truthy() && y.truthy()) ? 1 : 0);
+        if (op == "||") return Cell::I((x.truthy() || y.truthy()) ? 1 : 0);
         if (op == "&")  return Cell::I(x.asI() & y.asI());
         if (op == "|")  return Cell::I(x.asI() | y.asI());
         if (op == "^")  return Cell::I(x.asI() ^ y.asI());
@@ -1052,7 +1055,7 @@ struct Compiler {
                 StmtFn else_ = s.elseBody.empty() ? StmtFn() : compileBody(s.elseBody);
                 if (failed) return {};
                 return [cond, then_, else_](TS& ts) {
-                    if (cond(ts).asI() != 0) then_(ts);
+                    if (cond(ts).truthy()) then_(ts);
                     else if (else_) else_(ts);
                 };
             }
@@ -1061,7 +1064,7 @@ struct Compiler {
                 StmtFn body = compileBody(s.body);
                 if (failed) return {};
                 return [cond, body](TS& ts) {
-                    while (!ts.returned && cond(ts).asI() != 0) body(ts);
+                    while (!ts.returned && cond(ts).truthy()) body(ts);
                 };
             }
             case Stmt::For: {
@@ -1072,7 +1075,7 @@ struct Compiler {
                 if (failed) return {};
                 return [init, cond, incr, body](TS& ts) {
                     if (init) init(ts);
-                    while (!ts.returned && (!cond || cond(ts).asI() != 0)) {
+                    while (!ts.returned && (!cond || cond(ts).truthy())) {
                         body(ts);
                         if (incr) incr(ts);
                     }

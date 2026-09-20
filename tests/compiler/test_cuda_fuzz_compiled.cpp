@@ -43,14 +43,14 @@ static float  randFloat()  { return (float)(int32_t)rnd()  / (float)(1u << (rnd(
 static double randDouble() { return (double)(int32_t)rnd() / (double)(1u << (rnd() % 10)); }
 
 struct Node {
-    enum Kind { Var, Const, Bin, Un, Cast } kind;
+    enum Kind { Var, Const, Bin, Un, Cast, IntBin, Shift, Cmp, Ternary } kind;
     Ty ty;
     std::string op;
     int var = 0;         // 0=I,1=F,2=D
     int64_t ci = 0;
     float cf = 0.0f;
     double cd = 0.0;
-    std::unique_ptr<Node> l, r;
+    std::unique_ptr<Node> l, r, c;   // c = ternary else-branch
 };
 using NP = std::unique_ptr<Node>;
 
@@ -64,11 +64,31 @@ static NP genExpr(int depth) {
         else                 { n->kind = Node::Const; n->ty = TD; n->cd = randDouble(); }
         return n;
     }
-    int pick = rnd() % 7;
+    int pick = rnd() % 11;
     if (pick == 0) { n->kind = Node::Un; n->op = "-"; n->l = genExpr(depth - 1); n->ty = n->l->ty; }
     else if (pick == 1) { n->kind = Node::Cast; n->ty = TF; n->l = genExpr(depth - 1); }
     else if (pick == 2) { n->kind = Node::Cast; n->ty = TD; n->l = genExpr(depth - 1); }
     else if (pick == 3) { n->kind = Node::Cast; n->ty = TI; n->l = genExpr(depth - 1); }   // (int) — saturating if child is fp
+    else if (pick == 4) {   // integer bitwise: ((int)L) OP ((int)R) → int
+        n->kind = Node::IntBin; n->ty = TI;
+        static const char* ops[] = {"&", "|", "^"}; n->op = ops[rnd() % 3];
+        n->l = genExpr(depth - 1); n->r = genExpr(depth - 1);
+    }
+    else if (pick == 5) {   // shift: ((int)L) OP (((int)R)&31) → int (amount masked, no UB)
+        n->kind = Node::Shift; n->ty = TI;
+        n->op = (rnd() % 2) ? "<<" : ">>";
+        n->l = genExpr(depth - 1); n->r = genExpr(depth - 1);
+    }
+    else if (pick == 6) {   // comparison → int 0/1
+        n->kind = Node::Cmp; n->ty = TI;
+        static const char* ops[] = {"<", "<=", ">", ">=", "==", "!="}; n->op = ops[rnd() % 6];
+        n->l = genExpr(depth - 1); n->r = genExpr(depth - 1);
+    }
+    else if (pick == 7) {   // ternary: cond ? then : else
+        n->kind = Node::Ternary;
+        n->l = genExpr(depth - 1); n->r = genExpr(depth - 1); n->c = genExpr(depth - 1);
+        n->ty = promoteTy(n->r->ty, n->c->ty);
+    }
     else {
         n->kind = Node::Bin;
         n->l = genExpr(depth - 1);
@@ -93,6 +113,10 @@ static std::string toSrc(const Node* n) {
         case Node::Un:    return "(" + n->op + toSrc(n->l.get()) + ")";
         case Node::Cast:  return std::string("(") + (n->ty == TI ? "(int)" : n->ty == TF ? "(float)" : "(double)") + toSrc(n->l.get()) + ")";
         case Node::Bin:   return "(" + toSrc(n->l.get()) + n->op + toSrc(n->r.get()) + ")";
+        case Node::IntBin: return "(((int)" + toSrc(n->l.get()) + ")" + n->op + "((int)" + toSrc(n->r.get()) + "))";
+        case Node::Shift:  return "(((int)" + toSrc(n->l.get()) + ")" + n->op + "(((int)" + toSrc(n->r.get()) + ")&31))";
+        case Node::Cmp:    return "(" + toSrc(n->l.get()) + n->op + toSrc(n->r.get()) + ")";
+        case Node::Ternary:return "((" + toSrc(n->l.get()) + ")?(" + toSrc(n->r.get()) + "):(" + toSrc(n->c.get()) + "))";
     }
     return "0";
 }
