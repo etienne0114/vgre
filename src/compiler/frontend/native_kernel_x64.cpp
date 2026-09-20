@@ -69,6 +69,17 @@ struct X64 {
     void subEcxEaxToEax() { u8(0x29); u8(0xC1); u8(0x89); u8(0xC8); } // sub ecx,eax ; mov eax,ecx  (eax = ecx - eax)
     void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
     void negEax() { u8(0xF7); u8(0xD8); }                          // neg eax
+    void movEaxEsi() { u8(0x89); u8(0xF0); }                       // mov eax, esi   (the induction var i)
+    void cvtsi2ssFromEax(int xmm) { u8(0xF3); u8(0x0F); u8(0x2A); u8((uint8_t)(0xC0 | (xmm << 3))); }  // xmm = (float)eax
+    // float→int32 saturating cast helpers (match the compiled tier's satFloatToInt).
+    void cvttss2siEax(int xmm) { u8(0xF3); u8(0x0F); u8(0x2C); u8((uint8_t)(0xC0 | xmm)); }  // eax = (int)trunc(xmm), 0x80000000 on overflow/NaN
+    // Scratch for the saturating cast is ECX, not EDX: the store keeps its base
+    // pointer in RDX across the whole expression, so RDX must stay untouched.
+    void movImmEcx(uint32_t v) { u8(0xB9); u32(v); }              // mov ecx, imm32
+    void xorEcxEcx() { u8(0x31); u8(0xC9); }                       // ecx = 0
+    void ucomiss(int a, int b) { u8(0x0F); u8(0x2E); u8((uint8_t)(0xC0 | (a << 3) | b)); }  // compare xmm_a, xmm_b → EFLAGS
+    void cmovaeEaxEcx() { u8(0x0F); u8(0x43); u8(0xC1); }          // if CF=0 (x >= bound, ordered) eax = ecx
+    void cmovpEaxEcx() { u8(0x0F); u8(0x4A); u8(0xC1); }           // if PF=1 (NaN)             eax = ecx
 
     void movdXmmFromEax(int xmm) { u8(0x66); u8(0x0F); u8(0x6E); u8((uint8_t)(0xC0 | (xmm << 3))); }
     void movdEaxFromXmm(int xmm) { u8(0x66); u8(0x0F); u8(0x7E); u8((uint8_t)(0xC0 | (xmm << 3))); }
@@ -124,6 +135,33 @@ struct Lowerer {
                (member(a, "blockDim", "x") && member(b, "blockIdx", "x"));
     }
 
+    // Is `e` an integer-typed expression in the native subset? (Picks the eval
+    // path for a cast operand; comparisons are int, arithmetic is float if any
+    // operand is float.)
+    bool isIntExpr(const Expr& e) const {
+        switch (e.kind) {
+            case Expr::IntLit:   return true;
+            case Expr::FloatLit: return false;
+            case Expr::Ident: {
+                if (e.str == idxVar) return true;
+                const Param* p = param(e.str);
+                return p && !p->type.isPointer() && p->type.base == Type::Int;
+            }
+            case Expr::Index: {
+                const Param* p = (e.args.size() == 2 && e.args[0]->kind == Expr::Ident) ? param(e.args[0]->str) : nullptr;
+                return p && p->type.ptr == 1 && p->type.base == Type::Int;
+            }
+            case Expr::Unary: return e.args.size() == 1 && isIntExpr(*e.args[0]);
+            case Expr::Cast:  return e.castType.ptr == 0 && e.castType.base == Type::Int;
+            case Expr::Binary: {
+                if (e.str == "<" || e.str == "<=" || e.str == ">" || e.str == ">=" || e.str == "==" || e.str == "!=") return true;
+                return e.args.size() == 2 && isIntExpr(*e.args[0]) && isIntExpr(*e.args[1]);
+            }
+            case Expr::Ternary: return e.args.size() == 3 && isIntExpr(*e.args[1]) && isIntExpr(*e.args[2]);
+            default: return false;
+        }
+    }
+
     // Emit a float expression into xmm0. `depth` picks the red-zone spill slot.
     void emitFloat(const Expr& e, int depth) {
         if (!ok) return;
@@ -159,8 +197,12 @@ struct Lowerer {
                 asm_.movdEaxFromXmm(0); asm_.xorEaxImm(0x80000000u); asm_.movdXmmFromEax(0);   // negate
                 return;
             }
-            case Expr::Cast: {     // (float)x — only a float/int scalar cast we can fold
-                if (e.castType.base == Type::Float && e.castType.ptr == 0) { emitFloat(*e.args[0], depth); return; }
+            case Expr::Cast: {     // (float)x
+                if (e.castType.base == Type::Float && e.castType.ptr == 0) {
+                    if (isIntExpr(*e.args[0])) { emitInt(*e.args[0], depth); asm_.cvtsi2ssFromEax(0); }  // int→float, round-to-nearest
+                    else emitFloat(*e.args[0], depth);   // already float — a no-op fold
+                    return;
+                }
                 fail("native: unsupported cast"); return;
             }
             case Expr::Binary: {
@@ -215,17 +257,34 @@ struct Lowerer {
         }
     }
 
+    // Saturating float→int32 of the value in xmm0, result in eax — matches the
+    // compiled tier's satFloatToInt (trunc; NaN→0; clamp to [INT_MIN, INT_MAX]).
+    // cvttss2si already yields the right answer for in-range values, genuine
+    // INT_MIN, and everything ≤ INT_MIN incl. -inf (all → 0x80000000). Only two
+    // cases need fixing: x ≥ 2^31 (incl +inf) → INT_MAX, and NaN → 0.
+    void emitSatF2I() {
+        asm_.movImmEax(0x4F000000u); asm_.movdXmmFromEax(1);   // xmm1 = 2^31 as float
+        asm_.cvttss2siEax(0);                                  // eax = trunc(x) or 0x80000000
+        asm_.movImmEcx(0x7FFFFFFFu);                           // ecx = INT_MAX
+        asm_.ucomiss(0, 1); asm_.cmovaeEaxEcx();               // x ≥ 2^31 (ordered) → INT_MAX
+        asm_.xorEcxEcx();                                      // ecx = 0
+        asm_.ucomiss(0, 0); asm_.cmovpEaxEcx();                // x is NaN → 0
+    }
+
     // Emit a 32-bit integer expression into eax. All arithmetic wraps mod 2^32
     // (x86 add/sub/imul on r32), matching the compiled tier's int32 semantics.
     // Division/modulo are deferred (they trap on /0 and INT_MIN/-1).
     void emitInt(const Expr& e, int depth) {
         if (!ok) return;
-        if (depth > 20) { fail("native: expression too deep"); return; }
+        // Int and float share one depth→red-zone-offset map (8-byte stride) so a
+        // cast that nests int eval inside float eval never aliases a live slot.
+        if (depth > 14) { fail("native: expression too deep"); return; }
         switch (e.kind) {
             case Expr::IntLit: {
                 asm_.movImmEax((uint32_t)(int32_t)e.ival); return;
             }
-            case Expr::Ident: {    // a scalar `int` param
+            case Expr::Ident: {    // the induction var `i`, or a scalar `int` param
+                if (e.str == idxVar) { asm_.movEaxEsi(); return; }
                 const Param* p = param(e.str);
                 if (!p || p->type.isPointer() || p->type.base != Type::Int) { fail("native: unsupported int identifier '" + e.str + "'"); return; }
                 asm_.movArg(1, paramIndex(e.str)); asm_.movEaxMem(1);   // rcx=&value; eax=[rcx]
@@ -245,14 +304,18 @@ struct Lowerer {
                 if (e.str != "-") { fail("native: int unary '" + e.str + "'"); return; }
                 emitInt(*e.args[0], depth); asm_.negEax(); return;
             }
-            case Expr::Cast: {     // (int)x — only an int scalar cast we can fold
-                if (e.castType.base == Type::Int && e.castType.ptr == 0) { emitInt(*e.args[0], depth); return; }
+            case Expr::Cast: {     // (int)x
+                if (e.castType.base == Type::Int && e.castType.ptr == 0) {
+                    if (isIntExpr(*e.args[0])) emitInt(*e.args[0], depth);      // int→int32 (already int)
+                    else { emitFloat(*e.args[0], depth); emitSatF2I(); }        // float→int32, saturating
+                    return;
+                }
                 fail("native: unsupported int cast"); return;
             }
             case Expr::Binary: {
                 const bool add = e.str == "+", sub = e.str == "-", mul = e.str == "*";
                 if (!add && !sub && !mul) { fail("native: int operator '" + e.str + "'"); return; }
-                const int off = 4 * (depth + 1);
+                const int off = 8 * (depth + 1);
                 emitInt(*e.args[0], depth);        // L → eax
                 asm_.spillEax(off);               // [rsp-off] = L
                 emitInt(*e.args[1], depth + 1);    // R → eax

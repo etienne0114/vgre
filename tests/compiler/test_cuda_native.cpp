@@ -11,6 +11,8 @@
 #include "vgre/compiler/frontend/compiled_kernel.h"
 #include "vgre/compiler/frontend/native_kernel.h"
 
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -25,9 +27,26 @@ static uint32_t rnd() { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rn
 static int rint(int lo, int hi) { return lo + (int)(rnd() % (uint32_t)(hi - lo + 1)); }
 static float randFloat() { return (float)(int32_t)rnd() / (float)(1u << (rnd() % 10)); }
 
+// A random integer subexpression over the induction var `i`, the int bound `n`,
+// and small int literals, using + - * (wraps mod 2^32). Rendered as a string and
+// wrapped in `(float)(…)` to drive the native tier's int→float cast path.
+static std::string genIntSubStr(int d) {
+    if (d <= 0 || rnd() % 3 == 0) {
+        int w = rnd() % 4;
+        if (w == 0) return "i";
+        if (w == 1) return "n";
+        if (w == 2) { char b[16]; std::snprintf(b, sizeof b, "%d", (int)(rnd() % 1000)); return b; }
+        return "i";
+    }
+    if (rnd() % 5 == 0) return "(-" + genIntSubStr(d - 1) + ")";
+    static const char* ops[] = {"+", "-", "*"};
+    return "(" + genIntSubStr(d - 1) + ops[rnd() % 3] + genIntSubStr(d - 1) + ")";
+}
+
 // A random float expression over x[i], y[i], scalars a/b, and float constants.
 // Tern is `(cond) ? then : else` where cond is a float comparison (kind Cmp).
-struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
+// FCastI holds a pre-rendered `(float)(<int expr>)` string in `name`.
+struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern, FCastI } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
 using NP = std::unique_ptr<Node>;
 static NP gen(int d) {
     auto n = std::make_unique<Node>();
@@ -41,6 +60,7 @@ static NP gen(int d) {
         return n;
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
+    if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
     if (rnd() % 4 == 0) {   // a ternary select over a float comparison
         n->k = Node::Tern;
         n->cond = std::make_unique<Node>();
@@ -63,6 +83,7 @@ static std::string src(const Node* n) {
         case Node::Cmp:    return "(" + src(n->l.get()) + n->op + src(n->r.get()) + ")";
         case Node::Bin:    return "(" + src(n->l.get()) + n->op + src(n->r.get()) + ")";
         case Node::Tern:   return "(" + src(n->cond.get()) + "?" + src(n->l.get()) + ":" + src(n->r.get()) + ")";
+        case Node::FCastI: return n->name;
     }
     return "0.0f";
 }
@@ -144,6 +165,55 @@ int main() {
         int bad = 0; for (int i = 0; i < N; ++i) if (y[i] != (x[i] > 0.f ? x[i] : 0.f)) ++bad;
         if (bad) { std::printf("FAIL: relu native has %d mismatches vs reference\n", bad); return 1; }
         std::printf("  relu (ternary select) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: index-scaled math via an int→float cast of the induction var.
+    {
+        const char* k = "extern \"C\" __global__ void iscale(const float* x, float* y, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ y[i] = x[i] * (float)i + (float)(i*2); } }";
+        auto nk = NativeKernel::compileSource(k, "iscale", err);
+        if (!nk) { std::printf("FAIL: iscale native compile: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(N), y(N, -3.f);
+        for (int i = 0; i < N; ++i) x[i] = randFloat();
+        float* xp = x.data(); float* yp = y.data();
+        void* args[] = {&xp, &yp, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 3)) { std::printf("FAIL: iscale native launch\n"); return 1; }
+        int bad = 0; for (int i = 0; i < N; ++i) if (y[i] != x[i] * (float)i + (float)(i * 2)) ++bad;
+        if (bad) { std::printf("FAIL: iscale native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  iscale (int->float cast) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: saturating float→int cast (quantization), including the tricky
+    // overflow / NaN inputs, vs an independent saturating reference.
+    {
+        const char* k = "extern \"C\" __global__ void quant(const float* x, float s, int* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = (int)(x[i]*s); } }";
+        auto nk = NativeKernel::compileSource(k, "quant", err);
+        if (!nk) { std::printf("FAIL: quant native compile: %s\n", err.c_str()); return 1; }
+        float s = 1.0e6f;
+        std::vector<float> x(N);
+        for (int i = 0; i < N; ++i) x[i] = randFloat();
+        x[0] = 5.0e9f;  x[1] = -5.0e9f;                 // over/underflow after scaling
+        x[2] = 1.0f / 0.0f;  x[3] = -1.0f / 0.0f;       // ±inf
+        x[4] = 0.0f / 0.0f;                             // NaN
+        x[5] = 2147483647.0f;  x[6] = -2147483648.0f;   // near the int32 bounds
+        std::vector<int> out(N, -1);
+        float* xp = x.data(); int* op = out.data();
+        void* args[] = {&xp, &s, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 4)) { std::printf("FAIL: quant native launch\n"); return 1; }
+        auto sat = [](double d) -> int {
+            double r = std::trunc(d);
+            if (std::isnan(r)) return 0;
+            if (r >= 2147483647.0) return INT_MAX;
+            if (r <= -2147483648.0) return INT_MIN;
+            return (int)r;
+        };
+        int bad = 0;
+        for (int i = 0; i < N; ++i) if (out[i] != sat((double)(x[i] * s))) ++bad;
+        if (bad) { std::printf("FAIL: quant native has %d mismatches vs saturating reference\n", bad); return 1; }
+        std::printf("  quant (saturating float->int cast) native == reference (%d elems)\n", N);
     }
 
     // Differential fuzz: random elementwise kernels, native vs the compiled tier.
@@ -229,6 +299,48 @@ int main() {
     if (iboth < 200) { std::printf("FAIL: too few native int kernels compiled (%d)\n", iboth); return 1; }
     if (imis) { std::printf("FAIL: %d native/compiled int mismatches\n", imis); return 1; }
 
-    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int kernels\n", both, iboth);
+    // Differential fuzz: random float exprs cast to int (quantization) — exercises
+    // the saturating float→int path across the full float surface, native vs Tier-1.
+    int qboth = 0, qmis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        std::string expr = src(gen(rint(1, 4)).get());
+        std::string k =
+            "extern \"C\" __global__ void fz(float a, float b, const float* x, const float* y, int* out, int n) {\n"
+            "  int i = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  if (i < n) { out[i] = (int)(" + expr + "); }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++qboth;
+
+        float a = randFloat(), b = randFloat();
+        std::vector<float> x(N), y(N);
+        std::vector<int> on(N, 111), oc(N, 222);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat(); y[i] = randFloat(); }
+        float* xp = x.data(); float* yp = y.data(); int* onp = on.data(); int* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+
+        void* an[] = {&a, &b, &xp, &yp, &onp, &N};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native quant launch\n  %s\n", k.c_str()); ++qmis; if (qmis > 8) break; continue; }
+        void* ac[] = {&a, &b, &xp, &yp, &ocp, &N};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled quant launch\n"); ++qmis; if (qmis > 8) break; continue; }
+
+        for (int i = 0; i < N; ++i) {
+            if (on[i] != oc[i]) {
+                std::printf("NATIVE/COMPILED QUANT MISMATCH it=%d i=%d  native=%d compiled=%d\n  %s\n",
+                            it, i, on[i], oc[i], k.c_str());
+                ++qmis; break;
+            }
+        }
+        if (qmis > 8) break;
+    }
+
+    std::printf("native quant differential: %d elementwise kernels, %d mismatches\n", qboth, qmis);
+    if (qboth < 200) { std::printf("FAIL: too few native quant kernels compiled (%d)\n", qboth); return 1; }
+    if (qmis) { std::printf("FAIL: %d native/compiled quant mismatches\n", qmis); return 1; }
+
+    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int + %d quant kernels\n", both, iboth, qboth);
     return 0;
 }
