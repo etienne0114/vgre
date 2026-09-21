@@ -119,6 +119,10 @@ public:
   // kernel. Public so the static graph-op executor can reach it.
   VGREResult launchBackendByName(const std::string &name, const dim3 &gridDim,
                                  const dim3 &blockDim, void **args, size_t sharedMem);
+
+  // Which execution tier holds a registered backend kernel (for tests/diagnostics):
+  //   2  native x86-64 JIT   1  Tier-1 compiled   0  Tier-0 interpreter   -1 unknown.
+  int backendKernelTierByName(const std::string &name);
 #endif
 
   // Convenience: register + launch in one call

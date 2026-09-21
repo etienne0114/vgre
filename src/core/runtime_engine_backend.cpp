@@ -17,8 +17,10 @@
 #include "vgre/compiler/backend/execution_backend.h"
 #include "vgre/compiler/frontend/codegen.h"
 #include "vgre/compiler/frontend/compiled_kernel.h"
+#include "vgre/compiler/frontend/native_kernel.h"
 #include "vgre/compiler/frontend/parser.h"
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -28,10 +30,12 @@ namespace core {
 namespace fe = vgre::compiler::frontend;
 namespace be = vgre::compiler::backend;
 
-// A registered backend kernel: a Tier-1 compiled kernel (barrier-free, fast) OR
-// a Tier-0 interpreter kernel (shared-memory / __syncthreads cooperative path).
+// A registered backend kernel runs on the fastest tier that accepts it: the
+// native x86-64 JIT (real machine code) → the Tier-1 compiled backend (bound
+// closures) → the Tier-0 interpreter (shared-memory / __syncthreads path).
 struct RuntimeEngine::BackendKernel {
     int numArgs = 0;
+    std::unique_ptr<fe::NativeKernel>     native;     // native machine-code JIT (fastest)
     std::unique_ptr<fe::CompiledKernel>   compiled;   // Tier-1
     std::unique_ptr<be::PreparedKernel>   prepared;   // Tier-0 (interpreter)
 };
@@ -42,12 +46,32 @@ static be::ExecutionBackend *interpBackend() {
     return inst.get();
 }
 
+// The native tier is on by default; VGRE_DISABLE_NATIVE=1 forces the compiled tier
+// (an escape hatch, e.g. to isolate a regression).
+static bool nativeDisabled() {
+    const char *e = std::getenv("VGRE_DISABLE_NATIVE");
+    return e && e[0] && e[0] != '0';
+}
+
 std::shared_ptr<RuntimeEngine::BackendKernel>
 RuntimeEngine::makeBackendKernel(const std::string &name, const std::string &source) {
     auto bk = std::make_shared<BackendKernel>();
-
-    // Tier-1 compiled tier first (fast; barrier-free kernels).
     std::string err;
+
+    // Native x86-64 JIT (fastest): the default first choice for the elementwise/
+    // reduction subset it accepts — a strict, differentially-proven-bit-exact
+    // subset of the compiled tier. Falls through on anything it rejects (or any
+    // non-x86-64/Linux host, where compileSource returns nullptr).
+    if (!nativeDisabled()) {
+        if (auto nk = fe::NativeKernel::compileSource(source, name, err)) {
+            bk->numArgs = nk->numParams();
+            bk->native = std::move(nk);
+            VGRE_LOG_INFO("RuntimeEngine", "backend kernel '" + name + "' on the native x86-64 JIT tier");
+            return bk;
+        }
+    }
+
+    // Tier-1 compiled tier next (fast; barrier-free kernels).
     if (auto ck = fe::CompiledKernel::compileSource(source, name, err)) {
         bk->numArgs = ck->numParams();
         bk->compiled = std::move(ck);
@@ -80,6 +104,12 @@ RuntimeEngine::makeBackendKernel(const std::string &name, const std::string &sou
 VGREResult RuntimeEngine::launchBackendKernel(const std::shared_ptr<BackendKernel> &bk,
                                               const dim3 &gridDim, const dim3 &blockDim,
                                               void **args, size_t sharedMem) {
+    if (bk->native) {
+        fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
+        fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
+        return bk->native->launch(g, b, args, bk->numArgs)
+                   ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+    }
     if (bk->compiled) {
         fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
         fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
@@ -112,6 +142,18 @@ VGREResult RuntimeEngine::launchBackendByName(const std::string &name, const dim
     }
     if (!bk) return VGREResult::ERR_INVALID_KERNEL;
     return launchBackendKernel(bk, gridDim, blockDim, args, sharedMem);
+}
+
+int RuntimeEngine::backendKernelTierByName(const std::string &name) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto nit = kernelNames_.find(name);
+    if (nit == kernelNames_.end()) return -1;
+    auto bit = backendKernels_.find(nit->second);
+    if (bit == backendKernels_.end() || !bit->second) return -1;
+    if (bit->second->native) return 2;
+    if (bit->second->compiled) return 1;
+    if (bit->second->prepared) return 0;
+    return -1;
 }
 
 }  // namespace core

@@ -1447,6 +1447,13 @@ target_link_libraries(test_backend_dispatch PRIVATE vgre Threads::Threads)
 add_test(NAME BackendDispatch COMMAND test_backend_dispatch)
 set_tests_properties(BackendDispatch PROPERTIES TIMEOUT 60)
 
+# Native x86-64 JIT tier wired into the runtime: a C-ABI kernel launch lands on
+# native and produces bit-exact output; a __syncthreads kernel falls back.
+add_executable(test_native_backend api/test_native_backend.cpp)
+target_link_libraries(test_native_backend PRIVATE vgre Threads::Threads)
+add_test(NAME NativeBackend COMMAND test_native_backend)
+set_tests_properties(NativeBackend PROPERTIES TIMEOUT 60)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.
