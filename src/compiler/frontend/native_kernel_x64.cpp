@@ -78,6 +78,8 @@ struct X64 {
     void subEaxEcx() { u8(0x29); u8(0xC8); }                       // sub eax, ecx   (eax = eax - ecx)
     void movEcxEax() { u8(0x89); u8(0xC1); }                       // mov ecx, eax
     void addEaxImm(int32_t v) { u8(0x05); u32((uint32_t)v); }      // add eax, imm32
+    void setccAl(uint8_t cc) { u8(0x0F); u8(cc); u8(0xC0); }       // setcc al   (cc: l 9C le 9E g 9F ge 9D e 94 ne 95)
+    void movzxEaxAl() { u8(0x0F); u8(0xB6); u8(0xC0); }            // movzx eax, al  (0/1 → 32-bit)
     void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
     void negEax() { u8(0xF7); u8(0xD8); }                          // neg eax
     void movEaxEsi() { u8(0x89); u8(0xF0); }                       // mov eax, esi   (the induction var i)
@@ -152,6 +154,21 @@ struct Lowerer {
         const Expr& a = *mul->args[0]; const Expr& b = *mul->args[1];
         return (member(a, "blockIdx", "x") && member(b, "blockDim", "x")) ||
                (member(a, "blockDim", "x") && member(b, "blockIdx", "x"));
+    }
+
+    // Map a comparison operator to an SSE cmpss ordered predicate (0 EQ, 1 LT,
+    // 2 LE, 4 NEQ — all matching C's NaN behaviour); `>`/`>=` are the swapped
+    // `<`/`<=`. Returns false for non-comparison operators.
+    static bool cmpPredicate(const std::string& op, uint8_t& pred, bool& swap) {
+        swap = false;
+        if (op == "<") pred = 1;
+        else if (op == "<=") pred = 2;
+        else if (op == ">") { pred = 1; swap = true; }
+        else if (op == ">=") { pred = 2; swap = true; }
+        else if (op == "==") pred = 0;
+        else if (op == "!=") pred = 4;
+        else return false;
+        return true;
     }
 
     // Is `e` an integer-typed expression in the native subset? (Picks the eval
@@ -250,6 +267,18 @@ struct Lowerer {
                 fail("native: unsupported cast"); return;
             }
             case Expr::Binary: {
+                // A bare float comparison yields 1.0f / 0.0f (a predicate mask AND 1.0f).
+                { uint8_t pred; bool swap;
+                  if (cmpPredicate(e.str, pred, swap)) {
+                    const int off = evalSlot(depth);
+                    emitFloat(*e.args[0], depth); asm_.spillXmm(0, off);       // [off] = L
+                    emitFloat(*e.args[1], depth + 1); asm_.reloadXmm(1, off);  // xmm1 = L, xmm0 = R
+                    if (swap) { asm_.cmpss(0, 1, pred); asm_.movapsXmm(1, 0); } // mask → xmm1
+                    else       asm_.cmpss(1, 0, pred);                          // mask → xmm1
+                    asm_.movImmEax(0x3f800000u); asm_.movdXmmFromEax(0);        // xmm0 = 1.0f
+                    asm_.andps(0, 1);                                           // xmm0 = mask ? 1.0f : 0.0f
+                    return;
+                  } }
                 uint8_t opc = e.str == "+" ? 0x58 : e.str == "-" ? 0x5C : e.str == "*" ? 0x59 : e.str == "/" ? 0x5E : 0;
                 if (!opc) { fail("native: operator '" + e.str + "'"); return; }
                 const int off = evalSlot(depth);
@@ -263,16 +292,10 @@ struct Lowerer {
             }
             case Expr::Ternary: {   // `(<cmp>) ? t : e` — branchless SSE mask blend
                 const Expr& c = *e.args[0];
-                if (c.kind != Expr::Binary || c.args.size() != 2) { fail("native: ternary condition must be a float comparison"); return; }
-                // Pick the ordered predicate; `>`/`>=` are the swapped `<`/`<=`.
-                uint8_t pred; bool swap = false;
-                if (c.str == "<") pred = 1;
-                else if (c.str == "<=") pred = 2;
-                else if (c.str == ">") { pred = 1; swap = true; }
-                else if (c.str == ">=") { pred = 2; swap = true; }
-                else if (c.str == "==") pred = 0;
-                else if (c.str == "!=") pred = 4;
-                else { fail("native: ternary needs a comparison condition"); return; }
+                uint8_t pred; bool swap;
+                if (c.kind != Expr::Binary || c.args.size() != 2 || !cmpPredicate(c.str, pred, swap)) {
+                    fail("native: ternary condition must be a float comparison"); return;
+                }
 
                 // Reserve two red-zone slots for this level; sub-exprs use deeper slots.
                 const int slotMask = evalSlot(depth);
@@ -368,6 +391,17 @@ struct Lowerer {
                 fail("native: unsupported int cast"); return;
             }
             case Expr::Binary: {
+                // A bare int comparison yields 0 / 1 (signed cmp + setcc + zero-extend).
+                { uint8_t cc = e.str == "<" ? 0x9C : e.str == "<=" ? 0x9E : e.str == ">" ? 0x9F
+                             : e.str == ">=" ? 0x9D : e.str == "==" ? 0x94 : e.str == "!=" ? 0x95 : 0;
+                  if (cc) {
+                    const int off = evalSlot(depth);
+                    emitInt(*e.args[0], depth); asm_.spillEax(off);       // [off] = L
+                    emitInt(*e.args[1], depth + 1); asm_.reloadEcx(off);  // ecx = L, eax = R
+                    asm_.cmpEcxEax();                                     // flags = L - R
+                    asm_.setccAl(cc); asm_.movzxEaxAl();                  // eax = (L cmp R) ? 1 : 0
+                    return;
+                  } }
                 const bool add = e.str == "+", sub = e.str == "-", mul = e.str == "*";
                 if (!add && !sub && !mul) { fail("native: int operator '" + e.str + "'"); return; }
                 const int off = evalSlot(depth);

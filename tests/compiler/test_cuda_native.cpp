@@ -120,6 +120,11 @@ static NP gen(int d) {
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
     if (rnd() % 6 == 0) { n->k = Node::Func; n->name = (rnd() & 1) ? "sqrtf" : "fabsf"; n->l = gen(d - 1); return n; }
+    if (rnd() % 7 == 0) {   // a bare float comparison → 1.0f / 0.0f
+        n->k = Node::Cmp;
+        static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
+        n->op = cmps[rnd() % 6]; n->l = gen(d - 1); n->r = gen(d - 1); return n;
+    }
     if (rnd() % 4 == 0) {   // a ternary select over a float comparison
         n->k = Node::Tern;
         n->cond = std::make_unique<Node>();
@@ -162,6 +167,11 @@ static NP genI(int d) {
         return n;
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = genI(d - 1); return n; }
+    if (rnd() % 7 == 0) {   // a bare int comparison → 0 / 1
+        n->k = Node::Cmp;
+        static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
+        n->op = cmps[rnd() % 6]; n->l = genI(d - 1); n->r = genI(d - 1); return n;
+    }
     n->k = Node::Bin; static const char* ops[] = {"+", "-", "*"}; n->op = ops[rnd() % 3];
     n->l = genI(d - 1); n->r = genI(d - 1); return n;
 }
@@ -172,7 +182,8 @@ static std::string srcI(const Node* n) {
         case Node::Const:  { char b[32]; std::snprintf(b, sizeof b, "(%d)", (int)n->c); return b; }
         case Node::Neg:    return "(-" + srcI(n->l.get()) + ")";
         case Node::Bin:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
-        default:           break;   // Cmp/Tern aren't generated for the int sweep
+        case Node::Cmp:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
+        default:           break;   // Tern isn't generated for the int sweep
     }
     return "0";
 }
@@ -346,6 +357,24 @@ int main() {
         int bad = 0; for (int i = 0; i < N; ++i) if (out[i] != std::sqrt(std::fabs(x[i])) + std::fabs(y[i])) ++bad;
         if (bad) { std::printf("FAIL: norm native has %d mismatches vs reference\n", bad); return 1; }
         std::printf("  norm (sqrtf/fabsf) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: bare comparisons as values (predicate masks) — 1.0f/0.0f.
+    {
+        const char* k = "extern \"C\" __global__ void mask(const float* x, const float* y, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = (x[i] > y[i]) + (x[i] < 0.0f) * 2.0f; } }";
+        auto nk = NativeKernel::compileSource(k, "mask", err);
+        if (!nk) { std::printf("FAIL: mask native compile: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(N), y(N), out(N, -1.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat() - 4.f; y[i] = randFloat() - 4.f; }
+        float* xp = x.data(); float* yp = y.data(); float* op = out.data();
+        void* args[] = {&xp, &yp, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 4)) { std::printf("FAIL: mask native launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { float r = (float)(x[i] > y[i]) + (float)(x[i] < 0.0f) * 2.0f; if (out[i] != r) ++bad; }
+        if (bad) { std::printf("FAIL: mask native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  mask (bare comparisons) native == reference (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an
