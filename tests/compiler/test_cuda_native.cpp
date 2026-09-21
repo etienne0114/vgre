@@ -119,7 +119,7 @@ static NP gen(int d) {
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
-    if (rnd() % 6 == 0) { n->k = Node::Func; n->name = (rnd() & 1) ? "sqrtf" : "fabsf"; n->l = gen(d - 1); return n; }
+    if (rnd() % 6 == 0) { n->k = Node::Func; static const char* fs[] = {"sqrtf", "fabsf", "rsqrtf"}; n->name = fs[rnd() % 3]; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::Func2; n->name = (rnd() & 1) ? "fmaxf" : "fminf"; n->l = gen(d - 1); n->r = gen(d - 1); return n; }
     if (rnd() % 7 == 0) {   // a bare float comparison → 1.0f / 0.0f
         n->k = Node::Cmp;
@@ -405,6 +405,31 @@ int main() {
         }
         if (bad) { std::printf("FAIL: clamp01 native vs compiled has %d mismatches\n", bad); return 1; }
         std::printf("  clamp01 (fmaxf/fminf, incl NaN/inf/-0) native == compiled tier (%d elems)\n", N);
+    }
+
+    // Correctness: rsqrtf — the RMSNorm/LayerNorm core (1/sqrt computed in double,
+    // like the compiled tier). Oracle is the compiled tier.
+    {
+        const char* k = "extern \"C\" __global__ void rms(const float* x, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = x[i] * rsqrtf(fabsf(x[i]) + 9.9999997e-07f); } }";
+        auto nk = NativeKernel::compileSource(k, "rms", err);
+        auto ck = CompiledKernel::compileSource(k, "rms", err);
+        if (!nk || !ck) { std::printf("FAIL: rms compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> x(N), on(N, -9.f), oc(N, -8.f);
+        for (int i = 0; i < N; ++i) x[i] = randFloat() - 4.f;
+        x[0] = 0.0f; x[1] = 1e30f; x[2] = -1e30f;
+        float* xp = x.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &onp, &N}; if (!nk->launch(g, b, an, 3)) { std::printf("FAIL: rms native launch\n"); return 1; }
+        void* ac[] = {&xp, &ocp, &N}; if (!ck->launch(g, b, ac, 3)) { std::printf("FAIL: rms compiled launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) {
+            uint32_t a, c; std::memcpy(&a, &on[i], 4); std::memcpy(&c, &oc[i], 4);
+            const bool nan = (a & 0x7fffffff) > 0x7f800000 && (c & 0x7fffffff) > 0x7f800000;
+            if (a != c && !nan) ++bad;
+        }
+        if (bad) { std::printf("FAIL: rms native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  rms (rsqrtf, double 1/sqrt) native == compiled tier (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an

@@ -102,6 +102,13 @@ struct X64 {
     void sqrtssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x51); u8((uint8_t)(0xC0 | (dst << 3) | src)); }  // dst = sqrt(src), correctly rounded
     void maxssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x5F); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst = (dst > src) ? dst : src
     void minssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x5D); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst = (dst < src) ? dst : src
+    // double-precision helpers (to reproduce the compiled tier's compute-in-double
+    // intrinsics like rsqrtf = (float)(1.0/std::sqrt((double)x))).
+    void cvtss2sd(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x5A); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // (double)src
+    void cvtsd2ss(int dst, int src) { u8(0xF2); u8(0x0F); u8(0x5A); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // (float)src
+    void sqrtsdXmm(int dst, int src) { u8(0xF2); u8(0x0F); u8(0x51); u8((uint8_t)(0xC0 | (dst << 3) | src)); }  // dst = sqrt(src), double
+    void divsdXmm(int dst, int src) { u8(0xF2); u8(0x0F); u8(0x5E); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst /= src, double
+    void cvtsi2sdFromEax(int xmm) { u8(0xF2); u8(0x0F); u8(0x2A); u8((uint8_t)(0xC0 | (xmm << 3))); }            // xmm = (double)eax
     void movapsXmm(int dst, int src) { u8(0x0F); u8(0x28); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
     // cmpss xmm_dst, xmm_src, imm8  → dst = all-ones/zero mask per the ordered predicate
     // (imm: 0 EQ, 1 LT, 2 LE, 4 NEQ — all matching C's NaN behaviour).
@@ -249,12 +256,18 @@ struct Lowerer {
                 return;
             }
             case Expr::Call: {     // float math intrinsics that are bit-exact here
-                if (e.args.size() == 1 && (e.str == "sqrtf" || e.str == "fabsf")) {
+                if (e.args.size() == 1 && (e.str == "sqrtf" || e.str == "fabsf" || e.str == "rsqrtf")) {
                     emitFloat(*e.args[0], depth);
                     if (e.str == "sqrtf") {
                         asm_.sqrtssXmm(0, 0);   // SSE sqrt is IEEE correctly-rounded, == C sqrtf
-                    } else {                    // fabsf: clear the sign bit
+                    } else if (e.str == "fabsf") {           // clear the sign bit
                         asm_.movImmEax(0x7fffffffu); asm_.movdXmmFromEax(1); asm_.andps(0, 1);
+                    } else {                    // rsqrtf: compute 1/sqrt in DOUBLE, like the
+                        asm_.cvtss2sd(0, 0);                 // compiled tier — (float)(1.0/sqrt((double)x)).
+                        asm_.sqrtsdXmm(0, 0);                // A single-precision 1/sqrtss would double-round
+                        asm_.movImmEax(1); asm_.cvtsi2sdFromEax(1);  // the division differently and diverge.
+                        asm_.divsdXmm(1, 0);                 // xmm1 = 1.0 / sqrt((double)x)
+                        asm_.cvtsd2ss(0, 1);                 // xmm0 = (float)result
                     }
                     return;
                 }
