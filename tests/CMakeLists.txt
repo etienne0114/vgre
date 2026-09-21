@@ -1433,6 +1433,14 @@ target_link_libraries(test_cuda_native PRIVATE vgre Threads::Threads)
 add_test(NAME CudaNative COMMAND test_cuda_native)
 set_tests_properties(CudaNative PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Native tier speedup demo: times native vs compiled vs interpreter on saxpy.
+# Gate is cross-tier bit-exactness (timing is printed, never asserted). RUN_SERIAL
+# so the numbers aren't skewed by other tests sharing cores.
+add_executable(test_native_perf compiler/test_native_perf.cpp)
+target_link_libraries(test_native_perf PRIVATE vgre Threads::Threads)
+add_test(NAME NativePerf COMMAND test_native_perf)
+set_tests_properties(NativePerf PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)
