@@ -104,7 +104,7 @@ static std::string genLocExpr(int d, int nloc) {
 // A random float expression over x[i], y[i], scalars a/b, and float constants.
 // Tern is `(cond) ? then : else` where cond is a float comparison (kind Cmp).
 // FCastI holds a pre-rendered `(float)(<int expr>)` string in `name`.
-struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern, FCastI } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
+struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern, FCastI, Func } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
 using NP = std::unique_ptr<Node>;
 static NP gen(int d) {
     auto n = std::make_unique<Node>();
@@ -119,6 +119,7 @@ static NP gen(int d) {
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
+    if (rnd() % 6 == 0) { n->k = Node::Func; n->name = (rnd() & 1) ? "sqrtf" : "fabsf"; n->l = gen(d - 1); return n; }
     if (rnd() % 4 == 0) {   // a ternary select over a float comparison
         n->k = Node::Tern;
         n->cond = std::make_unique<Node>();
@@ -142,6 +143,7 @@ static std::string src(const Node* n) {
         case Node::Bin:    return "(" + src(n->l.get()) + n->op + src(n->r.get()) + ")";
         case Node::Tern:   return "(" + src(n->cond.get()) + "?" + src(n->l.get()) + ":" + src(n->r.get()) + ")";
         case Node::FCastI: return n->name;
+        case Node::Func:   return n->name + "(" + src(n->l.get()) + ")";
     }
     return "0.0f";
 }
@@ -327,6 +329,23 @@ int main() {
         int bad = 0; for (int i = 0; i < N; ++i) if (out[i] != x[N - 1 - i] + y[i]) ++bad;
         if (bad) { std::printf("FAIL: rev native has %d mismatches vs reference\n", bad); return 1; }
         std::printf("  rev (general index x[n-1-i]) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: sqrtf / fabsf math intrinsics (L2-normalize term shape).
+    {
+        const char* k = "extern \"C\" __global__ void norm(const float* x, const float* y, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = sqrtf(fabsf(x[i])) + fabsf(y[i]); } }";
+        auto nk = NativeKernel::compileSource(k, "norm", err);
+        if (!nk) { std::printf("FAIL: norm native compile: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(N), y(N), out(N, -1.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat() - 8.f; y[i] = randFloat() - 8.f; }
+        float* xp = x.data(); float* yp = y.data(); float* op = out.data();
+        void* args[] = {&xp, &yp, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 4)) { std::printf("FAIL: norm native launch\n"); return 1; }
+        int bad = 0; for (int i = 0; i < N; ++i) if (out[i] != std::sqrt(std::fabs(x[i])) + std::fabs(y[i])) ++bad;
+        if (bad) { std::printf("FAIL: norm native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  norm (sqrtf/fabsf) native == reference (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an

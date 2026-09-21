@@ -97,6 +97,7 @@ struct X64 {
     void xorEaxImm(uint32_t v) { u8(0x35); u32(v); }
     // <op>ss xmm1, xmm0  (dst op= src) — add 58 / sub 5C / mul 59 / div 5E
     void arithXmm(uint8_t opc, int dst, int src) { u8(0xF3); u8(0x0F); u8(opc); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
+    void sqrtssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x51); u8((uint8_t)(0xC0 | (dst << 3) | src)); }  // dst = sqrt(src), correctly rounded
     void movapsXmm(int dst, int src) { u8(0x0F); u8(0x28); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
     // cmpss xmm_dst, xmm_src, imm8  → dst = all-ones/zero mask per the ordered predicate
     // (imm: 0 EQ, 1 LT, 2 LE, 4 NEQ — all matching C's NaN behaviour).
@@ -227,6 +228,18 @@ struct Lowerer {
                 emitFloat(*e.args[0], depth);
                 asm_.movdEaxFromXmm(0); asm_.xorEaxImm(0x80000000u); asm_.movdXmmFromEax(0);   // negate
                 return;
+            }
+            case Expr::Call: {     // float math intrinsics that are bit-exact here
+                if (e.args.size() == 1 && (e.str == "sqrtf" || e.str == "fabsf")) {
+                    emitFloat(*e.args[0], depth);
+                    if (e.str == "sqrtf") {
+                        asm_.sqrtssXmm(0, 0);   // SSE sqrt is IEEE correctly-rounded, == C sqrtf
+                    } else {                    // fabsf: clear the sign bit
+                        asm_.movImmEax(0x7fffffffu); asm_.movdXmmFromEax(1); asm_.andps(0, 1);
+                    }
+                    return;
+                }
+                fail("native: unsupported call '" + e.str + "'"); return;
             }
             case Expr::Cast: {     // (float)x
                 if (e.castType.base == Type::Float && e.castType.ptr == 0) {
