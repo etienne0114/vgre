@@ -168,13 +168,20 @@ static NP genI(int d) {
         else { n->k = Node::Const; n->c = (float)(int32_t)rnd(); }
         return n;
     }
-    if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = genI(d - 1); return n; }
+    if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = genI(d - 1); return n; }              // -x
+    if (rnd() % 9 == 0) { n->k = Node::Neg; n->op = "~"; n->l = genI(d - 1); return n; } // ~x
     if (rnd() % 7 == 0) {   // a bare int comparison → 0 / 1
         n->k = Node::Cmp;
         static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
         n->op = cmps[rnd() % 6]; n->l = genI(d - 1); n->r = genI(d - 1); return n;
     }
-    n->k = Node::Bin; static const char* ops[] = {"+", "-", "*"}; n->op = ops[rnd() % 3];
+    if (rnd() % 6 == 0) {   // shift by a constant count in [0,31] (defined range)
+        n->k = Node::Bin; n->op = (rnd() & 1) ? "<<" : ">>";
+        n->l = genI(d - 1);
+        auto c = std::make_unique<Node>(); c->k = Node::Const; c->c = (float)(rnd() % 32); n->r = std::move(c);
+        return n;
+    }
+    n->k = Node::Bin; static const char* ops[] = {"+", "-", "*", "&", "|", "^"}; n->op = ops[rnd() % 6];
     n->l = genI(d - 1); n->r = genI(d - 1); return n;
 }
 static std::string srcI(const Node* n) {
@@ -182,7 +189,7 @@ static std::string srcI(const Node* n) {
         case Node::Load:   return n->name + "[i]";
         case Node::Scalar: return n->name;
         case Node::Const:  { char b[32]; std::snprintf(b, sizeof b, "(%d)", (int)n->c); return b; }
-        case Node::Neg:    return "(-" + srcI(n->l.get()) + ")";
+        case Node::Neg:    return "(" + (n->op.empty() ? std::string("-") : n->op) + srcI(n->l.get()) + ")";
         case Node::Bin:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
         case Node::Cmp:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
         default:           break;   // Tern isn't generated for the int sweep
@@ -325,6 +332,26 @@ int main() {
         for (int i = 0; i < N; ++i) { int kk = x[i] * 3 + 1; if (out[i] != kk * kk - kk) ++bad; }
         if (bad) { std::printf("FAIL: ic native has %d mismatches vs reference\n", bad); return 1; }
         std::printf("  ic (int locals) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: integer bitwise + shift ops (a bit-mix, the shape of hashing /
+    // quantization packing) vs reference.
+    {
+        const char* k = "extern \"C\" __global__ void bitmix(const int* x, int* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){"
+                        " int h = x[i] ^ (x[i] >> 15); h = (h * 5) | 1; out[i] = (h << 3) ^ (~h & 255); } }";
+        auto nk = NativeKernel::compileSource(k, "bitmix", err);
+        if (!nk) { std::printf("FAIL: bitmix native compile: %s\n", err.c_str()); return 1; }
+        std::vector<int> x(N), out(N, -1);
+        for (int i = 0; i < N; ++i) x[i] = (int)rnd();
+        int* xp = x.data(); int* op = out.data();
+        void* args[] = {&xp, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 3)) { std::printf("FAIL: bitmix native launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { int h = x[i] ^ (x[i] >> 15); h = (h * 5) | 1; if (out[i] != ((h << 3) ^ (~h & 255))) ++bad; }
+        if (bad) { std::printf("FAIL: bitmix native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  bitmix (bitwise ^ | ~ << >>) native == reference (%d elems)\n", N);
     }
 
     // Correctness: general array indexing — a reverse gather x[n-1-i].

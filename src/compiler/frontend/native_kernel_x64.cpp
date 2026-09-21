@@ -82,6 +82,12 @@ struct X64 {
     void movzxEaxAl() { u8(0x0F); u8(0xB6); u8(0xC0); }            // movzx eax, al  (0/1 → 32-bit)
     void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
     void negEax() { u8(0xF7); u8(0xD8); }                          // neg eax
+    void notEax() { u8(0xF7); u8(0xD0); }                          // not eax  (~)
+    void andEaxEcx() { u8(0x21); u8(0xC8); }                       // and eax, ecx
+    void orEaxEcx()  { u8(0x09); u8(0xC8); }                       // or  eax, ecx
+    void xorEaxEcx() { u8(0x31); u8(0xC8); }                       // xor eax, ecx
+    void shlEaxCl()  { u8(0xD3); u8(0xE0); }                       // shl eax, cl  (count masked to 5 bits by the CPU)
+    void sarEaxCl()  { u8(0xD3); u8(0xF8); }                       // sar eax, cl  (arithmetic >> for signed int)
     void movEaxEsi() { u8(0x89); u8(0xF0); }                       // mov eax, esi   (the induction var i)
     void cvtsi2ssFromEax(int xmm) { u8(0xF3); u8(0x0F); u8(0x2A); u8((uint8_t)(0xC0 | (xmm << 3))); }  // xmm = (float)eax
     // float→int32 saturating cast helpers (match the compiled tier's satFloatToInt).
@@ -414,8 +420,9 @@ struct Lowerer {
             }
             case Expr::Unary: {
                 if (e.str == "+") { emitInt(*e.args[0], depth); return; }
-                if (e.str != "-") { fail("native: int unary '" + e.str + "'"); return; }
-                emitInt(*e.args[0], depth); asm_.negEax(); return;
+                if (e.str == "-") { emitInt(*e.args[0], depth); asm_.negEax(); return; }
+                if (e.str == "~") { emitInt(*e.args[0], depth); asm_.notEax(); return; }
+                fail("native: int unary '" + e.str + "'"); return;
             }
             case Expr::Cast: {     // (int)x
                 if (e.castType.base == Type::Int && e.castType.ptr == 0) {
@@ -437,8 +444,20 @@ struct Lowerer {
                     asm_.setccAl(cc); asm_.movzxEaxAl();                  // eax = (L cmp R) ? 1 : 0
                     return;
                   } }
+                // Shifts (non-commutative, count in cl): L stays in eax, R → cl.
+                // The count must be in [0,31] for the CPU's masking to agree with the
+                // compiled tier's int64 shift — the fuzzer keeps it there.
+                if (e.str == "<<" || e.str == ">>") {
+                    const int off = evalSlot(depth);
+                    emitInt(*e.args[0], depth); asm_.spillEax(off);       // [off] = L
+                    emitInt(*e.args[1], depth + 1); asm_.movEcxEax();     // ecx = R (shift count)
+                    asm_.movEaxFromSlot(off);                            // eax = L
+                    if (e.str == "<<") asm_.shlEaxCl(); else asm_.sarEaxCl();  // signed >> is arithmetic
+                    return;
+                }
                 const bool add = e.str == "+", sub = e.str == "-", mul = e.str == "*";
-                if (!add && !sub && !mul) { fail("native: int operator '" + e.str + "'"); return; }
+                const bool band = e.str == "&", bor = e.str == "|", bxor = e.str == "^";
+                if (!add && !sub && !mul && !band && !bor && !bxor) { fail("native: int operator '" + e.str + "'"); return; }
                 const int off = evalSlot(depth);
                 emitInt(*e.args[0], depth);        // L → eax
                 asm_.spillEax(off);               // [rsp-off] = L
@@ -446,6 +465,9 @@ struct Lowerer {
                 asm_.reloadEcx(off);              // ecx = L
                 if (add) asm_.addEaxEcx();         // eax = R + L
                 else if (mul) asm_.imulEaxEcx();   // eax = R * L
+                else if (band) asm_.andEaxEcx();   // eax = R & L
+                else if (bor) asm_.orEaxEcx();     // eax = R | L
+                else if (bxor) asm_.xorEaxEcx();   // eax = R ^ L
                 else asm_.subEcxEaxToEax();        // eax = L - R
                 return;
             }
