@@ -46,7 +46,10 @@ struct X64 {
     void loadInt32Rax() { u8(0x8B); u8(0x00); }
     void movEsiEsi() { u8(0x89); u8(0xF6); }              // zero-extend esi into rsi
     void cmpEsiEax() { u8(0x39); u8(0xC6); }              // cmp esi, eax
+    void cmpEcxEax() { u8(0x39); u8(0xC1); }              // cmp ecx, eax  (flags = ecx - eax)
     size_t jgePlaceholder() { u8(0x0F); u8(0x8D); size_t at = code.size(); u32(0); return at; }  // jge rel32
+    size_t jgPlaceholder()  { u8(0x0F); u8(0x8F); size_t at = code.size(); u32(0); return at; }  // jg  rel32
+    void jmpBackTo(size_t target) { u8(0xE9); size_t at = code.size(); u32(0); patchRel32(at, target); }  // jmp target
     void ret() { u8(0xC3); }
 
     // movss xmm, [base + rsi*4]   /   movss [base + rsi*4], xmm   (base in rcx/rdx)
@@ -54,6 +57,9 @@ struct X64 {
     void movssStoreIdx(int base, int xmm) { u8(0xF3); u8(0x0F); u8(0x11); u8((uint8_t)((xmm << 3) | 4)); u8((uint8_t)(0x80 | (6 << 3) | base)); }
     // movss xmm, [base]           (scalar param, base in rcx)
     void movssLoad(int xmm, int base) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)((xmm << 3) | base)); }
+    // general indexed loads: [base + rax*4], the index precomputed (zero-extended) in rax
+    void movssLoadIdxRax(int xmm, int base) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)((xmm << 3) | 4)); u8((uint8_t)(0x80 | base)); }
+    void movEaxLoadIdxRax(int base) { u8(0x8B); u8(0x04); u8((uint8_t)(0x80 | base)); }  // mov eax, [base + rax*4]
     // spill/reload via the red zone: movss [rsp-off], xmm0 ; movss xmm, [rsp-off]
     void spillXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x11); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
     void reloadXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
@@ -69,6 +75,9 @@ struct X64 {
     void movEaxFromSlot(int off) { u8(0x8B); u8(0x44); u8(0x24); u8((uint8_t)(-off)); }  // mov eax, [rsp-off]
     void addEaxEcx() { u8(0x01); u8(0xC8); }                       // add eax, ecx   (eax = eax + ecx)
     void subEcxEaxToEax() { u8(0x29); u8(0xC1); u8(0x89); u8(0xC8); } // sub ecx,eax ; mov eax,ecx  (eax = ecx - eax)
+    void subEaxEcx() { u8(0x29); u8(0xC8); }                       // sub eax, ecx   (eax = eax - ecx)
+    void movEcxEax() { u8(0x89); u8(0xC1); }                       // mov ecx, eax
+    void addEaxImm(int32_t v) { u8(0x05); u32((uint32_t)v); }      // add eax, imm32
     void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
     void negEax() { u8(0xF7); u8(0xD8); }                          // neg eax
     void movEaxEsi() { u8(0x89); u8(0xF0); }                       // mov eax, esi   (the induction var i)
@@ -197,13 +206,19 @@ struct Lowerer {
                 asm_.movArg(1, paramIndex(e.str)); asm_.movssLoad(0, 1);   // rcx=&value; xmm0=[rcx]
                 return;
             }
-            case Expr::Index: {    // q[i] — a `float*` param indexed by the induction var
-                if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident ||
-                    e.args[1]->kind != Expr::Ident || e.args[1]->str != idxVar) { fail("native: only p[i] indexing"); return; }
+            case Expr::Index: {    // q[<int expr>] — a `float*` param, general integer index
+                if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident) { fail("native: bad index expression"); return; }
                 const Param* p = param(e.args[0]->str);
                 if (!p || !(p->type.base == Type::Float && p->type.ptr == 1)) { fail("native: index base must be float*"); return; }
-                asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);  // rcx = q pointer
-                asm_.movssLoadIdx(0, 1);                                    // xmm0 = [rcx + rsi*4]
+                if (e.args[1]->kind == Expr::Ident && e.args[1]->str == idxVar) {      // q[i] fast path (index already in rsi)
+                    asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);         // rcx = q pointer
+                    asm_.movssLoadIdx(0, 1);                                           // xmm0 = [rcx + rsi*4]
+                } else {                                                              // q[expr]: compute index → rax, then [base + rax*4]
+                    emitInt(*e.args[1], depth);                                        // eax = index (rax zero-extended)
+                    if (!ok) return;
+                    asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);         // rcx = q pointer (rax preserved)
+                    asm_.movssLoadIdxRax(0, 1);                                        // xmm0 = [rcx + rax*4]
+                }
                 return;
             }
             case Expr::Unary: {
@@ -311,13 +326,19 @@ struct Lowerer {
                 asm_.movArg(1, paramIndex(e.str)); asm_.movEaxMem(1);   // rcx=&value; eax=[rcx]
                 return;
             }
-            case Expr::Index: {    // q[i] — an `int*` param indexed by the induction var
-                if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident ||
-                    e.args[1]->kind != Expr::Ident || e.args[1]->str != idxVar) { fail("native: only p[i] indexing"); return; }
+            case Expr::Index: {    // q[<int expr>] — an `int*` param, general integer index
+                if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident) { fail("native: bad index expression"); return; }
                 const Param* p = param(e.args[0]->str);
                 if (!p || !(p->type.base == Type::Int && p->type.ptr == 1)) { fail("native: index base must be int*"); return; }
-                asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);  // rcx = q pointer
-                asm_.movEaxIdx(1);                                         // eax = [rcx + rsi*4]
+                if (e.args[1]->kind == Expr::Ident && e.args[1]->str == idxVar) {      // q[i] fast path
+                    asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);         // rcx = q pointer
+                    asm_.movEaxIdx(1);                                                 // eax = [rcx + rsi*4]
+                } else {                                                              // q[expr]: index → rax, then [base + rax*4]
+                    emitInt(*e.args[1], depth);                                        // eax = index (rax zero-extended)
+                    if (!ok) return;
+                    asm_.movArg(1, paramIndex(e.args[0]->str)); asm_.deref(1);         // rcx = q pointer (rax preserved)
+                    asm_.movEaxLoadIdxRax(1);                                          // eax = [rcx + rax*4]
+                }
                 return;
             }
             case Expr::Unary: {
@@ -348,6 +369,127 @@ struct Lowerer {
             }
             default: fail("native: unsupported int expression"); return;
         }
+    }
+
+    // ── statement emitters (the top-level body and loop bodies share these) ──────
+
+    // `p[i] = <expr>;` store — the element type picks the evaluation path.
+    bool emitStore(const Expr& lhs, const Expr& rhs) {
+        if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident ||
+            lhs.args[1]->kind != Expr::Ident || lhs.args[1]->str != idxVar) { err = "native: store target must be p[i]"; return false; }
+        const Param* p = param(lhs.args[0]->str);
+        if (!p || p->type.ptr != 1 || (p->type.base != Type::Float && p->type.base != Type::Int)) {
+            err = "native: store base must be float* or int*"; return false;
+        }
+        asm_.movArg(2, paramIndex(lhs.args[0]->str)); asm_.deref(2);   // rdx = p pointer (survives expr eval)
+        if (p->type.base == Type::Int) {
+            emitInt(rhs, 0); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+            asm_.movStoreIdxEax(2);                                    // [rdx + rsi*4] = eax
+        } else {
+            emitFloat(rhs, 0); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+            asm_.movssStoreIdx(2, 0);                                  // [rdx + rsi*4] = xmm0
+        }
+        return true;
+    }
+
+    // An assignment / compound-assignment / ++/-- used as a statement (this also
+    // handles the loop-increment expression).
+    bool emitAssignExpr(const Expr& e) {
+        if (e.kind == Expr::Unary && (e.str == "pre++" || e.str == "post++" || e.str == "pre--" || e.str == "post--")) {
+            auto it = e.args[0]->kind == Expr::Ident ? locals.find(e.args[0]->str) : locals.end();
+            if (it == locals.end() || it->second.isFloat) { err = "native: ++/-- needs an int local"; return false; }
+            asm_.movEaxFromSlot(it->second.off);
+            asm_.addEaxImm((e.str == "pre++" || e.str == "post++") ? 1 : -1);
+            asm_.spillEax(it->second.off);
+            return true;
+        }
+        if (e.kind != Expr::Assign || e.args.size() != 2) { err = "native: statement must be an assignment or ++/--"; return false; }
+        const Expr& lhs = *e.args[0];
+        const Expr& rhs = *e.args[1];
+        const std::string& op = e.str;
+
+        if (lhs.kind == Expr::Index) {   // p[i] = expr  (compound stores unsupported)
+            if (op != "=") { err = "native: compound store not supported"; return false; }
+            return emitStore(lhs, rhs);
+        }
+        if (lhs.kind != Expr::Ident) { err = "native: unsupported assignment target"; return false; }
+        auto it = locals.find(lhs.str);
+        if (it == locals.end()) { err = "native: assignment to non-local '" + lhs.str + "'"; return false; }
+        const Local& L = it->second;
+        if (L.isFloat) {
+            if (op == "=") { emitFloat(rhs, 0); if (!ok) return false; asm_.spillXmm(0, L.off); return true; }
+            uint8_t opc = op == "+=" ? 0x58 : op == "-=" ? 0x5C : op == "*=" ? 0x59 : op == "/=" ? 0x5E : 0;
+            if (!opc) { err = "native: unsupported float compound op"; return false; }
+            emitFloat(rhs, 0); if (!ok) return false;   // xmm0 = rhs
+            asm_.reloadXmm(1, L.off);                    // xmm1 = local
+            asm_.arithXmm(opc, 1, 0);                    // xmm1 = local op rhs
+            asm_.spillXmm(1, L.off);
+            return true;
+        }
+        if (op == "=") { emitInt(rhs, 0); if (!ok) return false; asm_.spillEax(L.off); return true; }
+        emitInt(rhs, 0); if (!ok) return false;          // eax = rhs
+        asm_.movEcxEax();                                // ecx = rhs
+        asm_.movEaxFromSlot(L.off);                      // eax = local
+        if (op == "+=") asm_.addEaxEcx();                // eax = local + rhs
+        else if (op == "-=") asm_.subEaxEcx();           // eax = local - rhs
+        else if (op == "*=") asm_.imulEaxEcx();          // eax = local * rhs
+        else { err = "native: unsupported int compound op"; return false; }
+        asm_.spillEax(L.off);
+        return true;
+    }
+
+    // A single body statement (recursively used for loop bodies).
+    bool emitStmt(const Stmt& s) {
+        switch (s.kind) {
+            case Stmt::VarDecl: {
+                auto it = locals.find(s.name);
+                if (it == locals.end()) { err = "native: unexpected local declaration"; return false; }
+                const Local& L = it->second;
+                if (L.isFloat) { emitFloat(*s.expr, 0); if (!ok) { err = err.empty() ? "native: bad local init" : err; return false; } asm_.spillXmm(0, L.off); }
+                else           { emitInt(*s.expr, 0);   if (!ok) { err = err.empty() ? "native: bad local init" : err; return false; } asm_.spillEax(L.off); }
+                return true;
+            }
+            case Stmt::ExprStmt:
+                if (!s.expr) { err = "native: empty statement"; return false; }
+                return emitAssignExpr(*s.expr);
+            case Stmt::For: return emitFor(s);
+            default: err = "native: unsupported statement in body"; return false;
+        }
+    }
+
+    // A bounded for-loop: `for (int j = init; j < bound; ++j) { … }` (also `<=`).
+    // The loop var and any accumulators live in red-zone slots, so nothing needs
+    // to survive in a register across iterations.
+    bool emitFor(const Stmt& s) {
+        if (!s.forInit || s.forInit->kind != Stmt::VarDecl) { err = "native: for-init must declare an int loop var"; return false; }
+        const Stmt& init = *s.forInit;
+        auto it = locals.find(init.name);
+        if (it == locals.end() || it->second.isFloat || !init.expr) { err = "native: for loop var must be an int local"; return false; }
+        const int jOff = it->second.off;
+        emitInt(*init.expr, 0); if (!ok) return false; asm_.spillEax(jOff);   // j = init
+
+        if (!s.forCond || s.forCond->kind != Expr::Binary || s.forCond->args.size() != 2) { err = "native: for-cond must be a comparison"; return false; }
+        bool le;
+        if (s.forCond->str == "<") le = false;
+        else if (s.forCond->str == "<=") le = true;
+        else { err = "native: for-cond must be `<` or `<=`"; return false; }
+
+        const size_t top = asm_.code.size();
+        emitInt(*s.forCond->args[0], 0); if (!ok) return false;   // eax = L
+        asm_.spillEax(evalSlot(0));
+        emitInt(*s.forCond->args[1], 1); if (!ok) return false;   // eax = R
+        asm_.reloadEcx(evalSlot(0));                              // ecx = L
+        asm_.cmpEcxEax();                                         // flags = L - R
+        const size_t exitJmp = le ? asm_.jgPlaceholder() : asm_.jgePlaceholder();  // exit when !(L < / <= R)
+
+        const std::vector<StmtPtr>& bodyStmts =
+            (s.body.size() == 1 && s.body[0]->kind == Stmt::Block) ? s.body[0]->body : s.body;
+        for (const StmtPtr& bs : bodyStmts) { if (!emitStmt(*bs)) return false; if (!ok) return false; }
+
+        if (s.forIncr) { if (!emitAssignExpr(*s.forIncr)) return false; }
+        asm_.jmpBackTo(top);
+        asm_.patchRel32(exitJmp, asm_.code.size());
+        return true;
     }
 
     // Compile the whole kernel; returns false (with err) if it isn't in the subset.
@@ -389,50 +531,31 @@ struct Lowerer {
 
         // Pre-pass: lay out per-thread scalar locals in the red zone (each an
         // 8-byte slot) so their types/offsets are known before any expression is
-        // emitted; expression scratch then sits above them at ≥ scratchBase.
+        // emitted; expression scratch then sits above them at ≥ scratchBase. This
+        // also registers for-loop induction vars (declared in the loop's init).
         int nLocals = 0;
-        for (const StmtPtr& s : body) {
-            if (s->kind != Stmt::VarDecl) continue;
-            if (s->type.ptr != 0 || s->arraySize != 0 || !s->expr ||
-                (s->type.base != Type::Float && s->type.base != Type::Int)) {
+        auto registerLocal = [&](const Stmt& d) -> bool {
+            if (d.type.ptr != 0 || d.arraySize != 0 || !d.expr ||
+                (d.type.base != Type::Float && d.type.base != Type::Int)) {
                 err = "native: only scalar float/int locals with an initializer"; return false;
             }
-            if (nLocals >= 8) { err = "native: too many locals"; return false; }
-            locals[s->name] = Local{s->type.base == Type::Float, 8 * (nLocals + 1)};
+            if (nLocals >= 12) { err = "native: too many locals"; return false; }
+            locals[d.name] = Local{d.type.base == Type::Float, 8 * (nLocals + 1)};
             ++nLocals;
+            return true;
+        };
+        for (const StmtPtr& s : body) {
+            if (s->kind == Stmt::VarDecl) { if (!registerLocal(*s)) return false; }
+            else if (s->kind == Stmt::For && s->forInit && s->forInit->kind == Stmt::VarDecl) {
+                if (!registerLocal(*s->forInit)) return false;
+            }
         }
         scratchBase = 8 * nLocals;
 
-        // Emit pass.
+        // Emit pass — each body statement (locals, stores, loops).
         for (const StmtPtr& s : body) {
-            if (s->kind == Stmt::VarDecl) {   // local: evaluate the initializer, store to its slot
-                const Local& L = locals[s->name];
-                if (L.isFloat) { emitFloat(*s->expr, 0); if (!ok) { err = err.empty() ? "native: bad local init" : err; return false; } asm_.spillXmm(0, L.off); }
-                else           { emitInt(*s->expr, 0);   if (!ok) { err = err.empty() ? "native: bad local init" : err; return false; } asm_.spillEax(L.off); }
-                continue;
-            }
-            if (s->kind != Stmt::ExprStmt || !s->expr || s->expr->kind != Expr::Assign || s->expr->str != "=") {
-                err = "native: body statements must be scalar locals or `p[i] = expr;` stores"; return false;
-            }
-            const Expr& lhs = *s->expr->args[0];
-            if (lhs.kind != Expr::Index || lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident ||
-                lhs.args[1]->kind != Expr::Ident || lhs.args[1]->str != idxVar) { err = "native: store target must be p[i]"; return false; }
-            const Param* p = param(lhs.args[0]->str);
-            if (!p || p->type.ptr != 1 || (p->type.base != Type::Float && p->type.base != Type::Int)) {
-                err = "native: store base must be float* or int*"; return false;
-            }
-            asm_.movArg(2, paramIndex(lhs.args[0]->str)); asm_.deref(2);   // rdx = p pointer (survives expr eval)
-            // The store's element type picks the evaluation path — an int* store
-            // evaluates an int32 expression, a float* store a float expression.
-            if (p->type.base == Type::Int) {
-                emitInt(*s->expr->args[1], 0);                            // eax = value
-                if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
-                asm_.movStoreIdxEax(2);                                   // [rdx + rsi*4] = eax
-            } else {
-                emitFloat(*s->expr->args[1], 0);                          // xmm0 = value
-                if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
-                asm_.movssStoreIdx(2, 0);                                 // [rdx + rsi*4] = xmm0
-            }
+            if (!emitStmt(*s)) return false;
+            if (!ok) { if (err.empty()) err = "native: unsupported body"; return false; }
         }
         // Epilogue.
         asm_.patchRel32(jmp, asm_.code.size());

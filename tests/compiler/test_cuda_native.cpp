@@ -43,6 +43,47 @@ static std::string genIntSubStr(int d) {
     return "(" + genIntSubStr(d - 1) + ops[rnd() % 3] + genIntSubStr(d - 1) + ")";
 }
 
+// A random float expression whose x/y loads use a general but IN-RANGE index:
+// `i`, `(i+c)` with c<PAD, or a constant < N. Arrays are sized N+PAD so every
+// such index is valid; the compiled tier reads the same array, so it stays a
+// bit-exact differential test of the general-index addressing path.
+static std::string safeIdx(int N, int PAD) {
+    int t = rnd() % 3;
+    if (t == 0) return "i";
+    if (t == 1) return "(i+" + std::to_string(rnd() % PAD) + ")";
+    return std::to_string(rnd() % N);
+}
+static std::string genGatherExpr(int d, int N, int PAD) {
+    if (d <= 0 || rnd() % 3 == 0) {
+        int w = rnd() % 5;
+        if (w == 0) return "x[" + safeIdx(N, PAD) + "]";
+        if (w == 1) return "y[" + safeIdx(N, PAD) + "]";
+        if (w == 2) return "a";
+        if (w == 3) return "b";
+        char b[40]; std::snprintf(b, sizeof b, "(%.9ef)", (double)randFloat()); return b;
+    }
+    if (rnd() % 5 == 0) return "(-" + genGatherExpr(d - 1, N, PAD) + ")";
+    static const char* ops[] = {"+", "-", "*", "/"};
+    return "(" + genGatherExpr(d - 1, N, PAD) + ops[rnd() % 4] + genGatherExpr(d - 1, N, PAD) + ")";
+}
+
+// A random float expression for a per-row reduction body, over the accumulator
+// `acc`, the row element a[i*K+j], the vector element b[j], a scalar `s`, and
+// constants (+ - * keep it a classic reduction/GEMV-inner shape).
+static std::string genReduceExpr(int d) {
+    if (d <= 0 || rnd() % 3 == 0) {
+        int w = rnd() % 5;
+        if (w == 0) return "acc";
+        if (w == 1) return "a[i*K+j]";
+        if (w == 2) return "b[j]";
+        if (w == 3) return "s";
+        char b[40]; std::snprintf(b, sizeof b, "(%.9ef)", (double)randFloat()); return b;
+    }
+    if (rnd() % 6 == 0) return "(-" + genReduceExpr(d - 1) + ")";
+    static const char* ops[] = {"+", "-", "*"};
+    return "(" + genReduceExpr(d - 1) + ops[rnd() % 3] + genReduceExpr(d - 1) + ")";
+}
+
 // A random float expression over x[i], y[i], a/b, float consts AND the first
 // `nloc` scalar locals t0..t{nloc-1}. Rendered directly to a string.
 static std::string genLocExpr(int d, int nloc) {
@@ -271,6 +312,45 @@ int main() {
         std::printf("  ic (int locals) native == reference (%d elems)\n", N);
     }
 
+    // Correctness: general array indexing — a reverse gather x[n-1-i].
+    {
+        const char* k = "extern \"C\" __global__ void rev(const float* x, const float* y, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = x[n-1-i] + y[i]; } }";
+        auto nk = NativeKernel::compileSource(k, "rev", err);
+        if (!nk) { std::printf("FAIL: rev native compile: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(N), y(N), out(N, -5.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat(); y[i] = randFloat(); }
+        float* xp = x.data(); float* yp = y.data(); float* op = out.data();
+        void* args[] = {&xp, &yp, &op, &N};
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, b, args, 4)) { std::printf("FAIL: rev native launch\n"); return 1; }
+        int bad = 0; for (int i = 0; i < N; ++i) if (out[i] != x[N - 1 - i] + y[i]) ++bad;
+        if (bad) { std::printf("FAIL: rev native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  rev (general index x[n-1-i]) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an
+    // accumulator and general indexing a[i*K+j] * b[j].
+    {
+        const int K = 5;
+        const char* k = "extern \"C\" __global__ void gemv(const float* a, const float* b, float* out, int n, int K){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){"
+                        " float acc = 0.0f; for(int j=0;j<K;++j){ acc += a[i*K+j]*b[j]; } out[i] = acc; } }";
+        auto nk = NativeKernel::compileSource(k, "gemv", err);
+        if (!nk) { std::printf("FAIL: gemv native compile: %s\n", err.c_str()); return 1; }
+        std::vector<float> a(N * K), b(K), out(N, -9.f);
+        for (int t = 0; t < N * K; ++t) a[t] = randFloat();
+        for (int t = 0; t < K; ++t) b[t] = randFloat();
+        float* ap = a.data(); float* bp = b.data(); float* op = out.data(); int Kv = K;
+        void* args[] = {&ap, &bp, &op, &N, &Kv};
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+        if (!nk->launch(g, bl, args, 5)) { std::printf("FAIL: gemv native launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { float acc = 0.f; for (int j = 0; j < K; ++j) acc += a[i * K + j] * b[j]; if (out[i] != acc) ++bad; }
+        if (bad) { std::printf("FAIL: gemv native has %d mismatches vs reference\n", bad); return 1; }
+        std::printf("  gemv (for-loop dot product) native == reference (%d rows, K=%d)\n", N, K);
+    }
+
     // Differential fuzz: random elementwise kernels, native vs the compiled tier.
     const int kIters = 800;
     int both = 0, mismatches = 0;
@@ -442,7 +522,102 @@ int main() {
     if (lboth < 200) { std::printf("FAIL: too few native locals kernels compiled (%d)\n", lboth); return 1; }
     if (lmis) { std::printf("FAIL: %d native/compiled locals mismatches\n", lmis); return 1; }
 
-    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int + %d quant + %d locals kernels\n",
-                both, iboth, qboth, lboth);
+    // Differential fuzz: general (in-range) array indexing — gather kernels, native
+    // vs compiled tier. Arrays are sized N+PAD so every generated index is valid.
+    const int PAD = 64;
+    int gboth = 0, gmis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        std::string expr = genGatherExpr(rint(1, 4), N, PAD);
+        std::string k =
+            "extern \"C\" __global__ void fz(float a, float b, const float* x, const float* y, float* out, int n) {\n"
+            "  int i = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  if (i < n) { out[i] = (" + expr + "); }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++gboth;
+
+        float a = randFloat(), b = randFloat();
+        std::vector<float> x(N + PAD), y(N + PAD), on(N, -1.f), oc(N, -2.f);
+        for (int i = 0; i < N + PAD; ++i) { x[i] = randFloat(); y[i] = randFloat(); }
+        float* xp = x.data(); float* yp = y.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+
+        void* an[] = {&a, &b, &xp, &yp, &onp, &N};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native gather launch\n  %s\n", k.c_str()); ++gmis; if (gmis > 8) break; continue; }
+        void* ac[] = {&a, &b, &xp, &yp, &ocp, &N};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled gather launch\n"); ++gmis; if (gmis > 8) break; continue; }
+
+        for (int i = 0; i < N; ++i) {
+            uint32_t bn, bc; std::memcpy(&bn, &on[i], 4); std::memcpy(&bc, &oc[i], 4);
+            const bool nan = (bn & 0x7fffffff) > 0x7f800000 && (bc & 0x7fffffff) > 0x7f800000;
+            if (on[i] != oc[i] && !nan) {
+                std::printf("NATIVE/COMPILED GATHER MISMATCH it=%d i=%d  native=%.9g compiled=%.9g\n  %s\n",
+                            it, i, (double)on[i], (double)oc[i], k.c_str());
+                ++gmis; break;
+            }
+        }
+        if (gmis > 8) break;
+    }
+
+    std::printf("native gather differential: %d elementwise kernels, %d mismatches\n", gboth, gmis);
+    if (gboth < 200) { std::printf("FAIL: too few native gather kernels compiled (%d)\n", gboth); return 1; }
+    if (gmis) { std::printf("FAIL: %d native/compiled gather mismatches\n", gmis); return 1; }
+
+    // Differential fuzz: per-row reduction kernels (bounded for-loop + accumulator
+    // + general indexing a[i*K+j], b[j]), native vs compiled tier. a is sized
+    // N*Kmax and b sized Kmax so every a[i*K+j]/b[j] with K<=Kmax is in range.
+    const int Kmax = 8;
+    int rboth = 0, rmis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        int K = rint(2, Kmax);
+        std::string bodyE = genReduceExpr(rint(1, 3));
+        char initc[40]; std::snprintf(initc, sizeof initc, "(%.9ef)", (double)randFloat());
+        std::string k =
+            "extern \"C\" __global__ void fz(const float* a, const float* b, float s, float* out, int n, int K) {\n"
+            "  int i = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  if (i < n) {\n"
+            "    float acc = " + std::string(initc) + ";\n"
+            "    for (int j = 0; j < K; ++j) { acc = (" + bodyE + "); }\n"
+            "    out[i] = acc;\n  }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++rboth;
+
+        float s = randFloat();
+        std::vector<float> a(N * Kmax), b(Kmax), on(N, -1.f), oc(N, -2.f);
+        for (int t = 0; t < N * Kmax; ++t) a[t] = randFloat();
+        for (int t = 0; t < Kmax; ++t) b[t] = randFloat();
+        float* ap = a.data(); float* bp = b.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+
+        void* an[] = {&ap, &bp, &s, &onp, &N, &K};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native reduce launch\n  %s\n", k.c_str()); ++rmis; if (rmis > 8) break; continue; }
+        void* ac[] = {&ap, &bp, &s, &ocp, &N, &K};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled reduce launch\n"); ++rmis; if (rmis > 8) break; continue; }
+
+        for (int i = 0; i < N; ++i) {
+            uint32_t bn, bc; std::memcpy(&bn, &on[i], 4); std::memcpy(&bc, &oc[i], 4);
+            const bool nan = (bn & 0x7fffffff) > 0x7f800000 && (bc & 0x7fffffff) > 0x7f800000;
+            if (on[i] != oc[i] && !nan) {
+                std::printf("NATIVE/COMPILED REDUCE MISMATCH it=%d i=%d K=%d  native=%.9g compiled=%.9g\n  %s\n",
+                            it, i, K, (double)on[i], (double)oc[i], k.c_str());
+                ++rmis; break;
+            }
+        }
+        if (rmis > 8) break;
+    }
+
+    std::printf("native reduce differential: %d loop kernels, %d mismatches\n", rboth, rmis);
+    if (rboth < 200) { std::printf("FAIL: too few native reduce kernels compiled (%d)\n", rboth); return 1; }
+    if (rmis) { std::printf("FAIL: %d native/compiled reduce mismatches\n", rmis); return 1; }
+
+    std::printf("PASS: native x86-64 JIT matches the compiled tier on %d float + %d int + %d quant + %d locals + %d gather + %d reduce kernels\n",
+                both, iboth, qboth, lboth, gboth, rboth);
     return 0;
 }
