@@ -100,6 +100,8 @@ struct X64 {
     // <op>ss xmm1, xmm0  (dst op= src) — add 58 / sub 5C / mul 59 / div 5E
     void arithXmm(uint8_t opc, int dst, int src) { u8(0xF3); u8(0x0F); u8(opc); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
     void sqrtssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x51); u8((uint8_t)(0xC0 | (dst << 3) | src)); }  // dst = sqrt(src), correctly rounded
+    void maxssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x5F); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst = (dst > src) ? dst : src
+    void minssXmm(int dst, int src) { u8(0xF3); u8(0x0F); u8(0x5D); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst = (dst < src) ? dst : src
     void movapsXmm(int dst, int src) { u8(0x0F); u8(0x28); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
     // cmpss xmm_dst, xmm_src, imm8  → dst = all-ones/zero mask per the ordered predicate
     // (imm: 0 EQ, 1 LT, 2 LE, 4 NEQ — all matching C's NaN behaviour).
@@ -254,6 +256,26 @@ struct Lowerer {
                     } else {                    // fabsf: clear the sign bit
                         asm_.movImmEax(0x7fffffffu); asm_.movdXmmFromEax(1); asm_.andps(0, 1);
                     }
+                    return;
+                }
+                if (e.args.size() == 2 && (e.str == "fmaxf" || e.str == "fminf")) {
+                    // C fmaxf/fminf, bit-exact: (a==b || isnan(b)) ? a : {max,min}ss(a,b).
+                    // The a==b arm reproduces the ±0 rule (fmax(+0,-0) keeps a's sign);
+                    // the isnan(b) arm reproduces "NaN operand → the other" for b.
+                    const bool isMax = e.str == "fmaxf";
+                    const int off = evalSlot(depth);
+                    emitFloat(*e.args[0], depth); asm_.spillXmm(0, off);        // [off] = a
+                    emitFloat(*e.args[1], depth + 1); asm_.reloadXmm(1, off);   // xmm1 = a, xmm0 = b
+                    asm_.movapsXmm(2, 1);                                       // xmm2 = a
+                    if (isMax) asm_.maxssXmm(2, 0); else asm_.minssXmm(2, 0);   // xmm2 = m = {max,min}ss(a,b)
+                    asm_.movapsXmm(3, 1);                                       // xmm3 = a
+                    asm_.cmpss(3, 0, 0);                                        // xmm3 = (a == b) mask (ordered EQ)
+                    asm_.cmpss(0, 0, 3);                                        // xmm0 = (b is NaN) mask (UNORD)
+                    asm_.orps(3, 0);                                            // xmm3 = keepA = (a==b) | isnan(b)
+                    asm_.andps(1, 3);                                           // xmm1 = a & keepA
+                    asm_.andnps(3, 2);                                          // xmm3 = ~keepA & m
+                    asm_.orps(1, 3);                                            // xmm1 = result
+                    asm_.movapsXmm(0, 1);
                     return;
                 }
                 fail("native: unsupported call '" + e.str + "'"); return;

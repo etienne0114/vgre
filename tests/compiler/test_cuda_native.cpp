@@ -104,7 +104,7 @@ static std::string genLocExpr(int d, int nloc) {
 // A random float expression over x[i], y[i], scalars a/b, and float constants.
 // Tern is `(cond) ? then : else` where cond is a float comparison (kind Cmp).
 // FCastI holds a pre-rendered `(float)(<int expr>)` string in `name`.
-struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern, FCastI, Func } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
+struct Node { enum K { Load, Scalar, Const, Bin, Neg, Cmp, Tern, FCastI, Func, Func2 } k; std::string name; float c = 0; std::string op; std::unique_ptr<Node> l, r, cond; };
 using NP = std::unique_ptr<Node>;
 static NP gen(int d) {
     auto n = std::make_unique<Node>();
@@ -120,6 +120,7 @@ static NP gen(int d) {
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
     if (rnd() % 6 == 0) { n->k = Node::Func; n->name = (rnd() & 1) ? "sqrtf" : "fabsf"; n->l = gen(d - 1); return n; }
+    if (rnd() % 6 == 0) { n->k = Node::Func2; n->name = (rnd() & 1) ? "fmaxf" : "fminf"; n->l = gen(d - 1); n->r = gen(d - 1); return n; }
     if (rnd() % 7 == 0) {   // a bare float comparison → 1.0f / 0.0f
         n->k = Node::Cmp;
         static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
@@ -149,6 +150,7 @@ static std::string src(const Node* n) {
         case Node::Tern:   return "(" + src(n->cond.get()) + "?" + src(n->l.get()) + ":" + src(n->r.get()) + ")";
         case Node::FCastI: return n->name;
         case Node::Func:   return n->name + "(" + src(n->l.get()) + ")";
+        case Node::Func2:  return n->name + "(" + src(n->l.get()) + "," + src(n->r.get()) + ")";
     }
     return "0.0f";
 }
@@ -375,6 +377,34 @@ int main() {
         for (int i = 0; i < N; ++i) { float r = (float)(x[i] > y[i]) + (float)(x[i] < 0.0f) * 2.0f; if (out[i] != r) ++bad; }
         if (bad) { std::printf("FAIL: mask native has %d mismatches vs reference\n", bad); return 1; }
         std::printf("  mask (bare comparisons) native == reference (%d elems)\n", N);
+    }
+
+    // Correctness: fmaxf/fminf clamp to [0,1] (ReLU6-style), exercising the tricky
+    // NaN / ±inf / ±0 operands. The oracle is the COMPILED TIER, not a std::fmax
+    // reference: a literal (fmaxf(x,0.0f)) lets clang constant-specialise fmax to a
+    // different ±0 tie-break, but the compiled tier calls fmax with two runtime Cell
+    // values (no folding) — exactly what native must match.
+    {
+        const char* k = "extern \"C\" __global__ void clamp01(const float* x, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = fminf(fmaxf(x[i], 0.0f), 1.0f); } }";
+        auto nk = NativeKernel::compileSource(k, "clamp01", err);
+        auto ck = CompiledKernel::compileSource(k, "clamp01", err);
+        if (!nk || !ck) { std::printf("FAIL: clamp01 compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> x(N), on(N, -9.f), oc(N, -8.f);
+        for (int i = 0; i < N; ++i) x[i] = randFloat() - 4.f;
+        x[0] = 0.0f / 0.0f; x[1] = 1.0f / 0.0f; x[2] = -1.0f / 0.0f; x[3] = -0.0f; x[4] = 0.5f;
+        float* xp = x.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &onp, &N}; if (!nk->launch(g, b, an, 3)) { std::printf("FAIL: clamp01 native launch\n"); return 1; }
+        void* ac[] = {&xp, &ocp, &N}; if (!ck->launch(g, b, ac, 3)) { std::printf("FAIL: clamp01 compiled launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) {
+            uint32_t a, c; std::memcpy(&a, &on[i], 4); std::memcpy(&c, &oc[i], 4);
+            const bool nan = (a & 0x7fffffff) > 0x7f800000 && (c & 0x7fffffff) > 0x7f800000;
+            if (a != c && !nan) { if (bad < 4) std::printf("  clamp01 diff i=%d x=%.9g native=%08x compiled=%08x\n", i, (double)x[i], a, c); ++bad; }
+        }
+        if (bad) { std::printf("FAIL: clamp01 native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  clamp01 (fmaxf/fminf, incl NaN/inf/-0) native == compiled tier (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an
