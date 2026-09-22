@@ -1,8 +1,10 @@
 // End-to-end: a real CUDA-C kernel registered + launched through the public C-ABI
-// actually runs on the native x86-64 JIT tier (no LLVM), producing the correct
-// result — and a kernel outside the native subset (__shared__ + __syncthreads)
-// transparently falls back to a slower tier. Proves the native tier is wired into
-// the runtime, not just unit-tested in isolation.
+// actually runs on the fastest tier available for the host (no LLVM), producing the
+// correct result — and a kernel outside the native subset (__shared__ +
+// __syncthreads) runs on the cooperative compiled tier. Proves the fast tiers are
+// wired into the runtime, not just unit-tested in isolation. The native x86-64 JIT
+// tier is Linux/x86-64 only (SysV machine code); on other hosts the portable Tier-1
+// compiled backend is the top tier — both bit-exact.
 //
 // Tier is read from whichever dispatch the build uses: the RuntimeEngine backend
 // (no-LLVM build) or the side backend dispatch (JIT build, VGRE_EXEC_BACKEND set).
@@ -95,9 +97,19 @@ int main() {
     for (int i = 0; i < N; ++i) maxErr = std::fmax(maxErr, std::fabs(hy[i] - ref[i]));
     CHECK(maxErr == 0.0f, "saxpy via native tier is bit-exact vs reference");
 
+    // The native x86-64 JIT emits hand-written SysV machine code (native_kernel_x64.cpp,
+    // guarded #if defined(__x86_64__) && defined(__linux__)), so it is the top tier only
+    // on Linux/x86-64. Elsewhere — macOS arm64 (wrong ISA), Windows (Microsoft x64 ABI),
+    // any non-x86-64 — that backend isn't built and saxpy lands on the portable Tier-1
+    // compiled backend (tier 1), still bit-exact (asserted just above).
     int st = tierOf("saxpy", kid);
-    if (st >= 0) CHECK(st == 2, "saxpy landed on the native x86-64 JIT tier");
-    std::printf("  saxpy: maxErr=%.3e  tier=%d (2=native)\n", maxErr, st);
+#if defined(__x86_64__) && defined(__linux__)
+    const int expectSaxpy = 2;   // native x86-64 JIT
+#else
+    const int expectSaxpy = 1;   // compiled tier — native JIT not built on this host
+#endif
+    if (st >= 0) CHECK(st == expectSaxpy, "saxpy landed on the expected fast tier for this host");
+    std::printf("  saxpy: maxErr=%.3e  tier=%d (expected %d; 2=native, 1=compiled)\n", maxErr, st, expectSaxpy);
 
     // A __syncthreads kernel never takes the native tier. It lands on the Tier-1
     // compiled fiber executor (tier 1) on every host — the executor is portable

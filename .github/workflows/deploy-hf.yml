@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-22.04         # older glibc → the .so loads on HF's runtime
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Skip if no token
         id: gate

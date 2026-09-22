@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install toolchain + deps
         # Pin LLVM 18: VGRE targets the LLVM-18 C++ API (ORC ThreadSafeContext::
@@ -54,7 +54,7 @@ jobs:
 
       # Cache the compiler object cache across runs so only changed TUs recompile.
       - name: ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.ccache
           key: ccache-linux-${{ github.sha }}
@@ -88,7 +88,7 @@ jobs:
 
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: linux-test-logs
           path: build/Testing/Temporary/
@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install minimal toolchain (no LLVM/Clang dev, no OpenMP)
         # Deliberately NO llvm-18-dev / libclang-18-dev / libomp-18-dev: the whole
@@ -126,7 +126,7 @@ jobs:
           cmake --version
 
       - name: ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.ccache
           key: ccache-linux-nollvm-${{ github.sha }}
@@ -157,7 +157,7 @@ jobs:
 
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: linux-llvm-free-test-logs
           path: build_nollvm/Testing/Temporary/
@@ -171,7 +171,7 @@ jobs:
     # per-job cap and drag the whole workflow to a 6 h "cancelled" (linux is ~6 min).
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install deps
         # Pin llvm@18: Homebrew's default `llvm` is 22, whose ORC API dropped
@@ -234,7 +234,7 @@ jobs:
     # job. Generous enough for a cold LLVM-18 build (the ~500 MB tarball is cached).
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # choco's `llvm` ships clang but NOT the LLVM CMake package (no
       # LLVMConfig.cmake), so `find_package(LLVM)` fails at configure. Use the
@@ -246,7 +246,7 @@ jobs:
       # was slow. Keyed on the pinned LLVM version.
       - name: Cache LLVM 18
         id: cache-llvm
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: C:\llvm
           key: llvm-18.1.8-windows-msvc

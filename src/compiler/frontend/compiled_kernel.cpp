@@ -1472,6 +1472,7 @@ struct Compiler {
                     }
                 };
             }
+            default: break;   // DoWhile/Break/Continue/Switch/… → unsupported on this tier
         }
         fail("unsupported statement");
         return {};

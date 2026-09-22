@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-22.04  # glibc 2.35 — loads on Streamlit's newer Debian glibc
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install LLVM 18 + toolchain
         run: |
