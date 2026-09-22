@@ -1,11 +1,28 @@
 # Supported CUDA-C subset (the from-scratch front-end)
 
-**Updated:** 2026-09-20
+**Updated:** 2026-09-22
 
 VGRE's own CUDA-C front-end (`src/compiler/frontend/`: lexer → parser → PTX
 codegen) compiles kernels with **no Clang/LLVM**. This is the compiler used when
 `-DVGRE_ENABLE_JIT=OFF`, and whenever `VGRE_EXEC_BACKEND` selects a non-JIT
-backend. It targets the practical subset of CUDA-C that real compute kernels use;
+backend.
+
+> **Three execution tiers, fastest-first.** A parsed kernel runs on the fastest tier
+> that accepts it: the **native x86-64 JIT** (`native_kernel_x64.cpp`, Tier 1b — real
+> hand-emitted machine code, the default in the no-LLVM build), else the **Tier-1
+> compiled** closure backend (`compiled_kernel.cpp`), else the **Tier-0 PTX
+> interpreter** (`ptx_interpreter.cpp`, the cooperative path for `__shared__`/
+> `__syncthreads`). The native tier covers the scalar subset — every int/float
+> operator, comparisons, ternary select, casts (round + saturate), scalar locals,
+> general gather/scatter, bounded `for`-loop reductions, flattened *and* true-2-D
+> (`threadIdx.y`) GEMM, and the full math surface incl. transcendentals via libm
+> calls — and is held **bit-exact** against the compiled tier by the `CudaNative`
+> differential-fuzzing suite, running ~18–118× faster (`NativePerf`). Kernels it
+> doesn't accept fall back transparently, so the *supported subset below is the same
+> on every tier*; the tiers differ only in speed. `VGRE_DISABLE_NATIVE=1` forces the
+> compiled tier.
+
+It targets the practical subset of CUDA-C that real compute kernels use;
 anything outside it returns a **located error** (never wrong code) — enriched with
 the offending source line and a caret under the column. Integer constant
 subexpressions are **constant-folded** to a single immediate (`5*5*5*5` → `625`;

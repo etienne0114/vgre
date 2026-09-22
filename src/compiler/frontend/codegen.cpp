@@ -1359,7 +1359,8 @@ struct Codegen {
         canon = dbl ? fn : fn.substr(0, fn.size() - 1);   // strip trailing 'f' for f32
         return canon == "sqrt" || canon == "fabs" || canon == "rsqrt" ||
                canon == "sin" || canon == "cos" || canon == "exp" || canon == "log" ||
-               canon == "exp2" || canon == "log2" || canon == "tanh";
+               canon == "exp2" || canon == "log2" || canon == "tanh" ||
+               canon == "floor" || canon == "ceil";
     }
 
     // Recognize an explicit-rounding arithmetic intrinsic:
@@ -1929,6 +1930,8 @@ struct Codegen {
             if (canon == "exp2")  { emit("ex2.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
             if (canon == "log2")  { emit("lg2.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
             if (canon == "tanh")  { emit("tanh.approx." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "floor") { emit("cvt.rmi." + suf + "." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
+            if (canon == "ceil")  { emit("cvt.rpi." + suf + "." + suf + " " + d + ", " + a.reg + ";"); return {d, ft}; }
             if (canon == "exp") {                       // e^x = 2^(x*log2 e)
                 std::string t = fresh(classOf(ft));
                 std::string log2e = dbl ? f64imm(1.4426950408889634) : "0f3FB8AA3B";

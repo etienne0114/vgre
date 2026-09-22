@@ -979,6 +979,10 @@ struct Compiler {
             if (fn == "ceilf"  || fn == "ceil")  return [a](TS& ts) { return Cell::F(std::ceil(a(ts).asF())); };
             if (fn == "__expf" || fn == "expf" || fn == "exp") return [a](TS& ts) { return Cell::F(std::exp(a(ts).asF())); };
             if (fn == "__logf" || fn == "logf" || fn == "log") return [a](TS& ts) { return Cell::F(std::log(a(ts).asF())); };
+            if (fn == "exp2f"  || fn == "exp2")  return [a](TS& ts) { return Cell::F(std::exp2(a(ts).asF())); };
+            if (fn == "log2f"  || fn == "log2")  return [a](TS& ts) { return Cell::F(std::log2(a(ts).asF())); };
+            if (fn == "tanhf"  || fn == "tanh")  return [a](TS& ts) { return Cell::F(std::tanh(a(ts).asF())); };
+            if (fn == "erff"   || fn == "erf")   return [a](TS& ts) { return Cell::F(std::erf(a(ts).asF())); };
         } else if (e.args.size() == 2) {
             ExprFn a = compileExpr(*e.args[0]); ExprFn b = compileExpr(*e.args[1]); if (failed) return {};
             if (fn == "fminf" || fn == "fmin") return [a, b](TS& ts) { return Cell::F(std::fmin(a(ts).asF(), b(ts).asF())); };

@@ -128,20 +128,29 @@ Executable Function Pointer (registered in kernelAddressMap_)
 > build dependency (~1 GB; the slow Windows step). It is now **optional**:
 > `-DVGRE_ENABLE_JIT=OFF` builds and runs with **no LLVM** via an in-tree,
 > from-scratch CUDA-C → PTX pipeline, so the whole engine can match the LLVM-free
-> `libvgre_nn` (OpenMP is optional too). A **layered `ExecutionBackend`** replaces
-> the ORC JIT, selectable at runtime (`VGRE_EXEC_BACKEND`) with Tier 0 as the
-> guaranteed fallback (Tier-1b native codegen and the Tier-2 SSA backend are the
-> remaining speed work — see `zeroBurdenRoadmap.md`):
-> - **Tier 0 — SIMD interpreter:** the existing `src/debug/ptx_interpreter.cpp`
->   promoted to a runtime backend (zero codegen; works on every OS/arch).
-> - **Tier 1 — copy-and-patch codegen:** precompiled stencils baked at build
->   time, stitched at runtime (near-native, **no runtime LLVM** — the CPython
->   3.13 JIT technique).
-> - **Tier 2 — own SSA backend (optional):** VGRE-IR → classic passes →
->   linear-scan register allocation → x86-64/AArch64 emitter (MIR/QBE-class).
+> `libvgre_nn` (OpenMP is optional too). A **layered set of execution tiers**
+> replaces the ORC JIT; each kernel runs on the fastest tier that accepts it, with
+> the interpreter as the guaranteed fallback:
+> - **Tier 0 — PTX interpreter:** `src/debug/ptx_interpreter.cpp` promoted to a
+>   runtime backend (zero codegen; works on every OS/arch; the cooperative path for
+>   `__shared__`/`__syncthreads`).
+> - **Tier 1 — compiled closure backend:** the CUDA-C AST lowered once to
+>   slot-based bound closures (`compiled_kernel.cpp`), executed per-thread with no
+>   string parsing — portable (pure C++), LLVM-free, ~30–90× over the interpreter.
+> - **Tier 1b — native x86-64 JIT (DONE, default):** `native_kernel_x64.cpp`, a
+>   from-scratch hand-written machine-code emitter (mmap W^X; no build-time
+>   stencils, no runtime LLVM). Emits real x86-64 for the scalar subset — every
+>   int/float op, comparisons, ternary, casts, locals, gather/scatter, bounded-loop
+>   reductions, flattened *and* true-2-D GEMM, and the full math surface incl.
+>   transcendentals via libm calls. Tried first (`RuntimeEngine::makeBackendKernel`),
+>   falling back to Tier 1 then Tier 0; ~18–118× over Tier 1; differential-fuzzed
+>   bit-exact (`CudaNative`). `VGRE_DISABLE_NATIVE=1` opts out.
+> - **Tier 2 — own SSA backend (optional, remaining):** VGRE-IR → classic passes →
+>   linear-scan register allocation → machine-code emitter (MIR/QBE-class), for peak
+>   throughput on hot kernels.
 >
-> A hand-written CUDA-C lexer/parser → **VGRE-IR** replaces the Clang front-end
-> for the documented CUDA-C subset. See [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
+> A hand-written CUDA-C lexer/parser → AST replaces the Clang front-end for the
+> documented CUDA-C subset. See [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
 
 **Key Files**:
 - `clang_kernel_parser.cpp` - Parse CUDA kernel source and build AST representations

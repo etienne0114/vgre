@@ -48,11 +48,28 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > expression/loop/array/atomic/`__device__`-inlining/struct/struct-array/pointer-arith on Tier-0 vs Tier-1),
 > which caught six real silent-wrong bugs, now fixed.
 >
+> **✅ ACHIEVED (2026-09-22): the native x86-64 JIT (Tier 1b).** A from-scratch
+> hand-written machine-code emitter (`src/compiler/frontend/native_kernel_x64.cpp`)
+> is now the **default** execution tier in the no-LLVM build: it mmaps W^X memory
+> and emits real x86-64 for the scalar CUDA-C subset — every int/float operator
+> (`+ - * / %`, `& | ^ << >>`, unary `-`/`~`), comparisons (as conditions *and*
+> values), ternary select, casts (round + saturating/quantizing), scalar locals +
+> reassignment/compound-assign, general-index gather/scatter, bounded `for`-loop
+> reductions, GEMM in both flattened and **true-2-D** (`threadIdx.y`) form, and the
+> **complete math-function surface** (`sqrtf`/`rsqrtf`/`fabsf`/`fminf`/`fmaxf`/`min`/
+> `max`/`powf` and the transcendentals `expf`/`logf`/`sinf`/`cosf`/`floorf`/`ceilf`
+> via calls into the same libm the compiled tier uses). It is tried first, falling
+> back to the compiled tier then the interpreter, and measures **~18–118× faster**
+> than the compiled tier (`NativePerf`). Every op is held **bit-exact** vs the
+> compiled tier by the `CudaNative` differential-fuzzing suite (float / int / quant
+> / locals / gather / scatter / reduce / 2-D, 800 kernels each). `VGRE_DISABLE_NATIVE=1`
+> opts out.
+>
 > **Remaining on the zero-burden track** (OpenMP is now *optional* too —
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
-> threading requirement): **Tier-1b native copy-and-patch** codegen and the
-> optional **Tier-2 SSA** backend for peak speed; and broader front-end coverage
-> (texture/surface ops; the maskless warp-vote/`__match` variants; templates/recursion).
+> threading requirement): the *optional* **Tier-2 SSA** backend for peak speed on
+> hot kernels; and broader front-end coverage (texture/surface ops; the maskless
+> warp-vote/`__match` variants; templates/recursion).
 > (warp **shuffle**, **vote**, and **reduce** `__reduce_*_sync` are done.)
 > (`__device__` helper inlining and **all** the struct forms
 > the interpreter supports — by-value params, local values, `p->field`, and

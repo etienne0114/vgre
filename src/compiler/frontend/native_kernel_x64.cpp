@@ -169,6 +169,10 @@ inline uint64_t libmDoubleUnary(const std::string& fn) {
     else if (fn == "cosf")   p = std::cos;
     else if (fn == "floorf") p = std::floor;
     else if (fn == "ceilf")  p = std::ceil;
+    else if (fn == "exp2f")  p = std::exp2;
+    else if (fn == "log2f")  p = std::log2;
+    else if (fn == "tanhf")  p = std::tanh;
+    else if (fn == "erff")   p = std::erf;
     return reinterpret_cast<uint64_t>(reinterpret_cast<void*>(p));
 }
 inline uint64_t libmDoubleBinary(const std::string& fn) {

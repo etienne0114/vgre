@@ -135,8 +135,9 @@ static NP gen(int d) {
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
     if (rnd() % 6 == 0) { n->k = Node::Func;
-        static const char* fs[] = {"sqrtf", "fabsf", "rsqrtf", "expf", "logf", "sinf", "cosf", "floorf", "ceilf"};
-        n->name = fs[rnd() % 9]; n->l = gen(d - 1); return n; }
+        static const char* fs[] = {"sqrtf", "fabsf", "rsqrtf", "expf", "logf", "sinf", "cosf",
+                                   "floorf", "ceilf", "exp2f", "log2f", "tanhf", "erff"};
+        n->name = fs[rnd() % 13]; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::Func2;
         static const char* fs[] = {"fmaxf", "fminf", "powf", "max", "min"};
         n->name = fs[rnd() % 5]; n->l = gen(d - 1); n->r = gen(d - 1); return n; }
@@ -598,6 +599,33 @@ int main() {
         }
         if (bad) { std::printf("FAIL: pmm native vs compiled has %d mismatches\n", bad); return 1; }
         std::printf("  pmm (powf + float/int min/max) native == compiled tier (%d elems)\n", N);
+    }
+
+    // Correctness: GELU (both tanh-approx and exact-erf forms) + exp2/log2 — the
+    // activation/normalisation math AI models need, now on the fast tier.
+    {
+        const char* k = "extern \"C\" __global__ void gelu(const float* x, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i];"
+                        " float g1 = 0.5f*v*(1.0f + tanhf(0.7978845608f*(v + 0.044715f*v*v*v)));"
+                        " float g2 = 0.5f*v*(1.0f + erff(v*0.70710678f));"
+                        " out[i] = g1 + g2 + exp2f(v) - log2f(fabsf(v)+1.0f); } }";
+        auto nk = NativeKernel::compileSource(k, "gelu", err);
+        auto ck = CompiledKernel::compileSource(k, "gelu", err);
+        if (!nk || !ck) { std::printf("FAIL: gelu compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> x(N), on(N, -9.f), oc(N, -8.f);
+        for (int i = 0; i < N; ++i) x[i] = randFloat() - 4.f;
+        float* xp = x.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &onp, &N}; if (!nk->launch(g, b, an, 3)) { std::printf("FAIL: gelu native launch\n"); return 1; }
+        void* ac[] = {&xp, &ocp, &N}; if (!ck->launch(g, b, ac, 3)) { std::printf("FAIL: gelu compiled launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) {
+            uint32_t a, c; std::memcpy(&a, &on[i], 4); std::memcpy(&c, &oc[i], 4);
+            const bool nan = (a & 0x7fffffff) > 0x7f800000 && (c & 0x7fffffff) > 0x7f800000;
+            if (a != c && !nan) ++bad;
+        }
+        if (bad) { std::printf("FAIL: gelu native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  gelu (tanhf/erff/exp2f/log2f) native == compiled tier (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an

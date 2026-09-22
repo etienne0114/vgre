@@ -1,12 +1,20 @@
 # VGRE Zero-Burden Roadmap — a self-contained, lightweight engine (0 → 100%)
 
-**Date:** 2026-09-06 (progress updated 2026-09-20) · **Status:** master plan for
-the next major version — **Phases A, B and the threading half of D are done**:
+**Date:** 2026-09-06 (progress updated 2026-09-22) · **Status:** master plan for
+the next major version — **Phases A, B, C and the threading half of D are done**:
 `-DVGRE_ENABLE_JIT=OFF` builds and runs with **no LLVM**, `-DVGRE_ENABLE_OPENMP=OFF`
 builds green on the in-tree thread pool alone, and the from-scratch CUDA-C
 front-end + Tier-0/Tier-1 backends are held bit-exact by a differential-fuzzing
-suite. **What's left:** Phase C (Tier-1b copy-and-patch codegen), the Tier-2 SSA
-backend, and Phase E packaging.
+suite. **Phase C is now delivered too**: a from-scratch **native x86-64 machine-code
+JIT** (`src/compiler/frontend/native_kernel_x64.cpp`) is the default execution tier —
+it emits real machine code for the scalar CUDA-C subset (all int/float arithmetic,
+comparisons, ternary select, casts, scalar locals, general gather/scatter, bounded
+loops, GEMM in both flattened and true-2-D form, and the full math-function surface
+incl. transcendentals via libm calls), is differential-fuzzed bit-exact against the
+Tier-1 compiled backend, and measures **~18–118× faster** than it (saxpy, `NativePerf`).
+Anything outside the subset (e.g. `__syncthreads`) falls back to the compiled tier,
+then the interpreter. **What's left:** the *optional* Tier-2 SSA backend (peak speed
+for hot kernels) and Phase E packaging.
 
 ## Mission (why this project exists)
 
@@ -39,7 +47,9 @@ extends that same discipline to the **whole engine**.
 **Conclusion (achieved):** the only *hard* burden worth eliminating was **LLVM**,
 and the LLVM-free build now runs with **just a C++ compiler** (OpenMP dropped
 too). Everything else already degrades gracefully or is off by default. The
-remaining work is *speed* (native copy-and-patch / SSA codegen), not *burden*.
+*speed* work is now largely done too: the native x86-64 JIT (Tier 1b) is the
+default and runs ~18–118× faster than the portable compiled tier. Only the
+*optional* Tier-2 SSA backend (peak throughput on hot kernels) remains.
 
 ---
 
@@ -79,11 +89,18 @@ universal tier first, faster tiers added without breaking correctness:
   Covers the barrier-free subset; `__shared__`/`__syncthreads` kernels fall back
   to Tier 0 (they need cooperative scheduling). Selected via
   `VGRE_EXEC_BACKEND=compiled`.
-  - *Future Tier-1b — native copy-and-patch.* Bake per-op machine-code
-    **stencils** at build time and stitch+patch them at runtime for near-native
-    speed with no runtime LLVM (CPython 3.13's technique; Copy-and-Patch, Xu &
-    Kjolstad, arXiv:2011.13127). Arch-specific (x86-64/AArch64), so it layers on
-    top of the portable compiled tier rather than replacing it.
+  - **Tier 1b — native x86-64 JIT (DONE).** `native_kernel_x64.cpp`: a from-scratch
+    hand-written machine-code emitter (not CI-baked stencils) that mmaps W^X memory
+    and emits real x86-64 for the scalar subset — all int/float arithmetic, bitwise/
+    shift, comparisons (as conditions and values), ternary select, casts (round +
+    saturate/quantize), scalar locals + reassignment, general-index gather/scatter,
+    bounded `for`-loop reductions, GEMM (flattened *and* true-2-D `threadIdx.y`), and
+    the full math surface (`sqrtf`/`rsqrtf`/`fabsf`/`fminf`/`fmaxf`/`min`/`max`/`powf`
+    + `expf`/`logf`/`sinf`/`cosf`/`floorf`/`ceilf` via libm calls). Arch-specific
+    (x86-64 Linux; other hosts fall back), so it layers on top of the portable
+    compiled tier. **Default tier** in the no-LLVM build; ~18–118× over Tier 1,
+    differential-fuzzed bit-exact. Copy-and-patch stencils were the original plan;
+    the direct emitter reaches the same goal with no build-time stencil step.
 - **Tier 2 — Own SSA optimizing backend (long-term).** A MIR/QBE-class in-tree
   backend: VGRE-IR (SSA) → a few classic passes (const-fold, DCE, GVN, LICM) →
   **linear-scan register allocation** (Poletto & Sarkar, O(n), JIT-grade) → a
@@ -137,12 +154,20 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
    (`supportedCudaSubset.md`; a full flash-attention kernel compiles with no Clang,
    and both tiers are differential-fuzzed bit-exact.)
 
-**Phase C — Fast codegen (copy-and-patch). ⬜ REMAINING.**
-6. Stencil generator run in CI; runtime copy-and-patch emitter for VGRE-IR.
-7. Benchmark Tier 1b vs the old LLVM JIT on the kernel corpus.
-   *Exit:* Tier 1b within a target factor of the LLVM JIT on the corpus.
-   (The portable Tier-1 closure backend already runs ~90× faster than the
-   interpreter and is LLVM-free; 1b is the native-codegen speed step.)
+**Phase C — Fast codegen (native machine code). ✅ DONE.**
+6. Built a from-scratch **native x86-64 JIT** (`native_kernel_x64.cpp`) rather than a
+   CI-baked copy-and-patch stencil set: a hand-written machine-code emitter that
+   mmaps W^X memory and emits real x86-64 for the scalar elementwise/reduction/GEMM
+   subset. LLVM-free, no build-time stencil step. It is wired in as the **default**
+   tier (`RuntimeEngine::makeBackendKernel` / the C-ABI dispatch try it first, then
+   the compiled tier, then the interpreter), with `VGRE_DISABLE_NATIVE=1` to opt out.
+7. Benchmarked (`test_native_perf.cpp`, `NativePerf`): native is **~18–118× faster
+   than the Tier-1 compiled backend** and ~1800–5700× faster than the interpreter on
+   saxpy, and every native op is held **bit-exact** against the compiled tier by the
+   `CudaNative` differential-fuzzing suite (float / int / quant / locals / gather /
+   scatter / reduce / 2-D sweeps, 800 kernels each).
+   *Exit met:* a native-code speed tier exists, is the default, and is far faster than
+   the portable Tier-1 backend — without reintroducing LLVM.
 
 **Phase D — Peak backend (optional) + threading.**
 8. In-tree thread pool becomes the only threading requirement (OpenMP optional). ✅ DONE
@@ -157,7 +182,7 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
 ## 5. Success criteria (global gate)
 
 - VGRE **builds and runs the kernel + model suites with LLVM absent** (Tier 0),
-  and with copy-and-patch for speed (Tier 1).
+  with the compiled closure tier and the native x86-64 JIT (Tier 1 / 1b) for speed.
 - **No new third-party runtime dependency** is introduced (from-scratch only);
   `libvgre_nn` stays LLVM/BLAS/CUDA-free and the whole engine trends that way.
 - Every new component ships with a numerical/behavioural test vs an independent

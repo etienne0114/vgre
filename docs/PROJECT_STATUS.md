@@ -128,10 +128,15 @@ The CUDA-emulation feature surface is complete; remaining gaps are hardware-leve
 constraints where CPU emulation falls back to a high-fidelity proxy or reports
 platform limits. **Superseded (2026-09):** the earlier "all software-emulatable
 features are done" framing predates the **zero-burden program** — making LLVM
-optional (done) and building the CUDA-C→PTX pipeline from scratch, whose own
-remaining work (Tier-1b copy-and-patch codegen, Tier-2 SSA backend, broader
-front-end coverage) is tracked in [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)
-and [`missingFeatures.md`](missingFeatures.md).
+optional (done) and building the CUDA-C→PTX pipeline from scratch. That pipeline's
+own speed step is now done too: a from-scratch **native x86-64 JIT**
+(`native_kernel_x64.cpp`, Tier 1b) is the default execution tier, emitting real
+machine code for the scalar subset (all int/float ops, casts, comparisons, ternary,
+locals, gather/scatter, bounded-loop reductions, flattened + true-2-D GEMM, and the
+full math surface incl. transcendentals) at ~18–118× the compiled tier, held
+bit-exact by the `CudaNative` fuzzers. Remaining zero-burden work (the *optional*
+Tier-2 SSA backend, broader front-end coverage) is tracked in
+[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) and [`missingFeatures.md`](missingFeatures.md).
 
 For the comprehensive, definitive list of boundary conditions (such as physical PMU counters, SASS binary execution, and GPUDirect RDMA), please see [missingFeatures.md](missingFeatures.md).
 
