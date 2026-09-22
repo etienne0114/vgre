@@ -201,7 +201,28 @@ extern "C" __global__ void wreduce(const int* in, int* out, int n) {
                   {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
     }
 
-    if (g_fail == 0) std::printf("PASS: cooperative __shared__/__syncthreads + warp shuffle/vote/reduce on the compiled fiber tier, == interpreter\n");
+    // 7) Block vote: __syncthreads_count / __syncthreads_and / __syncthreads_or.
+    {
+        const int block = 64, blocks = 4, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void bvote(const int* in, int* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int p = in[i] > 0;
+    int c = __syncthreads_count(p);
+    int a = __syncthreads_and(p);
+    int o = __syncthreads_or(p);
+    out[i] = c + a * 1000 + o * 100000;
+})";
+        std::vector<int> in(N); for (int i = 0; i < N; ++i) in[i] = (int)(rnd() % 3) - 1;
+        std::vector<float> outC(N, -1.f), outI(N, -2.f);
+        int n = N; int* ip = in.data();
+        int* ocp = reinterpret_cast<int*>(outC.data()); int* oip = reinterpret_cast<int*>(outI.data());
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("block-vote", "bvote", src, grid, blk,
+                  {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
+    }
+
+    if (g_fail == 0) std::printf("PASS: cooperative shared/barrier + warp shuffle/vote/reduce + block vote on the compiled fiber tier, == interpreter\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -61,9 +61,10 @@ struct TS {
     Cell* shared = nullptr;    // block-wide `__shared__` storage (cooperative kernels)
     void* fiber = nullptr;     // Fiber* while running cooperatively; __syncthreads yields it
     uint32_t lintid = 0;       // linear thread id in the block (for warp = /32, lane = %32)
-    Cell* shflPub = nullptr;   // per-CTA warp-shuffle publish buffer (numWarps*32 Cells)
+    Cell* shflPub = nullptr;   // per-CTA warp-shuffle/vote publish buffer (numWarps*32 Cells)
     Cell* shflSnap = nullptr;  // its snapshot, taken at each warp release
     uint32_t* shflActive = nullptr;  // per-warp mask of lanes that reached this shuffle
+    uint32_t* blkVote = nullptr;     // block-vote result [count, any, all], filled at __syncthreads_* release
 };
 
 using ExprFn = std::function<Cell(TS&)>;
@@ -124,6 +125,18 @@ inline Cell coopShuffle(TS& ts, Cell var, int mode, int laneArg, int width) {
 // __syncwarp(): a warp-scoped barrier (no data exchanged).
 inline void coopSyncwarp(TS& ts) { if (ts.fiber) fiberYield(ts, WAIT_WARP); }
 
+// Block vote (__syncthreads_{count,and,or}) — op 0=count 1=or(any) 2=and(all). Each
+// thread publishes its predicate, then the block barrier release computes the
+// block-wide reduction (see runCoopCTA) which every thread reads back.
+inline Cell coopBlockVote(TS& ts, bool pred, int op) {
+    if (!ts.fiber) return Cell::I(0);
+    ts.shflPub[ts.lintid] = Cell::I(pred ? 1 : 0);
+    fiberYield(ts, WAIT_BLOCK);
+    if (op == 0) return Cell::I((int64_t)ts.blkVote[0]);       // count
+    if (op == 1) return Cell::I(ts.blkVote[1] ? 1 : 0);        // or  → any
+    return Cell::I(ts.blkVote[2] ? 1 : 0);                     // and → all
+}
+
 // Warp vote — op 0=ballot 1=any 2=all. Each lane publishes its predicate; after the
 // warp rendezvous, every lane reads the whole ballot (matches the interpreter).
 inline Cell coopVote(TS& ts, bool pred, uint32_t memMask, int op) {
@@ -167,6 +180,7 @@ inline void coopSyncwarp(TS&) {}
 inline Cell coopShuffle(TS&, Cell var, int, int, int) { return var; }
 inline Cell coopVote(TS&, bool, uint32_t, int) { return Cell::I(0); }
 inline Cell coopReduce(TS&, Cell value, uint32_t, int, bool) { return value; }
+inline Cell coopBlockVote(TS&, bool, int) { return Cell::I(0); }
 #endif
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
@@ -343,12 +357,14 @@ public:
         std::vector<Cell> shared(sharedSlots_ ? sharedSlots_ : 1);
         std::vector<Cell> shflPub(nwarps * 32), shflSnap(nwarps * 32);
         std::vector<uint32_t> shflActive(nwarps, 0);
+        uint32_t blkVote[3] = {0, 0, 0};   // [count, any, all] for __syncthreads_{count,or,and}
         std::vector<TS> ts(bt);
         std::vector<Fiber> fibers(bt);
         ucontext_t sched;
         for (uint32_t t = 0; t < bt; ++t) {
             initTS(ts[t], t, cx, cy, cz, shared.data());
-            ts[t].lintid = t; ts[t].shflPub = shflPub.data(); ts[t].shflSnap = shflSnap.data(); ts[t].shflActive = shflActive.data();
+            ts[t].lintid = t; ts[t].shflPub = shflPub.data(); ts[t].shflSnap = shflSnap.data();
+            ts[t].shflActive = shflActive.data(); ts[t].blkVote = blkVote;
             Fiber& f = fibers[t];
             f.sched = &sched; f.body = &body_; f.ts = &ts[t];
             f.stack.resize(1 << 17);   // 128 KiB per fiber (kernels are shallow)
@@ -384,6 +400,15 @@ public:
             bool allBlock = true;
             for (uint32_t t = 0; t < bt; ++t) if (!fibers[t].done && fibers[t].wait != WAIT_BLOCK) { allBlock = false; break; }
             if (allBlock) {
+                // Compute the block vote over the participants, in case this barrier
+                // is a __syncthreads_{count,and,or} (harmless for a plain __syncthreads).
+                uint32_t count = 0; bool any = false, all = true, anyPart = false;
+                for (uint32_t t = 0; t < bt; ++t) {
+                    if (fibers[t].done || fibers[t].wait != WAIT_BLOCK) continue;
+                    anyPart = true;
+                    if (shflPub[t].asI() != 0) { ++count; any = true; } else all = false;
+                }
+                blkVote[0] = count; blkVote[1] = any ? 1 : 0; blkVote[2] = (anyPart && all) ? 1 : 0;
                 for (uint32_t t = 0; t < bt; ++t) if (!fibers[t].done) fibers[t].wait = WAIT_NONE;
                 released = true;
             } else {
@@ -583,12 +608,11 @@ struct Compiler {
              e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync" ||
              e->str == "__ballot_sync" || e->str == "__any_sync" || e->str == "__all_sync" ||
              e->str == "__reduce_add_sync" || e->str == "__reduce_min_sync" || e->str == "__reduce_max_sync" ||
-             e->str == "__reduce_and_sync" || e->str == "__reduce_or_sync" || e->str == "__reduce_xor_sync")) {
+             e->str == "__reduce_and_sync" || e->str == "__reduce_or_sync" || e->str == "__reduce_xor_sync" ||
+             e->str == "__syncthreads_count" || e->str == "__syncthreads_and" || e->str == "__syncthreads_or")) {
             hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier/warp op
-        } else if (e->kind == Expr::Call &&
-                   (e->str == "__syncthreads_count" || e->str == "__syncthreads_and" ||
-                    e->str == "__syncthreads_or" || e->str == "__activemask")) {
-            fail("block-vote / activemask op needs the interpreter tier");
+        } else if (e->kind == Expr::Call && e->str == "__activemask") {
+            fail("activemask (convergence query) needs the interpreter tier");
         }
         for (auto& a : e->args) scanExprBarriers(a.get());
     }
@@ -788,7 +812,8 @@ struct Compiler {
                      fn == "__shfl_xor_sync") && e.args.size() >= 2) return estimateType(*e.args[1]);
                 if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync" ||
                     fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
-                    fn == "__reduce_and_sync" || fn == "__reduce_or_sync" || fn == "__reduce_xor_sync")
+                    fn == "__reduce_and_sync" || fn == "__reduce_or_sync" || fn == "__reduce_xor_sync" ||
+                    fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or")
                     return scalar(Type::Int);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
                 return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
@@ -1215,6 +1240,13 @@ struct Compiler {
             };
         }
         if (fn == "__syncwarp") return [](TS& ts) -> Cell { coopSyncwarp(ts); return Cell::I(0); };
+        // Block vote: __syncthreads_count / __syncthreads_and / __syncthreads_or(pred).
+        if ((fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or") && e.args.size() == 1) {
+            int op = fn == "__syncthreads_count" ? 0 : fn == "__syncthreads_or" ? 1 : 2;
+            ExprFn pred = compileExpr(*e.args[0]);
+            if (failed) return {};
+            return [pred, op](TS& ts) -> Cell { return coopBlockVote(ts, pred(ts).truthy(), op); };
+        }
         // Warp vote: __ballot_sync / __any_sync / __all_sync(mask, pred).
         if ((fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync") && e.args.size() == 2) {
             int op = fn == "__ballot_sync" ? 0 : fn == "__any_sync" ? 1 : 2;
