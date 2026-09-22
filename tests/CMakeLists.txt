@@ -1441,6 +1441,13 @@ target_link_libraries(test_native_perf PRIVATE vgre Threads::Threads)
 add_test(NAME NativePerf COMMAND test_native_perf)
 set_tests_properties(NativePerf PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Cooperative __shared__/__syncthreads kernels on the compiled tier's fiber
+# executor, checked bit-exact against the interpreter (block reduction + tiled GEMM).
+add_executable(test_cuda_coop compiler/test_cuda_coop.cpp)
+target_link_libraries(test_cuda_coop PRIVATE vgre Threads::Threads)
+add_test(NAME CudaCoop COMMAND test_cuda_coop)
+set_tests_properties(CudaCoop PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

@@ -66,8 +66,12 @@ bool backendModeActive() {
 bool tryRegisterBackendKernel(const std::string& name, const std::string& source, uint64_t& outId) {
     if (!backendModeActive()) return false;
     const std::string mode = modeName();
-    const bool wantsCompiled = (mode == "compiled" || mode == "cp");
-    const bool wantsNative = wantsCompiled || mode == "native" || mode == "nv";
+    // The tier ladder is uniform: native → compiled → interpreter. "native"/"nv"
+    // and "compiled"/"cp" both walk the whole ladder (they only document intent);
+    // e.g. a __syncthreads kernel is rejected by native but taken by the compiled
+    // fiber tier before the interpreter, in every mode.
+    const bool wantsNative = (mode == "compiled" || mode == "cp" || mode == "native" || mode == "nv");
+    const bool wantsCompiled = wantsNative;
     Entry entry;
 
     // Native x86-64 JIT (fastest): tried first when the native/compiled tier is

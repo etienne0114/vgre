@@ -20,6 +20,17 @@
 #include <unordered_map>
 #include <vector>
 
+// Cooperative (`__shared__`/`__syncthreads`) kernels run each CUDA thread as a
+// fiber (ucontext) and a block scheduler releases the barrier once every thread
+// reaches it — see the cooperative launch path below. POSIX-only; on other hosts
+// such kernels fall back to the interpreter tier as before.
+#if defined(__unix__) || defined(__APPLE__)
+#define VGRE_COOP_FIBERS 1
+#include <ucontext.h>
+#else
+#define VGRE_COOP_FIBERS 0
+#endif
+
 namespace vgre {
 namespace compiler {
 namespace frontend {
@@ -47,10 +58,43 @@ struct TS {
     uint32_t ntid[3] = {1, 1, 1}, nctaid[3] = {1, 1, 1};
     void* const* args = nullptr;
     bool returned = false;
+    Cell* shared = nullptr;    // block-wide `__shared__` storage (cooperative kernels)
+    void* fiber = nullptr;     // Fiber* while running cooperatively; __syncthreads yields it
 };
 
 using ExprFn = std::function<Cell(TS&)>;
 using StmtFn = std::function<void(TS&)>;
+
+#if VGRE_COOP_FIBERS
+// One CUDA thread as a fiber: its own stack + context; the block scheduler round-
+// robins them, releasing __syncthreads once every live fiber has reached it.
+struct Fiber {
+    ucontext_t ctx;
+    ucontext_t* sched = nullptr;
+    std::vector<char> stack;
+    const std::vector<StmtFn>* body = nullptr;
+    TS* ts = nullptr;
+    bool done = false;
+    bool atBarrier = false;
+};
+// Set by the scheduler just before a fiber's FIRST resume so the trampoline (which
+// takes no args under makecontext) can find its work. Thread-local: one worker per CTA.
+thread_local Fiber* g_startFiber = nullptr;
+inline void fiberTrampoline() {
+    Fiber* f = g_startFiber;
+    for (const StmtFn& s : *f->body) { s(*f->ts); if (f->ts->returned) break; }
+    f->done = true;   // returns to uc_link (the scheduler)
+}
+// __syncthreads(): mark this fiber arrived and yield back to the scheduler.
+inline void coopBarrier(TS& ts) {
+    if (!ts.fiber) return;
+    Fiber* f = static_cast<Fiber*>(ts.fiber);
+    f->atBarrier = true;
+    swapcontext(&f->ctx, f->sched);
+}
+#else
+inline void coopBarrier(TS&) {}
+#endif
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
 // compiled tier runs a grid's CTAs on parallel OS threads (see
@@ -173,24 +217,32 @@ public:
         const uint32_t gt = grid.x * grid.y * grid.z;
         const uint32_t bt = block.x * block.y * block.z;
 
-        // One CTA's worth of work: run all its threads sequentially. CTAs on the
-        // compiled tier are barrier-free (kernels that need __syncthreads() defer
-        // to the Tier-0 interpreter), so distinct CTAs are independent and safe to
-        // run concurrently — the only cross-CTA sharing is atomicAdd, which is a
-        // real atomic RMW (see atomicAddInt/atomicAddFloat).
+        auto initTS = [&](TS& ts, uint32_t t, uint32_t cx, uint32_t cy, uint32_t cz, Cell* shared) {
+            ts.regs.resize(numSlots_);
+            ts.args = args;
+            ts.tid[0] = t % block.x; ts.tid[1] = (t / block.x) % block.y; ts.tid[2] = t / (block.x * block.y);
+            ts.ctaid[0] = cx; ts.ctaid[1] = cy; ts.ctaid[2] = cz;
+            ts.ntid[0] = block.x; ts.ntid[1] = block.y; ts.ntid[2] = block.z;
+            ts.nctaid[0] = grid.x; ts.nctaid[1] = grid.y; ts.nctaid[2] = grid.z;
+            ts.shared = shared;
+            loadParams(ts);
+        };
+
+        // One CTA's worth of work. Barrier-free kernels run each thread to
+        // completion in turn (independent, so distinct CTAs run concurrently — the
+        // only cross-CTA sharing is atomicAdd, a real atomic RMW). Cooperative
+        // kernels (`__shared__`/`__syncthreads`) instead run each thread as a fiber
+        // that yields at the barrier; a block scheduler releases them together.
         auto runCTA = [&](uint32_t cta) {
             uint32_t cx = cta % grid.x, cy = (cta / grid.x) % grid.y, cz = cta / (grid.x * grid.y);
-            for (uint32_t t = 0; t < bt; ++t) {
-                TS ts;
-                ts.regs.resize(numSlots_);
-                ts.args = args;
-                ts.tid[0] = t % block.x; ts.tid[1] = (t / block.x) % block.y; ts.tid[2] = t / (block.x * block.y);
-                ts.ctaid[0] = cx; ts.ctaid[1] = cy; ts.ctaid[2] = cz;
-                ts.ntid[0] = block.x; ts.ntid[1] = block.y; ts.ntid[2] = block.z;
-                ts.nctaid[0] = grid.x; ts.nctaid[1] = grid.y; ts.nctaid[2] = grid.z;
-                loadParams(ts);
-                for (auto& s : body_) { s(ts); if (ts.returned) break; }
+            if (!coop_) {
+                for (uint32_t t = 0; t < bt; ++t) {
+                    TS ts; initTS(ts, t, cx, cy, cz, nullptr);
+                    for (auto& s : body_) { s(ts); if (ts.returned) break; }
+                }
+                return;
             }
+            runCoopCTA(cta, cx, cy, cz, bt, initTS);
         };
 
         auto& pool = xla::ThreadPool::global();
@@ -207,10 +259,54 @@ public:
         return true;
     }
 
+    // Cooperative CTA execution: one fiber per thread; a round-robin scheduler
+    // resumes each fiber until it reaches __syncthreads() (or finishes), then
+    // releases them all together — correct for barriers anywhere (loops, ifs),
+    // no kernel transformation. Threads share one block-wide `shared` buffer.
+    template <class Init>
+    void runCoopCTA(uint32_t /*cta*/, uint32_t cx, uint32_t cy, uint32_t cz, uint32_t bt, Init&& initTS) {
+#if VGRE_COOP_FIBERS
+        std::vector<Cell> shared(sharedSlots_ ? sharedSlots_ : 1);
+        std::vector<TS> ts(bt);
+        std::vector<Fiber> fibers(bt);
+        ucontext_t sched;
+        for (uint32_t t = 0; t < bt; ++t) {
+            initTS(ts[t], t, cx, cy, cz, shared.data());
+            Fiber& f = fibers[t];
+            f.sched = &sched; f.body = &body_; f.ts = &ts[t];
+            f.stack.resize(1 << 17);   // 128 KiB per fiber (kernels are shallow)
+            getcontext(&f.ctx);
+            f.ctx.uc_stack.ss_sp = f.stack.data();
+            f.ctx.uc_stack.ss_size = f.stack.size();
+            f.ctx.uc_link = &sched;    // returning from the body lands back in the scheduler
+            makecontext(&f.ctx, fiberTrampoline, 0);
+            ts[t].fiber = &f;
+        }
+        // Drive to completion. Each pass advances every runnable fiber by one
+        // barrier segment; when all non-done fibers are parked at the barrier we
+        // clear the flags (release the barrier) and go again.
+        for (;;) {
+            bool allDone = true;
+            for (uint32_t t = 0; t < bt; ++t) {
+                if (fibers[t].done || fibers[t].atBarrier) { if (!fibers[t].done) allDone = false; continue; }
+                allDone = false;
+                g_startFiber = &fibers[t];
+                swapcontext(&sched, &fibers[t].ctx);   // runs until barrier or done
+            }
+            if (allDone) break;
+            for (uint32_t t = 0; t < bt; ++t) fibers[t].atBarrier = false;   // release the barrier
+        }
+#else
+        (void)cx; (void)cy; (void)cz; (void)bt; (void)initTS;   // no fibers → cooperative path unused
+#endif
+    }
+
     // Populated by Compiler (friend-like via public setters kept minimal).
     std::vector<ParamInfo> params_;
     std::vector<StmtFn> body_;
     size_t numSlots_ = 0;
+    size_t sharedSlots_ = 0;   // block-wide __shared__ Cell count
+    bool coop_ = false;        // uses __shared__/__syncthreads → fiber scheduler
 
     void loadParams(TS& ts) const {
         for (size_t k = 0; k < params_.size(); ++k) {
@@ -234,9 +330,11 @@ struct Compiler {
     // run of Cell slots [base, base+size). Indexed by slot, not by memory address
     // — private to the thread, so no barriers/atomics are needed and these stay
     // on the fast tier. `dims` are the per-dimension sizes for row-major flatten.
-    struct LocalArr { size_t base; Type elem; int size; std::vector<int> dims; };
+    struct LocalArr { size_t base; Type elem; int size; std::vector<int> dims; bool isShared = false; };
     std::unordered_map<std::string, LocalArr> arrays;
     size_t nextSlot = 0;
+    size_t sharedNext = 0;        // block-wide `__shared__` element count (separate address space)
+    bool hasBarrier = false;      // kernel calls __syncthreads() → needs cooperative execution
     bool failed = false;
     std::string err;
     int line = 0, col = 0;
@@ -338,14 +436,25 @@ struct Compiler {
     void scan(const Stmt& s) {
         if (failed) return;
         if (s.kind == Stmt::VarDecl) {
-            if (s.isShared) { fail("__shared__ needs the interpreter tier"); return; }
+            if (s.isShared) {
+                // `__shared__` array → block-wide storage (its own address space).
+                // A dynamic `extern __shared__` (arraySize 0) or scalar shared still
+                // defers to the interpreter.
+                if (s.arraySize <= 0 || s.isExternShared) { fail("__shared__ (dynamic/scalar) needs the interpreter tier"); return; }
+                size_t base = sharedNext;
+                sharedNext += (size_t)s.arraySize;
+                std::vector<int> dims = s.arrayDims.empty()
+                                            ? std::vector<int>{s.arraySize} : s.arrayDims;
+                arrays[s.name] = LocalArr{base, s.type, s.arraySize, std::move(dims), true};
+                return;
+            }
             if (s.arraySize > 0) {
                 // Reserve a contiguous slot run for the per-thread local array.
                 size_t base = nextSlot;
                 nextSlot += (size_t)s.arraySize;
                 std::vector<int> dims = s.arrayDims.empty()
                                             ? std::vector<int>{s.arraySize} : s.arrayDims;
-                arrays[s.name] = LocalArr{base, s.type, s.arraySize, std::move(dims)};
+                arrays[s.name] = LocalArr{base, s.type, s.arraySize, std::move(dims), false};
                 return;
             }
             if (s.type.isStruct()) { declareStructVar(s.name, s.type); return; }   // local struct value
@@ -360,10 +469,15 @@ struct Compiler {
     }
     void scanExprBarriers(const Expr* e) {
         if (!e || failed) return;
-        if (e->kind == Expr::Call &&
-            (e->str == "__syncthreads" || e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
-             e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync"))
-            fail("warp-cooperative op needs the interpreter tier");   // __syncthreads / __shfl_*
+        if (e->kind == Expr::Call && e->str == "__syncthreads") {
+            hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier
+        } else if (e->kind == Expr::Call &&
+                   (e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
+                    e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync" ||
+                    e->str == "__syncthreads_count" || e->str == "__syncthreads_and" ||
+                    e->str == "__syncthreads_or")) {
+            fail("warp-cooperative op needs the interpreter tier");   // __shfl_* / voting barriers
+        }
         for (auto& a : e->args) scanExprBarriers(a.get());
     }
 
@@ -580,11 +694,11 @@ struct Compiler {
         ExprFn flat;
         if (const LocalArr* la = localArrayAccess(e, flat)) {  // acc[i] / t[i][j] — slot access
             if (failed) return {};
-            size_t base = la->base; int sz = la->size;
-            return [base, flat, sz](TS& ts) -> Cell {
+            size_t base = la->base; int sz = la->size; bool sh = la->isShared;
+            return [base, flat, sz, sh](TS& ts) -> Cell {
                 int64_t i = flat(ts).asI();
                 if (i < 0 || i >= sz) return Cell::I(0);     // OOB → 0 (no fault)
-                return ts.regs[base + (size_t)i];
+                return (sh ? ts.shared : ts.regs.data())[base + (size_t)i];
             };
         }
         ExprFn base = compileExpr(*e.args[0]);
@@ -609,11 +723,11 @@ struct Compiler {
         ExprFn flat;
         if (const LocalArr* la = localArrayAccess(lhs, flat)) {  // acc[i] / t[i][j] = v — slot access
             if (failed) return {};
-            size_t base = la->base; int sz = la->size; Type pt = la->elem;
-            return [base, flat, value, sz, pt](TS& ts) {
+            size_t base = la->base; int sz = la->size; Type pt = la->elem; bool sh = la->isShared;
+            return [base, flat, value, sz, pt, sh](TS& ts) {
                 int64_t i = flat(ts).asI();
                 if (i < 0 || i >= sz) return;                // OOB → drop (no fault)
-                ts.regs[base + (size_t)i] = coerce(value(ts), pt);
+                (sh ? ts.shared : ts.regs.data())[base + (size_t)i] = coerce(value(ts), pt);
             };
         }
         ExprFn base = compileExpr(*lhs.args[0]);
@@ -880,12 +994,15 @@ struct Compiler {
         if (const LocalArr* la = localArrayAccess(index, flat)) {  // atomicAdd(&acc[i], v) — slot RMW
             ExprFn val = compileExpr(*e.args[1]);
             if (failed) return {};
-            size_t base = la->base; int sz = la->size; Type pt = la->elem;
-            return [base, flat, val, sz, pt](TS& ts) -> Cell {
+            size_t base = la->base; int sz = la->size; Type pt = la->elem; bool sh = la->isShared;
+            return [base, flat, val, sz, pt, sh](TS& ts) -> Cell {
                 int64_t i = flat(ts).asI();
                 if (i < 0 || i >= sz) return Cell::I(0);
-                Cell old = ts.regs[base + (size_t)i];        // private to the thread → plain RMW
-                ts.regs[base + (size_t)i] = coerce(binop("+", old, val(ts)), pt);
+                // Per-thread slot, or block-shared: either way fibers are cooperative
+                // (one runs at a time, never mid-RMW), so a plain RMW is atomic here.
+                Cell* store = sh ? ts.shared : ts.regs.data();
+                Cell old = store[base + (size_t)i];
+                store[base + (size_t)i] = coerce(binop("+", old, val(ts)), pt);
                 return old;
             };
         }
@@ -961,6 +1078,7 @@ struct Compiler {
 
     ExprFn compileCall(const Expr& e) {
         const std::string& fn = e.str;
+        if (fn == "__syncthreads") return [](TS& ts) -> Cell { coopBarrier(ts); return Cell::I(0); };
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         auto dfit = deviceFns.find(fn);
         if (dfit != deviceFns.end()) return inlineDeviceCall(*dfit->second, e);   // user __device__ helper
@@ -1123,6 +1241,11 @@ static std::unique_ptr<CompiledKernel> finishCompile(Compiler& c, const Kernel& 
         impl->body_.push_back(std::move(f));
     }
     impl->numSlots_ = c.nextSlot;
+    impl->sharedSlots_ = c.sharedNext;
+    impl->coop_ = (c.sharedNext > 0 || c.hasBarrier);
+#if !VGRE_COOP_FIBERS
+    if (impl->coop_) { err = "__shared__/__syncthreads needs the interpreter tier on this host"; return nullptr; }
+#endif
     return impl;
 }
 

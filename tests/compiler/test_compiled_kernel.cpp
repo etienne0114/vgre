@@ -83,7 +83,9 @@ int main() {
         CHECK(compMs < interpMs, "compiled tier is faster than the PTX interpreter");
     }
 
-    // ── Barrier kernels are rejected (caller falls back to the interpreter) ───
+    // ── Barrier kernels now run on the compiled tier's fiber executor ─────────
+    // (they used to defer to the interpreter; __shared__ + __syncthreads are now
+    //  supported cooperatively — see test_cuda_coop.cpp for the vs-interpreter check).
     const char* kBarrier = R"(
 extern "C" __global__ void red(const float* in, float* out, int n) {
     __shared__ float s[128];
@@ -92,11 +94,20 @@ extern "C" __global__ void red(const float* in, float* out, int n) {
     __syncthreads();
     if (t == 0) out[0] = s[0];
 })";
-    auto bad = CompiledKernel::compileSource(kBarrier, "red", err);
-    CHECK(bad == nullptr, "compiled tier rejects __shared__/__syncthreads (falls back to interpreter)");
+    auto coop = CompiledKernel::compileSource(kBarrier, "red", err);
+    CHECK(coop != nullptr, "compiled tier now compiles __shared__/__syncthreads (fiber executor)");
+    if (coop) {
+        std::vector<float> in(128), out(1, -1.0f);
+        for (int i = 0; i < 128; ++i) in[i] = (float)i;
+        float* ip = in.data(); float* op = out.data(); int n = 128;
+        void* args[] = {&ip, &op, &n};
+        vgre::compiler::frontend::Extent g{1, 1, 1}, b{128, 1, 1};
+        CHECK(coop->launch(g, b, args, 3), "cooperative red launches");
+        CHECK(out[0] == 0.0f, "cooperative red: out[0] == s[0] == in[0]");
+    }
 
     if (g_fail == 0)
-        std::printf("PASS: Tier-1 compiled backend — correct, faster than interpreter, clean fallback\n");
+        std::printf("PASS: Tier-1 compiled backend — correct, faster than interpreter, cooperative barriers\n");
     else
         std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;

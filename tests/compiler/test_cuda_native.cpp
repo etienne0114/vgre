@@ -628,6 +628,54 @@ int main() {
         std::printf("  gelu (tanhf/erff/exp2f/log2f) native == compiled tier (%d elems)\n", N);
     }
 
+    // Correctness: a real per-row SOFTMAX (max-reduce, exp-sum, normalize — three
+    // sequential loops + locals + general index) — the attention building block.
+    {
+        const int rows = 64, cols = 16;
+        const char* k = "extern \"C\" __global__ void softmax(const float* x, float* out, int rows, int cols){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<rows){"
+                        " float m=-1.0e30f; for(int j=0;j<cols;++j){ m = fmaxf(m, x[i*cols+j]); }"
+                        " float s=0.0f;     for(int j=0;j<cols;++j){ s = s + expf(x[i*cols+j]-m); }"
+                        " for(int j=0;j<cols;++j){ out[i*cols+j] = expf(x[i*cols+j]-m)/s; } } }";
+        auto nk = NativeKernel::compileSource(k, "softmax", err);
+        auto ck = CompiledKernel::compileSource(k, "softmax", err);
+        if (!nk) { std::printf("FAIL: softmax NOT native-eligible: %s\n", err.c_str()); return 1; }
+        if (!ck) { std::printf("FAIL: softmax compiled: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(rows * cols), on(rows * cols, -9.f), oc(rows * cols, -8.f);
+        for (int t = 0; t < rows * cols; ++t) x[t] = randFloat() - 4.f;
+        float* xp = x.data(); float* onp = on.data(); float* ocp = oc.data(); int rv = rows, cv = cols;
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &onp, &rv, &cv}; if (!nk->launch(g, b, an, 4)) { std::printf("FAIL: softmax native launch\n"); return 1; }
+        void* ac[] = {&xp, &ocp, &rv, &cv}; if (!ck->launch(g, b, ac, 4)) { std::printf("FAIL: softmax compiled launch\n"); return 1; }
+        int bad = 0; for (int t = 0; t < rows * cols; ++t) if (on[t] != oc[t]) ++bad;
+        if (bad) { std::printf("FAIL: softmax native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  softmax (3-loop attention row) native == compiled tier (%dx%d)\n", rows, cols);
+    }
+
+    // Correctness: a real per-row LAYERNORM (mean, variance, rsqrt normalize).
+    {
+        const int rows = 64, cols = 16;
+        const char* k = "extern \"C\" __global__ void layernorm(const float* x, float* out, int rows, int cols){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<rows){"
+                        " float mean=0.0f; for(int j=0;j<cols;++j){ mean = mean + x[i*cols+j]; } mean = mean/(float)cols;"
+                        " float var=0.0f; for(int j=0;j<cols;++j){ var = var + (x[i*cols+j]-mean)*(x[i*cols+j]-mean); } var = var/(float)cols;"
+                        " float inv = rsqrtf(var + 1.0e-5f);"
+                        " for(int j=0;j<cols;++j){ out[i*cols+j] = (x[i*cols+j]-mean)*inv; } } }";
+        auto nk = NativeKernel::compileSource(k, "layernorm", err);
+        auto ck = CompiledKernel::compileSource(k, "layernorm", err);
+        if (!nk) { std::printf("FAIL: layernorm NOT native-eligible: %s\n", err.c_str()); return 1; }
+        if (!ck) { std::printf("FAIL: layernorm compiled: %s\n", err.c_str()); return 1; }
+        std::vector<float> x(rows * cols), on(rows * cols, -9.f), oc(rows * cols, -8.f);
+        for (int t = 0; t < rows * cols; ++t) x[t] = randFloat() - 4.f;
+        float* xp = x.data(); float* onp = on.data(); float* ocp = oc.data(); int rv = rows, cv = cols;
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &onp, &rv, &cv}; if (!nk->launch(g, b, an, 4)) { std::printf("FAIL: layernorm native launch\n"); return 1; }
+        void* ac[] = {&xp, &ocp, &rv, &cv}; if (!ck->launch(g, b, ac, 4)) { std::printf("FAIL: layernorm compiled launch\n"); return 1; }
+        int bad = 0; for (int t = 0; t < rows * cols; ++t) if (on[t] != oc[t]) ++bad;
+        if (bad) { std::printf("FAIL: layernorm native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  layernorm (mean/var/rsqrt row) native == compiled tier (%dx%d)\n", rows, cols);
+    }
+
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an
     // accumulator and general indexing a[i*K+j] * b[j].
     {

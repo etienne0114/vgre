@@ -99,12 +99,14 @@ int main() {
     if (st >= 0) CHECK(st == 2, "saxpy landed on the native x86-64 JIT tier");
     std::printf("  saxpy: maxErr=%.3e  tier=%d (2=native)\n", maxErr, st);
 
-    // Fallback: a __syncthreads kernel must NOT take the native tier.
+    // Fallback: a __syncthreads kernel must NOT take the native tier — it now
+    // lands on the Tier-1 compiled fiber executor (tier 1), not the native JIT
+    // (tier 2), and no longer needs the interpreter (tier 0).
     uint64_t sid = 0;
     CHECK(vgre_register_kernel("smem", kSmem, &sid) == VGRE_SUCCESS, "register smem");
     int tt = tierOf("smem", sid);
-    if (tt >= 0) CHECK(tt == 0, "smem (__syncthreads) fell back to the interpreter tier");
-    std::printf("  smem : tier=%d (0=interpreter fallback)\n", tt);
+    if (tt >= 0) CHECK(tt == 1, "smem (__syncthreads) runs on the compiled fiber tier (not native)");
+    std::printf("  smem : tier=%d (1=compiled fiber, cooperative)\n", tt);
 
     vgre_free(dx); vgre_free(dy);
     vgre_shutdown();
