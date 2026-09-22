@@ -84,6 +84,21 @@ static std::string genReduceExpr(int d) {
     return "(" + genReduceExpr(d - 1) + ops[rnd() % 3] + genReduceExpr(d - 1) + ")";
 }
 
+// A random float expression for a true-2-D kernel: leaves are A[row*W+col],
+// B[row*W+col], the scalar `a`, and constants.
+static std::string gen2dExpr(int d) {
+    if (d <= 0 || rnd() % 3 == 0) {
+        int w = rnd() % 4;
+        if (w == 0) return "A[row*W+col]";
+        if (w == 1) return "B[row*W+col]";
+        if (w == 2) return "a";
+        char b[40]; std::snprintf(b, sizeof b, "(%.9ef)", (double)randFloat()); return b;
+    }
+    if (rnd() % 5 == 0) return "(-" + gen2dExpr(d - 1) + ")";
+    static const char* ops[] = {"+", "-", "*", "/"};
+    return "(" + gen2dExpr(d - 1) + ops[rnd() % 4] + gen2dExpr(d - 1) + ")";
+}
+
 // A random float expression over x[i], y[i], a/b, float consts AND the first
 // `nloc` scalar locals t0..t{nloc-1}. Rendered directly to a string.
 static std::string genLocExpr(int d, int nloc) {
@@ -122,7 +137,9 @@ static NP gen(int d) {
     if (rnd() % 6 == 0) { n->k = Node::Func;
         static const char* fs[] = {"sqrtf", "fabsf", "rsqrtf", "expf", "logf", "sinf", "cosf", "floorf", "ceilf"};
         n->name = fs[rnd() % 9]; n->l = gen(d - 1); return n; }
-    if (rnd() % 6 == 0) { n->k = Node::Func2; n->name = (rnd() & 1) ? "fmaxf" : "fminf"; n->l = gen(d - 1); n->r = gen(d - 1); return n; }
+    if (rnd() % 6 == 0) { n->k = Node::Func2;
+        static const char* fs[] = {"fmaxf", "fminf", "powf", "max", "min"};
+        n->name = fs[rnd() % 5]; n->l = gen(d - 1); n->r = gen(d - 1); return n; }
     if (rnd() % 7 == 0) {   // a bare float comparison → 1.0f / 0.0f
         n->k = Node::Cmp;
         static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
@@ -172,6 +189,7 @@ static NP genI(int d) {
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = genI(d - 1); return n; }              // -x
     if (rnd() % 9 == 0) { n->k = Node::Neg; n->op = "~"; n->l = genI(d - 1); return n; } // ~x
+    if (rnd() % 8 == 0) { n->k = Node::Func2; n->name = (rnd() & 1) ? "min" : "max"; n->l = genI(d - 1); n->r = genI(d - 1); return n; }  // int min/max
     if (rnd() % 7 == 0) {   // a bare int comparison → 0 / 1
         n->k = Node::Cmp;
         static const char* cmps[] = {"<", "<=", ">", ">=", "==", "!="};
@@ -194,6 +212,7 @@ static std::string srcI(const Node* n) {
         case Node::Neg:    return "(" + (n->op.empty() ? std::string("-") : n->op) + srcI(n->l.get()) + ")";
         case Node::Bin:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
         case Node::Cmp:    return "(" + srcI(n->l.get()) + n->op + srcI(n->r.get()) + ")";
+        case Node::Func2:  return n->name + "(" + srcI(n->l.get()) + "," + srcI(n->r.get()) + ")";
         default:           break;   // Tern isn't generated for the int sweep
     }
     return "0";
@@ -403,6 +422,29 @@ int main() {
         std::printf("  gemm (naive matmul %dx%dx%d, general bound + / %% + general store) native == compiled tier\n", M, Nn, K);
     }
 
+    // Correctness: a TRUE 2-D kernel — row from threadIdx.y/blockIdx.y, compound
+    // guard `col<W && row<H`, launched over a 2-D grid. A per-row-col dot product.
+    {
+        const int W = 16, H = 16, K = 8;
+        const char* k = "extern \"C\" __global__ void gemm2d(const float* A, const float* B, float* C, int W, int H, int K){"
+                        " int col=blockIdx.x*blockDim.x+threadIdx.x; int row=blockIdx.y*blockDim.y+threadIdx.y;"
+                        " if(col < W && row < H){ float acc=0.0f; for(int k=0;k<K;++k){ acc = acc + A[row*K+k]*B[k*W+col]; } C[row*W+col]=acc; } }";
+        auto nk = NativeKernel::compileSource(k, "gemm2d", err);
+        auto ck = CompiledKernel::compileSource(k, "gemm2d", err);
+        if (!nk || !ck) { std::printf("FAIL: gemm2d compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> A(H * K), B(K * W), Cn(H * W, -1.f), Cc(H * W, -2.f);
+        for (int t = 0; t < H * K; ++t) A[t] = randFloat();
+        for (int t = 0; t < K * W; ++t) B[t] = randFloat();
+        float* Ap = A.data(); float* Bp = B.data(); float* Cnp = Cn.data(); float* Ccp = Cc.data();
+        int Wv = W, Hv = H, Kv = K;
+        Extent g{2, 2, 1}, bl{8, 8, 1};   // 2-D grid/block → 16x16 threads
+        void* an[] = {&Ap, &Bp, &Cnp, &Wv, &Hv, &Kv}; if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: gemm2d native launch\n"); return 1; }
+        void* ac[] = {&Ap, &Bp, &Ccp, &Wv, &Hv, &Kv}; if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: gemm2d compiled launch\n"); return 1; }
+        int bad = 0; for (int t = 0; t < H * W; ++t) if (Cn[t] != Cc[t]) ++bad;
+        if (bad) { std::printf("FAIL: gemm2d native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  gemm2d (TRUE 2-D: threadIdx.y + compound guard + 2-D launch) native == compiled tier (%dx%d)\n", H, W);
+    }
+
     // Correctness: general array indexing — a reverse gather x[n-1-i].
     {
         const char* k = "extern \"C\" __global__ void rev(const float* x, const float* y, float* out, int n){"
@@ -531,6 +573,31 @@ int main() {
         }
         if (bad) { std::printf("FAIL: trig native vs compiled has %d mismatches\n", bad); return 1; }
         std::printf("  trig (expf/logf/sinf/cosf/floorf/ceilf via libm calls) native == compiled tier (%d elems)\n", N);
+    }
+
+    // Correctness: powf (2-arg libm call) + float/int min/max vs the compiled tier.
+    {
+        const char* k = "extern \"C\" __global__ void pmm(const float* x, const float* y, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){"
+                        " int a=(int)x[i]; int b=(int)y[i];"
+                        " out[i] = powf(fabsf(x[i])+0.25f, y[i]) + max(x[i],y[i]) + min(x[i],3.0f) + (float)(min(a,b)+max(a,b*2)); } }";
+        auto nk = NativeKernel::compileSource(k, "pmm", err);
+        auto ck = CompiledKernel::compileSource(k, "pmm", err);
+        if (!nk || !ck) { std::printf("FAIL: pmm compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> x(N), y(N), on(N, -9.f), oc(N, -8.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat() - 4.f; y[i] = randFloat() - 4.f; }
+        float* xp = x.data(); float* yp = y.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &yp, &onp, &N}; if (!nk->launch(g, b, an, 4)) { std::printf("FAIL: pmm native launch\n"); return 1; }
+        void* ac[] = {&xp, &yp, &ocp, &N}; if (!ck->launch(g, b, ac, 4)) { std::printf("FAIL: pmm compiled launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) {
+            uint32_t a, c; std::memcpy(&a, &on[i], 4); std::memcpy(&c, &oc[i], 4);
+            const bool nan = (a & 0x7fffffff) > 0x7f800000 && (c & 0x7fffffff) > 0x7f800000;
+            if (a != c && !nan) ++bad;
+        }
+        if (bad) { std::printf("FAIL: pmm native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  pmm (powf + float/int min/max) native == compiled tier (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an
@@ -807,6 +874,45 @@ int main() {
     std::printf("native scatter differential: %d elementwise kernels, %d mismatches\n", sboth, smis);
     if (sboth < 200) { std::printf("FAIL: too few native scatter kernels compiled (%d)\n", sboth); return 1; }
     if (smis) { std::printf("FAIL: %d native/compiled scatter mismatches\n", smis); return 1; }
+
+    // Differential fuzz: TRUE 2-D elementwise kernels (row from threadIdx.y, compound
+    // guard, 2-D launch, general store C[row*W+col]), native vs compiled tier.
+    const int W2 = 16, H2 = 16;
+    int dboth = 0, dmis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        std::string expr = gen2dExpr(rint(1, 4));
+        std::string k =
+            "extern \"C\" __global__ void fz(const float* A, const float* B, float a, float* C, int W, int H) {\n"
+            "  int col = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  int row = blockIdx.y*blockDim.y+threadIdx.y;\n"
+            "  if (col < W && row < H) { C[row*W+col] = (" + expr + "); }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++dboth;
+
+        float a = randFloat();
+        std::vector<float> A(H2 * W2), B(H2 * W2), Cn(H2 * W2, -1.f), Cc(H2 * W2, -2.f);
+        for (int t = 0; t < H2 * W2; ++t) { A[t] = randFloat(); B[t] = randFloat(); }
+        float* Ap = A.data(); float* Bp = B.data(); float* Cnp = Cn.data(); float* Ccp = Cc.data();
+        int Wv = W2, Hv = H2;
+        Extent g{2, 2, 1}, bl{8, 8, 1};
+        void* an[] = {&Ap, &Bp, &a, &Cnp, &Wv, &Hv};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native 2d launch\n  %s\n", k.c_str()); ++dmis; if (dmis > 8) break; continue; }
+        void* ac[] = {&Ap, &Bp, &a, &Ccp, &Wv, &Hv};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled 2d launch\n"); ++dmis; if (dmis > 8) break; continue; }
+        for (int t = 0; t < H2 * W2; ++t) {
+            uint32_t bn, bc; std::memcpy(&bn, &Cn[t], 4); std::memcpy(&bc, &Cc[t], 4);
+            const bool nan = (bn & 0x7fffffff) > 0x7f800000 && (bc & 0x7fffffff) > 0x7f800000;
+            if (Cn[t] != Cc[t] && !nan) { ++dmis; break; }
+        }
+        if (dmis > 8) break;
+    }
+    std::printf("native 2-D differential: %d kernels, %d mismatches\n", dboth, dmis);
+    if (dboth < 200) { std::printf("FAIL: too few native 2-D kernels compiled (%d)\n", dboth); return 1; }
+    if (dmis) { std::printf("FAIL: %d native/compiled 2-D mismatches\n", dmis); return 1; }
 
     // Differential fuzz: per-row reduction kernels (bounded for-loop + accumulator
     // + general indexing a[i*K+j], b[j]), native vs compiled tier. a is sized

@@ -48,6 +48,7 @@ struct X64 {
     void movEsiEsi() { u8(0x89); u8(0xF6); }              // zero-extend esi into rsi
     void cmpEsiEax() { u8(0x39); u8(0xC6); }              // cmp esi, eax
     void cmpEcxEax() { u8(0x39); u8(0xC1); }              // cmp ecx, eax  (flags = ecx - eax)
+    void cmpEaxEcx() { u8(0x39); u8(0xC8); }              // cmp eax, ecx  (flags = eax - ecx)
     void cmpEcxImm(int8_t v) { u8(0x83); u8(0xF9); u8((uint8_t)v); }   // cmp ecx, imm8
     size_t jgePlaceholder() { u8(0x0F); u8(0x8D); size_t at = code.size(); u32(0); return at; }  // jge rel32
     size_t jgPlaceholder()  { u8(0x0F); u8(0x8F); size_t at = code.size(); u32(0); return at; }  // jg  rel32
@@ -74,6 +75,9 @@ struct X64 {
     // spill/reload via the red zone: movss [rsp-off], xmm0 ; movss xmm, [rsp-off]
     void spillXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x11); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
     void reloadXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
+    // double (8-byte) spill/reload — for holding a converted argument across a 2-arg call.
+    void spillXmmD(int xmm, int off) { u8(0xF2); u8(0x0F); u8(0x11); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
+    void reloadXmmD(int xmm, int off) { u8(0xF2); u8(0x0F); u8(0x10); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
 
     void movImmEax(uint32_t bits) { u8(0xB8); u32(bits); }        // mov eax, imm32
 
@@ -82,6 +86,7 @@ struct X64 {
     void movEaxIdx(int base) { u8(0x8B); u8(0x04); u8((uint8_t)(0x80 | (6 << 3) | base)); }  // mov eax, [base + rsi*4]
     void movStoreIdxEax(int base) { u8(0x89); u8(0x04); u8((uint8_t)(0x80 | (6 << 3) | base)); } // mov [base + rsi*4], eax
     void spillEax(int off) { u8(0x89); u8(0x44); u8(0x24); u8((uint8_t)(-off)); }   // mov [rsp-off], eax
+    void spillEdx(int off) { u8(0x89); u8(0x54); u8(0x24); u8((uint8_t)(-off)); }   // mov [rsp-off], edx (the y index)
     void reloadEcx(int off) { u8(0x8B); u8(0x4C); u8(0x24); u8((uint8_t)(-off)); }  // mov ecx, [rsp-off]
     void movEaxFromSlot(int off) { u8(0x8B); u8(0x44); u8(0x24); u8((uint8_t)(-off)); }  // mov eax, [rsp-off]
     void addEaxEcx() { u8(0x01); u8(0xC8); }                       // add eax, ecx   (eax = eax + ecx)
@@ -91,6 +96,8 @@ struct X64 {
     void addEaxImm(int32_t v) { u8(0x05); u32((uint32_t)v); }      // add eax, imm32
     void setccAl(uint8_t cc) { u8(0x0F); u8(cc); u8(0xC0); }       // setcc al   (cc: l 9C le 9E g 9F ge 9D e 94 ne 95)
     void movzxEaxAl() { u8(0x0F); u8(0xB6); u8(0xC0); }            // movzx eax, al  (0/1 → 32-bit)
+    void cmovlEaxEcx() { u8(0x0F); u8(0x4C); u8(0xC1); }           // if eax < ecx (signed) eax = ecx
+    void cmovgEaxEcx() { u8(0x0F); u8(0x4F); u8(0xC1); }           // if eax > ecx (signed) eax = ecx
     void imulEaxEcx() { u8(0x0F); u8(0xAF); u8(0xC1); }            // imul eax, ecx  (eax = eax * ecx)
     void negEax() { u8(0xF7); u8(0xD8); }                          // neg eax
     void notEax() { u8(0xF7); u8(0xD0); }                          // not eax  (~)
@@ -164,12 +171,18 @@ inline uint64_t libmDoubleUnary(const std::string& fn) {
     else if (fn == "ceilf")  p = std::ceil;
     return reinterpret_cast<uint64_t>(reinterpret_cast<void*>(p));
 }
+inline uint64_t libmDoubleBinary(const std::string& fn) {
+    double (*p)(double, double) = nullptr;
+    if (fn == "powf" || fn == "pow") p = std::pow;
+    return reinterpret_cast<uint64_t>(reinterpret_cast<void*>(p));
+}
 
 // ── The elementwise-subset compiler ──────────────────────────────────────────
 struct Lowerer {
     const Kernel& k;
     X64 asm_;
-    std::string idxVar;                 // the `int i = …` induction variable
+    std::string idxVar;                 // the x induction var  (col = …threadIdx.x…), held in esi
+    std::string rowVar;                 // the y induction var  (row = …threadIdx.y…), empty for 1-D
     bool ok = true;
     std::string err;
 
@@ -194,18 +207,19 @@ struct Lowerer {
         return e.kind == Expr::Member && e.args.size() == 1 && e.args[0]->kind == Expr::Ident &&
                e.args[0]->str == obj && e.str == field;
     }
-    // blockIdx.x*blockDim.x + threadIdx.x  (either operand order for + and *).
-    bool isFlatIndex(const Expr& e) const {
+    // blockIdx.<ax>*blockDim.<ax> + threadIdx.<ax>  (either operand order for + and *).
+    bool isFlatIndexAxis(const Expr& e, const char* ax) const {
         if (e.kind != Expr::Binary || e.str != "+" || e.args.size() != 2) return false;
         const Expr* mul = e.args[0]->kind == Expr::Binary && e.args[0]->str == "*" ? e.args[0].get()
                         : e.args[1]->kind == Expr::Binary && e.args[1]->str == "*" ? e.args[1].get() : nullptr;
-        const Expr* tid = member(*e.args[0], "threadIdx", "x") ? e.args[0].get()
-                        : member(*e.args[1], "threadIdx", "x") ? e.args[1].get() : nullptr;
+        const Expr* tid = member(*e.args[0], "threadIdx", ax) ? e.args[0].get()
+                        : member(*e.args[1], "threadIdx", ax) ? e.args[1].get() : nullptr;
         if (!mul || !tid) return false;
         const Expr& a = *mul->args[0]; const Expr& b = *mul->args[1];
-        return (member(a, "blockIdx", "x") && member(b, "blockDim", "x")) ||
-               (member(a, "blockDim", "x") && member(b, "blockIdx", "x"));
+        return (member(a, "blockIdx", ax) && member(b, "blockDim", ax)) ||
+               (member(a, "blockDim", ax) && member(b, "blockIdx", ax));
     }
+    bool isFlatIndex(const Expr& e) const { return isFlatIndexAxis(e, "x"); }
 
     // Map a comparison operator to an SSE cmpss ordered predicate (0 EQ, 1 LT,
     // 2 LE, 4 NEQ — all matching C's NaN behaviour); `>`/`>=` are the swapped
@@ -247,6 +261,9 @@ struct Lowerer {
                 return e.args.size() == 2 && isIntExpr(*e.args[0]) && isIntExpr(*e.args[1]);
             }
             case Expr::Ternary: return e.args.size() == 3 && isIntExpr(*e.args[1]) && isIntExpr(*e.args[2]);
+            case Expr::Call:  // min/max are integer iff both args are (the compiled tier's rule)
+                return (e.str == "min" || e.str == "max") && e.args.size() == 2 &&
+                       isIntExpr(*e.args[0]) && isIntExpr(*e.args[1]);
             default: return false;
         }
     }
@@ -327,11 +344,28 @@ struct Lowerer {
                         return;
                     }
                 }
-                if (e.args.size() == 2 && (e.str == "fmaxf" || e.str == "fminf")) {
-                    // C fmaxf/fminf, bit-exact: (a==b || isnan(b)) ? a : {max,min}ss(a,b).
-                    // The a==b arm reproduces the ±0 rule (fmax(+0,-0) keeps a's sign);
-                    // the isnan(b) arm reproduces "NaN operand → the other" for b.
-                    const bool isMax = e.str == "fmaxf";
+                if (e.args.size() == 2 && (e.str == "powf" || e.str == "pow")) {
+                    // (float)pow((double)a, (double)b) — the same libm pow the compiled
+                    // tier calls. Both args go to xmm0/xmm1 as doubles per the SysV ABI.
+                    const int off = evalSlot(depth);
+                    emitFloat(*e.args[0], depth); asm_.cvtss2sd(0, 0); asm_.spillXmmD(0, off);  // [off] = (double)a
+                    emitFloat(*e.args[1], depth + 1); asm_.cvtss2sd(0, 0);                       // xmm0 = (double)b
+                    asm_.movapsXmm(1, 0);                                                        // xmm1 = (double)b
+                    asm_.reloadXmmD(0, off);                                                     // xmm0 = (double)a
+                    asm_.subRsp152(); asm_.saveArgsIdx();
+                    asm_.movabsRax(libmDoubleBinary(e.str)); asm_.callRax();                     // xmm0 = pow(a,b)
+                    asm_.restoreArgsIdx(); asm_.addRsp152();
+                    asm_.cvtsd2ss(0, 0);
+                    return;
+                }
+                if (e.args.size() == 2 && (e.str == "fmaxf" || e.str == "fminf" ||
+                                           e.str == "fmax" || e.str == "fmin" ||
+                                           e.str == "max" || e.str == "min")) {
+                    // C fmaxf/fminf (and the float case of max/min), bit-exact:
+                    // (a==b || isnan(b)) ? a : {max,min}ss(a,b). The a==b arm reproduces
+                    // the ±0 rule (fmax(+0,-0) keeps a's sign); the isnan(b) arm
+                    // reproduces "NaN operand → the other" for b.
+                    const bool isMax = e.str == "fmaxf" || e.str == "fmax" || e.str == "max";
                     const int off = evalSlot(depth);
                     emitFloat(*e.args[0], depth); asm_.spillXmm(0, off);        // [off] = a
                     emitFloat(*e.args[1], depth + 1); asm_.reloadXmm(1, off);   // xmm1 = a, xmm0 = b
@@ -543,6 +577,19 @@ struct Lowerer {
                 else asm_.subEcxEaxToEax();        // eax = L - R
                 return;
             }
+            case Expr::Call: {   // integer min(a,b) / max(a,b) — cmp + cmov (signed)
+                if ((e.str == "min" || e.str == "max") && e.args.size() == 2) {
+                    const int off = evalSlot(depth);
+                    emitInt(*e.args[0], depth); asm_.spillEax(off);       // [off] = a
+                    emitInt(*e.args[1], depth + 1); asm_.movEcxEax();     // ecx = b
+                    asm_.movEaxFromSlot(off);                            // eax = a
+                    asm_.cmpEaxEcx();                                    // flags = a - b
+                    if (e.str == "min") asm_.cmovgEaxEcx();              // a > b → eax = b
+                    else asm_.cmovlEaxEcx();                             // a < b → eax = b
+                    return;
+                }
+                fail("native: unsupported int call '" + e.str + "'"); return;
+            }
             default: fail("native: unsupported int expression"); return;
         }
     }
@@ -709,22 +756,47 @@ struct Lowerer {
             const bool okScalar = p.type.ptr == 0 && (p.type.base == Type::Float || p.type.base == Type::Int);
             if (!okPtr && !okScalar) { err = "native: unsupported param type"; return false; }
         }
-        if (k.body.size() != 2 || k.body[0]->kind != Stmt::VarDecl || k.body[1]->kind != Stmt::If) {
-            err = "native: not the `int i = …; if (i<n) {…}` shape"; return false;
+        // Shape: `<xdecl>; [<ydecl>;] if (<guard>) { … }` — 1-D has 2 statements, a
+        // true-2-D kernel has 3 (a row induction var too). The last statement is the if.
+        if (k.body.size() < 2 || k.body.size() > 3 || k.body.back()->kind != Stmt::If ||
+            k.body[0]->kind != Stmt::VarDecl) {
+            err = "native: not the `int i = …; if (…) {…}` shape"; return false;
         }
-        const Stmt& decl = *k.body[0];
+        const bool is2D = (k.body.size() == 3);
+
+        const Stmt& decl = *k.body[0];   // x/col induction var (held in esi)
         if (decl.type.base != Type::Int || decl.type.ptr != 0 || decl.arraySize != 0 || !decl.expr || !isFlatIndex(*decl.expr)) {
-            err = "native: first stmt must be `int i = blockIdx.x*blockDim.x+threadIdx.x`"; return false;
+            err = "native: first stmt must be `int col = blockIdx.x*blockDim.x+threadIdx.x`"; return false;
         }
         idxVar = decl.name;
-
-        const Stmt& gate = *k.body[1];
-        if (!gate.elseBody.empty() || !gate.expr || gate.expr->kind != Expr::Binary || gate.expr->str != "<" ||
-            gate.expr->args[0]->kind != Expr::Ident || gate.expr->args[0]->str != idxVar) {
-            err = "native: guard must be `if (i < <int bound>)`"; return false;
+        if (is2D) {
+            const Stmt& yd = *k.body[1];  // y/row induction var (arrives in edx; parked in a slot)
+            if (yd.kind != Stmt::VarDecl || yd.type.base != Type::Int || yd.type.ptr != 0 ||
+                yd.arraySize != 0 || !yd.expr || !isFlatIndexAxis(*yd.expr, "y")) {
+                err = "native: 2-D second stmt must be `int row = blockIdx.y*blockDim.y+threadIdx.y`"; return false;
+            }
+            rowVar = yd.name;
         }
-        const Expr& boundExpr = *gate.expr->args[1];   // any integer expression, e.g. n or M*N
-        if (!isIntExpr(boundExpr)) { err = "native: guard bound must be an integer expression"; return false; }
+
+        const Stmt& gate = *k.body.back();
+        if (!gate.elseBody.empty() || !gate.expr) { err = "native: guard required"; return false; }
+
+        // Guard: 1-D `col < <int bound>`; 2-D `col < A && row < B`.
+        auto condBound = [&](const Expr* c, const std::string& var, const Expr*& out) -> bool {
+            if (!c || c->kind != Expr::Binary || c->str != "<" || c->args.size() != 2 ||
+                c->args[0]->kind != Expr::Ident || c->args[0]->str != var || !isIntExpr(*c->args[1])) return false;
+            out = c->args[1].get(); return true;
+        };
+        const Expr* xBound = nullptr; const Expr* yBound = nullptr;
+        if (is2D) {
+            if (gate.expr->kind != Expr::Binary || gate.expr->str != "&&" || gate.expr->args.size() != 2 ||
+                !condBound(gate.expr->args[0].get(), idxVar, xBound) ||
+                !condBound(gate.expr->args[1].get(), rowVar, yBound)) {
+                err = "native: 2-D guard must be `col < A && row < B`"; return false;
+            }
+        } else if (!condBound(gate.expr.get(), idxVar, xBound)) {
+            err = "native: guard must be `col < <int bound>`"; return false;
+        }
 
         // Body: scalar-local declarations interleaved with `p[idx] = <expr>;` stores
         // and loops. A braced `{ … }` body parses as a single Block wrapping the stmts.
@@ -745,6 +817,9 @@ struct Lowerer {
             ++nLocals;
             return true;
         };
+        // `row` is a hidden int local, initialised from the y index (edx) at entry.
+        int rowSlot = 0;
+        if (is2D) { rowSlot = 8 * (nLocals + 1); locals[rowVar] = Local{false, rowSlot}; ++nLocals; }
         for (const StmtPtr& s : body) {
             if (s->kind == Stmt::VarDecl) { if (!registerLocal(*s)) return false; }
             else if (s->kind == Stmt::For && s->forInit && s->forInit->kind == Stmt::VarDecl) {
@@ -753,12 +828,21 @@ struct Lowerer {
         }
         scratchBase = 8 * nLocals;
 
-        // Prologue + guard: i is in esi (zero-extended); evaluate the bound and skip
-        // the body if i >= bound.
+        // Prologue: col in esi (zero-extended); park the y index (edx) into row's slot.
         asm_.movEsiEsi();
-        emitInt(boundExpr, 0); if (!ok) { err = err.empty() ? "native: bad guard bound" : err; return false; }  // eax = bound
+        if (is2D) asm_.spillEdx(rowSlot);
+
+        // Guard(s): skip the body unless col < A (and, for 2-D, row < B).
+        emitInt(*xBound, 0); if (!ok) { err = err.empty() ? "native: bad guard bound" : err; return false; }  // eax = A
         asm_.cmpEsiEax();
-        size_t jmp = asm_.jgePlaceholder();
+        size_t jmpX = asm_.jgePlaceholder();
+        size_t jmpY = 0;
+        if (is2D) {
+            emitInt(*yBound, 0); if (!ok) { err = err.empty() ? "native: bad guard bound" : err; return false; }  // eax = B
+            asm_.reloadEcx(rowSlot);   // ecx = row
+            asm_.cmpEcxEax();          // row - B
+            jmpY = asm_.jgePlaceholder();
+        }
 
         // Emit pass — each body statement (locals, stores, loops).
         for (const StmtPtr& s : body) {
@@ -766,13 +850,14 @@ struct Lowerer {
             if (!ok) { if (err.empty()) err = "native: unsupported body"; return false; }
         }
         // Epilogue.
-        asm_.patchRel32(jmp, asm_.code.size());
+        asm_.patchRel32(jmpX, asm_.code.size());
+        if (is2D) asm_.patchRel32(jmpY, asm_.code.size());
         asm_.ret();
         return true;
     }
 };
 
-using KernelFn = void (*)(void* const*, uint32_t);
+using KernelFn = void (*)(void* const*, uint32_t, uint32_t);   // (args, x-index, y-index)
 
 class NativeKernelImpl : public NativeKernel {
 public:
@@ -789,14 +874,19 @@ public:
 
     bool launch(const Extent& grid, const Extent& block, void* const* args, int numArgs) override {
         if (numArgs != nparams_ || mem_ == MAP_FAILED) return false;
-        const uint32_t total = grid.x * block.x;   // 1-D elementwise
+        const uint32_t totalX = grid.x * block.x;         // x-index range
+        const uint32_t totalY = grid.y * block.y;         // y-index range (1 for 1-D kernels)
+        const uint64_t total = (uint64_t)totalX * (uint64_t)totalY;
         KernelFn fn = fn_;
         auto& pool = xla::ThreadPool::global();
         if (total <= 1024 || pool.concurrency() <= 1) {
-            for (uint32_t i = 0; i < total; ++i) fn(args, i);
+            for (uint32_t iy = 0; iy < totalY; ++iy)
+                for (uint32_t ix = 0; ix < totalX; ++ix) fn(args, ix, iy);
         } else {
-            int64_t grain = 256;
-            pool.parallelFor((int64_t)total, grain, [&](int64_t i) { fn(args, (uint32_t)i); });
+            // Flatten the 2-D iteration space; a 1-D kernel simply ignores the y index.
+            pool.parallelFor((int64_t)total, 256, [&](int64_t idx) {
+                fn(args, (uint32_t)((uint64_t)idx % totalX), (uint32_t)((uint64_t)idx / totalX));
+            });
         }
         return true;
     }
