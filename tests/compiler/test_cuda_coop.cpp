@@ -222,7 +222,24 @@ extern "C" __global__ void bvote(const int* in, int* out, int n) {
                   {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
     }
 
-    if (g_fail == 0) std::printf("PASS: cooperative shared/barrier + warp shuffle/vote/reduce + block vote on the compiled fiber tier, == interpreter\n");
+    // 8) __activemask: the warp's live-lane mask. block=48 → a full warp (0xffffffff)
+    //    and a 16-lane partial warp (0x0000ffff); both tiers must agree.
+    {
+        const int block = 48, blocks = 2, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void amask(int* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    out[i] = (int)__activemask();
+})";
+        std::vector<float> outC(N, -3.f), outI(N, -4.f);
+        int n = N;
+        int* ocp = reinterpret_cast<int*>(outC.data()); int* oip = reinterpret_cast<int*>(outI.data());
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("activemask", "amask", src, grid, blk,
+                  {&ocp, &n}, outC, {&oip, &n}, outI, N);
+    }
+
+    if (g_fail == 0) std::printf("PASS: the full cooperative surface (shared/barrier/shuffle/vote/reduce/block-vote/activemask) runs on the compiled fiber tier, == interpreter\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -65,6 +65,8 @@ struct TS {
     Cell* shflSnap = nullptr;  // its snapshot, taken at each warp release
     uint32_t* shflActive = nullptr;  // per-warp mask of lanes that reached this shuffle
     uint32_t* blkVote = nullptr;     // block-vote result [count, any, all], filled at __syncthreads_* release
+    void* fiberArr = nullptr;        // base of the CTA's Fiber array (for __activemask's live-lane query)
+    uint32_t nthreads = 0;           // threads in the block (bt)
 };
 
 using ExprFn = std::function<Cell(TS&)>;
@@ -125,6 +127,22 @@ inline Cell coopShuffle(TS& ts, Cell var, int mode, int laneArg, int width) {
 // __syncwarp(): a warp-scoped barrier (no data exchanged).
 inline void coopSyncwarp(TS& ts) { if (ts.fiber) fiberYield(ts, WAIT_WARP); }
 
+// __activemask(): the warp's mask of non-exited lanes, read at this instant with
+// NO rendezvous — exactly the interpreter's semantics. The scheduler resumes fibers
+// in lane order, so lanes already run-to-completion read as done and later lanes as
+// live, reproducing the interpreter's sequential done-state bit-for-bit.
+inline Cell coopActivemask(TS& ts) {
+    if (!ts.fiber) return Cell::I(-1);
+    const Fiber* fib = static_cast<const Fiber*>(ts.fiberArr);
+    const uint32_t base = (ts.lintid >> 5) * 32;
+    uint32_t mask = 0;
+    for (uint32_t l = 0; l < 32; ++l) {
+        const uint32_t t = base + l;
+        if (t < ts.nthreads && !fib[t].done) mask |= (1u << l);
+    }
+    return Cell::I((int64_t)mask);
+}
+
 // Block vote (__syncthreads_{count,and,or}) — op 0=count 1=or(any) 2=and(all). Each
 // thread publishes its predicate, then the block barrier release computes the
 // block-wide reduction (see runCoopCTA) which every thread reads back.
@@ -181,6 +199,7 @@ inline Cell coopShuffle(TS&, Cell var, int, int, int) { return var; }
 inline Cell coopVote(TS&, bool, uint32_t, int) { return Cell::I(0); }
 inline Cell coopReduce(TS&, Cell value, uint32_t, int, bool) { return value; }
 inline Cell coopBlockVote(TS&, bool, int) { return Cell::I(0); }
+inline Cell coopActivemask(TS&) { return Cell::I(-1); }
 #endif
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
@@ -365,6 +384,7 @@ public:
             initTS(ts[t], t, cx, cy, cz, shared.data());
             ts[t].lintid = t; ts[t].shflPub = shflPub.data(); ts[t].shflSnap = shflSnap.data();
             ts[t].shflActive = shflActive.data(); ts[t].blkVote = blkVote;
+            ts[t].fiberArr = fibers.data(); ts[t].nthreads = bt;
             Fiber& f = fibers[t];
             f.sched = &sched; f.body = &body_; f.ts = &ts[t];
             f.stack.resize(1 << 17);   // 128 KiB per fiber (kernels are shallow)
@@ -609,10 +629,9 @@ struct Compiler {
              e->str == "__ballot_sync" || e->str == "__any_sync" || e->str == "__all_sync" ||
              e->str == "__reduce_add_sync" || e->str == "__reduce_min_sync" || e->str == "__reduce_max_sync" ||
              e->str == "__reduce_and_sync" || e->str == "__reduce_or_sync" || e->str == "__reduce_xor_sync" ||
-             e->str == "__syncthreads_count" || e->str == "__syncthreads_and" || e->str == "__syncthreads_or")) {
+             e->str == "__syncthreads_count" || e->str == "__syncthreads_and" || e->str == "__syncthreads_or" ||
+             e->str == "__activemask")) {
             hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier/warp op
-        } else if (e->kind == Expr::Call && e->str == "__activemask") {
-            fail("activemask (convergence query) needs the interpreter tier");
         }
         for (auto& a : e->args) scanExprBarriers(a.get());
     }
@@ -813,7 +832,8 @@ struct Compiler {
                 if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync" ||
                     fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
                     fn == "__reduce_and_sync" || fn == "__reduce_or_sync" || fn == "__reduce_xor_sync" ||
-                    fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or")
+                    fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or" ||
+                    fn == "__activemask")
                     return scalar(Type::Int);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
                 return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
@@ -1240,6 +1260,7 @@ struct Compiler {
             };
         }
         if (fn == "__syncwarp") return [](TS& ts) -> Cell { coopSyncwarp(ts); return Cell::I(0); };
+        if (fn == "__activemask" && e.args.empty()) return [](TS& ts) -> Cell { return coopActivemask(ts); };
         // Block vote: __syncthreads_count / __syncthreads_and / __syncthreads_or(pred).
         if ((fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or") && e.args.size() == 1) {
             int op = fn == "__syncthreads_count" ? 0 : fn == "__syncthreads_or" ? 1 : 2;
