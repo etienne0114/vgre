@@ -119,7 +119,9 @@ static NP gen(int d) {
     }
     if (rnd() % 5 == 0) { n->k = Node::Neg; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::FCastI; n->name = "((float)(" + genIntSubStr(d) + "))"; return n; }
-    if (rnd() % 6 == 0) { n->k = Node::Func; static const char* fs[] = {"sqrtf", "fabsf", "rsqrtf"}; n->name = fs[rnd() % 3]; n->l = gen(d - 1); return n; }
+    if (rnd() % 6 == 0) { n->k = Node::Func;
+        static const char* fs[] = {"sqrtf", "fabsf", "rsqrtf", "expf", "logf", "sinf", "cosf", "floorf", "ceilf"};
+        n->name = fs[rnd() % 9]; n->l = gen(d - 1); return n; }
     if (rnd() % 6 == 0) { n->k = Node::Func2; n->name = (rnd() & 1) ? "fmaxf" : "fminf"; n->l = gen(d - 1); n->r = gen(d - 1); return n; }
     if (rnd() % 7 == 0) {   // a bare float comparison → 1.0f / 0.0f
         n->k = Node::Cmp;
@@ -181,7 +183,7 @@ static NP genI(int d) {
         auto c = std::make_unique<Node>(); c->k = Node::Const; c->c = (float)(rnd() % 32); n->r = std::move(c);
         return n;
     }
-    n->k = Node::Bin; static const char* ops[] = {"+", "-", "*", "&", "|", "^"}; n->op = ops[rnd() % 6];
+    n->k = Node::Bin; static const char* ops[] = {"+", "-", "*", "&", "|", "^", "/", "%"}; n->op = ops[rnd() % 8];
     n->l = genI(d - 1); n->r = genI(d - 1); return n;
 }
 static std::string srcI(const Node* n) {
@@ -354,6 +356,53 @@ int main() {
         std::printf("  bitmix (bitwise ^ | ~ << >>) native == reference (%d elems)\n", N);
     }
 
+    // Correctness: integer / and % — including divide-by-zero and INT_MIN/-1 (the
+    // x86 #DE trap cases). Oracle is the compiled tier (guards /0→0, does int64).
+    {
+        const char* k = "extern \"C\" __global__ void divmod(const int* x, const int* y, int* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ out[i] = (x[i]/y[i])*100 + (x[i]%y[i]); } }";
+        auto nk = NativeKernel::compileSource(k, "divmod", err);
+        auto ck = CompiledKernel::compileSource(k, "divmod", err);
+        if (!nk || !ck) { std::printf("FAIL: divmod compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<int> x(N), y(N), on(N, 7), oc(N, 9);
+        for (int i = 0; i < N; ++i) { x[i] = (int)rnd(); y[i] = (int)rnd() % 13 - 6; }  // small divisors incl 0
+        x[0] = INT_MIN; y[0] = -1;   // the overflow trap case
+        x[1] = 123;     y[1] = 0;    // divide by zero
+        x[2] = INT_MIN; y[2] = 0;
+        int* xp = x.data(); int* yp = y.data(); int* onp = on.data(); int* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &yp, &onp, &N}; if (!nk->launch(g, b, an, 4)) { std::printf("FAIL: divmod native launch\n"); return 1; }
+        void* ac[] = {&xp, &yp, &ocp, &N}; if (!ck->launch(g, b, ac, 4)) { std::printf("FAIL: divmod compiled launch\n"); return 1; }
+        int bad = 0; for (int i = 0; i < N; ++i) if (on[i] != oc[i]) ++bad;
+        if (bad) { std::printf("FAIL: divmod native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  divmod (int / %%, incl /0 and INT_MIN/-1) native == compiled tier (%d elems)\n", N);
+    }
+
+    // Correctness: a naive (flattened-2-D) GEMM — general guard bound `idx < M*N`,
+    // row=idx/N & col=idx%N, an inner reduction loop, general-index loads AND a
+    // general-index store C[row*N+col]. This is the matmul the mission needs.
+    {
+        const int M = 16, Nn = N / 16, K = 12;   // M*Nn == N (== grid*block threads)
+        const char* k = "extern \"C\" __global__ void gemm(const float* A, const float* B, float* C, int M, int N, int K){"
+                        " int idx=blockIdx.x*blockDim.x+threadIdx.x; if(idx < M*N){"
+                        " int row=idx/N; int col=idx%N; float acc=0.0f;"
+                        " for(int k=0;k<K;++k){ acc = acc + A[row*K+k]*B[k*N+col]; } C[row*N+col]=acc; } }";
+        auto nk = NativeKernel::compileSource(k, "gemm", err);
+        auto ck = CompiledKernel::compileSource(k, "gemm", err);
+        if (!nk || !ck) { std::printf("FAIL: gemm compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> A(M * K), B(K * Nn), Cn(M * Nn, -1.f), Cc(M * Nn, -2.f);
+        for (int t = 0; t < M * K; ++t) A[t] = randFloat();
+        for (int t = 0; t < K * Nn; ++t) B[t] = randFloat();
+        float* Ap = A.data(); float* Bp = B.data(); float* Cnp = Cn.data(); float* Ccp = Cc.data();
+        int Mv = M, Nv = Nn, Kv = K;
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+        void* an[] = {&Ap, &Bp, &Cnp, &Mv, &Nv, &Kv}; if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: gemm native launch\n"); return 1; }
+        void* ac[] = {&Ap, &Bp, &Ccp, &Mv, &Nv, &Kv}; if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: gemm compiled launch\n"); return 1; }
+        int bad = 0; for (int t = 0; t < M * Nn; ++t) if (Cn[t] != Cc[t]) ++bad;
+        if (bad) { std::printf("FAIL: gemm native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  gemm (naive matmul %dx%dx%d, general bound + / %% + general store) native == compiled tier\n", M, Nn, K);
+    }
+
     // Correctness: general array indexing — a reverse gather x[n-1-i].
     {
         const char* k = "extern \"C\" __global__ void rev(const float* x, const float* y, float* out, int n){"
@@ -457,6 +506,31 @@ int main() {
         }
         if (bad) { std::printf("FAIL: rms native vs compiled has %d mismatches\n", bad); return 1; }
         std::printf("  rms (rsqrtf, double 1/sqrt) native == compiled tier (%d elems)\n", N);
+    }
+
+    // Correctness: libm transcendentals (expf/logf/sinf/cosf/floorf/ceilf) via calls
+    // into the same libm the compiled tier uses (softmax/GELU/activation math).
+    {
+        const char* k = "extern \"C\" __global__ void trig(const float* x, const float* y, float* out, int n){"
+                        " int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){"
+                        " out[i] = expf(x[i]*0.5f) + logf(fabsf(y[i]) + 1.0f) + sinf(x[i])*cosf(y[i]) + floorf(x[i]*3.0f) + ceilf(y[i]); } }";
+        auto nk = NativeKernel::compileSource(k, "trig", err);
+        auto ck = CompiledKernel::compileSource(k, "trig", err);
+        if (!nk || !ck) { std::printf("FAIL: trig compile (native=%p compiled=%p): %s\n", (void*)nk.get(), (void*)ck.get(), err.c_str()); return 1; }
+        std::vector<float> x(N), y(N), on(N, -9.f), oc(N, -8.f);
+        for (int i = 0; i < N; ++i) { x[i] = randFloat() - 4.f; y[i] = randFloat() - 4.f; }
+        float* xp = x.data(); float* yp = y.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, b{(uint32_t)block, 1, 1};
+        void* an[] = {&xp, &yp, &onp, &N}; if (!nk->launch(g, b, an, 4)) { std::printf("FAIL: trig native launch\n"); return 1; }
+        void* ac[] = {&xp, &yp, &ocp, &N}; if (!ck->launch(g, b, ac, 4)) { std::printf("FAIL: trig compiled launch\n"); return 1; }
+        int bad = 0;
+        for (int i = 0; i < N; ++i) {
+            uint32_t a, c; std::memcpy(&a, &on[i], 4); std::memcpy(&c, &oc[i], 4);
+            const bool nan = (a & 0x7fffffff) > 0x7f800000 && (c & 0x7fffffff) > 0x7f800000;
+            if (a != c && !nan) ++bad;
+        }
+        if (bad) { std::printf("FAIL: trig native vs compiled has %d mismatches\n", bad); return 1; }
+        std::printf("  trig (expf/logf/sinf/cosf/floorf/ceilf via libm calls) native == compiled tier (%d elems)\n", N);
     }
 
     // Correctness: a per-row dot product (GEMV inner) — a bounded for-loop with an
@@ -695,6 +769,44 @@ int main() {
     std::printf("native gather differential: %d elementwise kernels, %d mismatches\n", gboth, gmis);
     if (gboth < 200) { std::printf("FAIL: too few native gather kernels compiled (%d)\n", gboth); return 1; }
     if (gmis) { std::printf("FAIL: %d native/compiled gather mismatches\n", gmis); return 1; }
+
+    // Differential fuzz: general-index STORES (scatter) — out[n-1-i] = <expr>, a
+    // bijective in-range permutation, native vs compiled tier.
+    int sboth = 0, smis = 0;
+    for (int it = 0; it < kIters; ++it) {
+        std::string expr = genGatherExpr(rint(1, 4), N, PAD);
+        std::string k =
+            "extern \"C\" __global__ void fz(float a, float b, const float* x, const float* y, float* out, int n) {\n"
+            "  int i = blockIdx.x*blockDim.x+threadIdx.x;\n"
+            "  if (i < n) { out[n-1-i] = (" + expr + "); }\n}";
+
+        auto nk = NativeKernel::compileSource(k, "fz", err);
+        if (!nk) continue;
+        auto ck = CompiledKernel::compileSource(k, "fz", err);
+        if (!ck) continue;
+        ++sboth;
+
+        float a = randFloat(), b = randFloat();
+        std::vector<float> x(N + PAD), y(N + PAD), on(N, -1.f), oc(N, -2.f);
+        for (int i = 0; i < N + PAD; ++i) { x[i] = randFloat(); y[i] = randFloat(); }
+        float* xp = x.data(); float* yp = y.data(); float* onp = on.data(); float* ocp = oc.data();
+        Extent g{(uint32_t)grid, 1, 1}, bl{(uint32_t)block, 1, 1};
+
+        void* an[] = {&a, &b, &xp, &yp, &onp, &N};
+        if (!nk->launch(g, bl, an, 6)) { std::printf("FAIL: native scatter launch\n  %s\n", k.c_str()); ++smis; if (smis > 8) break; continue; }
+        void* ac[] = {&a, &b, &xp, &yp, &ocp, &N};
+        if (!ck->launch(g, bl, ac, 6)) { std::printf("FAIL: compiled scatter launch\n"); ++smis; if (smis > 8) break; continue; }
+
+        for (int i = 0; i < N; ++i) {
+            uint32_t bn, bc; std::memcpy(&bn, &on[i], 4); std::memcpy(&bc, &oc[i], 4);
+            const bool nan = (bn & 0x7fffffff) > 0x7f800000 && (bc & 0x7fffffff) > 0x7f800000;
+            if (on[i] != oc[i] && !nan) { ++smis; break; }
+        }
+        if (smis > 8) break;
+    }
+    std::printf("native scatter differential: %d elementwise kernels, %d mismatches\n", sboth, smis);
+    if (sboth < 200) { std::printf("FAIL: too few native scatter kernels compiled (%d)\n", sboth); return 1; }
+    if (smis) { std::printf("FAIL: %d native/compiled scatter mismatches\n", smis); return 1; }
 
     // Differential fuzz: per-row reduction kernels (bounded for-loop + accumulator
     // + general indexing a[i*K+j], b[j]), native vs compiled tier. a is sized

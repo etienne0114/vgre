@@ -12,6 +12,7 @@
 
 #include "vgre/compiler/frontend/parser.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -47,9 +48,16 @@ struct X64 {
     void movEsiEsi() { u8(0x89); u8(0xF6); }              // zero-extend esi into rsi
     void cmpEsiEax() { u8(0x39); u8(0xC6); }              // cmp esi, eax
     void cmpEcxEax() { u8(0x39); u8(0xC1); }              // cmp ecx, eax  (flags = ecx - eax)
+    void cmpEcxImm(int8_t v) { u8(0x83); u8(0xF9); u8((uint8_t)v); }   // cmp ecx, imm8
     size_t jgePlaceholder() { u8(0x0F); u8(0x8D); size_t at = code.size(); u32(0); return at; }  // jge rel32
     size_t jgPlaceholder()  { u8(0x0F); u8(0x8F); size_t at = code.size(); u32(0); return at; }  // jg  rel32
+    size_t jePlaceholder()  { u8(0x0F); u8(0x84); size_t at = code.size(); u32(0); return at; }  // je  rel32
+    size_t jmpPlaceholder() { u8(0xE9);            size_t at = code.size(); u32(0); return at; }  // jmp rel32 (forward)
+    void patchHere(size_t at) { patchRel32(at, code.size()); }
     void jmpBackTo(size_t target) { u8(0xE9); size_t at = code.size(); u32(0); patchRel32(at, target); }  // jmp target
+    void cdq() { u8(0x99); }                              // sign-extend eax into edx:eax
+    void idivEcx() { u8(0xF7); u8(0xF9); }                // idiv ecx: eax=quotient, edx=remainder
+    void movEaxEdx() { u8(0x89); u8(0xD0); }              // mov eax, edx
     void ret() { u8(0xC3); }
 
     // movss xmm, [base + rsi*4]   /   movss [base + rsi*4], xmm   (base in rcx/rdx)
@@ -60,6 +68,9 @@ struct X64 {
     // general indexed loads: [base + rax*4], the index precomputed (zero-extended) in rax
     void movssLoadIdxRax(int xmm, int base) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)((xmm << 3) | 4)); u8((uint8_t)(0x80 | base)); }
     void movEaxLoadIdxRax(int base) { u8(0x8B); u8(0x04); u8((uint8_t)(0x80 | base)); }  // mov eax, [base + rax*4]
+    // general indexed stores: [base + rax*4] = ecx / xmm   (index precomputed in rax)
+    void movStoreEcxIdxRax(int base) { u8(0x89); u8(0x0C); u8((uint8_t)(0x80 | base)); }              // mov [base + rax*4], ecx
+    void movssStoreIdxRax(int base, int xmm) { u8(0xF3); u8(0x0F); u8(0x11); u8((uint8_t)((xmm << 3) | 4)); u8((uint8_t)(0x80 | base)); }  // movss [base + rax*4], xmm
     // spill/reload via the red zone: movss [rsp-off], xmm0 ; movss xmm, [rsp-off]
     void spillXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x11); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
     void reloadXmm(int xmm, int off) { u8(0xF3); u8(0x0F); u8(0x10); u8((uint8_t)(0x44 | (xmm << 3))); u8(0x24); u8((uint8_t)(-off)); }
@@ -115,6 +126,17 @@ struct X64 {
     void sqrtsdXmm(int dst, int src) { u8(0xF2); u8(0x0F); u8(0x51); u8((uint8_t)(0xC0 | (dst << 3) | src)); }  // dst = sqrt(src), double
     void divsdXmm(int dst, int src) { u8(0xF2); u8(0x0F); u8(0x5E); u8((uint8_t)(0xC0 | (dst << 3) | src)); }   // dst /= src, double
     void cvtsi2sdFromEax(int xmm) { u8(0xF2); u8(0x0F); u8(0x2A); u8((uint8_t)(0xC0 | (xmm << 3))); }            // xmm = (double)eax
+    // Calling a libm function (turns the leaf into a caller): free the red zone above
+    // rsp and re-align, save the two regs we keep live (rdi=args, rsi=index), then
+    // restore. Entry rsp%16==8, and 152%16==8, so `sub rsp,152` also aligns to 16.
+    void subRsp152() { u8(0x48); u8(0x81); u8(0xEC); u32(152); }   // sub rsp, 152
+    void addRsp152() { u8(0x48); u8(0x81); u8(0xC4); u32(152); }   // add rsp, 152
+    void saveArgsIdx() { u8(0x48); u8(0x89); u8(0x3C); u8(0x24);   // mov [rsp], rdi
+                         u8(0x48); u8(0x89); u8(0x74); u8(0x24); u8(0x08); }  // mov [rsp+8], rsi
+    void restoreArgsIdx() { u8(0x48); u8(0x8B); u8(0x3C); u8(0x24);   // mov rdi, [rsp]
+                            u8(0x48); u8(0x8B); u8(0x74); u8(0x24); u8(0x08); }  // mov rsi, [rsp+8]
+    void movabsRax(uint64_t v) { u8(0x48); u8(0xB8); for (int i = 0; i < 8; ++i) u8((uint8_t)(v >> (8 * i))); }  // movabs rax, imm64
+    void callRax() { u8(0xFF); u8(0xD0); }                         // call rax
     void movapsXmm(int dst, int src) { u8(0x0F); u8(0x28); u8((uint8_t)(0xC0 | (dst << 3) | src)); }
     // cmpss xmm_dst, xmm_src, imm8  → dst = all-ones/zero mask per the ordered predicate
     // (imm: 0 EQ, 1 LT, 2 LE, 4 NEQ — all matching C's NaN behaviour).
@@ -128,6 +150,20 @@ struct X64 {
         for (int i = 0; i < 4; ++i) code[at + i] = (uint8_t)((uint32_t)rel >> (8 * i));
     }
 };
+
+// libm double→double functions the compiled tier also uses (std::exp/… on a double).
+// Resolving them here fixes their addresses for the process; the JIT embeds the
+// address and calls the SAME function, so (float)fn((double)x) is bit-exact.
+inline uint64_t libmDoubleUnary(const std::string& fn) {
+    double (*p)(double) = nullptr;
+    if (fn == "expf")   p = std::exp;
+    else if (fn == "logf")   p = std::log;
+    else if (fn == "sinf")   p = std::sin;
+    else if (fn == "cosf")   p = std::cos;
+    else if (fn == "floorf") p = std::floor;
+    else if (fn == "ceilf")  p = std::ceil;
+    return reinterpret_cast<uint64_t>(reinterpret_cast<void*>(p));
+}
 
 // ── The elementwise-subset compiler ──────────────────────────────────────────
 struct Lowerer {
@@ -276,6 +312,20 @@ struct Lowerer {
                         asm_.cvtsd2ss(0, 1);                 // xmm0 = (float)result
                     }
                     return;
+                }
+                if (e.args.size() == 1) {
+                    // 1-arg libm transcendentals: compute (float)fn((double)x) by calling
+                    // the very libm function the compiled tier uses — bit-exact.
+                    uint64_t fp = libmDoubleUnary(e.str);
+                    if (fp) {
+                        emitFloat(*e.args[0], depth);          // xmm0 = x (float)
+                        asm_.cvtss2sd(0, 0);                   // xmm0 = (double)x
+                        asm_.subRsp152(); asm_.saveArgsIdx();  // enter call frame (aligns rsp, frees red zone)
+                        asm_.movabsRax(fp); asm_.callRax();    // xmm0 = fn((double)x)
+                        asm_.restoreArgsIdx(); asm_.addRsp152();
+                        asm_.cvtsd2ss(0, 0);                   // xmm0 = (float)result
+                        return;
+                    }
                 }
                 if (e.args.size() == 2 && (e.str == "fmaxf" || e.str == "fminf")) {
                     // C fmaxf/fminf, bit-exact: (a==b || isnan(b)) ? a : {max,min}ss(a,b).
@@ -455,6 +505,28 @@ struct Lowerer {
                     if (e.str == "<<") asm_.shlEaxCl(); else asm_.sarEaxCl();  // signed >> is arithmetic
                     return;
                 }
+                // Division / modulo. Matches the compiled tier (which guards /0 → 0
+                // and does int64 arithmetic): guard b==0 → 0, special-case b==-1
+                // (a/-1 = -a, a%-1 = 0) to avoid the x86 #DE overflow trap, else idiv.
+                if (e.str == "/" || e.str == "%") {
+                    const bool isMod = e.str == "%";
+                    const int off = evalSlot(depth);
+                    emitInt(*e.args[0], depth); asm_.spillEax(off);       // [off] = a
+                    emitInt(*e.args[1], depth + 1); asm_.movEcxEax();     // ecx = b
+                    asm_.movEaxFromSlot(off);                            // eax = a
+                    asm_.cmpEcxImm(0); size_t jZero = asm_.jePlaceholder();
+                    asm_.cmpEcxImm(-1); size_t jNeg1 = asm_.jePlaceholder();
+                    asm_.cdq(); asm_.idivEcx();                          // eax=a/b, edx=a%b
+                    if (isMod) asm_.movEaxEdx();                         // remainder → eax
+                    size_t jDone = asm_.jmpPlaceholder();
+                    asm_.patchHere(jNeg1);                              // b == -1
+                    if (isMod) asm_.movImmEax(0); else asm_.negEax();   // a%-1=0 ; a/-1=-a
+                    size_t jDone2 = asm_.jmpPlaceholder();
+                    asm_.patchHere(jZero);                             // b == 0
+                    asm_.movImmEax(0);                                 // matches the compiled tier's guard
+                    asm_.patchHere(jDone); asm_.patchHere(jDone2);
+                    return;
+                }
                 const bool add = e.str == "+", sub = e.str == "-", mul = e.str == "*";
                 const bool band = e.str == "&", bor = e.str == "|", bxor = e.str == "^";
                 if (!add && !sub && !mul && !band && !bor && !bxor) { fail("native: int operator '" + e.str + "'"); return; }
@@ -477,21 +549,54 @@ struct Lowerer {
 
     // ── statement emitters (the top-level body and loop bodies share these) ──────
 
-    // `p[i] = <expr>;` store — the element type picks the evaluation path.
+    // `p[<index>] = <expr>;` store — the element type picks the evaluation path.
+    // `p[i]` uses the fast rsi addressing; any other index is computed into rax.
     bool emitStore(const Expr& lhs, const Expr& rhs) {
-        if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident ||
-            lhs.args[1]->kind != Expr::Ident || lhs.args[1]->str != idxVar) { err = "native: store target must be p[i]"; return false; }
+        if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident) { err = "native: bad store target"; return false; }
         const Param* p = param(lhs.args[0]->str);
         if (!p || p->type.ptr != 1 || (p->type.base != Type::Float && p->type.base != Type::Int)) {
             err = "native: store base must be float* or int*"; return false;
         }
-        asm_.movArg(2, paramIndex(lhs.args[0]->str)); asm_.deref(2);   // rdx = p pointer (survives expr eval)
-        if (p->type.base == Type::Int) {
-            emitInt(rhs, 0); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
-            asm_.movStoreIdxEax(2);                                    // [rdx + rsi*4] = eax
+        const int pIdx = paramIndex(lhs.args[0]->str);
+        const bool isInt = p->type.base == Type::Int;
+        const bool fastIdx = lhs.args[1]->kind == Expr::Ident && lhs.args[1]->str == idxVar;
+
+        if (fastIdx) {
+            // Evaluate the value FIRST, then load the base pointer into rdx — keeps rdx
+            // free during eval so an `idiv` inside the expression can't clobber it.
+            const int slot = evalSlot(0);
+            if (isInt) {
+                emitInt(rhs, 0); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+                asm_.spillEax(slot);
+                asm_.movArg(2, pIdx); asm_.deref(2);                   // rdx = base
+                asm_.movEaxFromSlot(slot);
+                asm_.movStoreIdxEax(2);                                // [rdx + rsi*4] = eax
+            } else {
+                emitFloat(rhs, 0); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+                asm_.spillXmm(0, slot);
+                asm_.movArg(2, pIdx); asm_.deref(2);                   // rdx = base
+                asm_.reloadXmm(0, slot);
+                asm_.movssStoreIdx(2, 0);                              // [rdx + rsi*4] = xmm0
+            }
+            return true;
+        }
+
+        // General index: compute the index first (→ rax at evalSlot(0)), then the value
+        // at depth 1 (its scratch sits above evalSlot(0), so the index survives).
+        const int idxSlot = evalSlot(0);
+        emitInt(*lhs.args[1], 0); if (!ok) { err = err.empty() ? "native: bad store index" : err; return false; }
+        asm_.spillEax(idxSlot);                                        // [idxSlot] = index
+        if (isInt) {
+            emitInt(rhs, 1); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+            asm_.movEcxEax();                                          // ecx = value
+            asm_.movEaxFromSlot(idxSlot);                             // eax = index (rax)
+            asm_.movArg(2, pIdx); asm_.deref(2);                      // rdx = base
+            asm_.movStoreEcxIdxRax(2);                                // [rdx + rax*4] = ecx
         } else {
-            emitFloat(rhs, 0); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
-            asm_.movssStoreIdx(2, 0);                                  // [rdx + rsi*4] = xmm0
+            emitFloat(rhs, 1); if (!ok) { err = err.empty() ? "native: unsupported store expression" : err; return false; }
+            asm_.movEaxFromSlot(idxSlot);                            // eax = index (rax); value stays in xmm0
+            asm_.movArg(2, pIdx); asm_.deref(2);                     // rdx = base
+            asm_.movssStoreIdxRax(2, 0);                             // movss [rdx + rax*4], xmm0
         }
         return true;
     }
@@ -615,28 +720,20 @@ struct Lowerer {
 
         const Stmt& gate = *k.body[1];
         if (!gate.elseBody.empty() || !gate.expr || gate.expr->kind != Expr::Binary || gate.expr->str != "<" ||
-            gate.expr->args[0]->kind != Expr::Ident || gate.expr->args[0]->str != idxVar ||
-            gate.expr->args[1]->kind != Expr::Ident) { err = "native: guard must be `if (i < n)`"; return false; }
-        const Param* nP = param(gate.expr->args[1]->str);
-        if (!nP || nP->type.ptr != 0 || nP->type.base != Type::Int) { err = "native: bound `n` must be an int param"; return false; }
-        const int nIdx = paramIndex(gate.expr->args[1]->str);
+            gate.expr->args[0]->kind != Expr::Ident || gate.expr->args[0]->str != idxVar) {
+            err = "native: guard must be `if (i < <int bound>)`"; return false;
+        }
+        const Expr& boundExpr = *gate.expr->args[1];   // any integer expression, e.g. n or M*N
+        if (!isIntExpr(boundExpr)) { err = "native: guard bound must be an integer expression"; return false; }
 
-        // Prologue: i is in esi; zero-extend so [base + rsi*4] is valid.
-        asm_.movEsiEsi();
-        // Guard: load n, compare, skip the body if i >= n.
-        asm_.movArg(0, nIdx); asm_.loadInt32Rax();   // rax=&n ; eax=n
-        asm_.cmpEsiEax();
-        size_t jmp = asm_.jgePlaceholder();
-
-        // Body: scalar-local declarations interleaved with `p[i] = <expr>;` stores.
-        // A braced `{ … }` body parses as a single Block wrapping the statements.
+        // Body: scalar-local declarations interleaved with `p[idx] = <expr>;` stores
+        // and loops. A braced `{ … }` body parses as a single Block wrapping the stmts.
         const std::vector<StmtPtr>& body =
             (gate.body.size() == 1 && gate.body[0]->kind == Stmt::Block) ? gate.body[0]->body : gate.body;
 
-        // Pre-pass: lay out per-thread scalar locals in the red zone (each an
-        // 8-byte slot) so their types/offsets are known before any expression is
-        // emitted; expression scratch then sits above them at ≥ scratchBase. This
-        // also registers for-loop induction vars (declared in the loop's init).
+        // Pre-pass (BEFORE the guard, so the bound expression's scratch slots sit above
+        // the locals): lay out per-thread scalar locals in the red zone (each an 8-byte
+        // slot). Also registers for-loop induction vars (declared in the loop's init).
         int nLocals = 0;
         auto registerLocal = [&](const Stmt& d) -> bool {
             if (d.type.ptr != 0 || d.arraySize != 0 || !d.expr ||
@@ -655,6 +752,13 @@ struct Lowerer {
             }
         }
         scratchBase = 8 * nLocals;
+
+        // Prologue + guard: i is in esi (zero-extended); evaluate the bound and skip
+        // the body if i >= bound.
+        asm_.movEsiEsi();
+        emitInt(boundExpr, 0); if (!ok) { err = err.empty() ? "native: bad guard bound" : err; return false; }  // eax = bound
+        asm_.cmpEsiEax();
+        size_t jmp = asm_.jgePlaceholder();
 
         // Emit pass — each body statement (locals, stores, loops).
         for (const StmtPtr& s : body) {
