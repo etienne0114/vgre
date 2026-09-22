@@ -1,9 +1,9 @@
 // Track Z (Zero-Burden Engine): warp-shuffle intrinsics. Lanes within a 32-thread
 // warp exchange register values at a rendezvous — the from-scratch front-end
-// lowers __shfl[_up|_down|_xor]_sync to `shfl.sync.<mode>.b32`, and the Tier-0
-// interpreter implements the cross-lane exchange (warp-wide, so it stays on the
-// interpreter like __shared__/__syncthreads). Verified against CPU references,
-// including across parallel CTAs (one warp per block, several blocks).
+// lowers __shfl[_up|_down|_xor]_sync to `shfl.sync.<mode>.b32`, which the Tier-0
+// interpreter (verified here) executes. The Tier-1 compiled fiber tier ALSO runs
+// these now (see test_cuda_coop.cpp, checked bit-exact against this interpreter
+// path). Verified against CPU references, incl. across parallel CTAs.
 //
 // Tests build in Release (-DNDEBUG); asserts must stay real.
 #undef NDEBUG

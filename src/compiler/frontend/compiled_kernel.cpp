@@ -60,6 +60,10 @@ struct TS {
     bool returned = false;
     Cell* shared = nullptr;    // block-wide `__shared__` storage (cooperative kernels)
     void* fiber = nullptr;     // Fiber* while running cooperatively; __syncthreads yields it
+    uint32_t lintid = 0;       // linear thread id in the block (for warp = /32, lane = %32)
+    Cell* shflPub = nullptr;   // per-CTA warp-shuffle publish buffer (numWarps*32 Cells)
+    Cell* shflSnap = nullptr;  // its snapshot, taken at each warp release
+    uint32_t* shflActive = nullptr;  // per-warp mask of lanes that reached this shuffle
 };
 
 using ExprFn = std::function<Cell(TS&)>;
@@ -68,6 +72,9 @@ using StmtFn = std::function<void(TS&)>;
 #if VGRE_COOP_FIBERS
 // One CUDA thread as a fiber: its own stack + context; the block scheduler round-
 // robins them, releasing __syncthreads once every live fiber has reached it.
+// wait kinds a fiber parks with: NONE=runnable, BLOCK=__syncthreads (block-wide),
+// WARP=a warp-shuffle (released per 32-lane warp).
+enum { WAIT_NONE = 0, WAIT_BLOCK = 1, WAIT_WARP = 2 };
 struct Fiber {
     ucontext_t ctx;
     ucontext_t* sched = nullptr;
@@ -75,7 +82,7 @@ struct Fiber {
     const std::vector<StmtFn>* body = nullptr;
     TS* ts = nullptr;
     bool done = false;
-    bool atBarrier = false;
+    int wait = WAIT_NONE;
 };
 // Set by the scheduler just before a fiber's FIRST resume so the trampoline (which
 // takes no args under makecontext) can find its work. Thread-local: one worker per CTA.
@@ -85,15 +92,37 @@ inline void fiberTrampoline() {
     for (const StmtFn& s : *f->body) { s(*f->ts); if (f->ts->returned) break; }
     f->done = true;   // returns to uc_link (the scheduler)
 }
-// __syncthreads(): mark this fiber arrived and yield back to the scheduler.
-inline void coopBarrier(TS& ts) {
-    if (!ts.fiber) return;
+inline void fiberYield(TS& ts, int kind) {
     Fiber* f = static_cast<Fiber*>(ts.fiber);
-    f->atBarrier = true;
+    f->wait = kind;
     swapcontext(&f->ctx, f->sched);
+}
+// __syncthreads(): block-wide barrier.
+inline void coopBarrier(TS& ts) { if (ts.fiber) fiberYield(ts, WAIT_BLOCK); }
+
+// Warp shuffle: publish `var`, warp-barrier-yield, then read the source lane's
+// value from the snapshot. mode 0=idx 1=up 2=down 3=xor; matches the interpreter
+// (subgroup `width`, up/down/xor out-of-range → own value, inactive src → own).
+inline Cell coopShuffle(TS& ts, Cell var, int mode, int laneArg, int width) {
+    if (!ts.fiber) return var;
+    if (width <= 0 || width > 32) width = 32;
+    const uint32_t warp = ts.lintid >> 5, lane = ts.lintid & 31u;
+    ts.shflPub[warp * 32 + lane] = var;
+    fiberYield(ts, WAIT_WARP);                 // released once every warp lane arrives
+    const int laneInSub = (int)lane % width;
+    const int subBase = ((int)lane / width) * width;
+    int srcSub = laneInSub; bool own = false;
+    if (mode == 0)      srcSub = width ? (laneArg % width) : 0;
+    else if (mode == 1) { srcSub = laneInSub - laneArg; if (srcSub < 0) own = true; }
+    else if (mode == 2) { srcSub = laneInSub + laneArg; if (srcSub >= width) own = true; }
+    else                { srcSub = laneInSub ^ laneArg; if (srcSub >= width) own = true; }
+    const int src = subBase + srcSub;
+    if (own || src < 0 || src >= 32 || !(ts.shflActive[warp] & (1u << src))) return var;
+    return ts.shflSnap[warp * 32 + (uint32_t)src];
 }
 #else
 inline void coopBarrier(TS&) {}
+inline Cell coopShuffle(TS&, Cell var, int, int, int) { return var; }
 #endif
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
@@ -266,12 +295,16 @@ public:
     template <class Init>
     void runCoopCTA(uint32_t /*cta*/, uint32_t cx, uint32_t cy, uint32_t cz, uint32_t bt, Init&& initTS) {
 #if VGRE_COOP_FIBERS
+        const uint32_t nwarps = (bt + 31) / 32;
         std::vector<Cell> shared(sharedSlots_ ? sharedSlots_ : 1);
+        std::vector<Cell> shflPub(nwarps * 32), shflSnap(nwarps * 32);
+        std::vector<uint32_t> shflActive(nwarps, 0);
         std::vector<TS> ts(bt);
         std::vector<Fiber> fibers(bt);
         ucontext_t sched;
         for (uint32_t t = 0; t < bt; ++t) {
             initTS(ts[t], t, cx, cy, cz, shared.data());
+            ts[t].lintid = t; ts[t].shflPub = shflPub.data(); ts[t].shflSnap = shflSnap.data(); ts[t].shflActive = shflActive.data();
             Fiber& f = fibers[t];
             f.sched = &sched; f.body = &body_; f.ts = &ts[t];
             f.stack.resize(1 << 17);   // 128 KiB per fiber (kernels are shallow)
@@ -282,19 +315,50 @@ public:
             makecontext(&f.ctx, fiberTrampoline, 0);
             ts[t].fiber = &f;
         }
-        // Drive to completion. Each pass advances every runnable fiber by one
-        // barrier segment; when all non-done fibers are parked at the barrier we
-        // clear the flags (release the barrier) and go again.
+        // Drive to completion: resume every runnable fiber (to its next barrier or
+        // finish), then release whatever is satisfied — the block barrier when all
+        // live fibers are at __syncthreads, and each warp independently when all its
+        // live lanes are at a shuffle (snapshotting the published values first so a
+        // fast lane racing ahead can't clobber a value another lane hasn't read).
+        auto laneLive = [&](uint32_t w, uint32_t l) {
+            uint32_t t = w * 32 + l; return t < bt && !fibers[t].done;
+        };
         for (;;) {
-            bool allDone = true;
+            bool ranAny = false, allDone = true;
             for (uint32_t t = 0; t < bt; ++t) {
-                if (fibers[t].done || fibers[t].atBarrier) { if (!fibers[t].done) allDone = false; continue; }
+                if (fibers[t].done) continue;
                 allDone = false;
+                if (fibers[t].wait != WAIT_NONE) continue;
+                ranAny = true;
                 g_startFiber = &fibers[t];
-                swapcontext(&sched, &fibers[t].ctx);   // runs until barrier or done
+                swapcontext(&sched, &fibers[t].ctx);   // runs until barrier/shuffle or done
             }
             if (allDone) break;
-            for (uint32_t t = 0; t < bt; ++t) fibers[t].atBarrier = false;   // release the barrier
+
+            bool released = false;
+            // Block barrier: every live fiber parked at __syncthreads.
+            bool allBlock = true;
+            for (uint32_t t = 0; t < bt; ++t) if (!fibers[t].done && fibers[t].wait != WAIT_BLOCK) { allBlock = false; break; }
+            if (allBlock) {
+                for (uint32_t t = 0; t < bt; ++t) if (!fibers[t].done) fibers[t].wait = WAIT_NONE;
+                released = true;
+            } else {
+                // Per-warp shuffle: release each warp whose live lanes are all at a shuffle.
+                for (uint32_t w = 0; w < nwarps; ++w) {
+                    bool allWarp = true, anyLive = false;
+                    for (uint32_t l = 0; l < 32; ++l) if (laneLive(w, l)) { anyLive = true; if (fibers[w * 32 + l].wait != WAIT_WARP) { allWarp = false; break; } }
+                    if (!anyLive || !allWarp) continue;
+                    uint32_t mask = 0;
+                    for (uint32_t l = 0; l < 32; ++l) if (laneLive(w, l) && fibers[w * 32 + l].wait == WAIT_WARP) {
+                        mask |= (1u << l);
+                        shflSnap[w * 32 + l] = shflPub[w * 32 + l];   // snapshot before any reads
+                    }
+                    shflActive[w] = mask;
+                    for (uint32_t l = 0; l < 32; ++l) if (laneLive(w, l)) fibers[w * 32 + l].wait = WAIT_NONE;
+                    released = true;
+                }
+            }
+            if (!released && !ranAny) break;   // no progress possible (divergent/UB) — avoid a hang
         }
 #else
         (void)cx; (void)cy; (void)cz; (void)bt; (void)initTS;   // no fibers → cooperative path unused
@@ -469,14 +533,15 @@ struct Compiler {
     }
     void scanExprBarriers(const Expr* e) {
         if (!e || failed) return;
-        if (e->kind == Expr::Call && e->str == "__syncthreads") {
-            hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier
+        if (e->kind == Expr::Call &&
+            (e->str == "__syncthreads" || e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
+             e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync")) {
+            hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier/shuffle
         } else if (e->kind == Expr::Call &&
-                   (e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
-                    e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync" ||
-                    e->str == "__syncthreads_count" || e->str == "__syncthreads_and" ||
-                    e->str == "__syncthreads_or")) {
-            fail("warp-cooperative op needs the interpreter tier");   // __shfl_* / voting barriers
+                   (e->str == "__syncthreads_count" || e->str == "__syncthreads_and" ||
+                    e->str == "__syncthreads_or" || e->str == "__syncwarp" ||
+                    e->str == "__ballot_sync" || e->str == "__any_sync" || e->str == "__all_sync")) {
+            fail("warp voting/barrier op needs the interpreter tier");   // voting barriers
         }
         for (auto& a : e->args) scanExprBarriers(a.get());
     }
@@ -1079,6 +1144,21 @@ struct Compiler {
     ExprFn compileCall(const Expr& e) {
         const std::string& fn = e.str;
         if (fn == "__syncthreads") return [](TS& ts) -> Cell { coopBarrier(ts); return Cell::I(0); };
+        // Warp shuffle: __shfl[_up|_down|_xor]_sync(mask, var, laneArg[, width]).
+        if ((fn == "__shfl_sync" || fn == "__shfl_up_sync" || fn == "__shfl_down_sync" || fn == "__shfl_xor_sync") &&
+            (e.args.size() == 3 || e.args.size() == 4)) {
+            int mode = fn == "__shfl_sync" ? 0 : fn == "__shfl_up_sync" ? 1 : fn == "__shfl_down_sync" ? 2 : 3;
+            ExprFn var = compileExpr(*e.args[1]);
+            ExprFn laneArg = compileExpr(*e.args[2]);
+            ExprFn widthE = e.args.size() == 4 ? compileExpr(*e.args[3]) : ExprFn{};
+            if (failed) return {};
+            return [var, laneArg, widthE, mode](TS& ts) -> Cell {
+                Cell v = var(ts);
+                int la = static_cast<int>(laneArg(ts).asI());
+                int w = widthE ? static_cast<int>(widthE(ts).asI()) : 32;
+                return coopShuffle(ts, v, mode, la, w);
+            };
+        }
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         auto dfit = deviceFns.find(fn);
         if (dfit != deviceFns.end()) return inlineDeviceCall(*dfit->second, e);   // user __device__ helper

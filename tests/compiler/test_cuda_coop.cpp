@@ -119,7 +119,47 @@ extern "C" __global__ void tiled(const float* A, const float* B, float* C, int M
                   {&ap, &bp, &c1, &m, &nn, &kk}, C1, {&ap, &bp, &c2, &m, &nn, &kk}, C2, M * Nn);
     }
 
-    if (g_fail == 0) std::printf("PASS: cooperative __shared__/__syncthreads kernels run on the compiled fiber tier, == interpreter\n");
+    // 3) Warp shuffle: a butterfly all-reduce (__shfl_xor_sync) + a broadcast
+    //    (__shfl_sync from lane 0). Every lane ends with the warp sum, then lane 0's.
+    {
+        const int block = 64, blocks = 4, N = block * blocks;   // 8 warps
+        const char* src = R"(
+extern "C" __global__ void warpred(const float* in, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    float v = (i < n) ? in[i] : 0.0f;
+    for (int o = 16; o > 0; o = o >> 1) { v = v + __shfl_xor_sync(-1, v, o); }
+    float b = __shfl_sync(-1, v, 0);
+    if (i < n) { out[i] = v + b; }
+})";
+        std::vector<float> in(N); for (int i = 0; i < N; ++i) in[i] = rf();
+        std::vector<float> outC(N, -1.f), outI(N, -2.f);
+        int n = N;
+        float* ip = in.data(); float* ocp = outC.data(); float* oip = outI.data();
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("warp-shuffle", "warpred", src, grid, blk,
+                  {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
+    }
+
+    // 4) Warp shuffle-down reduction (__shfl_down_sync) writing one result per warp.
+    {
+        const int block = 64, blocks = 4, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void wdown(const float* in, float* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    float v = (i < n) ? in[i] : 0.0f;
+    for (int o = 16; o > 0; o = o >> 1) { v = v + __shfl_down_sync(-1, v, o); }
+    if ((threadIdx.x & 31) == 0) { out[i >> 5] = v; }
+})";
+        std::vector<float> in(N); for (int i = 0; i < N; ++i) in[i] = rf();
+        std::vector<float> outC(N / 32, -1.f), outI(N / 32, -2.f);
+        int n = N;
+        float* ip = in.data(); float* ocp = outC.data(); float* oip = outI.data();
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("warp-shfl-down", "wdown", src, grid, blk,
+                  {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N / 32);
+    }
+
+    if (g_fail == 0) std::printf("PASS: cooperative __shared__/__syncthreads + warp shuffle run on the compiled fiber tier, == interpreter\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }
