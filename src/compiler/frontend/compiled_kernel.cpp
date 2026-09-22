@@ -3,6 +3,19 @@
 // One compile pass turns the AST into std::function closures bound to register
 // slots; launch() runs them per-thread with no string parsing. Portable, no LLVM.
 
+// macOS gates the POSIX ucontext routines (used by the cooperative fiber executor
+// below) behind _XOPEN_SOURCE; _DARWIN_C_SOURCE re-enables the BSD extensions that
+// _XOPEN_SOURCE would otherwise hide in the system headers. Both must be defined
+// before the first system header is pulled in, so they live at the top of the file.
+#if defined(__APPLE__)
+#  ifndef _XOPEN_SOURCE
+#    define _XOPEN_SOURCE 700
+#  endif
+#  ifndef _DARWIN_C_SOURCE
+#    define _DARWIN_C_SOURCE 1
+#  endif
+#endif
+
 #include "vgre/compiler/frontend/compiled_kernel.h"
 
 #include "vgre/compiler/frontend/parser.h"
@@ -21,14 +34,24 @@
 #include <vector>
 
 // Cooperative (`__shared__`/`__syncthreads`) kernels run each CUDA thread as a
-// fiber (ucontext) and a block scheduler releases the barrier once every thread
-// reaches it — see the cooperative launch path below. POSIX-only; on other hosts
-// such kernels fall back to the interpreter tier as before.
-#if defined(__unix__) || defined(__APPLE__)
+// stackful fiber; a per-block scheduler round-robins them and releases the barrier
+// once every live fiber reaches it — see the cooperative launch path below. This
+// runs on EVERY host, with no interpreter fallback: POSIX (Linux + macOS) uses the
+// ucontext routines (macOS needs the feature-test macros set at the top of this
+// file), and Windows uses its native Fibers API (CreateFiber/SwitchToFiber).
 #define VGRE_COOP_FIBERS 1
-#include <ucontext.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX   // keep windows.h from clobbering std::min/std::max
+#endif
+#include <windows.h>
+#define VGRE_COOP_WIN 1
 #else
-#define VGRE_COOP_FIBERS 0
+#include <ucontext.h>
+#define VGRE_COOP_WIN 0
 #endif
 
 namespace vgre {
@@ -79,14 +102,35 @@ using StmtFn = std::function<void(TS&)>;
 // WARP=a warp-shuffle (released per 32-lane warp).
 enum { WAIT_NONE = 0, WAIT_BLOCK = 1, WAIT_WARP = 2 };
 struct Fiber {
+#if VGRE_COOP_WIN
+    void* wf = nullptr;          // Win32 fiber handle (CreateFiber)
+    void** sched = nullptr;      // &scheduler fiber handle (one per CTA)
+#else
     ucontext_t ctx;
-    ucontext_t* sched = nullptr;
+    ucontext_t* sched = nullptr; // scheduler context (one per CTA)
     std::vector<char> stack;
+#endif
     const std::vector<StmtFn>* body = nullptr;
     TS* ts = nullptr;
     bool done = false;
     int wait = WAIT_NONE;
 };
+#if VGRE_COOP_WIN
+// Win32 fibers pass their argument, so the trampoline reads it directly. Returning
+// from a fiber's entry terminates the OS thread, so once the body finishes we park
+// forever on the scheduler — the scheduler never resumes a fiber marked done.
+static void CALLBACK fiberTrampoline(void* p) {
+    Fiber* f = static_cast<Fiber*>(p);
+    for (const StmtFn& s : *f->body) { s(*f->ts); if (f->ts->returned) break; }
+    f->done = true;
+    for (;;) SwitchToFiber(*f->sched);   // must never return
+}
+inline void fiberYield(TS& ts, int kind) {
+    Fiber* f = static_cast<Fiber*>(ts.fiber);
+    f->wait = kind;
+    SwitchToFiber(*f->sched);            // back to the scheduler; resumed later
+}
+#else
 // Set by the scheduler just before a fiber's FIRST resume so the trampoline (which
 // takes no args under makecontext) can find its work. Thread-local: one worker per CTA.
 thread_local Fiber* g_startFiber = nullptr;
@@ -100,6 +144,7 @@ inline void fiberYield(TS& ts, int kind) {
     f->wait = kind;
     swapcontext(&f->ctx, f->sched);
 }
+#endif
 // __syncthreads(): block-wide barrier.
 inline void coopBarrier(TS& ts) { if (ts.fiber) fiberYield(ts, WAIT_BLOCK); }
 
@@ -192,15 +237,7 @@ inline Cell coopReduce(TS& ts, Cell value, uint32_t memMask, int op, bool sgn) {
     }
     return Cell::I((int64_t)(uint32_t)acc);
 }
-#else
-inline void coopBarrier(TS&) {}
-inline void coopSyncwarp(TS&) {}
-inline Cell coopShuffle(TS&, Cell var, int, int, int) { return var; }
-inline Cell coopVote(TS&, bool, uint32_t, int) { return Cell::I(0); }
-inline Cell coopReduce(TS&, Cell value, uint32_t, int, bool) { return value; }
-inline Cell coopBlockVote(TS&, bool, int) { return Cell::I(0); }
-inline Cell coopActivemask(TS&) { return Cell::I(-1); }
-#endif
+#endif  // VGRE_COOP_FIBERS
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
 // compiled tier runs a grid's CTAs on parallel OS threads (see
@@ -379,20 +416,34 @@ public:
         uint32_t blkVote[3] = {0, 0, 0};   // [count, any, all] for __syncthreads_{count,or,and}
         std::vector<TS> ts(bt);
         std::vector<Fiber> fibers(bt);
+#if VGRE_COOP_WIN
+        // The worker thread becomes a fiber so it can switch to the work fibers; it
+        // is the scheduler. (A thread-pool worker may already be a fiber from an
+        // earlier CTA, in which case we reuse it and don't convert back.)
+        const bool wasFiber = IsThreadAFiber() != FALSE;
+        void* schedFiber = wasFiber ? GetCurrentFiber() : ConvertThreadToFiber(nullptr);
+#else
         ucontext_t sched;
+#endif
         for (uint32_t t = 0; t < bt; ++t) {
             initTS(ts[t], t, cx, cy, cz, shared.data());
             ts[t].lintid = t; ts[t].shflPub = shflPub.data(); ts[t].shflSnap = shflSnap.data();
             ts[t].shflActive = shflActive.data(); ts[t].blkVote = blkVote;
             ts[t].fiberArr = fibers.data(); ts[t].nthreads = bt;
             Fiber& f = fibers[t];
-            f.sched = &sched; f.body = &body_; f.ts = &ts[t];
+            f.body = &body_; f.ts = &ts[t];
+#if VGRE_COOP_WIN
+            f.sched = &schedFiber;
+            f.wf = CreateFiber(1 << 17, fiberTrampoline, &f);   // 128 KiB stack
+#else
+            f.sched = &sched;
             f.stack.resize(1 << 17);   // 128 KiB per fiber (kernels are shallow)
             getcontext(&f.ctx);
             f.ctx.uc_stack.ss_sp = f.stack.data();
             f.ctx.uc_stack.ss_size = f.stack.size();
             f.ctx.uc_link = &sched;    // returning from the body lands back in the scheduler
             makecontext(&f.ctx, fiberTrampoline, 0);
+#endif
             ts[t].fiber = &f;
         }
         // Drive to completion: resume every runnable fiber (to its next barrier or
@@ -410,8 +461,12 @@ public:
                 allDone = false;
                 if (fibers[t].wait != WAIT_NONE) continue;
                 ranAny = true;
+#if VGRE_COOP_WIN
+                SwitchToFiber(fibers[t].wf);           // runs until barrier/shuffle or done
+#else
                 g_startFiber = &fibers[t];
                 swapcontext(&sched, &fibers[t].ctx);   // runs until barrier/shuffle or done
+#endif
             }
             if (allDone) break;
 
@@ -449,9 +504,11 @@ public:
             }
             if (!released && !ranAny) break;   // no progress possible (divergent/UB) — avoid a hang
         }
-#else
-        (void)cx; (void)cy; (void)cz; (void)bt; (void)initTS;   // no fibers → cooperative path unused
+#if VGRE_COOP_WIN
+        for (uint32_t t = 0; t < bt; ++t) if (fibers[t].wf) DeleteFiber(fibers[t].wf);
+        if (!wasFiber) ConvertFiberToThread();   // restore the worker for the pool
 #endif
+#endif  // VGRE_COOP_FIBERS
     }
 
     // Populated by Compiler (friend-like via public setters kept minimal).
@@ -1454,10 +1511,7 @@ static std::unique_ptr<CompiledKernel> finishCompile(Compiler& c, const Kernel& 
     }
     impl->numSlots_ = c.nextSlot;
     impl->sharedSlots_ = c.sharedNext;
-    impl->coop_ = (c.sharedNext > 0 || c.hasBarrier);
-#if !VGRE_COOP_FIBERS
-    if (impl->coop_) { err = "__shared__/__syncthreads needs the interpreter tier on this host"; return nullptr; }
-#endif
+    impl->coop_ = (c.sharedNext > 0 || c.hasBarrier);   // runs on the fiber executor (every host)
     return impl;
 }
 

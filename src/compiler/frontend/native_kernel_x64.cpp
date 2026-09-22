@@ -43,8 +43,6 @@ struct X64 {
     void movArg(int reg, int k) { u8(0x48); u8(0x8B); u8((uint8_t)(0x40 | (reg << 3) | 7)); u8((uint8_t)(8 * k)); }
     // mov r64, [r64]           (dereference)
     void deref(int reg) { u8(0x48); u8(0x8B); u8((uint8_t)((reg << 3) | reg)); }
-    // mov eax, [rax]           (load a 32-bit int through rax)
-    void loadInt32Rax() { u8(0x8B); u8(0x00); }
     void movEsiEsi() { u8(0x89); u8(0xF6); }              // zero-extend esi into rsi
     void cmpEsiEax() { u8(0x39); u8(0xC6); }              // cmp esi, eax
     void cmpEcxEax() { u8(0x39); u8(0xC1); }              // cmp ecx, eax  (flags = ecx - eax)

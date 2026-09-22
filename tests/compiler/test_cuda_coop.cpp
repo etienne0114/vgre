@@ -24,6 +24,9 @@
 namespace fe = vgre::compiler::frontend;
 namespace be = vgre::compiler::backend;
 
+// The cooperative fiber tier is portable — it runs on every host (ucontext on
+// POSIX, the Win32 Fibers API on Windows) — so this compiled-vs-interpreter
+// differential check runs everywhere.
 static uint64_t g_rng = 0x1234567 ^ 0x9e3779b97f4a7c15ull;
 static uint32_t rnd() { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rng << 17; return (uint32_t)(g_rng >> 32); }
 static float rf() { return (float)(int32_t)rnd() / (float)(1u << 22); }

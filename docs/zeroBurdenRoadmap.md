@@ -84,11 +84,16 @@ universal tier first, faster tiers added without breaking correctness:
   permanent fallback.
 - **Tier 1 — Compiled backend (DONE).** The CUDA-C AST is lowered **once** to
   slot-based bound closures (`include/vgre/compiler/frontend/compiled_kernel.h`)
-  and executed per-thread with zero string parsing — **~32× faster than the
-  interpreter** (saxpy, N=4096), portable (pure C++, every arch), LLVM-free.
-  Covers the barrier-free subset; `__shared__`/`__syncthreads` kernels fall back
-  to Tier 0 (they need cooperative scheduling). Selected via
-  `VGRE_EXEC_BACKEND=compiled`.
+  and executed per-thread with zero string parsing — **~32–200× faster than the
+  interpreter**, portable (pure C++, every arch), LLVM-free. Barrier-free kernels run
+  the closures directly; **cooperative kernels** (`__shared__`, `__syncthreads`,
+  `__syncwarp`, `__shfl_*`, warp vote/reduce, `__syncthreads_{count,and,or}`,
+  `__activemask`) run on a **fiber executor** — each CUDA thread a stackful fiber,
+  a per-block scheduler releasing barriers/warp ops — so tiled GEMM, block & warp
+  reductions and shared-memory attention no longer fall back to Tier 0. The executor
+  is portable to every host (`ucontext` on POSIX incl. macOS, the Win32 Fibers API on
+  Windows), with no interpreter fallback (bit-exact vs the interpreter,
+  `test_cuda_coop.cpp`). Selected via `VGRE_EXEC_BACKEND=compiled`.
   - **Tier 1b — native x86-64 JIT (DONE).** `native_kernel_x64.cpp`: a from-scratch
     hand-written machine-code emitter (not CI-baked stencils) that mmaps W^X memory
     and emits real x86-64 for the scalar subset — all int/float arithmetic, bitwise/

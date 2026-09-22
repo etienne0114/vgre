@@ -95,7 +95,9 @@ extern "C" __global__ void red(const float* in, float* out, int n) {
     if (t == 0) out[0] = s[0];
 })";
     auto coop = CompiledKernel::compileSource(kBarrier, "red", err);
-    CHECK(coop != nullptr, "compiled tier now compiles __shared__/__syncthreads (fiber executor)");
+    // The fiber executor runs cooperative kernels on this tier on every host
+    // (ucontext on POSIX, the Win32 Fibers API on Windows) — no interpreter fallback.
+    CHECK(coop != nullptr, "compiled tier compiles __shared__/__syncthreads (fiber executor)");
     if (coop) {
         std::vector<float> in(128), out(1, -1.0f);
         for (int i = 0; i < 128; ++i) in[i] = (float)i;

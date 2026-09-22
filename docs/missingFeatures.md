@@ -65,11 +65,23 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > / locals / gather / scatter / reduce / 2-D, 800 kernels each). `VGRE_DISABLE_NATIVE=1`
 > opts out.
 >
+> **✅ ACHIEVED (2026-09-22): the full cooperative surface on the fast tier.** The
+> Tier-1 compiled backend gained a **fiber executor** (each CUDA thread a stackful
+> fiber; a per-block scheduler releasing barriers/warp ops) so `__shared__`,
+> `__syncthreads`, `__syncwarp`, `__shfl_{sync,up,down,xor}`, `__ballot/any/all_sync`,
+> `__reduce_{add,min,max,and,or,xor}_sync`, `__syncthreads_{count,and,or}` and
+> `__activemask` all run **~30–200× faster than the interpreter** — tiled GEMM,
+> block & warp reductions and shared-memory attention no longer defer to Tier-0.
+> The executor is **portable to every host** (`ucontext` on POSIX incl. macOS, the
+> Win32 Fibers API on Windows), with no interpreter fallback. Held **bit-exact**
+> against the interpreter by `test_cuda_coop.cpp` (8 patterns).
+>
 > **Remaining on the zero-burden track** (OpenMP is now *optional* too —
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
 > threading requirement): the *optional* **Tier-2 SSA** backend for peak speed on
-> hot kernels; and broader front-end coverage (texture/surface ops; the maskless
-> warp-vote/`__match` variants; templates/recursion).
+> hot kernels; native-machine-code cooperative execution (fibers in the JIT tier);
+> and broader front-end coverage (texture/surface ops; the maskless `__match`
+> variants; templates/recursion).
 > (warp **shuffle**, **vote**, and **reduce** `__reduce_*_sync` are done.)
 > (`__device__` helper inlining and **all** the struct forms
 > the interpreter supports — by-value params, local values, `p->field`, and

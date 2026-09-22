@@ -132,11 +132,16 @@ Executable Function Pointer (registered in kernelAddressMap_)
 > replaces the ORC JIT; each kernel runs on the fastest tier that accepts it, with
 > the interpreter as the guaranteed fallback:
 > - **Tier 0 — PTX interpreter:** `src/debug/ptx_interpreter.cpp` promoted to a
->   runtime backend (zero codegen; works on every OS/arch; the cooperative path for
->   `__shared__`/`__syncthreads`).
+>   runtime backend (zero codegen; works on every OS/arch; the guaranteed fallback).
 > - **Tier 1 — compiled closure backend:** the CUDA-C AST lowered once to
 >   slot-based bound closures (`compiled_kernel.cpp`), executed per-thread with no
 >   string parsing — portable (pure C++), LLVM-free, ~30–90× over the interpreter.
+>   **Cooperative kernels** run here too via a **fiber executor** (each CUDA thread a
+>   stackful fiber; a per-block scheduler releases `__syncthreads`, `__syncwarp`,
+>   `__shfl_*`, warp vote/reduce, `__syncthreads_{count,and,or}`, `__activemask`) — so
+>   tiled GEMM / block & warp reductions / shared-memory attention no longer need the
+>   interpreter (bit-exact vs it, `test_cuda_coop.cpp`). The executor is portable to
+>   every host: `ucontext` on POSIX (Linux + macOS), the Win32 Fibers API on Windows.
 > - **Tier 1b — native x86-64 JIT (DONE, default):** `native_kernel_x64.cpp`, a
 >   from-scratch hand-written machine-code emitter (mmap W^X; no build-time
 >   stencils, no runtime LLVM). Emits real x86-64 for the scalar subset — every
