@@ -159,7 +159,49 @@ extern "C" __global__ void wdown(const float* in, float* out, int n) {
                   {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N / 32);
     }
 
-    if (g_fail == 0) std::printf("PASS: cooperative __shared__/__syncthreads + warp shuffle run on the compiled fiber tier, == interpreter\n");
+    // 5) Warp vote: __ballot_sync / __any_sync / __all_sync. (int I/O via float
+    //    byte-buffers — checkCoop compares raw 32-bit words.)
+    {
+        const int block = 64, blocks = 4, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void wvote(const int* in, int* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int p = in[i] > 0;
+    unsigned b = __ballot_sync(-1, p);
+    int a = __any_sync(-1, p);
+    int al = __all_sync(-1, p);
+    out[i] = (int)b + a * 2 + al * 4;
+})";
+        std::vector<int> in(N); for (int i = 0; i < N; ++i) in[i] = (int)(rnd() % 3) - 1;
+        std::vector<float> outC(N, -1.f), outI(N, -2.f);
+        int n = N; int* ip = in.data();
+        int* ocp = reinterpret_cast<int*>(outC.data()); int* oip = reinterpret_cast<int*>(outI.data());
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("warp-vote", "wvote", src, grid, blk,
+                  {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
+    }
+
+    // 6) Warp reduce: __reduce_add_sync / __reduce_max_sync (compute capability 8.0).
+    {
+        const int block = 64, blocks = 4, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void wreduce(const int* in, int* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int v = in[i];
+    int s = __reduce_add_sync(-1, v);
+    int mx = __reduce_max_sync(-1, v);
+    out[i] = s + mx;
+})";
+        std::vector<int> in(N); for (int i = 0; i < N; ++i) in[i] = (int)(rnd() % 200) - 100;
+        std::vector<float> outC(N, -1.f), outI(N, -2.f);
+        int n = N; int* ip = in.data();
+        int* ocp = reinterpret_cast<int*>(outC.data()); int* oip = reinterpret_cast<int*>(outI.data());
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("warp-reduce", "wreduce", src, grid, blk,
+                  {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
+    }
+
+    if (g_fail == 0) std::printf("PASS: cooperative __shared__/__syncthreads + warp shuffle/vote/reduce on the compiled fiber tier, == interpreter\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

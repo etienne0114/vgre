@@ -120,9 +120,53 @@ inline Cell coopShuffle(TS& ts, Cell var, int mode, int laneArg, int width) {
     if (own || src < 0 || src >= 32 || !(ts.shflActive[warp] & (1u << src))) return var;
     return ts.shflSnap[warp * 32 + (uint32_t)src];
 }
+
+// __syncwarp(): a warp-scoped barrier (no data exchanged).
+inline void coopSyncwarp(TS& ts) { if (ts.fiber) fiberYield(ts, WAIT_WARP); }
+
+// Warp vote — op 0=ballot 1=any 2=all. Each lane publishes its predicate; after the
+// warp rendezvous, every lane reads the whole ballot (matches the interpreter).
+inline Cell coopVote(TS& ts, bool pred, uint32_t memMask, int op) {
+    if (!ts.fiber) return Cell::I(0);
+    const uint32_t warp = ts.lintid >> 5, lane = ts.lintid & 31u;
+    ts.shflPub[warp * 32 + lane] = Cell::I(pred ? 1 : 0);
+    fiberYield(ts, WAIT_WARP);
+    const uint32_t active = ts.shflActive[warp];
+    uint32_t ballot = 0;
+    for (uint32_t l = 0; l < 32; ++l)
+        if ((active & (1u << l)) && ts.shflSnap[warp * 32 + l].asI() != 0) ballot |= (1u << l);
+    const uint32_t masked = ballot & memMask;
+    if (op == 0) return Cell::I((int64_t)masked);                       // ballot
+    if (op == 1) return Cell::I(masked != 0 ? 1 : 0);                   // any
+    return Cell::I(masked == (memMask & active) ? 1 : 0);              // all
+}
+
+// Warp reduce (__reduce_<op>_sync) — op 0=add 1=min 2=max 3=and 4=or 5=xor. Folds
+// `value` over the warp's participating lanes (active ∩ memMask); every lane gets it.
+inline Cell coopReduce(TS& ts, Cell value, uint32_t memMask, int op, bool sgn) {
+    if (!ts.fiber) return value;
+    const uint32_t warp = ts.lintid >> 5, lane = ts.lintid & 31u;
+    ts.shflPub[warp * 32 + lane] = value;
+    fiberYield(ts, WAIT_WARP);
+    const uint32_t active = ts.shflActive[warp];
+    bool first = true; int64_t acc = 0;
+    for (uint32_t l = 0; l < 32; ++l) {
+        if (!(active & (1u << l)) || !(memMask & (1u << l))) continue;
+        const uint32_t raw = (uint32_t)ts.shflSnap[warp * 32 + l].asI();
+        const int64_t v = sgn ? (int64_t)(int32_t)raw : (int64_t)raw;
+        if (first) { acc = v; first = false; continue; }
+        if (op == 0) acc = v + acc; else if (op == 1) acc = acc < v ? acc : v;
+        else if (op == 2) acc = acc > v ? acc : v; else if (op == 3) acc &= v;
+        else if (op == 4) acc |= v; else acc ^= v;
+    }
+    return Cell::I((int64_t)(uint32_t)acc);
+}
 #else
 inline void coopBarrier(TS&) {}
+inline void coopSyncwarp(TS&) {}
 inline Cell coopShuffle(TS&, Cell var, int, int, int) { return var; }
+inline Cell coopVote(TS&, bool, uint32_t, int) { return Cell::I(0); }
+inline Cell coopReduce(TS&, Cell value, uint32_t, int, bool) { return value; }
 #endif
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
@@ -534,14 +578,17 @@ struct Compiler {
     void scanExprBarriers(const Expr* e) {
         if (!e || failed) return;
         if (e->kind == Expr::Call &&
-            (e->str == "__syncthreads" || e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
-             e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync")) {
-            hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier/shuffle
+            (e->str == "__syncthreads" || e->str == "__syncwarp" ||
+             e->str == "__shfl_sync" || e->str == "__shfl_up_sync" ||
+             e->str == "__shfl_down_sync" || e->str == "__shfl_xor_sync" ||
+             e->str == "__ballot_sync" || e->str == "__any_sync" || e->str == "__all_sync" ||
+             e->str == "__reduce_add_sync" || e->str == "__reduce_min_sync" || e->str == "__reduce_max_sync" ||
+             e->str == "__reduce_and_sync" || e->str == "__reduce_or_sync" || e->str == "__reduce_xor_sync")) {
+            hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier/warp op
         } else if (e->kind == Expr::Call &&
                    (e->str == "__syncthreads_count" || e->str == "__syncthreads_and" ||
-                    e->str == "__syncthreads_or" || e->str == "__syncwarp" ||
-                    e->str == "__ballot_sync" || e->str == "__any_sync" || e->str == "__all_sync")) {
-            fail("warp voting/barrier op needs the interpreter tier");   // voting barriers
+                    e->str == "__syncthreads_or" || e->str == "__activemask")) {
+            fail("block-vote / activemask op needs the interpreter tier");
         }
         for (auto& a : e->args) scanExprBarriers(a.get());
     }
@@ -735,6 +782,14 @@ struct Compiler {
                     return e.args.size() < 2 ? scalar(Type::Int) : promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
                 if (fn == "abs")       return e.args.empty() ? scalar(Type::Int) : estimateType(*e.args[0]);
                 if (fn == "atomicAdd") return e.args.size() < 2 ? scalar(Type::Int) : estimateType(*e.args[1]);
+                // Warp shuffle returns the shuffled variable's type; vote/reduce/count
+                // return int (not the default-double for a non-`f` name).
+                if ((fn == "__shfl_sync" || fn == "__shfl_up_sync" || fn == "__shfl_down_sync" ||
+                     fn == "__shfl_xor_sync") && e.args.size() >= 2) return estimateType(*e.args[1]);
+                if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync" ||
+                    fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
+                    fn == "__reduce_and_sync" || fn == "__reduce_or_sync" || fn == "__reduce_xor_sync")
+                    return scalar(Type::Int);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
                 return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
             }
@@ -1157,6 +1212,30 @@ struct Compiler {
                 int la = static_cast<int>(laneArg(ts).asI());
                 int w = widthE ? static_cast<int>(widthE(ts).asI()) : 32;
                 return coopShuffle(ts, v, mode, la, w);
+            };
+        }
+        if (fn == "__syncwarp") return [](TS& ts) -> Cell { coopSyncwarp(ts); return Cell::I(0); };
+        // Warp vote: __ballot_sync / __any_sync / __all_sync(mask, pred).
+        if ((fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync") && e.args.size() == 2) {
+            int op = fn == "__ballot_sync" ? 0 : fn == "__any_sync" ? 1 : 2;
+            ExprFn mask = compileExpr(*e.args[0]);
+            ExprFn pred = compileExpr(*e.args[1]);
+            if (failed) return {};
+            return [mask, pred, op](TS& ts) -> Cell {
+                return coopVote(ts, pred(ts).truthy(), (uint32_t)mask(ts).asI(), op);
+            };
+        }
+        // Warp reduce: __reduce_<op>_sync(mask, value).
+        if ((fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
+             fn == "__reduce_and_sync" || fn == "__reduce_or_sync" || fn == "__reduce_xor_sync") && e.args.size() == 2) {
+            int op = fn == "__reduce_add_sync" ? 0 : fn == "__reduce_min_sync" ? 1 : fn == "__reduce_max_sync" ? 2
+                   : fn == "__reduce_and_sync" ? 3 : fn == "__reduce_or_sync" ? 4 : 5;
+            const bool sgn = !estimateType(*e.args[1]).isUnsigned;
+            ExprFn mask = compileExpr(*e.args[0]);
+            ExprFn val = compileExpr(*e.args[1]);
+            if (failed) return {};
+            return [mask, val, op, sgn](TS& ts) -> Cell {
+                return coopReduce(ts, val(ts), (uint32_t)mask(ts).asI(), op, sgn);
             };
         }
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
