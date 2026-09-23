@@ -77,7 +77,29 @@ int main() {
     checkCF("while",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int k=0; float acc=0.0f; while(k<m){ acc += x[i*m+k]*2.0f; k++; } y[i]=acc; } })", 64, 20);
     checkCF("nested",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v>0.0f) acc+=v; else acc-=v; } y[i]=acc; } })", 64, 20);
 
-    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering + verifier + evaluator, incl. loops/if-else via phi) == compiled tier\n");
+    // Optimizer passes (const-fold / local GVN / DCE): the optimized IR must stay
+    // bit-exact vs the compiled tier AND have fewer live instructions than the raw IR.
+    auto checkOpt = [&](const char* label, const char* src, int NN, int M) {
+        std::string err;
+        auto ck = CompiledKernel::compileSource(src, "k", err);
+        auto raw = SsaProgram::compile(src, "k", err, /*optimize=*/false);
+        auto opt = SsaProgram::compile(src, "k", err, /*optimize=*/true);
+        if (!ck || !raw || !opt) { std::printf("FAIL: %s compile: %s\n", label, err.c_str()); ++g_fail; return; }
+        std::vector<float> xv(NN * M); for (int i = 0; i < NN * M; ++i) xv[i] = (i % 11) * 0.5f - 2.0f;
+        std::vector<float> yc(NN, -1.f), yo(NN, -3.f);
+        float* xp = xv.data(); int n = NN, m = M;
+        Extent g{(uint32_t)((NN + 31) / 32), 1, 1}, b{32, 1, 1};
+        { float* yp = yc.data(); void* a[] = {&xp, &yp, &n, &m}; ck->launch(g, b, a, 4); }
+        { float* yp = yo.data(); void* a[] = {&xp, &yp, &n, &m}; opt->launch(g, b, a, 4); }
+        int bad = 0; for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yc[i], 4); std::memcpy(&v, &yo[i], 4); if (u != v) ++bad; }
+        if (bad) { std::printf("FAIL: %s optimized SSA vs compiled: %d/%d\n", label, bad, NN); ++g_fail; }
+        else if (opt->liveInsts() > raw->liveInsts()) { std::printf("FAIL: %s optimizer did not shrink IR (raw=%d opt=%d)\n", label, raw->liveInsts(), opt->liveInsts()); ++g_fail; }
+        else std::printf("  %s: optimized == compiled; IR %d → %d live insts\n", label, raw->liveInsts(), opt->liveInsts());
+    };
+    checkOpt("fold",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int a=2+3; int b=a*4; float c=1.0f+2.0f; y[i]=x[i*m]*(float)b + c; } })", 128, 16);
+    checkOpt("cse-dce",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float dead=v*99.0f; float r=(v*2.0f)+(v*2.0f); y[i]=r; } })", 128, 16);
+
+    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering, phi, verifier, evaluator, const-fold/GVN/DCE) == compiled tier\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

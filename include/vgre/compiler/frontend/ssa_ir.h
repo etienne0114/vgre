@@ -28,10 +28,13 @@ class SsaProgram {
 public:
     ~SsaProgram();
 
-    // Parse `source`, lower the named kernel to SSA, and verify it. Returns null
-    // (with `err` set) on a parse error or an out-of-subset construct.
+    // Parse `source`, lower the named kernel to SSA, verify it, and (by default) run
+    // the optimizer passes (const-fold / local GVN / DCE). Returns null (with `err`
+    // set) on a parse error or an out-of-subset construct. `optimize=false` keeps the
+    // raw lowering (used by tests to check the passes preserve semantics + shrink IR).
     static std::unique_ptr<SsaProgram> compile(const std::string& source,
-                                               const std::string& name, std::string& err);
+                                               const std::string& name, std::string& err,
+                                               bool optimize = true);
 
     // Reference-evaluate the SSA over a CUDA-style launch, one thread at a time
     // (the correctness oracle for the IR + lowering until native emission lands).
@@ -40,9 +43,11 @@ public:
     // Human-readable IR dump (for tests / debugging).
     std::string dump() const;
 
-    // Counts, for tests: basic blocks and SSA values in the lowered function.
+    // Counts, for tests: basic blocks, total SSA values, and live instructions
+    // (those still referenced by a block after optimization).
     int numBlocks() const;
     int numValues() const;
+    int liveInsts() const;
 
 private:
     SsaProgram();

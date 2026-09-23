@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -499,6 +500,97 @@ static void memStore(int64_t addr, const Type& t, const SVal& v) {
     }
 }
 
+// ── Optimizer passes (increment 3): pure, semantics-preserving IR→IR ──────────────
+static bool isConst(const Inst& in) { return in.op == Op::ConstI || in.op == Op::ConstF; }
+
+// Constant folding: rewrite pure ops with all-constant operands to a constant, in
+// place (same value id, so uses need no rewrite). Runs to a fixpoint.
+static void constFold(Fn& fn) {
+    auto cst = [&](int id, SVal& out) -> bool {
+        const Inst& o = fn.vals[id];
+        if (o.op == Op::ConstI) { out = coerce(SI(o.ci), o.ty); return true; }
+        if (o.op == Op::ConstF) { out = coerce(SF(o.cf), o.ty); return true; }
+        return false;
+    };
+    auto setConst = [&](Inst& in, SVal r) {
+        if (in.ty.isFloating()) { in.op = Op::ConstF; in.cf = r.d; } else { in.op = Op::ConstI; in.ci = coerce(r, in.ty).i; }
+        in.a.clear();
+    };
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& in : fn.vals) {
+            if (isConst(in)) continue;
+            SVal a, b, c;
+            if (in.op == Op::Bin && in.a.size() == 2 && cst(in.a[0], a) && cst(in.a[1], b)) { setConst(in, binop(in.s, a, b, in.ty)); changed = true; }
+            else if (in.op == Op::Cmp && in.a.size() == 2 && cst(in.a[0], a) && cst(in.a[1], b)) { in.op = Op::ConstI; in.ci = cmpop(in.s, a, b).i; in.a.clear(); changed = true; }
+            else if (in.op == Op::Cast && in.a.size() == 1 && cst(in.a[0], a)) { setConst(in, coerce(a, in.ty)); changed = true; }
+            else if (in.op == Op::Un && in.a.size() == 1 && cst(in.a[0], a)) {
+                SVal r = in.s == "-" ? (in.ty.isFloating() ? SF(-asF(a)) : SI(-a.i)) : in.s == "~" ? SI(~a.i) : SI(asI(a) == 0 ? 1 : 0);
+                setConst(in, r); changed = true;
+            } else if (in.op == Op::Sel && in.a.size() == 3 && cst(in.a[0], c)) {
+                in.op = Op::Cast; in.a = {(asI(c) != 0) ? in.a[1] : in.a[2]}; changed = true;   // fold to a copy of the taken arm
+            }
+        }
+    }
+}
+
+// Local value numbering (safe GVN within a block): dedupe identical pure instructions;
+// the canonical precedes the duplicate in the same block, so it dominates all uses.
+static void localGvn(Fn& fn) {
+    std::vector<int> remap(fn.vals.size());
+    for (size_t i = 0; i < remap.size(); ++i) remap[i] = (int)i;
+    std::function<int(int)> resolve = [&](int id) { while (remap[id] != id) id = remap[id]; return id; };
+    for (auto& bb : fn.bbs) {
+        std::unordered_map<std::string, int> seen;
+        for (int id : bb.insts) {
+            Inst& in = fn.vals[id];
+            const bool pure = in.op == Op::ConstI || in.op == Op::ConstF || in.op == Op::Bin ||
+                              in.op == Op::Un || in.op == Op::Cmp || in.op == Op::Cast || in.op == Op::Sel;
+            for (int& op : in.a) op = resolve(op);
+            if (!pure) continue;
+            uint64_t fb; std::memcpy(&fb, &in.cf, 8);
+            std::string key = std::to_string((int)in.op) + "|" + in.s + "|" + std::to_string(in.ci) + "|" +
+                              std::to_string(fb) + "|" + std::to_string((int)in.ty.base) + std::to_string(in.ty.ptr) +
+                              std::to_string(in.ty.isUnsigned ? 1 : 0);
+            for (int op : in.a) key += "," + std::to_string(op);
+            auto it = seen.find(key);
+            if (it != seen.end()) remap[id] = it->second; else seen[key] = id;
+        }
+    }
+    for (auto& in : fn.vals) for (int& op : in.a) op = resolve(op);
+    for (auto& bb : fn.bbs) {
+        std::vector<int> keep;
+        for (int id : bb.insts) if (resolve(id) == id) keep.push_back(id);
+        bb.insts = std::move(keep);
+    }
+}
+
+// Dead-code elimination: keep effects (stores, terminators) + everything transitively
+// used by them; drop the rest from the block lists.
+static void dce(Fn& fn) {
+    std::vector<char> live(fn.vals.size(), 0);
+    std::vector<int> work;
+    for (auto& bb : fn.bbs) for (int id : bb.insts) {
+        const Inst& in = fn.vals[id];
+        if (in.op == Op::Store || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
+            if (!live[id]) { live[id] = 1; work.push_back(id); }
+        }
+    }
+    while (!work.empty()) { int id = work.back(); work.pop_back(); for (int op : fn.vals[id].a) if (!live[op]) { live[op] = 1; work.push_back(op); } }
+    for (auto& bb : fn.bbs) {
+        std::vector<int> keep;
+        for (int id : bb.insts) {
+            const Inst& in = fn.vals[id];
+            const bool effect = in.op == Op::Store || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
+            if (effect || live[id]) keep.push_back(id);
+        }
+        bb.insts = std::move(keep);
+    }
+}
+
+static void runOpt(Fn& fn) { constFold(fn); localGvn(fn); constFold(fn); dce(fn); }
+
 }  // namespace
 
 // ── SsaProgram wrapper ────────────────────────────────────────────────────────────
@@ -511,8 +603,9 @@ SsaProgram::SsaProgram() : p_(new Impl) {}
 SsaProgram::~SsaProgram() = default;
 int SsaProgram::numBlocks() const { return (int)p_->fn.bbs.size(); }
 int SsaProgram::numValues() const { return (int)p_->fn.vals.size(); }
+int SsaProgram::liveInsts() const { int n = 0; for (const auto& bb : p_->fn.bbs) n += (int)bb.insts.size(); return n; }
 
-std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const std::string& name, std::string& err) {
+std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const std::string& name, std::string& err, bool optimize) {
     ParseResult pr = parse(source);
     if (!pr.ok || !pr.module) { err = pr.error; return nullptr; }
     const Kernel* target = nullptr;
@@ -522,6 +615,7 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
     Lowerer lo(*target);
     if (!lo.run()) { err = lo.err; return nullptr; }
     if (!verify(lo.fn, err)) return nullptr;
+    if (optimize) { runOpt(lo.fn); if (!verify(lo.fn, err)) return nullptr; }
     std::unique_ptr<SsaProgram> prog(new SsaProgram());
     prog->p_->fn = std::move(lo.fn);
     return prog;

@@ -189,9 +189,14 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      values and if/else merges lower to real phi nodes; the evaluator resolves them
      by arrival edge. Held bit-exact vs the compiled tier by `test_ssa_ir.cpp`
      (for-sum / while / if-else / nested loop+conditional).
-   - **Remaining**: do-while/switch/break/continue; increment 3 — const-fold / DCE /
-     GVN / LICM passes; increment 4 — linear-scan register allocation + an x86-64 /
-     AArch64 machine-code emitter; then wire it as `VGRE_EXEC_BACKEND=ssa`.
+   - **Increment 3 ✅ DONE**: the optimizer passes — **constant folding**, **local
+     value numbering** (safe in-block GVN/CSE), and **dead-code elimination** — as
+     pure IR→IR transforms run in `SsaProgram::compile`. Verified by `test_ssa_ir.cpp`:
+     the optimized IR stays bit-exact vs the compiled tier AND has fewer live
+     instructions than the raw lowering (fold 32→22, cse-dce 28→23).
+   - **Remaining**: LICM + cross-block GVN (need dominance/loop analysis); do-while/
+     switch/break/continue; increment 4 — linear-scan register allocation + an
+     x86-64 / AArch64 machine-code emitter; then wire it as `VGRE_EXEC_BACKEND=ssa`.
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries
