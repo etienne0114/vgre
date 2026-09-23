@@ -1470,6 +1470,13 @@ target_link_libraries(test_cuda_vectypes PRIVATE vgre Threads::Threads)
 add_test(NAME CudaVecTypes COMMAND test_cuda_vectypes)
 set_tests_properties(CudaVecTypes PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Full atomic set on the COMPILED tier (add/sub/exch/min/max/and/or/xor/cas) vs the
+# interpreter — commutative ops under concurrency, exch/cas single-threaded.
+add_executable(test_cuda_compiled_atomics compiler/test_cuda_compiled_atomics.cpp)
+target_link_libraries(test_cuda_compiled_atomics PRIVATE vgre Threads::Threads)
+add_test(NAME CudaCompiledAtomics COMMAND test_cuda_compiled_atomics)
+set_tests_properties(CudaCompiledAtomics PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

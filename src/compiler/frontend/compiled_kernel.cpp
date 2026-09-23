@@ -905,7 +905,10 @@ struct Compiler {
                 if (fn == "min" || fn == "max")
                     return e.args.size() < 2 ? scalar(Type::Int) : promoteT(estimateType(*e.args[0]), estimateType(*e.args[1]));
                 if (fn == "abs")       return e.args.empty() ? scalar(Type::Int) : estimateType(*e.args[0]);
-                if (fn == "atomicAdd") return e.args.size() < 2 ? scalar(Type::Int) : estimateType(*e.args[1]);
+                if (fn == "atomicAdd" || fn == "atomicSub" || fn == "atomicExch" || fn == "atomicMin" ||
+                    fn == "atomicMax" || fn == "atomicAnd" || fn == "atomicOr" || fn == "atomicXor" ||
+                    fn == "atomicCAS")
+                    return e.args.size() < 2 ? scalar(Type::Int) : estimateType(*e.args[1]);
                 // Warp shuffle returns the shuffled variable's type; vote/reduce/count
                 // return int (not the default-double for a non-`f` name).
                 if ((fn == "__shfl_sync" || fn == "__shfl_up_sync" || fn == "__shfl_down_sync" ||
@@ -1282,41 +1285,103 @@ struct Compiler {
     }
 
     // atomicAdd(&arr[i], val): read-modify-write returning the old value.
-    ExprFn compileAtomicAdd(const Expr& e) {
+    // Apply an atomic op to a Cell in-place (the local-array / shared path, where the
+    // cooperative fiber scheduler already serialises RMWs). Returns the OLD value.
+    static Cell atomicApplyCell(const std::string& op, Cell* cell, Cell v, Cell cmp, const Type& pt) {
+        const Cell old = *cell;
+        const bool u = pt.isUnsigned, w64 = pt.elemBytes() == 8;
+        auto lt = [&](int64_t a, int64_t b) {
+            if (!u) return (w64 ? a : (int64_t)(int32_t)a) < (w64 ? b : (int64_t)(int32_t)b);
+            return (w64 ? (uint64_t)a : (uint32_t)a) < (w64 ? (uint64_t)b : (uint32_t)b);
+        };
+        Cell nv;
+        if (op == "add")       nv = binop("+", old, v);
+        else if (op == "sub")  nv = binop("-", old, v);
+        else if (op == "and")  nv = binop("&", old, v);
+        else if (op == "or")   nv = binop("|", old, v);
+        else if (op == "xor")  nv = binop("^", old, v);
+        else if (op == "exch") nv = v;
+        else if (op == "min")  nv = lt(old.asI(), v.asI()) ? old : v;
+        else if (op == "max")  nv = lt(v.asI(), old.asI()) ? old : v;
+        else /* cas */         nv = (old.asI() == cmp.asI()) ? v : old;
+        *cell = coerce(nv, pt);
+        return old;
+    }
+
+    ExprFn compileAtomicAdd(const Expr& e) { return compileAtomic(e, "add"); }
+
+    // atomic<Op>(&array[index], value [, value2 for CAS]) — returns the OLD value.
+    // Ops: add/sub/exch/and/or/xor/min/max/cas. Integer for and/or/xor/min/max/cas;
+    // add/sub/exch also allow float. Mirrors the interpreter (same atomic_rmw.h prims).
+    ExprFn compileAtomic(const Expr& e, const std::string& op) {
+        const bool isCas = (op == "cas");
+        if (e.args.size() != (isCas ? 3u : 2u)) { fail("atomic" + op + ": wrong argument count"); return {}; }
         const Expr& a0 = *e.args[0];
         if (a0.kind != Expr::Unary || a0.str != "&" || a0.args.empty() || a0.args[0]->kind != Expr::Index) {
-            fail("atomicAdd expects &array[index] as its first argument");
+            fail("atomic" + op + " expects &array[index] as its first argument");
             return {};
         }
         const Expr& index = *a0.args[0];
+        ExprFn cmp = isCas ? compileExpr(*e.args[1]) : ExprFn();
+        ExprFn val = compileExpr(isCas ? *e.args[2] : *e.args[1]);
+        if (failed) return {};
         ExprFn flat;
-        if (const LocalArr* la = localArrayAccess(index, flat)) {  // atomicAdd(&acc[i], v) — slot RMW
-            ExprFn val = compileExpr(*e.args[1]);
-            if (failed) return {};
+        if (const LocalArr* la = localArrayAccess(index, flat)) {  // atomic on a per-thread/shared slot
             size_t base = la->base; int sz = la->size; Type pt = la->elem; bool sh = la->isShared;
-            return [base, flat, val, sz, pt, sh](TS& ts) -> Cell {
+            return [base, flat, val, cmp, sz, pt, sh, op, isCas](TS& ts) -> Cell {
                 int64_t i = flat(ts).asI();
                 if (i < 0 || i >= sz) return Cell::I(0);
-                // Per-thread slot, or block-shared: either way fibers are cooperative
-                // (one runs at a time, never mid-RMW), so a plain RMW is atomic here.
                 Cell* store = sh ? ts.shared : ts.regs.data();
-                Cell old = store[base + (size_t)i];
-                store[base + (size_t)i] = coerce(binop("+", old, val(ts)), pt);
-                return old;
+                Cell cv = isCas ? cmp(ts) : Cell::I(0);
+                return atomicApplyCell(op, &store[base + (size_t)i], val(ts), cv, pt);
             };
         }
         ExprFn base = compileExpr(*index.args[0]);
         ExprFn idx  = compileExpr(*index.args[1]);
-        ExprFn val  = compileExpr(*e.args[1]);
         if (failed) return {};
         Type pt = pointee(index);
         int bytes = pt.elemBytes();
         bool fp = pt.isFloating();
-        return [base, idx, val, bytes, fp](TS& ts) -> Cell {
+        if (fp && !(op == "add" || op == "sub" || op == "exch")) { fail("atomic" + op + " is integer-only"); return {}; }
+        const bool uns = pt.isUnsigned;
+        return [base, idx, val, cmp, bytes, fp, uns, op, isCas](TS& ts) -> Cell {
             void* addr = reinterpret_cast<void*>(base(ts).asI() + idx(ts).asI() * bytes);
-            Cell v = val(ts);
-            if (fp) return Cell::F(atomicAddFloat(addr, bytes, v.asF()));
-            return Cell::I(atomicAddInt(addr, bytes, v.asI()));
+            // Sign/zero-extend a raw old-value back into an int64 Cell per the type.
+            auto ret = [&](uint64_t o) -> Cell {
+                if (bytes == 8) return Cell::I((int64_t)o);
+                return Cell::I(uns ? (int64_t)(uint32_t)o : (int64_t)(int32_t)o);
+            };
+            if (fp) {
+                double d = val(ts).asF();
+                if (op == "add") return Cell::F(atomicAddFloat(addr, bytes, d));
+                if (op == "sub") return Cell::F(atomicAddFloat(addr, bytes, -d));
+                // exch: reinterpret bits through the integer exchange.
+                if (bytes == 8) { uint64_t b; double dd = d; std::memcpy(&b, &dd, 8); uint64_t o = common::atomicExchU64(addr, b); double r; std::memcpy(&r, &o, 8); return Cell::F(r); }
+                float f = (float)d; uint32_t b; std::memcpy(&b, &f, 4); uint32_t o = common::atomicExchU32(addr, b); float r; std::memcpy(&r, &o, 4); return Cell::F((double)r);
+            }
+            int64_t vi = val(ts).asI();
+            if (op == "add") return Cell::I(atomicAddInt(addr, bytes, vi));
+            if (op == "sub") return Cell::I(atomicAddInt(addr, bytes, -vi));
+            if (bytes == 8) {
+                uint64_t x = (uint64_t)vi, o;
+                if (op == "exch") o = common::atomicExchU64(addr, x);
+                else if (op == "and") o = common::atomicAndU64(addr, x);
+                else if (op == "or")  o = common::atomicOrU64(addr, x);
+                else if (op == "xor") o = common::atomicXorU64(addr, x);
+                else if (op == "min") o = uns ? common::atomicMinU64(addr, x) : (uint64_t)common::atomicMinS64(addr, (int64_t)x);
+                else if (op == "max") o = uns ? common::atomicMaxU64(addr, x) : (uint64_t)common::atomicMaxS64(addr, (int64_t)x);
+                else /* cas */        o = common::atomicCasU64(addr, (uint64_t)cmp(ts).asI(), x);
+                return ret(o);
+            }
+            uint32_t x = (uint32_t)vi, o;
+            if (op == "exch") o = common::atomicExchU32(addr, x);
+            else if (op == "and") o = common::atomicAndU32(addr, x);
+            else if (op == "or")  o = common::atomicOrU32(addr, x);
+            else if (op == "xor") o = common::atomicXorU32(addr, x);
+            else if (op == "min") o = uns ? common::atomicMinU32(addr, x) : (uint32_t)common::atomicMinS32(addr, (int32_t)x);
+            else if (op == "max") o = uns ? common::atomicMaxU32(addr, x) : (uint32_t)common::atomicMaxS32(addr, (int32_t)x);
+            else /* cas */        o = common::atomicCasU32(addr, (uint32_t)cmp(ts).asI(), x);
+            return ret(o);
         };
     }
 
@@ -1503,7 +1568,15 @@ struct Compiler {
                 return [v, h, x, y](TS& ts) -> Cell { TM::instance().surf2Dwrite((uint64_t)h(ts).asI(), (float)v(ts).asF(), (int)x(ts).asI(), (int)y(ts).asI()); return Cell::I(0); };
             }
         }
-        if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
+        if (fn == "atomicAdd"  && e.args.size() == 2) return compileAtomic(e, "add");
+        if (fn == "atomicSub"  && e.args.size() == 2) return compileAtomic(e, "sub");
+        if (fn == "atomicExch" && e.args.size() == 2) return compileAtomic(e, "exch");
+        if (fn == "atomicMin"  && e.args.size() == 2) return compileAtomic(e, "min");
+        if (fn == "atomicMax"  && e.args.size() == 2) return compileAtomic(e, "max");
+        if (fn == "atomicAnd"  && e.args.size() == 2) return compileAtomic(e, "and");
+        if (fn == "atomicOr"   && e.args.size() == 2) return compileAtomic(e, "or");
+        if (fn == "atomicXor"  && e.args.size() == 2) return compileAtomic(e, "xor");
+        if (fn == "atomicCAS"  && e.args.size() == 3) return compileAtomic(e, "cas");
         auto dfit = deviceFns.find(fn);
         if (dfit != deviceFns.end()) return inlineDeviceCall(*dfit->second, e);   // user __device__ helper
         if (e.args.size() == 1) {
