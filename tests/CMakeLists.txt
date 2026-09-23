@@ -1477,6 +1477,13 @@ target_link_libraries(test_cuda_compiled_atomics PRIVATE vgre Threads::Threads)
 add_test(NAME CudaCompiledAtomics COMMAND test_cuda_compiled_atomics)
 set_tests_properties(CudaCompiledAtomics PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Tier-2 SSA backend, increment 1: VGRE-IR lowering + verifier + evaluator, diffed
+# against the compiled tier over the scalar elementwise subset.
+add_executable(test_ssa_ir compiler/test_ssa_ir.cpp)
+target_link_libraries(test_ssa_ir PRIVATE vgre Threads::Threads)
+add_test(NAME SsaIr COMMAND test_ssa_ir)
+set_tests_properties(SsaIr PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

@@ -176,7 +176,22 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
 
 **Phase D — Peak backend (optional) + threading.**
 8. In-tree thread pool becomes the only threading requirement (OpenMP optional). ✅ DONE
-9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). ⬜ REMAINING
+9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). 🚧 STARTED
+   - **Increment 1 ✅ DONE**: VGRE-IR (typed SSA: basic blocks + br/condbr/ret) +
+     AST→SSA lowering for the scalar elementwise subset (`if`-guarded bodies,
+     ternary→select) + a well-formedness verifier + a reference evaluator. Held
+     bit-exact against the Tier-1 compiled backend by `test_ssa_ir.cpp`
+     (`src/compiler/frontend/ssa_ir.cpp`). This is the foundation the passes and
+     the emitter build on.
+   - **Increment 2 ✅ DONE**: full structured control flow — `if`/`if-else`, `for`,
+     `while`, inc/dec — with on-demand **SSA phi insertion** (Braun et al.: per-block
+     current definitions, incomplete phis in unsealed loop headers). Loop-carried
+     values and if/else merges lower to real phi nodes; the evaluator resolves them
+     by arrival edge. Held bit-exact vs the compiled tier by `test_ssa_ir.cpp`
+     (for-sum / while / if-else / nested loop+conditional).
+   - **Remaining**: do-while/switch/break/continue; increment 3 — const-fold / DCE /
+     GVN / LICM passes; increment 4 — linear-scan register allocation + an x86-64 /
+     AArch64 machine-code emitter; then wire it as `VGRE_EXEC_BACKEND=ssa`.
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries

@@ -1,0 +1,83 @@
+// Tier-2 backend, increment 1 — VGRE-IR (SSA) foundation. The AST→SSA lowering, the
+// well-formedness verifier, and the reference evaluator are validated by diffing the
+// SSA tier against the Tier-1 compiled backend (the established oracle) over the
+// scalar elementwise subset: saxpy, an `if`-guarded ternary (→ select), unary math
+// intrinsics, and integer modulo. They must agree bit-for-bit. This proves the IR and
+// lowering are correct before the optimizer passes and native emission build on them.
+//
+// Tests build in Release (-DNDEBUG); asserts must stay real.
+#undef NDEBUG
+
+#include "vgre/compiler/frontend/compiled_kernel.h"
+#include "vgre/compiler/frontend/ssa_ir.h"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+using namespace vgre::compiler::frontend;
+
+static int g_fail = 0;
+
+// Run `src` on the compiled tier and the SSA tier over the same (a, x, y, n) launch;
+// require the y outputs to match bit-for-bit.
+static void check(const char* label, const char* src, int N,
+                  const std::vector<float>& x, const std::vector<float>& y0, float a) {
+    std::string err;
+    auto ck = CompiledKernel::compileSource(src, "k", err);
+    if (!ck) { std::printf("FAIL: %s compiled compile: %s\n", label, err.c_str()); ++g_fail; return; }
+    auto sp = SsaProgram::compile(src, "k", err);
+    if (!sp) { std::printf("FAIL: %s SSA compile: %s\n", label, err.c_str()); ++g_fail; return; }
+
+    std::vector<float> yc = y0, ys = y0;
+    std::vector<float> xv = x;
+    float av = a; int n = N; float* xp = xv.data();
+    Extent g{(uint32_t)((N + 63) / 64), 1, 1}, b{64, 1, 1};
+    { float* yp = yc.data(); void* ar[] = {&av, &xp, &yp, &n}; if (!ck->launch(g, b, ar, 4)) { std::printf("FAIL: %s compiled launch\n", label); ++g_fail; return; } }
+    { float* yp = ys.data(); void* ar[] = {&av, &xp, &yp, &n}; if (!sp->launch(g, b, ar, 4)) { std::printf("FAIL: %s SSA launch\n", label); ++g_fail; return; } }
+
+    int bad = 0;
+    for (int i = 0; i < N; ++i) { uint32_t u, v; std::memcpy(&u, &yc[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v) ++bad; }
+    if (bad) { std::printf("FAIL: %s SSA vs compiled: %d/%d mismatches\n", label, bad, N); ++g_fail; }
+    else std::printf("  %s: SSA (blocks=%d values=%d) == compiled (%d elems)\n", label, sp->numBlocks(), sp->numValues(), N);
+}
+
+int main() {
+    const int N = 256;
+    std::vector<float> x(N), y0(N);
+    for (int i = 0; i < N; ++i) { x[i] = i * 0.5f - 3.0f; y0[i] = 100.0f - i * 0.25f; }
+
+    check("saxpy",   R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n) y[i]=a*x[i]+y[i]; })", N, x, y0, 2.5f);
+    check("ternary", R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; y[i]=(v>0.0f)?(v*a):(-v); } })", N, x, y0, 3.0f);
+    check("math",    R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; y[i]=sqrtf(fabsf(v))*a + y[i]; } })", N, x, y0, 1.5f);
+    check("intmod",  R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int m=i%7; y[i]=(float)m + a; } })", N, x, y0, 0.25f);
+    check("compound",R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=y[i]; acc += a*x[i]; acc *= 2.0f; y[i]=acc; } })", N, x, y0, 1.25f);
+
+    // Control flow with phi insertion (loops + if/else) — signature (x, y, n, m).
+    auto checkCF = [&](const char* label, const char* src, int NN, int M) {
+        std::string err;
+        auto ck = CompiledKernel::compileSource(src, "k", err);
+        if (!ck) { std::printf("FAIL: %s compiled: %s\n", label, err.c_str()); ++g_fail; return; }
+        auto sp = SsaProgram::compile(src, "k", err);
+        if (!sp) { std::printf("FAIL: %s SSA: %s\n", label, err.c_str()); ++g_fail; return; }
+        std::vector<float> xv(NN * M); for (int i = 0; i < NN * M; ++i) xv[i] = (i % 13) * 0.5f - 3.0f;
+        std::vector<float> yc(NN, -1.f), ys(NN, -2.f);
+        float* xp = xv.data(); int n = NN, m = M;
+        Extent g{(uint32_t)((NN + 31) / 32), 1, 1}, b{32, 1, 1};
+        { float* yp = yc.data(); void* a[] = {&xp, &yp, &n, &m}; ck->launch(g, b, a, 4); }
+        { float* yp = ys.data(); void* a[] = {&xp, &yp, &n, &m}; sp->launch(g, b, a, 4); }
+        int bad = 0; for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yc[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v) ++bad; }
+        if (bad) { std::printf("FAIL: %s SSA vs compiled: %d/%d\n", label, bad, NN); ++g_fail; }
+        else std::printf("  %s: SSA (blocks=%d values=%d) == compiled (%d elems)\n", label, sp->numBlocks(), sp->numValues(), NN);
+    };
+    checkCF("for-sum",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ acc += x[i*m+k]; } y[i]=acc; } })", 64, 20);
+    checkCF("if-else",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float r; if(v>0.0f){ r=v*2.0f; } else { r=v-1.0f; } y[i]=r; } })", 64, 20);
+    checkCF("while",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int k=0; float acc=0.0f; while(k<m){ acc += x[i*m+k]*2.0f; k++; } y[i]=acc; } })", 64, 20);
+    checkCF("nested",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v>0.0f) acc+=v; else acc-=v; } y[i]=acc; } })", 64, 20);
+
+    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering + verifier + evaluator, incl. loops/if-else via phi) == compiled tier\n");
+    else std::printf("FAILED: %d check(s)\n", g_fail);
+    return g_fail == 0 ? 0 : 1;
+}
