@@ -119,6 +119,7 @@ struct Lowerer {
     std::unordered_map<std::string, std::unordered_map<int, int>> curDef;   // var -> block -> value
     std::vector<char> sealed;                                               // per block
     std::unordered_map<int, std::unordered_map<std::string, int>> incPhis;  // block -> var -> phi id
+    std::vector<std::pair<int, int>> loops;   // (breakTarget, continueTarget) per enclosing loop
 
     explicit Lowerer(const Kernel& kern) : k(kern) {}
     void fail(const std::string& m) { if (ok) { ok = false; err = m; } }
@@ -129,6 +130,7 @@ struct Lowerer {
     }
     void addEdge(int from, int to) { (void)from; fn.preds[to].push_back(from); }
     int emit(Inst in) { int id = (int)fn.vals.size(); fn.vals.push_back(std::move(in)); fn.bbs[cur].insts.push_back(id); return id; }
+    void emitBr(int target) { Inst in; in.op = Op::Br; in.bbT = target; emit(std::move(in)); }
 
     // ── Braun SSA variable access ────────────────────────────────────────────────
     void writeVar(const std::string& v, int block, int val) { curDef[v][block] = val; }
@@ -366,28 +368,60 @@ struct Lowerer {
             }
             case Stmt::For:
             case Stmt::While: {
+                // header(cond) → body → latch(incr) → back to header; break→exit, continue→latch.
                 if (s.kind == Stmt::For && s.forInit) { lowerStmt(*s.forInit); if (!ok) return; }
-                int header = newBlock();   // unsealed: the back-edge pred is still pending
-                Inst brh; brh.op = Op::Br; brh.bbT = header; emit(std::move(brh)); addEdge(cur, header);
-                cur = header;
+                int header = newBlock(), body = newBlock(), latch = newBlock(), exit = newBlock();
+                emitBr(header); addEdge(cur, header);
+                cur = header;                              // unsealed until the back-edge
                 const Expr* cond = (s.kind == Stmt::For) ? s.forCond.get() : s.expr.get();
                 int c = cond ? lowerExpr(*cond) : constI(1, scalar(Type::Int));
                 if (!ok) return;
-                int body = newBlock(), exit = newBlock();
                 Inst cb; cb.op = Op::CondBr; cb.a = {c}; cb.bbT = body; cb.bbF = exit; emit(std::move(cb));
                 addEdge(header, body); addEdge(header, exit);
-                sealBlock(body);
+                sealBlock(body);                           // body's only pred is header
                 cur = body;
-                const std::vector<StmtPtr>& loopBody = (s.kind == Stmt::For) ? s.body : s.body;
-                for (auto& st : loopBody) { lowerStmt(*st); if (!ok) return; }
+                loops.push_back({exit, latch});
+                for (auto& st : s.body) { lowerStmt(*st); if (!ok) return; }
+                loops.pop_back();
+                emitBr(latch); addEdge(cur, latch);        // normal fall-through to the latch
+                sealBlock(latch);                          // preds: body fall-through + any `continue`s
+                cur = latch;
                 if (s.kind == Stmt::For && s.forIncr) { lowerExpr(*s.forIncr); if (!ok) return; }
-                Inst bb; bb.op = Op::Br; bb.bbT = header; emit(std::move(bb)); addEdge(cur, header);   // back-edge
-                sealBlock(header);   // all header preds known now → fill its incomplete phis
-                sealBlock(exit);
+                emitBr(header); addEdge(cur, header);       // back-edge
+                sealBlock(header);                          // preds complete → fill header phis
+                sealBlock(exit);                            // preds: header false-edge + any `break`s
                 cur = exit;
                 return;
             }
-            default: fail("SSA: unsupported statement (do-while/switch/break/continue → later increment)"); return;
+            case Stmt::DoWhile: {
+                // body → cond; cond true → body (back-edge); break→exit, continue→cond.
+                int body = newBlock(), condB = newBlock(), exit = newBlock();
+                emitBr(body); addEdge(cur, body);
+                cur = body;                                // unsealed until the back-edge
+                loops.push_back({exit, condB});
+                for (auto& st : s.body) { lowerStmt(*st); if (!ok) return; }
+                loops.pop_back();
+                emitBr(condB); addEdge(cur, condB);
+                sealBlock(condB);                          // preds: body fall-through + continues
+                cur = condB;
+                int c = s.expr ? lowerExpr(*s.expr) : constI(1, scalar(Type::Int));
+                if (!ok) return;
+                Inst cb; cb.op = Op::CondBr; cb.a = {c}; cb.bbT = body; cb.bbF = exit; emit(std::move(cb));
+                addEdge(condB, body); addEdge(condB, exit);
+                sealBlock(body);                           // preds: pre-loop + condB back-edge
+                sealBlock(exit);                           // preds: condB + breaks
+                cur = exit;
+                return;
+            }
+            case Stmt::Break:
+            case Stmt::Continue: {
+                if (loops.empty()) { fail("SSA: break/continue outside a loop"); return; }
+                int tgt = (s.kind == Stmt::Break) ? loops.back().first : loops.back().second;
+                emitBr(tgt); addEdge(cur, tgt);
+                cur = newBlock(/*seal=*/true);             // fresh unreachable block for any trailing stmts
+                return;
+            }
+            default: fail("SSA: unsupported statement (switch → later increment)"); return;
         }
     }
 
@@ -589,7 +623,78 @@ static void dce(Fn& fn) {
     }
 }
 
-static void runOpt(Fn& fn) { constFold(fn); localGvn(fn); constFold(fn); dce(fn); }
+// Dominator sets by iterative dataflow (small CFGs): dom[b][d] ⇔ d dominates b.
+static std::vector<std::vector<char>> computeDom(const Fn& fn) {
+    const int n = (int)fn.bbs.size();
+    std::vector<std::vector<char>> dom(n, std::vector<char>(n, 1));
+    for (int d = 0; d < n; ++d) dom[fn.entry][d] = (d == fn.entry) ? 1 : 0;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int b = 0; b < n; ++b) {
+            if (b == fn.entry) continue;
+            std::vector<char> inter(n, 1); bool any = false;
+            for (int p : fn.preds[b]) { any = true; for (int d = 0; d < n; ++d) inter[d] = inter[d] && dom[p][d]; }
+            if (!any) std::fill(inter.begin(), inter.end(), 0);
+            inter[b] = 1;
+            if (inter != dom[b]) { dom[b] = std::move(inter); changed = true; }
+        }
+    }
+    return dom;
+}
+
+// Loop-invariant code motion: hoist pure instructions whose operands are all defined
+// outside the loop (or are themselves invariant) into the loop's preheader. Speculative
+// execution of pure ops is safe (no traps: /0 yields 0, float ops don't fault).
+static void licm(Fn& fn) {
+    const int n = (int)fn.bbs.size();
+    auto dom = computeDom(fn);
+    std::vector<int> blockOf(fn.vals.size(), -1);
+    for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) blockOf[id] = b;
+    for (int h = 0; h < n; ++h) {
+        std::vector<int> latches;                       // preds of h dominated by h ⇒ back-edges
+        for (int p : fn.preds[h]) if (dom[p][h]) latches.push_back(p);
+        if (latches.empty()) continue;
+        std::vector<char> inLoop(n, 0); inLoop[h] = 1;
+        std::vector<int> stk;
+        for (int l : latches) if (!inLoop[l]) { inLoop[l] = 1; stk.push_back(l); }
+        while (!stk.empty()) { int b = stk.back(); stk.pop_back(); for (int p : fn.preds[b]) if (!inLoop[p]) { inLoop[p] = 1; stk.push_back(p); } }
+        int preheader = -1, phCount = 0;                // h's unique out-of-loop pred
+        for (int p : fn.preds[h]) if (!inLoop[p]) { preheader = p; ++phCount; }
+        if (phCount != 1) continue;                     // not a simple structured loop
+        auto inLoopDef = [&](int id) { return blockOf[id] >= 0 && inLoop[blockOf[id]]; };
+        std::vector<char> inv(fn.vals.size(), 0);
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (int b = 0; b < n; ++b) {
+                if (!inLoop[b]) continue;
+                for (int id : fn.bbs[b].insts) {
+                    const Inst& in = fn.vals[id];
+                    const bool pure = in.op == Op::Bin || in.op == Op::Un || in.op == Op::Cmp ||
+                                      in.op == Op::Cast || in.op == Op::Sel || in.op == Op::ConstI || in.op == Op::ConstF;
+                    if (!pure || inv[id]) continue;
+                    bool allInv = true;
+                    for (int op : in.a) if (inLoopDef(op) && !inv[op]) { allInv = false; break; }
+                    if (allInv) { inv[id] = 1; changed = true; }
+                }
+            }
+        }
+        std::vector<int> hoist;
+        for (int b = 0; b < n; ++b) {
+            if (!inLoop[b]) continue;
+            std::vector<int> keep;
+            for (int id : fn.bbs[b].insts) { if (inv[id]) { hoist.push_back(id); blockOf[id] = preheader; } else keep.push_back(id); }
+            fn.bbs[b].insts = std::move(keep);
+        }
+        std::sort(hoist.begin(), hoist.end());          // SSA ids increase with def order ⇒ defs precede uses
+        auto& ph = fn.bbs[preheader].insts;
+        size_t at = ph.empty() ? 0 : ph.size() - 1;     // before the preheader's terminator
+        ph.insert(ph.begin() + at, hoist.begin(), hoist.end());
+    }
+}
+
+static void runOpt(Fn& fn) { constFold(fn); localGvn(fn); licm(fn); constFold(fn); dce(fn); }
 
 }  // namespace
 

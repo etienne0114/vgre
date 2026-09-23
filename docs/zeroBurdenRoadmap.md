@@ -189,14 +189,21 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      values and if/else merges lower to real phi nodes; the evaluator resolves them
      by arrival edge. Held bit-exact vs the compiled tier by `test_ssa_ir.cpp`
      (for-sum / while / if-else / nested loop+conditional).
+   - **Increment 2b ✅ DONE**: the rest of structured control flow — `do-while`,
+     `break`, `continue` — via a loop-context stack + latch/exit blocks (phi
+     construction handles the extra edges). Diffed vs the Tier-0 interpreter (the
+     compiled tier lacks these), bit-exact.
    - **Increment 3 ✅ DONE**: the optimizer passes — **constant folding**, **local
-     value numbering** (safe in-block GVN/CSE), and **dead-code elimination** — as
-     pure IR→IR transforms run in `SsaProgram::compile`. Verified by `test_ssa_ir.cpp`:
-     the optimized IR stays bit-exact vs the compiled tier AND has fewer live
-     instructions than the raw lowering (fold 32→22, cse-dce 28→23).
-   - **Remaining**: LICM + cross-block GVN (need dominance/loop analysis); do-while/
-     switch/break/continue; increment 4 — linear-scan register allocation + an
-     x86-64 / AArch64 machine-code emitter; then wire it as `VGRE_EXEC_BACKEND=ssa`.
+     value numbering** (safe in-block GVN/CSE), **dead-code elimination**, and
+     **loop-invariant code motion** (dominator sets by iterative dataflow → natural
+     loops via back-edges → hoist pure invariants to the preheader). Pure IR→IR,
+     run in `SsaProgram::compile`. `test_ssa_ir.cpp` checks each stays bit-exact vs
+     the reference tiers AND shrinks/hoists (fold 32→22, cse-dce 28→23, licm hoists).
+   - **Remaining**: cross-block GVN (dominance is now available); `switch`;
+     increment 4 — SSA-destruction + register allocation + an x86-64 / AArch64
+     machine-code emitter, then wire it as `VGRE_EXEC_BACKEND=ssa`. The IR, control
+     flow, optimizer, and evaluator are complete and **portable to every platform**;
+     the machine-code emitter is the remaining (arch-specific) peak-throughput layer.
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries

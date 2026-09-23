@@ -8,6 +8,9 @@
 // Tests build in Release (-DNDEBUG); asserts must stay real.
 #undef NDEBUG
 
+#include "vgre/compiler/backend/backend_registry.h"
+#include "vgre/compiler/backend/execution_backend.h"
+#include "vgre/compiler/frontend/codegen.h"
 #include "vgre/compiler/frontend/compiled_kernel.h"
 #include "vgre/compiler/frontend/ssa_ir.h"
 
@@ -98,8 +101,33 @@ int main() {
     };
     checkOpt("fold",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int a=2+3; int b=a*4; float c=1.0f+2.0f; y[i]=x[i*m]*(float)b + c; } })", 128, 16);
     checkOpt("cse-dce",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float dead=v*99.0f; float r=(v*2.0f)+(v*2.0f); y[i]=r; } })", 128, 16);
+    checkOpt("licm",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float inv=(float)(m*2)+3.0f; acc += x[i*m+k]+inv; } y[i]=acc; } })", 128, 16);
 
-    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering, phi, verifier, evaluator, const-fold/GVN/DCE) == compiled tier\n");
+    // break / continue / do-while: the compiled tier doesn't support these, so the
+    // SSA tier is diffed against the Tier-0 interpreter (which does).
+    namespace be = vgre::compiler::backend;
+    auto checkVsInterp = [&](const char* label, const char* src, int NN, int M) {
+        std::string err;
+        auto sp = SsaProgram::compile(src, "k", err);
+        if (!sp) { std::printf("FAIL: %s SSA: %s\n", label, err.c_str()); ++g_fail; return; }
+        auto cg = compileToPtx(src, "k");
+        auto ib = be::makeBackend("interpreter");
+        auto ik = cg.ok ? ib->preparePtx(cg.ptx, "k") : nullptr;
+        if (!ik) { std::printf("FAIL: %s interpreter prepare\n", label); ++g_fail; return; }
+        std::vector<float> xv(NN * M); for (int i = 0; i < NN * M; ++i) xv[i] = (i % 17) * 0.5f - 4.0f;
+        std::vector<float> yi(NN, -1.f), ys(NN, -2.f);
+        float* xp = xv.data(); int n = NN, m = M;
+        { float* yp = yi.data(); void* a[] = {&xp, &yp, &n, &m}; be::LaunchConfig lc; lc.gridDim[0] = (NN + 31) / 32; lc.blockDim[0] = 32; ib->launch(*ik, lc, a, 4); }
+        { float* yp = ys.data(); void* a[] = {&xp, &yp, &n, &m}; Extent g{(uint32_t)((NN + 31) / 32), 1, 1}, b{32, 1, 1}; sp->launch(g, b, a, 4); }
+        int bad = 0; for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yi[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v) ++bad; }
+        if (bad) { std::printf("FAIL: %s SSA vs interpreter: %d/%d\n", label, bad, NN); ++g_fail; }
+        else std::printf("  %s: SSA (blocks=%d) == interpreter (%d elems)\n", label, sp->numBlocks(), NN);
+    };
+    checkVsInterp("break",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) break; acc+=v; } y[i]=acc; } })", 96, 16);
+    checkVsInterp("continue", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) continue; acc+=v; } y[i]=acc; } })", 96, 16);
+    checkVsInterp("do-while", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; int k=0; do { acc += x[i*m+k]; k++; } while(k<m); y[i]=acc; } })", 96, 16);
+
+    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering, phi, full control flow, verifier, evaluator, const-fold/GVN/DCE) == reference tiers\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }
