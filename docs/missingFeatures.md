@@ -87,6 +87,11 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > (`test_cuda_templates.cpp`). **Scalar texture/surface fetches are now done too** —
 > `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` (incl. the `tex2D<float>` spelling)
 > run on both tiers via the shared `TextureManager`, bit-exact (`test_cuda_texture.cpp`).
+> **CUDA built-in vector types are now done too** — `float4`/`int2`/`double3`/… as
+> auto-registered structs: `make_<T>` constructors, `.x/.y/.z/.w`, and vectorized
+> whole-struct load/store (`float4 v = p[i]; p[i] = v;`), compiled tier == interpreter
+> (`test_cuda_vectypes.cpp`). (This also generalized struct support: whole-struct
+> load/store/constructor now work for user structs too.)
 > (warp **shuffle**, **vote**, **reduce** `__reduce_*_sync`, and **match**
 > `__match_any_sync`/`__match_all_sync` are done — the full sm_70+ warp intrinsic
 > surface, bit-exact on the compiled fiber tier and the interpreter.)

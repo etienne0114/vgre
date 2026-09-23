@@ -1094,9 +1094,57 @@ struct Compiler {
     }
 
     // Assignment as an expression (also used by ExprStmt); returns the stored value.
+    // Whole-struct store `p[i] = rhs` / `*p = rhs` (p : S*), where rhs is a struct
+    // variable of the same type or a `make_<vectype>(...)` constructor. Stores each
+    // member to global memory. Returns a null ExprFn if this isn't a struct store.
+    ExprFn compileStructStore(const Expr& lhs, const Expr& rhs) {
+        ExprFn baseP, idxE; bool indexed;
+        Type bt;
+        if (lhs.kind == Expr::Index && lhs.args.size() == 2) {
+            bt = estimateType(*lhs.args[0]);
+            if (!(bt.base == Type::Struct && bt.ptr == 1)) return {};
+            baseP = compileExpr(*lhs.args[0]); idxE = compileExpr(*lhs.args[1]); indexed = true;
+        } else if (lhs.kind == Expr::Unary && lhs.str == "*" && lhs.args.size() == 1) {
+            bt = estimateType(*lhs.args[0]);
+            if (!(bt.base == Type::Struct && bt.ptr == 1)) return {};
+            baseP = compileExpr(*lhs.args[0]); indexed = false;
+        } else return {};
+        const StructDef* def = findStruct(bt.structName);
+        if (!def || failed) { if (!def) fail("unknown struct '" + bt.structName + "'"); return {}; }
+        const size_t cnt = def->members.size();
+        const int structSize = def->size;
+        std::vector<int> offs; std::vector<Type> mts;
+        for (const auto& m : def->members) { offs.push_back(m.offset); mts.push_back(m.type); }
+        std::vector<ExprFn> comps;
+        if (rhs.kind == Expr::Ident) {                        // = a struct variable
+            auto sit = structVars.find(rhs.str);
+            if (sit == structVars.end() || sit->second.def != def) { fail("struct store type mismatch"); return {}; }
+            for (size_t i = 0; i < cnt; ++i) { size_t si = sit->second.base + i; comps.push_back([si](TS& ts) { return ts.regs[si]; }); }
+        } else if (rhs.kind == Expr::Call && rhs.str.rfind("make_", 0) == 0) {   // = make_T(...)
+            if (rhs.args.size() != cnt) { fail("'" + rhs.str + "' expects " + std::to_string(cnt) + " components"); return {}; }
+            for (size_t i = 0; i < cnt; ++i) comps.push_back(compileExpr(*rhs.args[i]));
+        } else return {};                                     // not a struct-store RHS
+        if (failed) return {};
+        if (indexed)
+            return [baseP, idxE, structSize, offs, mts, comps, cnt](TS& ts) -> Cell {
+                int64_t addr = baseP(ts).asI() + idxE(ts).asI() * structSize;
+                for (size_t i = 0; i < cnt; ++i) memStore(addr + offs[i], mts[i], coerce(comps[i](ts), mts[i]));
+                return Cell::I(0);
+            };
+        return [baseP, offs, mts, comps, cnt](TS& ts) -> Cell {
+            int64_t addr = baseP(ts).asI();
+            for (size_t i = 0; i < cnt; ++i) memStore(addr + offs[i], mts[i], coerce(comps[i](ts), mts[i]));
+            return Cell::I(0);
+        };
+    }
+
     ExprFn compileAssign(const Expr& e) {
         const Expr& lhs = *e.args[0];
         const std::string& op = e.str;
+        if (op == "=") {                                      // whole-struct store?
+            if (ExprFn ss = compileStructStore(lhs, *e.args[1])) return ss;
+            if (failed) return {};
+        }
         ExprFn rhs = compileExpr(*e.args[1]);
         if (failed) return {};
 
@@ -1495,6 +1543,36 @@ struct Compiler {
         return {};
     }
 
+    // Whole-struct load from a struct pointer: `V v = p[i]` (Index) or `V v = *p`
+    // (Deref). Returns a StmtFn that memLoads each member into v's slot range [db..),
+    // or a null StmtFn if `e` is not such a load (so the caller tries other forms).
+    StmtFn compileStructLoadInit(const Expr& e, const StructDef* def, size_t db) {
+        ExprFn baseP, idxE; bool indexed;
+        if (e.kind == Expr::Index && e.args.size() == 2) {
+            Type bt = estimateType(*e.args[0]);
+            if (!(bt.base == Type::Struct && bt.ptr == 1)) return {};
+            baseP = compileExpr(*e.args[0]); idxE = compileExpr(*e.args[1]); indexed = true;
+        } else if (e.kind == Expr::Unary && e.str == "*" && e.args.size() == 1) {
+            Type bt = estimateType(*e.args[0]);
+            if (!(bt.base == Type::Struct && bt.ptr == 1)) return {};
+            baseP = compileExpr(*e.args[0]); indexed = false;
+        } else return {};
+        if (failed) return {};
+        const int structSize = def->size;
+        std::vector<int> offs; std::vector<Type> mts;
+        for (const auto& m : def->members) { offs.push_back(m.offset); mts.push_back(m.type); }
+        const size_t cnt = def->members.size();
+        if (indexed)
+            return [db, baseP, idxE, structSize, offs, mts, cnt](TS& ts) {
+                int64_t addr = baseP(ts).asI() + idxE(ts).asI() * structSize;
+                for (size_t i = 0; i < cnt; ++i) ts.regs[db + i] = memLoad(addr + offs[i], mts[i]);
+            };
+        return [db, baseP, offs, mts, cnt](TS& ts) {
+            int64_t addr = baseP(ts).asI();
+            for (size_t i = 0; i < cnt; ++i) ts.regs[db + i] = memLoad(addr + offs[i], mts[i]);
+        };
+    }
+
     StmtFn compileStmt(const Stmt& s) {
         line = s.line; col = s.col;
         switch (s.kind) {
@@ -1504,16 +1582,32 @@ struct Compiler {
                     return [](TS&) {};
                 }
                 if (s.type.isStruct()) {
-                    // `V v;` — members default-zero (regs are zero-initialised).
-                    // `V q = v;` — copy each member slot from the source struct.
+                    // `V v;`               — members default-zero (regs zero-initialised).
+                    // `V v = make_T(...)`  — a vector-type constructor: one arg per member.
+                    // `V v = p[i]` / `*p`  — a whole-struct load from global memory.
+                    // `V q = v;`           — copy each member slot from the source struct.
                     auto dit = structVars.find(s.name);
                     if (dit == structVars.end()) { fail("struct variable not reserved"); return {}; }
+                    const StructDef* def = dit->second.def;
+                    const size_t db = dit->second.base, cnt = def->members.size();
                     if (!s.expr) return [](TS&) {};
-                    if (s.expr->kind != Expr::Ident) { fail("a struct can only be copy-initialised from a struct variable"); return {}; }
+                    // Constructor make_<vectype>(c0, c1, …): set each member from an arg.
+                    if (s.expr->kind == Expr::Call && s.expr->str.rfind("make_", 0) == 0) {
+                        if (s.expr->args.size() != cnt) { fail("'" + s.expr->str + "' expects " + std::to_string(cnt) + " components"); return {}; }
+                        std::vector<ExprFn> comps; std::vector<Type> mt;
+                        for (size_t i = 0; i < cnt; ++i) { comps.push_back(compileExpr(*s.expr->args[i])); mt.push_back(def->members[i].type); }
+                        if (failed) return {};
+                        return [db, comps, mt, cnt](TS& ts) { for (size_t i = 0; i < cnt; ++i) ts.regs[db + i] = coerce(comps[i](ts), mt[i]); };
+                    }
+                    // Whole-struct load from a struct pointer: `V v = p[i]` or `V v = *p`.
+                    if (StmtFn ld = compileStructLoadInit(*s.expr, def, db)) return ld;
+                    if (failed) return {};
+                    // Copy from another struct variable of the same type.
+                    if (s.expr->kind != Expr::Ident) { fail("unsupported struct initialiser (expected make_*, a load p[i], or a struct variable)"); return {}; }
                     auto sit = structVars.find(s.expr->str);
                     if (sit == structVars.end()) { fail("use of undeclared struct '" + s.expr->str + "'"); return {}; }
-                    if (sit->second.def != dit->second.def) { fail("struct copy type mismatch"); return {}; }
-                    size_t db = dit->second.base, sb = sit->second.base, cnt = dit->second.def->members.size();
+                    if (sit->second.def != def) { fail("struct copy type mismatch"); return {}; }
+                    size_t sb = sit->second.base;
                     return [db, sb, cnt](TS& ts) { for (size_t i = 0; i < cnt; ++i) ts.regs[db + i] = ts.regs[sb + i]; };
                 }
                 size_t sl = slot[s.name];

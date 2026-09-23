@@ -1463,6 +1463,13 @@ target_link_libraries(test_cuda_texture PRIVATE vgre Threads::Threads)
 add_test(NAME CudaTexture COMMAND test_cuda_texture)
 set_tests_properties(CudaTexture PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# CUDA built-in vector types (float4/int2/…): make_ constructors, member access,
+# vectorized whole-struct load/store — compiled tier == interpreter == reference.
+add_executable(test_cuda_vectypes compiler/test_cuda_vectypes.cpp)
+target_link_libraries(test_cuda_vectypes PRIVATE vgre Threads::Threads)
+add_test(NAME CudaVecTypes COMMAND test_cuda_vectypes)
+set_tests_properties(CudaVecTypes PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

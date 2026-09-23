@@ -1075,9 +1075,85 @@ struct Codegen {
         }
     }
 
+    // Initialise a local struct `dst` from `src`: a `make_<vectype>(...)` constructor
+    // (one arg per member), a whole-struct load `p[i]` (struct-array element), or a
+    // struct-variable copy (emitStructCopy). Used for `V v = …;`.
+    void emitStructInit(const std::string& dst, const Expr& src, const Type& dstType) {
+        const StructDef* def = mod_ ? mod_->findStruct(dstType.structName) : nullptr;
+        if (!def) { fail("unknown struct '" + dstType.structName + "'"); return; }
+        auto& dm = localStructMembers_[dst];
+        if (src.kind == Expr::Call && src.str.rfind("make_", 0) == 0) {          // make_T(c0,…)
+            if (src.args.size() != def->members.size()) { fail("'" + src.str + "' component count mismatch"); return; }
+            for (size_t i = 0; i < def->members.size(); ++i) {
+                const auto& m = def->members[i];
+                Val a = coerce(emitExpr(*src.args[i]), m.type);
+                if (failed) return;
+                emit(std::string(movFor(m.type)) + dm[m.name].reg + ", " + a.reg + ";");
+            }
+            return;
+        }
+        if (src.kind == Expr::Index) {                                           // V v = p[i]
+            Type et = indexPointee(src);
+            if (et.base == Type::Struct && et.ptr == 0) {
+                for (const auto& m : def->members) {
+                    MemberAddr ma = structArrayMember(src, m.name);
+                    if (failed) return;
+                    if (!ma.ok) { fail("cannot load struct member '" + m.name + "'"); return; }
+                    emit("ld." + std::string(ma.space == Space::Shared ? "shared." : "global.") +
+                         ldSuffix(ma.type) + " " + dm[m.name].reg + ", [" + ma.reg + "];");
+                }
+                return;
+            }
+        }
+        emitStructCopy(dst, src);
+    }
+
+    // Whole-struct store `p[i] = rhs` where rhs is a struct variable or a
+    // `make_<vectype>(...)` constructor. Returns true if it handled the assignment
+    // (a struct store), false if `lhs` isn't a struct-array element (fall through).
+    bool emitStructStore(const Expr& lhs, const Expr& rhs) {
+        if (lhs.kind != Expr::Index) return false;
+        Type et = indexPointee(lhs);
+        if (!(et.base == Type::Struct && et.ptr == 0)) return false;
+        const StructDef* def = mod_ ? mod_->findStruct(et.structName) : nullptr;
+        if (!def) { fail("unknown struct '" + et.structName + "'"); return true; }
+        auto storeMember = [&](const StructMember& m, const std::string& srcReg) {
+            MemberAddr ma = structArrayMember(lhs, m.name);
+            if (failed || !ma.ok) { if (!failed) fail("cannot store struct member '" + m.name + "'"); return; }
+            emit("st." + std::string(ma.space == Space::Shared ? "shared." : "global.") +
+                 stSuffix(ma.type) + " [" + ma.reg + "], " + srcReg + ";");
+        };
+        if (rhs.kind == Expr::Ident) {                                           // = a struct variable
+            auto sit = vars.find(rhs.str);
+            if (sit == vars.end() || sit->second.space != Space::LocalStruct) { fail("struct store from a non-struct value"); return true; }
+            auto sm = localStructMembers_[rhs.str];   // copy (avoid rehash aliasing)
+            for (const auto& m : def->members) {
+                auto it = sm.find(m.name);
+                if (it == sm.end()) { fail("struct member mismatch in store"); return true; }
+                storeMember(m, it->second.reg);
+                if (failed) return true;
+            }
+            return true;
+        }
+        if (rhs.kind == Expr::Call && rhs.str.rfind("make_", 0) == 0) {          // = make_T(...)
+            if (rhs.args.size() != def->members.size()) { fail("'" + rhs.str + "' component count mismatch"); return true; }
+            for (size_t i = 0; i < def->members.size(); ++i) {
+                const auto& m = def->members[i];
+                Val a = coerce(emitExpr(*rhs.args[i]), m.type);
+                if (failed) return true;
+                storeMember(m, a.reg);
+                if (failed) return true;
+            }
+            return true;
+        }
+        return false;
+    }
+
     Val emitAssign(const Expr& e) {
         const Expr& lhs = *e.args[0];
         const std::string& op = e.str;
+
+        if (op == "=" && emitStructStore(lhs, *e.args[1])) return {};   // whole-struct store p[i] = v
 
         // Compute the value to store: rhs, or (lhs <binop> rhs) for compound.
         auto computeRhs = [&](const Val& lhsVal) -> Val {
@@ -2226,8 +2302,8 @@ struct Codegen {
                     }
                     Val v; v.type = s.type; v.space = Space::LocalStruct;
                     vars[s.name] = v;
-                    if (s.expr) {   // struct copy-init: `Foo b = a;`
-                        emitStructCopy(s.name, *s.expr);
+                    if (s.expr) {   // `Foo b = a;` / `float4 v = make_float4(…)` / `v = p[i]`
+                        emitStructInit(s.name, *s.expr, s.type);
                         if (failed) return;
                     }
                     return;

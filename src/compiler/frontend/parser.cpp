@@ -162,6 +162,48 @@ struct Parser {
     }
 
     // ── Types ─────────────────────────────────────────────────────────────────
+    // CUDA built-in vector types (float4, int2, uchar3, …) are just structs with
+    // components x/y/z/w. Map `name` → (component type, lane count); false if not one.
+    static bool isVectorTypeName(const std::string& n) { Type c; int k; return vectorComponent(n, c, k); }
+    static bool vectorComponent(const std::string& name, Type& comp, int& count) {
+        if (name.size() < 2) return false;
+        const char d = name.back();
+        if (d < '1' || d > '4') return false;
+        count = d - '0';
+        const std::string base = name.substr(0, name.size() - 1);
+        comp = Type{};
+        if      (base == "float")  comp.base = Type::Float;
+        else if (base == "double") comp.base = Type::Double;
+        else if (base == "int")    comp.base = Type::Int;
+        else if (base == "uint")  { comp.base = Type::Int;   comp.isUnsigned = true; }
+        else if (base == "char")   comp.base = Type::Char;
+        else if (base == "uchar") { comp.base = Type::Char;  comp.isUnsigned = true; }
+        else if (base == "short")  comp.base = Type::Short;
+        else if (base == "ushort"){ comp.base = Type::Short; comp.isUnsigned = true; }
+        else if (base == "long" || base == "longlong")   comp.base = Type::Long;
+        else if (base == "ulong" || base == "ulonglong"){ comp.base = Type::Long; comp.isUnsigned = true; }
+        else return false;
+        return true;
+    }
+    // Register a built-in vector type's StructDef in the module the first time it is
+    // used, so all the existing struct machinery (member access, layout) applies.
+    void ensureVectorStruct(const std::string& name) {
+        if (!mod_ || mod_->findStruct(name)) return;
+        Type comp; int count;
+        if (!vectorComponent(name, comp, count)) return;
+        StructDef def; def.name = name;
+        static const char* kLanes[4] = {"x", "y", "z", "w"};
+        const int esz = comp.elemBytes();
+        int off = 0;
+        for (int i = 0; i < count; ++i) {
+            StructMember m; m.type = comp; m.name = kLanes[i];
+            off = (off + esz - 1) / esz * esz; m.offset = off; off += esz;
+            def.members.push_back(std::move(m));
+        }
+        def.size = (off + esz - 1) / esz * esz;   // natural alignment (matches CUDA sizeof)
+        mod_->structs.push_back(std::move(def));
+    }
+
     // Consume the trailing `*`/const/__restrict__ qualifiers of a pointer type.
     void parsePtrQualifiers(Type& out) {
         while (accept(TokenKind::Star)) {
@@ -183,6 +225,9 @@ struct Parser {
             out = Type{}; out.base = Type::Long; out.isUnsigned = true; advance();
             parsePtrQualifiers(out); return true;
         }
+        // A CUDA built-in vector type (float4, int2, …): register it as a struct on
+        // first use so the struct path below (and everywhere else) just works.
+        if (kind() == TokenKind::Identifier) ensureVectorStruct(cur().text);
         // Struct type: a known struct name, optionally preceded by the 'struct'
         // keyword (`struct Foo` or bare `Foo`). Resolved against the module table.
         bool sawStructKw = (kind() == TokenKind::KwStruct);
@@ -215,9 +260,10 @@ struct Parser {
         if (kind() == TokenKind::Identifier && isCurTypeParam(cur().text)) {
             out.tparam = advance().text; parsePtrQualifiers(out); return true;
         }
-        // A struct type can follow leading qualifiers too (e.g. `const Vec*`): the
-        // base-type switch below only knows primitives, so catch a struct name here
-        // (keeping the `isConst` we just parsed).
+        // A struct type can follow leading qualifiers too (e.g. `const Vec*`,
+        // `const float4*`): the base-type switch below only knows primitives, so catch
+        // a struct / built-in vector name here (keeping the `isConst` we just parsed).
+        if (kind() == TokenKind::Identifier) ensureVectorStruct(cur().text);
         if (kind() == TokenKind::KwStruct ||
             (kind() == TokenKind::Identifier && mod_ && mod_->findStruct(cur().text))) {
             if (kind() == TokenKind::KwStruct) advance();
@@ -551,8 +597,9 @@ struct Parser {
         }
         if (isTypeStart(kind()) || at(TokenKind::KwCudaShared) || at(TokenKind::KwExtern) ||
             at(TokenKind::KwStatic) || at(TokenKind::KwInline) || at(TokenKind::KwStruct) ||
-            (at(TokenKind::Identifier) && mod_ && mod_->findStruct(cur().text)))
-            return parseVarDecl();   // (static) (extern) __shared__ …, volatile T x, `Vec p;`, etc.
+            (at(TokenKind::Identifier) && mod_ &&
+             (mod_->findStruct(cur().text) || isVectorTypeName(cur().text))))
+            return parseVarDecl();   // (static) (extern) __shared__ …, volatile T x, `Vec p;`, `float4 v;`, etc.
         // expression statement
         auto s = mkStmt(Stmt::ExprStmt);
         s->expr = parseExpr();
@@ -718,7 +765,9 @@ struct Parser {
         // init: declaration, expr-stmt, or empty
         if (accept(TokenKind::Semicolon)) {
             // no init
-        } else if (isTypeStart(kind())) {
+        } else if (isTypeStart(kind()) ||
+                   (at(TokenKind::Identifier) && mod_ &&
+                    (mod_->findStruct(cur().text) || isVectorTypeName(cur().text)))) {
             s->forInit = parseVarDecl();   // consumes the ';'
             if (!s->forInit) return nullptr;
         } else {
