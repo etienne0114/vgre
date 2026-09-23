@@ -80,9 +80,10 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
 > threading requirement): the *optional* **Tier-2 SSA** backend for peak speed on
 > hot kernels; native-machine-code cooperative execution (fibers in the JIT tier);
-> and broader front-end coverage (texture/surface ops; the maskless `__match`
-> variants; templates/recursion).
-> (warp **shuffle**, **vote**, and **reduce** `__reduce_*_sync` are done.)
+> and broader front-end coverage (texture/surface ops; templates/recursion).
+> (warp **shuffle**, **vote**, **reduce** `__reduce_*_sync`, and **match**
+> `__match_any_sync`/`__match_all_sync` are done — the full sm_70+ warp intrinsic
+> surface, bit-exact on the compiled fiber tier and the interpreter.)
 > (`__device__` helper inlining and **all** the struct forms
 > the interpreter supports — by-value params, local values, `p->field`, and
 > `arr[i].field` struct arrays — now run on the Tier-1 compiled tier too, no longer

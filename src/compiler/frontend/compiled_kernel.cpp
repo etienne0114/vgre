@@ -237,6 +237,28 @@ inline Cell coopReduce(TS& ts, Cell value, uint32_t memMask, int op, bool sgn) {
     }
     return Cell::I((int64_t)(uint32_t)acc);
 }
+
+// Warp match (__match_any_sync / __match_all_sync) — sm_70+. Each participating lane
+// (active ∩ memMask) publishes `value`; after the rendezvous every lane compares the
+// 32-bit snapshots. `any`: return the mask of participating lanes whose value equals
+// this lane's. `all`: if EVERY participating lane holds the same value, return the
+// participant mask and set *pred=1; otherwise return 0 and *pred=0. `outPred` is null
+// for the any variant. Mirrors PTX match.{any,all}.sync.b32 and the interpreter.
+inline Cell coopMatch(TS& ts, Cell value, uint32_t memMask, bool all, int* outPred) {
+    if (!ts.fiber) { if (outPred) *outPred = 1; return all ? Cell::I((int64_t)memMask) : value; }
+    const uint32_t warp = ts.lintid >> 5, lane = ts.lintid & 31u;
+    ts.shflPub[warp * 32 + lane] = value;
+    fiberYield(ts, WAIT_WARP);
+    const uint32_t part = ts.shflActive[warp] & memMask;       // participating lanes
+    const uint32_t mine = (uint32_t)ts.shflSnap[warp * 32 + lane].asI();
+    uint32_t same = 0;
+    for (uint32_t l = 0; l < 32; ++l)
+        if ((part & (1u << l)) && (uint32_t)ts.shflSnap[warp * 32 + l].asI() == mine) same |= (1u << l);
+    if (!all) return Cell::I((int64_t)same);                   // __match_any_sync
+    const bool allSame = (same == part);                       // every participant equal
+    if (outPred) *outPred = allSame ? 1 : 0;
+    return Cell::I(allSame ? (int64_t)part : 0);               // __match_all_sync
+}
 #endif  // VGRE_COOP_FIBERS
 
 // atomicAdd over the Cell/byte-width convention, returning the OLD value. The
@@ -687,6 +709,7 @@ struct Compiler {
              e->str == "__reduce_add_sync" || e->str == "__reduce_min_sync" || e->str == "__reduce_max_sync" ||
              e->str == "__reduce_and_sync" || e->str == "__reduce_or_sync" || e->str == "__reduce_xor_sync" ||
              e->str == "__syncthreads_count" || e->str == "__syncthreads_and" || e->str == "__syncthreads_or" ||
+             e->str == "__match_any_sync" || e->str == "__match_all_sync" ||
              e->str == "__activemask")) {
             hasBarrier = true;   // cooperative — run each thread as a fiber, released at the barrier/warp op
         }
@@ -890,6 +913,7 @@ struct Compiler {
                     fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
                     fn == "__reduce_and_sync" || fn == "__reduce_or_sync" || fn == "__reduce_xor_sync" ||
                     fn == "__syncthreads_count" || fn == "__syncthreads_and" || fn == "__syncthreads_or" ||
+                    fn == "__match_any_sync" || fn == "__match_all_sync" ||
                     fn == "__activemask")
                     return scalar(Type::Int);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
@@ -1347,6 +1371,51 @@ struct Compiler {
             return [mask, val, op, sgn](TS& ts) -> Cell {
                 return coopReduce(ts, val(ts), (uint32_t)mask(ts).asI(), op, sgn);
             };
+        }
+        // Warp match: __match_any_sync(mask, value) → mask of same-valued lanes;
+        // __match_all_sync(mask, value, &pred) → the participant mask if every lane
+        // agrees (and *pred=1), else 0 (and *pred=0). See coopMatch.
+        if (fn == "__match_any_sync" && e.args.size() == 2) {
+            ExprFn mask = compileExpr(*e.args[0]);
+            ExprFn val  = compileExpr(*e.args[1]);
+            if (failed) return {};
+            return [mask, val](TS& ts) -> Cell {
+                return coopMatch(ts, val(ts), (uint32_t)mask(ts).asI(), false, nullptr);
+            };
+        }
+        if (fn == "__match_all_sync" && e.args.size() == 3) {
+            const Expr& pe = *e.args[2];   // int* pred: &localInt (natural) or &global[i]
+            if (pe.kind != Expr::Unary || pe.str != "&" || pe.args.empty()) {
+                fail("__match_all_sync expects &pred as its third argument"); return {};
+            }
+            ExprFn mask = compileExpr(*e.args[0]);
+            ExprFn val  = compileExpr(*e.args[1]);
+            if (failed) return {};
+            if (pe.args[0]->kind == Expr::Ident) {                 // &pred — a local int slot
+                auto sit = slot.find(pe.args[0]->str);
+                if (sit == slot.end()) { fail("__match_all_sync: unknown predicate variable '" + pe.args[0]->str + "'"); return {}; }
+                size_t pslot = sit->second;
+                return [mask, val, pslot](TS& ts) -> Cell {
+                    int pr = 0;
+                    Cell r = coopMatch(ts, val(ts), (uint32_t)mask(ts).asI(), true, &pr);
+                    ts.regs[pslot] = Cell::I(pr);
+                    return r;
+                };
+            }
+            if (pe.args[0]->kind == Expr::Index) {                 // &out[i] — a global int address
+                const Expr& index = *pe.args[0];
+                ExprFn pbase = compileExpr(*index.args[0]);
+                ExprFn pidx  = compileExpr(*index.args[1]);
+                if (failed) return {};
+                Type ppt = pointee(index); int pbytes = ppt.elemBytes();
+                return [mask, val, pbase, pidx, ppt, pbytes](TS& ts) -> Cell {
+                    int pr = 0;
+                    Cell r = coopMatch(ts, val(ts), (uint32_t)mask(ts).asI(), true, &pr);
+                    memStore(pbase(ts).asI() + pidx(ts).asI() * pbytes, ppt, Cell::I(pr));
+                    return r;
+                };
+            }
+            fail("__match_all_sync: &pred must be &localInt or &global[i]"); return {};
         }
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         auto dfit = deviceFns.find(fn);

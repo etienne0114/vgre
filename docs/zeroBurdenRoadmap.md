@@ -87,7 +87,7 @@ universal tier first, faster tiers added without breaking correctness:
   and executed per-thread with zero string parsing — **~32–200× faster than the
   interpreter**, portable (pure C++, every arch), LLVM-free. Barrier-free kernels run
   the closures directly; **cooperative kernels** (`__shared__`, `__syncthreads`,
-  `__syncwarp`, `__shfl_*`, warp vote/reduce, `__syncthreads_{count,and,or}`,
+  `__syncwarp`, `__shfl_*`, warp vote/reduce/match, `__syncthreads_{count,and,or}`,
   `__activemask`) run on a **fiber executor** — each CUDA thread a stackful fiber,
   a per-block scheduler releasing barriers/warp ops — so tiled GEMM, block & warp
   reductions and shared-memory attention no longer fall back to Tier 0. The executor

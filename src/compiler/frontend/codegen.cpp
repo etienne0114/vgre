@@ -1496,6 +1496,36 @@ struct Codegen {
         return {d, rt};
     }
 
+    // Warp match: __match_any_sync(mask, value) / __match_all_sync(mask, value, &pred).
+    //   any → match.any.sync.b32 d, value, membermask   (mask of same-valued lanes)
+    //   all → match.all.sync.b32 d|p, value, membermask  (d = participant mask if every
+    //         lane agrees, p set accordingly); store p (as 0/1) through &pred, return d.
+    // The value is a 32-bit key (b32). Warp-cooperative, so it runs on the Tier-0
+    // interpreter. In this register model &pred must be a global element (&out[i]).
+    Val emitMatch(const Expr& e) {
+        const std::string& fn = e.str;
+        const bool all = (fn == "__match_all_sync");
+        const size_t want = all ? 3 : 2;
+        if (e.args.size() != want) { fail("'" + fn + "' expects (" + (all ? "mask, value, &pred" : "mask, value") + ")"); return {}; }
+        Val mask = coerce(emitExpr(*e.args[0]), intType()); if (failed) return {};
+        Val val  = coerce(emitExpr(*e.args[1]), intType()); if (failed) return {};
+        std::string d = fresh(RC::R32);
+        if (!all) {
+            emit("match.any.sync.b32 " + d + ", " + val.reg + ", " + mask.reg + ";");
+            return {d, intType()};
+        }
+        const Expr& pe = *e.args[2];
+        if (pe.kind != Expr::Unary || pe.str != "&" || pe.args.empty() || pe.args[0]->kind != Expr::Index) {
+            fail("__match_all_sync expects &pred as &out[i] (a global element) on the interpreter tier"); return {};
+        }
+        std::string p = fresh(RC::Pred);
+        emit("match.all.sync.b32 " + d + "|" + p + ", " + val.reg + ", " + mask.reg + ";");
+        std::string pi = fresh(RC::R32);
+        emit("selp.b32 " + pi + ", 1, 0, " + p + ";");   // pred → int 0/1
+        emitStore(*pe.args[0], {pi, intType()});          // *pred = 0/1
+        return {d, intType()};
+    }
+
     // __half <-> float helpers (used by the half arithmetic intrinsics, which all
     // promote to float, compute, then narrow back to __half).
     Val h2f(const Val& h) { std::string d = fresh(RC::F32); emit("cvt.f32.f16 " + d + ", " + h.reg + ";"); return {d, floatType()}; }
@@ -1707,6 +1737,7 @@ struct Codegen {
         if (fn == "__ballot_sync" || fn == "__any_sync" || fn == "__all_sync") return emitVote(e);
         if (fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
             fn == "__reduce_and_sync" || fn == "__reduce_or_sync"  || fn == "__reduce_xor_sync") return emitReduce(e);
+        if (fn == "__match_any_sync" || fn == "__match_all_sync") return emitMatch(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);

@@ -138,7 +138,7 @@ Executable Function Pointer (registered in kernelAddressMap_)
 >   string parsing — portable (pure C++), LLVM-free, ~30–90× over the interpreter.
 >   **Cooperative kernels** run here too via a **fiber executor** (each CUDA thread a
 >   stackful fiber; a per-block scheduler releases `__syncthreads`, `__syncwarp`,
->   `__shfl_*`, warp vote/reduce, `__syncthreads_{count,and,or}`, `__activemask`) — so
+>   `__shfl_*`, warp vote/reduce/match, `__syncthreads_{count,and,or}`, `__activemask`) — so
 >   tiled GEMM / block & warp reductions / shared-memory attention no longer need the
 >   interpreter (bit-exact vs it, `test_cuda_coop.cpp`). The executor is portable to
 >   every host: `ucontext` on POSIX (Linux + macOS), the Win32 Fibers API on Windows.

@@ -559,6 +559,55 @@ void PtxInterpreter::releaseVoteIfReady(int anyTid) {
     for (int L = warpBase; L < warpEnd; ++L)
         if (!threads_[L].done && !threads_[L].atVote) return;
 
+    // Warp match (match.{any,all}.sync.b32 d[|p], a, membermask): warp-synchronous
+    // like redux/vote. Each lane compares its 32-bit key `a` against every parked
+    // lane in its membermask. `any` → the mask of lanes whose key equals this lane's;
+    // `all` → membermask if every participating lane's key agrees (else 0), and p set.
+    {
+        int firstParked = -1;
+        for (int L = warpBase; L < warpEnd; ++L) if (threads_[L].atVote) { firstParked = L; break; }
+        if (firstParked >= 0 && splitDots(kernel_.code[threads_[firstParked].pc].op)[0] == "match") {
+            uint32_t value[32] = {0}; bool parked[32] = {false};
+            for (int L = warpBase; L < warpEnd; ++L) {
+                Thread& t = threads_[L];
+                if (!t.atVote) continue;
+                parked[L - warpBase] = true;
+                value[L - warpBase] = (uint32_t)evalOperand(t, L, kernel_.code[t.pc].args[1], 4);
+            }
+            for (int L = warpBase; L < warpEnd; ++L) {
+                Thread& t = threads_[L];
+                if (!t.atVote) continue;
+                const PtxInstr& I = kernel_.code[t.pc];
+                std::vector<std::string> parts = splitDots(I.op);   // match.<any|all>.sync.b32
+                const bool all = parts.size() > 1 && parts[1] == "all";
+                const uint32_t memMask = (uint32_t)evalOperand(t, L, I.args[2], 4);
+                const int lane = L - warpBase;
+                uint32_t part = 0;                                  // parked lanes in membermask
+                for (int M = 0; M < warpEnd - warpBase; ++M)
+                    if (parked[M] && (memMask & (1u << M))) part |= (1u << M);
+                if (all) {
+                    bool allSame = true;
+                    for (int M = 0; M < 32; ++M)
+                        if ((part & (1u << M)) && value[M] != value[lane]) { allSame = false; break; }
+                    const std::string& dp = I.args[0];              // "d|p"
+                    const size_t bar = dp.find('|');
+                    const std::string d = bar == std::string::npos ? dp : dp.substr(0, bar);
+                    t.regs[d].u = zeroExtend(allSame ? part : 0u, 4);
+                    if (bar != std::string::npos) t.preds[dp.substr(bar + 1)] = allSame;
+                } else {
+                    uint32_t same = 0;
+                    for (int M = 0; M < 32; ++M)
+                        if ((part & (1u << M)) && value[M] == value[lane]) same |= (1u << M);
+                    t.regs[I.args[0]].u = zeroExtend(same, 4);
+                }
+                t.atVote = false;
+                ++t.pc;
+                if (t.pc >= (int)kernel_.code.size()) t.done = true;
+            }
+            return;
+        }
+    }
+
     // Warp reduce (redux.sync.<op>.<type> d, a, membermask): the parked lanes are
     // warp-synchronous, so if the first one is at a redux they all are — each
     // participating lane gets the fold of `a` over the lanes its membermask selects.
@@ -995,6 +1044,12 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
     } else if (mnem == "redux") {
         // Warp reduce (redux.sync.<op>): park like a vote; releaseVoteIfReady detects
         // the redux and folds `a` across the warp's participating lanes for everyone.
+        t.atVote = true;
+        releaseVoteIfReady(tid);
+        return true;
+    } else if (mnem == "match") {
+        // Warp match (match.{any,all}.sync.b32): park like a vote; releaseVoteIfReady
+        // detects the match and gives each lane the mask of same-valued warp lanes.
         t.atVote = true;
         releaseVoteIfReady(tid);
         return true;

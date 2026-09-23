@@ -242,7 +242,50 @@ extern "C" __global__ void amask(int* out, int n) {
                   {&ocp, &n}, outC, {&oip, &n}, outI, N);
     }
 
-    if (g_fail == 0) std::printf("PASS: the full cooperative surface (shared/barrier/shuffle/vote/reduce/block-vote/activemask) runs on the compiled fiber tier, == interpreter\n");
+    // 9) Warp match-any: __match_any_sync(mask, key) — each lane gets the bitmask of
+    //    warp lanes holding its key. Keys are i%4, so lanes split into 4 match groups.
+    {
+        const int block = 64, blocks = 2, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void wmatchany(const int* in, int* out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int key = in[i];
+    unsigned m = __match_any_sync(-1, key);
+    out[i] = (int)m;
+})";
+        std::vector<int> in(N); for (int i = 0; i < N; ++i) in[i] = (int)(rnd() % 4);
+        std::vector<float> outC(N, -1.f), outI(N, -2.f);
+        int n = N; int* ip = in.data();
+        int* ocp = reinterpret_cast<int*>(outC.data()); int* oip = reinterpret_cast<int*>(outI.data());
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("warp-match-any", "wmatchany", src, grid, blk,
+                  {&ip, &ocp, &n}, outC, {&ip, &oip, &n}, outI, N);
+    }
+
+    // 10) Warp match-all: __match_all_sync(mask, v, &pred) — mask if all warp lanes
+    //     agree (pred=1), else 0 (pred=0). Warp 0's lanes all hold 9 (all-same); warp
+    //     1's alternate (not all-same). Fold both the returned mask and *pred.
+    {
+        const int block = 64, blocks = 2, N = block * blocks;
+        const char* src = R"(
+extern "C" __global__ void wmatchall(const int* in, int* out, int* pr, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int v = in[i];
+    unsigned m = __match_all_sync(-1, v, &pr[i]);
+    out[i] = (int)m + pr[i] * 16;
+})";
+        std::vector<int> in(N); for (int i = 0; i < N; ++i) in[i] = ((i % 64) < 32) ? 9 : (i & 1);
+        std::vector<int> prC(N, 0), prI(N, 0);
+        std::vector<float> outC(N, -1.f), outI(N, -2.f);
+        int n = N; int* ip = in.data();
+        int* prcp = prC.data(); int* prip = prI.data();
+        int* ocp = reinterpret_cast<int*>(outC.data()); int* oip = reinterpret_cast<int*>(outI.data());
+        uint32_t grid[3] = {(uint32_t)blocks, 1, 1}, blk[3] = {(uint32_t)block, 1, 1};
+        checkCoop("warp-match-all", "wmatchall", src, grid, blk,
+                  {&ip, &ocp, &prcp, &n}, outC, {&ip, &oip, &prip, &n}, outI, N);
+    }
+
+    if (g_fail == 0) std::printf("PASS: the full cooperative surface (shared/barrier/shuffle/vote/reduce/block-vote/match/activemask) runs on the compiled fiber tier, == interpreter\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }
