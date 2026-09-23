@@ -1448,6 +1448,14 @@ target_link_libraries(test_cuda_coop PRIVATE vgre Threads::Threads)
 add_test(NAME CudaCoop COMMAND test_cuda_coop)
 set_tests_properties(CudaCoop PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Function templates on the from-scratch front-end (monomorphization): deduced /
+# explicit / non-type args, chained templates, pointer deduction — compiled tier
+# == interpreter, bit-exact.
+add_executable(test_cuda_templates compiler/test_cuda_templates.cpp)
+target_link_libraries(test_cuda_templates PRIVATE vgre Threads::Threads)
+add_test(NAME CudaTemplates COMMAND test_cuda_templates)
+set_tests_properties(CudaTemplates PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

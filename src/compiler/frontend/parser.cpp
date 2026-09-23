@@ -6,7 +6,9 @@
 #include "vgre/compiler/frontend/lexer.h"
 
 #include <cstdlib>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace vgre {
@@ -105,6 +107,24 @@ struct Parser {
     bool failed = false;
     std::string err;
     Module* mod_ = nullptr;  // module being built (so parseType can resolve struct names)
+    // Template state: the params of the function template currently being parsed
+    // (so parseType sees `T` as a type), and the names of every template seen so far
+    // (so `foo<int>(x)` is a template call, not the comparison chain `foo < int > (x)`).
+    const std::vector<TemplateParam>* curTParams_ = nullptr;
+    std::set<std::string> templateNames_;
+
+    // Is `n` a type-parameter of the template currently being parsed?
+    bool isCurTypeParam(const std::string& n) const {
+        if (!curTParams_) return false;
+        for (const auto& tp : *curTParams_) if (tp.isTypename && tp.name == n) return true;
+        return false;
+    }
+    // A callee that `name<...>(...)` may legitimately template on: a user template
+    // seen so far, or a texture/surface builtin (tex1D<T>/surf2Dread<T>/…).
+    bool isTemplateCallee(const std::string& n) const {
+        if (templateNames_.count(n)) return true;
+        return n.compare(0, 3, "tex") == 0 || n.compare(0, 4, "surf") == 0;
+    }
 
     const Token& cur() const { return toks[pos]; }
     TokenKind kind() const { return toks[pos].kind; }
@@ -142,7 +162,21 @@ struct Parser {
     }
 
     // ── Types ─────────────────────────────────────────────────────────────────
+    // Consume the trailing `*`/const/__restrict__ qualifiers of a pointer type.
+    void parsePtrQualifiers(Type& out) {
+        while (accept(TokenKind::Star)) {
+            out.ptr++;
+            while (accept(TokenKind::KwConst) || accept(TokenKind::KwVolatile) ||
+                   accept(TokenKind::KwCudaRestrict)) { /* qualifier */ }
+        }
+    }
+
     bool parseType(Type& out) {
+        // A template type-parameter in scope (`T`, `T*`, `const T*`) — a placeholder
+        // resolved to a concrete type by instantiation before codegen.
+        if (kind() == TokenKind::Identifier && isCurTypeParam(cur().text)) {
+            out = Type{}; out.tparam = advance().text; parsePtrQualifiers(out); return true;
+        }
         // Struct type: a known struct name, optionally preceded by the 'struct'
         // keyword (`struct Foo` or bare `Foo`). Resolved against the module table.
         bool sawStructKw = (kind() == TokenKind::KwStruct);
@@ -170,6 +204,10 @@ struct Parser {
             if (accept(TokenKind::KwUnsigned)) { out.isUnsigned = true; continue; }
             if (accept(TokenKind::KwSigned)) { out.isUnsigned = false; continue; }
             break;
+        }
+        // `const T` / `const T*` — a template type-parameter after leading qualifiers.
+        if (kind() == TokenKind::Identifier && isCurTypeParam(cur().text)) {
+            out.tparam = advance().text; parsePtrQualifiers(out); return true;
         }
         // A struct type can follow leading qualifiers too (e.g. `const Vec*`): the
         // base-type switch below only knows primitives, so catch a struct name here
@@ -324,10 +362,65 @@ struct Parser {
         return parsePostfix();
     }
 
+    // Try to parse an explicit template-argument list `< T, 4, … >` at a call site.
+    // On success `pos` is left just after `>` and `out` holds the args; on failure
+    // `pos` is fully restored (so the `<` can still parse as a comparison operator).
+    // Nested angle args (`foo<bar<int>>`) aren't supported (`>>` won't split here).
+    bool tryParseTemplateArgs(std::vector<TemplateArg>& out) {
+        out.clear();
+        size_t save = pos;
+        if (!accept(TokenKind::Lt)) return false;
+        if (!at(TokenKind::Gt)) {
+            for (;;) {
+                TemplateArg a;
+                const bool typeAhead =
+                    isTypeStart(kind()) || kind() == TokenKind::KwStruct ||
+                    (kind() == TokenKind::Identifier &&
+                     ((mod_ && mod_->findStruct(cur().text)) || isCurTypeParam(cur().text)));
+                if (typeAhead) {
+                    if (!parseType(a.type)) { pos = save; out.clear(); return false; }
+                    a.isType = true;
+                } else if (at(TokenKind::IntLiteral)) {           // non-type constant `foo<4>()`
+                    a.isType = false;
+                    a.value = (int64_t)std::strtoll(advance().text.c_str(), nullptr, 0);
+                } else { pos = save; out.clear(); return false; }
+                out.push_back(std::move(a));
+                if (!accept(TokenKind::Comma)) break;
+            }
+        }
+        if (!accept(TokenKind::Gt)) { pos = save; out.clear(); return false; }
+        return true;
+    }
+
     ExprPtr parsePostfix() {
         ExprPtr e = parsePrimary();
         if (!e || failed) return e;
         for (;;) {
+            // Template call `callee<args>(…)` — only for a name we know can be a
+            // template (a user template seen so far, or a tex/surf builtin), so an
+            // ordinary comparison chain `a < b > (c)` is never misread as a call.
+            if (e->kind == Expr::Ident && at(TokenKind::Lt) && isTemplateCallee(e->str)) {
+                std::vector<TemplateArg> targs;
+                size_t save = pos;
+                if (tryParseTemplateArgs(targs) && at(TokenKind::LParen)) {
+                    advance();                                    // consume '('
+                    auto node = mkExpr(Expr::Call);
+                    node->str = e->str;
+                    node->targs = std::move(targs);
+                    if (!at(TokenKind::RParen)) {
+                        for (;;) {
+                            ExprPtr a = parseAssign();
+                            if (!a) return nullptr;
+                            node->args.push_back(std::move(a));
+                            if (!accept(TokenKind::Comma)) break;
+                        }
+                    }
+                    expect(TokenKind::RParen, "')'");
+                    e = std::move(node);
+                    continue;
+                }
+                pos = save;   // not a template call → let the binary parser see '<'
+            }
             if (accept(TokenKind::LBracket)) {          // e[index]
                 auto node = mkExpr(Expr::Index);
                 ExprPtr idx = parseExpr();
@@ -648,8 +741,43 @@ struct Parser {
     }
 
     // ── Kernel / module ─────────────────────────────────────────────────────────
+    // template < typename T, int N, … >  — a function-template header. Type params
+    // (`typename`/`class T`) and non-type params (`int N`). Returns false on error.
+    bool parseTemplateHeader(std::vector<TemplateParam>& out) {
+        advance();  // 'template'
+        expect(TokenKind::Lt, "'<'");
+        if (!at(TokenKind::Gt)) {
+            for (;;) {
+                TemplateParam tp;
+                if (accept(TokenKind::KwTypename) || accept(TokenKind::KwClass)) {
+                    tp.isTypename = true;
+                    if (!at(TokenKind::Identifier)) { fail("expected a template type-parameter name"); return false; }
+                    tp.name = advance().text;
+                } else {                                   // non-type parameter: `int N`
+                    tp.isTypename = false;
+                    if (!parseType(tp.type)) { fail("expected a template parameter"); return false; }
+                    if (!at(TokenKind::Identifier)) { fail("expected a non-type template parameter name"); return false; }
+                    tp.name = advance().text;
+                }
+                out.push_back(std::move(tp));
+                if (!accept(TokenKind::Comma)) break;
+            }
+        }
+        expect(TokenKind::Gt, "'>'");
+        return !failed;
+    }
+
     std::unique_ptr<Kernel> parseKernel() {
         auto k = std::make_unique<Kernel>();
+        // A function template: parse its header, then compile the body with its type
+        // parameters in scope so `T`/`T*` parse as types. It is instantiated on demand.
+        std::vector<TemplateParam> tparams;
+        if (at(TokenKind::KwTemplate)) {
+            if (!parseTemplateHeader(tparams)) return nullptr;
+            k->tparams = tparams;
+            curTParams_ = &tparams;
+        }
+        struct TParamGuard { const std::vector<TemplateParam>*& slot; ~TParamGuard() { slot = nullptr; } } guard{curTParams_};
         // Leading qualifiers in any order: extern "C", the execution-space specifiers,
         // and inline/storage hints. Only __global__ changes lowering (it marks the
         // entry); __device__ helpers are inlined; the rest are accepted and ignored.
@@ -669,6 +797,7 @@ struct Parser {
         k->returnType = ret;
         if (!at(TokenKind::Identifier)) { fail("expected a kernel name"); return nullptr; }
         k->name = advance().text;
+        if (!k->tparams.empty()) templateNames_.insert(k->name);   // so callers parse `name<…>(…)`
         expect(TokenKind::LParen, "'('");
         if (!at(TokenKind::RParen)) {
             for (;;) {
@@ -733,6 +862,209 @@ struct Parser {
     }
 };
 
+// ── Template instantiation (monomorphization) ────────────────────────────────
+// After parsing, every `template<…>` function is a Kernel with non-empty tparams
+// and every `foo<int>(…)`/`foo(x)` call carries explicit or deducible type args.
+// This pass clones a concrete copy of each template per distinct argument set,
+// substitutes the type/non-type parameters throughout, rewrites the calls to the
+// mangled instance names, and drops the templates — so codegen and the compiled
+// tier only ever see ordinary concrete functions. Chained templates (a template
+// calling another) resolve via a worklist to a fixed point.
+
+ExprPtr cloneExpr(const Expr& e) {
+    auto n = std::make_unique<Expr>();
+    n->kind = e.kind; n->line = e.line; n->col = e.col;
+    n->ival = e.ival; n->fval = e.fval; n->wide = e.wide;
+    n->str = e.str; n->castType = e.castType; n->targs = e.targs;
+    for (const auto& a : e.args) n->args.push_back(cloneExpr(*a));
+    return n;
+}
+StmtPtr cloneStmt(const Stmt& s) {
+    auto n = std::make_unique<Stmt>();
+    n->kind = s.kind; n->line = s.line; n->col = s.col;
+    n->type = s.type; n->name = s.name; n->isShared = s.isShared;
+    n->isExternShared = s.isExternShared; n->arraySize = s.arraySize; n->arrayDims = s.arrayDims;
+    if (s.expr) n->expr = cloneExpr(*s.expr);
+    for (const auto& b : s.body) n->body.push_back(cloneStmt(*b));
+    for (const auto& b : s.elseBody) n->elseBody.push_back(cloneStmt(*b));
+    if (s.forInit) n->forInit = cloneStmt(*s.forInit);
+    if (s.forCond) n->forCond = cloneExpr(*s.forCond);
+    if (s.forIncr) n->forIncr = cloneExpr(*s.forIncr);
+    return n;
+}
+
+std::string mangleType(const Type& t) {
+    std::string s;
+    if (t.isConst) s += "K";
+    if (t.isUnsigned) s += "u";
+    switch (t.base) {
+        case Type::Void: s += "v"; break; case Type::Bool: s += "b"; break;
+        case Type::Char: s += "c"; break; case Type::Short: s += "s"; break;
+        case Type::Int: s += "i"; break;  case Type::Long: s += "l"; break;
+        case Type::Float: s += "f"; break; case Type::Double: s += "d"; break;
+        case Type::Half: s += "h"; break;  case Type::Struct: s += "S" + t.structName; break;
+    }
+    for (int i = 0; i < t.ptr; ++i) s += "P";
+    return s;
+}
+
+struct Instantiator {
+    Module& m;
+    std::string err;
+    std::unordered_map<std::string, const Kernel*> templates;   // name → template
+    std::unordered_map<std::string, bool> done;                 // mangled instance names
+    std::vector<std::unique_ptr<Kernel>> instances;
+    std::vector<Kernel*> worklist;
+
+    explicit Instantiator(Module& mod) : m(mod) {}
+
+    void fail(const std::string& e) { if (err.empty()) err = e; }
+
+    void substType(Type& t, const std::unordered_map<std::string, Type>& tmap) {
+        if (t.tparam.empty()) return;
+        auto it = tmap.find(t.tparam);
+        if (it == tmap.end()) return;
+        const int extraPtr = t.ptr; const bool wasConst = t.isConst;
+        t = it->second;                 // adopt the concrete base/struct/unsigned/ptr
+        t.ptr += extraPtr;              // `T*` over T=float ⇒ float*
+        t.isConst = t.isConst || wasConst;
+        t.tparam.clear();
+    }
+    void substExpr(Expr& e, const std::unordered_map<std::string, Type>& tmap,
+                   const std::unordered_map<std::string, int64_t>& vmap) {
+        substType(e.castType, tmap);
+        if (e.kind == Expr::Ident) {                     // non-type parameter → its constant
+            auto it = vmap.find(e.str);
+            if (it != vmap.end()) { e.kind = Expr::IntLit; e.ival = it->second; e.wide = false; e.str.clear(); }
+        }
+        for (auto& ta : e.targs) if (ta.isType) substType(ta.type, tmap);
+        for (auto& a : e.args) substExpr(*a, tmap, vmap);
+    }
+    void substStmt(Stmt& s, const std::unordered_map<std::string, Type>& tmap,
+                   const std::unordered_map<std::string, int64_t>& vmap) {
+        substType(s.type, tmap);
+        if (s.expr) substExpr(*s.expr, tmap, vmap);
+        for (auto& b : s.body) substStmt(*b, tmap, vmap);
+        for (auto& b : s.elseBody) substStmt(*b, tmap, vmap);
+        if (s.forInit) substStmt(*s.forInit, tmap, vmap);
+        if (s.forCond) substExpr(*s.forCond, tmap, vmap);
+        if (s.forIncr) substExpr(*s.forIncr, tmap, vmap);
+    }
+
+    // Best-effort type of a caller argument expression, for template deduction.
+    Type typeOfExpr(const Expr& e, const std::unordered_map<std::string, Type>& sym) {
+        switch (e.kind) {
+            case Expr::IntLit:   { Type t; t.base = e.wide ? Type::Long : Type::Int; return t; }
+            case Expr::FloatLit: { Type t; t.base = e.wide ? Type::Double : Type::Float; return t; }
+            case Expr::Ident:    { auto it = sym.find(e.str); return it != sym.end() ? it->second : Type{}; }
+            case Expr::Index:    { Type b = e.args.empty() ? Type{} : typeOfExpr(*e.args[0], sym); if (b.ptr > 0) b.ptr--; return b; }
+            case Expr::Cast:     return e.castType;
+            case Expr::Unary:    return e.args.empty() ? Type{} : typeOfExpr(*e.args[0], sym);
+            case Expr::Binary:   return e.args.size() == 2 ? typeOfExpr(*e.args[0], sym) : Type{};
+            case Expr::Ternary:  return e.args.size() == 3 ? typeOfExpr(*e.args[1], sym) : Type{};
+            default:             return Type{};
+        }
+    }
+
+    // Resolve every template parameter of `tpl` for this call: explicit args first,
+    // then deduce remaining type parameters from the call's argument types.
+    bool resolveArgs(const Kernel& tpl, const Expr& call, const std::unordered_map<std::string, Type>& sym,
+                     std::unordered_map<std::string, Type>& tmap, std::unordered_map<std::string, int64_t>& vmap) {
+        if (call.targs.size() > tpl.tparams.size()) { fail("too many template arguments for '" + tpl.name + "'"); return false; }
+        for (size_t i = 0; i < call.targs.size(); ++i) {
+            const TemplateParam& tp = tpl.tparams[i];
+            if (tp.isTypename) {
+                if (!call.targs[i].isType) { fail("template parameter '" + tp.name + "' expects a type"); return false; }
+                tmap[tp.name] = call.targs[i].type;
+            } else {
+                if (call.targs[i].isType) { fail("non-type template parameter '" + tp.name + "' expects a value"); return false; }
+                vmap[tp.name] = call.targs[i].value;
+            }
+        }
+        for (const auto& tp : tpl.tparams) {
+            if (!tp.isTypename || tmap.count(tp.name)) continue;
+            bool found = false;
+            for (size_t pi = 0; pi < tpl.params.size() && pi < call.args.size(); ++pi) {
+                if (tpl.params[pi].type.tparam != tp.name) continue;
+                Type at = typeOfExpr(*call.args[pi], sym);
+                at.ptr -= tpl.params[pi].type.ptr; if (at.ptr < 0) at.ptr = 0;
+                at.isConst = false; at.tparam.clear();
+                tmap[tp.name] = at; found = true; break;
+            }
+            if (!found) { fail("cannot deduce template parameter '" + tp.name + "' for '" + tpl.name + "'"); return false; }
+        }
+        for (const auto& tp : tpl.tparams)
+            if (!tp.isTypename && !vmap.count(tp.name)) { fail("non-type template parameter '" + tp.name + "' needs an explicit argument"); return false; }
+        return true;
+    }
+
+    // Rewrite one call to a template into a call to its (possibly new) instance.
+    bool rewriteCall(Expr& call, const std::unordered_map<std::string, Type>& sym) {
+        auto ti = templates.find(call.str);
+        if (ti == templates.end()) return true;   // not a template call
+        const Kernel& tpl = *ti->second;
+        std::unordered_map<std::string, Type> tmap;
+        std::unordered_map<std::string, int64_t> vmap;
+        if (!resolveArgs(tpl, call, sym, tmap, vmap)) return false;
+        std::string mangled = tpl.name;
+        for (const auto& tp : tpl.tparams)
+            mangled += "$" + (tp.isTypename ? mangleType(tmap[tp.name]) : std::to_string(vmap[tp.name]));
+        if (!done.count(mangled)) {
+            done[mangled] = true;
+            auto inst = std::make_unique<Kernel>();
+            inst->name = mangled;
+            inst->returnType = tpl.returnType; substType(inst->returnType, tmap);
+            inst->isGlobal = tpl.isGlobal; inst->isDevice = tpl.isDevice; inst->isHost = tpl.isHost;
+            for (const auto& p : tpl.params) { Param np; np.name = p.name; np.type = p.type; substType(np.type, tmap); inst->params.push_back(std::move(np)); }
+            for (const auto& s : tpl.body) { auto cs = cloneStmt(*s); substStmt(*cs, tmap, vmap); inst->body.push_back(std::move(cs)); }
+            Kernel* raw = inst.get();
+            instances.push_back(std::move(inst));
+            worklist.push_back(raw);   // its body may call further templates
+        }
+        call.str = mangled; call.targs.clear();
+        return true;
+    }
+
+    bool rewriteExpr(Expr& e, const std::unordered_map<std::string, Type>& sym) {
+        for (auto& a : e.args) if (!rewriteExpr(*a, sym)) return false;
+        if (e.kind == Expr::Call) return rewriteCall(e, sym);
+        return true;
+    }
+    bool rewriteStmt(Stmt& s, std::unordered_map<std::string, Type>& sym) {
+        if (s.expr && !rewriteExpr(*s.expr, sym)) return false;
+        if (s.forInit && !rewriteStmt(*s.forInit, sym)) return false;
+        if (s.forCond && !rewriteExpr(*s.forCond, sym)) return false;
+        if (s.forIncr && !rewriteExpr(*s.forIncr, sym)) return false;
+        for (auto& b : s.body) if (!rewriteStmt(*b, sym)) return false;
+        for (auto& b : s.elseBody) if (!rewriteStmt(*b, sym)) return false;
+        if (s.kind == Stmt::VarDecl && !s.name.empty()) sym[s.name] = s.type;   // track locals for deduction
+        return true;
+    }
+
+    bool run() {
+        for (auto& k : m.kernels) if (!k->tparams.empty()) templates[k->name] = k.get();
+        if (templates.empty()) return true;
+        for (auto& k : m.kernels) if (k->tparams.empty()) worklist.push_back(k.get());
+        for (size_t i = 0; i < worklist.size(); ++i) {
+            Kernel* caller = worklist[i];
+            std::unordered_map<std::string, Type> sym;
+            for (const auto& p : caller->params) sym[p.name] = p.type;
+            for (auto& s : caller->body) if (!rewriteStmt(*s, sym)) return false;
+        }
+        for (auto& inst : instances) m.kernels.push_back(std::move(inst));
+        m.kernels.erase(std::remove_if(m.kernels.begin(), m.kernels.end(),
+                        [](const std::unique_ptr<Kernel>& k) { return !k->tparams.empty(); }),
+                        m.kernels.end());
+        return true;
+    }
+};
+
+bool instantiateTemplates(Module& m, std::string& err) {
+    Instantiator inst(m);
+    if (!inst.run()) { err = inst.err.empty() ? "template instantiation failed" : inst.err; return false; }
+    return true;
+}
+
 }  // namespace
 
 ParseResult parse(const std::string& source) {
@@ -741,7 +1073,9 @@ ParseResult parse(const std::string& source) {
     p.toks = lex(source);
     r.module = p.parseModule();
     r.ok = !p.failed && r.module != nullptr;
-    if (!r.ok) r.error = p.err.empty() ? "parse failed" : p.err;
+    if (!r.ok) { r.error = p.err.empty() ? "parse failed" : p.err; return r; }
+    std::string terr;
+    if (!instantiateTemplates(*r.module, terr)) { r.ok = false; r.module.reset(); r.error = terr; }
     return r;
 }
 

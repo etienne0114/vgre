@@ -23,7 +23,11 @@ struct Type {
     int  ptr = 0;           // pointer depth: float* -> 1
     bool isConst = false;
     std::string structName; // when base == Struct
+    std::string tparam;     // non-empty ⇒ an unsubstituted template type-parameter
+                            // named `tparam` (e.g. `T`, `T*`). Resolved away by
+                            // template instantiation before codegen ever sees it.
 
+    bool isTemplateParam() const { return !tparam.empty(); }
     bool isPointer() const { return ptr > 0; }
     bool isStruct()  const { return base == Struct && ptr == 0; }
     bool isFloating() const { return ptr == 0 && (base == Float || base == Double); }
@@ -41,6 +45,14 @@ struct Type {
         return 4;
     }
 };
+
+// One parameter of a function template. `typename T` → isTypename=true, name="T".
+// A non-type parameter `int N` → isTypename=false, name="N", type=int.
+struct TemplateParam { bool isTypename = true; std::string name; Type type; };
+
+// One explicit template argument at a call site: a type (`foo<float>()`) or a
+// non-type constant value (`foo<4>()`).
+struct TemplateArg { bool isType = true; Type type; int64_t value = 0; };
 
 // A user struct definition (scalar members, natural alignment).
 struct StructMember { Type type; std::string name; int offset = 0; };
@@ -65,6 +77,7 @@ struct Expr {
     bool        wide = false;  // IntLit: 64-bit (long); FloatLit: 64-bit (double)
     std::string str;        // Ident name / Member field / Call callee / operator spelling
     Type        castType;   // Cast: the target type
+    std::vector<TemplateArg> targs;   // Call: explicit template args `foo<float,4>(...)`
     std::vector<std::unique_ptr<Expr>> args;
     // Member: args[0]=object, str=field.  Index: args[0]=base, args[1]=index.
     // Unary: str=op, args[0].  Binary: str=op, args[0],args[1].
@@ -111,6 +124,8 @@ struct Kernel {
     Type returnType;              // void for __global__; the real type for __device__
     std::vector<Param> params;
     std::vector<StmtPtr> body;
+    std::vector<TemplateParam> tparams;   // non-empty ⇒ a function template, only
+                                          // compiled once instantiated (see parser)
     bool isGlobal = false;        // had __global__ (a kernel entry)
     bool isDevice = false;        // had __device__ (callable/inlinable from device code)
     bool isHost   = false;        // had __host__

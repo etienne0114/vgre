@@ -139,6 +139,7 @@ an 8-worker pool, both bit-identical to the serial result.
 | `break`, `continue` | ✅ `break` exits the nearest loop **or** switch; `continue` targets the nearest enclosing loop (`for`-increment / `while`-retest), skipping switches; misuse outside a loop/switch is a located error |
 | `return` | ✅ |
 | blocks / scopes | ✅ (single flat scope) |
+| **function templates** — `template<typename T>` / `template<int N>` `__device__` helpers | ✅ **on both tiers** via monomorphization in the from-scratch front-end (no Clang). Deduced (`foo(x)`) and explicit (`foo<float>(x)`) type args, non-type params (`bar<4>()`), chained templates (a template calling another), and pointer-parameter deduction (`const T*`) all work; each distinct argument set is instantiated once, substituted, and compiled as an ordinary concrete function. `test_cuda_templates.cpp` proves the compiled tier == the interpreter, bit-exact. The `<` disambiguation only treats `name<…>(…)` as a template call for a known template or a `tex`/`surf` builtin, so ordinary comparison chains (`a < b`) are unaffected. (Nested angle args `foo<bar<int>>` and templated `__global__` launch entries are not yet supported.) |
 | `__device__` / `__host__ __device__` helper functions | ✅ **on both tiers** (inlined; nested calls OK; recursion rejected). The interpreter inlines into PTX; the **Tier-1 compiled** backend inlines into closures — a fresh param/local slot range per call site, the return value stashed in a slot, `ts.returned` saved/restored so `return` unwinds only the callee — and `test_cuda_fuzz_device.cpp` proves the two tiers agree bit-for-bit over random helpers (branches, early returns, nesting, mixed types). Hygienic: each inline gets its own variable/array scope; a non-void helper that falls through without a `return` yields a defined 0. A `__host__`-only function is **not** device-callable (calling it from a kernel is a located error); the launch entry must be a `__global__` kernel. |
 
 **Token vocabulary:** the lexer recognizes the **complete** C++ reserved-keyword set (through C++26, incl. the alternative operator spellings `and`/`or`/…), every CUDA qualifier/annotation (`__host__`/`__device__`/`__global__`/`__shared__`/`__constant__`/`__managed__`/`__restrict__`/`__forceinline__`/`__launch_bounds__`/`__grid_constant__`/`__cluster_dims__`/…), all operators and punctuators (`-> :: ... .* ->* <=> <<< >>>` included), character literals and `true`/`false`/`nullptr`. Each token carries a source byte span; the keyword table, spellings, names and classifiers are centralized in `token.cpp`. Tokens outside the parsed subset lex cleanly and produce a **located** error if used — never wrong code.
@@ -225,8 +226,9 @@ softmax-attention reference to ~5e-8 (float rounding). The canonical transformer
 workload runs on the from-scratch front-end.
 
 ## Not yet supported (returns an error, falls back to JIT when available)
-- templates, recursion
-- texture/surface intrinsics
+- recursion (function templates **are** supported — see the helper-functions row)
+- texture/surface intrinsics (the `tex<T>`/`surf<T>` **call syntax** now parses, but
+  execution on the from-scratch tiers is not yet wired)
 - `__shfl` predicate/return variants beyond the four `__shfl_*_sync` forms, and
   `__ballot`-style vote **without** an explicit membership mask (the `_sync`
   forms — `__ballot_sync`/`__any_sync`/`__all_sync` — and 64-bit `__shfl_*_sync`
