@@ -1526,6 +1526,47 @@ struct Codegen {
         return {d, intType()};
     }
 
+    // Texture / surface fetches. VGRE's interpreter has no bindless-PTX texture
+    // unit, so these lower to in-house `vgretex*`/`vgresurf*` ops that the Tier-0
+    // interpreter executes by calling the shared TextureManager — the same sampler
+    // the compiled tier and the LLVM tier use. Handles are opaque u64 ids; tex
+    // coords are f32 (tex1Dfetch/surf coords are int); every result is an f32 sample.
+    Val emitTex(const Expr& e) {
+        const std::string& fn = e.str;
+        Type u64t; u64t.base = Type::Long; u64t.isUnsigned = true;
+        if (fn == "surf2Dwrite") {                        // surf2Dwrite(val, surf, x, y) — void
+            if (e.args.size() != 4) { fail("'surf2Dwrite' expects (value, surf, x, y)"); return {}; }
+            Val v = coerce(emitExpr(*e.args[0]), floatType());
+            Val h = coerce(emitExpr(*e.args[1]), u64t);
+            Val x = coerce(emitExpr(*e.args[2]), intType());
+            Val y = coerce(emitExpr(*e.args[3]), intType());
+            if (failed) return {};
+            emit("vgresurf2dwrite.f32 " + v.reg + ", " + h.reg + ", " + x.reg + ", " + y.reg + ";");
+            return {v.reg, floatType()};                  // no value (discarded)
+        }
+        Val h = coerce(emitExpr(*e.args[0]), u64t); if (failed) return {};
+        auto fc = [&](const Expr& a) { return coerce(emitExpr(a), floatType()); };
+        auto ic = [&](const Expr& a) { return coerce(emitExpr(a), intType()); };
+        std::string d = fresh(RC::F32);
+        if (fn == "tex1D" && e.args.size() == 2) {
+            Val x = fc(*e.args[1]); if (failed) return {};
+            emit("vgretex1d.f32 " + d + ", " + h.reg + ", " + x.reg + ";");
+        } else if (fn == "tex1Dfetch" && e.args.size() == 2) {
+            Val x = ic(*e.args[1]); if (failed) return {};
+            emit("vgretex1dfetch.f32 " + d + ", " + h.reg + ", " + x.reg + ";");
+        } else if (fn == "tex2D" && e.args.size() == 3) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); if (failed) return {};
+            emit("vgretex2d.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ";");
+        } else if (fn == "tex3D" && e.args.size() == 4) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val z = fc(*e.args[3]); if (failed) return {};
+            emit("vgretex3d.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + z.reg + ";");
+        } else if (fn == "surf2Dread" && e.args.size() == 3) {
+            Val x = ic(*e.args[1]); Val y = ic(*e.args[2]); if (failed) return {};
+            emit("vgresurf2dread.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ";");
+        } else { fail("codegen: unsupported texture builtin '" + fn + "'"); return {}; }
+        return {d, floatType()};
+    }
+
     // __half <-> float helpers (used by the half arithmetic intrinsics, which all
     // promote to float, compute, then narrow back to __half).
     Val h2f(const Val& h) { std::string d = fresh(RC::F32); emit("cvt.f32.f16 " + d + ", " + h.reg + ";"); return {d, floatType()}; }
@@ -1738,6 +1779,8 @@ struct Codegen {
         if (fn == "__reduce_add_sync" || fn == "__reduce_min_sync" || fn == "__reduce_max_sync" ||
             fn == "__reduce_and_sync" || fn == "__reduce_or_sync"  || fn == "__reduce_xor_sync") return emitReduce(e);
         if (fn == "__match_any_sync" || fn == "__match_all_sync") return emitMatch(e);
+        if (fn == "tex1D" || fn == "tex2D" || fn == "tex3D" || fn == "tex1Dfetch" ||
+            fn == "surf2Dread" || fn == "surf2Dwrite") return emitTex(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);

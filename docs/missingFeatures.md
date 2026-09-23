@@ -80,11 +80,13 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
 > threading requirement): the *optional* **Tier-2 SSA** backend for peak speed on
 > hot kernels; native-machine-code cooperative execution (fibers in the JIT tier);
-> and broader front-end coverage (texture/surface execution; recursion). **Function
-> templates are now done** — `template<typename T>`/`template<int N>` `__device__`
-> helpers monomorphize on the from-scratch front-end (deduced/explicit/non-type args,
-> chained, pointer deduction), compiled tier == interpreter (`test_cuda_templates.cpp`);
-> this also unblocks the `tex<T>`/`surf<T>` call syntax.
+> and broader front-end coverage (vector/layered/mipmap texture fetches; recursion).
+> **Function templates are now done** — `template<typename T>`/`template<int N>`
+> `__device__` helpers monomorphize on the from-scratch front-end (deduced/explicit/
+> non-type args, chained, pointer deduction), compiled tier == interpreter
+> (`test_cuda_templates.cpp`). **Scalar texture/surface fetches are now done too** —
+> `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` (incl. the `tex2D<float>` spelling)
+> run on both tiers via the shared `TextureManager`, bit-exact (`test_cuda_texture.cpp`).
 > (warp **shuffle**, **vote**, **reduce** `__reduce_*_sync`, and **match**
 > `__match_any_sync`/`__match_all_sync` are done — the full sm_70+ warp intrinsic
 > surface, bit-exact on the compiled fiber tier and the interpreter.)

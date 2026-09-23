@@ -177,6 +177,12 @@ struct Parser {
         if (kind() == TokenKind::Identifier && isCurTypeParam(cur().text)) {
             out = Type{}; out.tparam = advance().text; parsePtrQualifiers(out); return true;
         }
+        // Texture/surface object handles are opaque 64-bit ids (unsigned long long).
+        if (kind() == TokenKind::Identifier &&
+            (cur().text == "cudaTextureObject_t" || cur().text == "cudaSurfaceObject_t")) {
+            out = Type{}; out.base = Type::Long; out.isUnsigned = true; advance();
+            parsePtrQualifiers(out); return true;
+        }
         // Struct type: a known struct name, optionally preceded by the 'struct'
         // keyword (`struct Foo` or bare `Foo`). Resolved against the module table.
         bool sawStructKw = (kind() == TokenKind::KwStruct);

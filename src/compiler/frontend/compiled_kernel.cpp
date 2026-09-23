@@ -21,6 +21,7 @@
 #include "vgre/compiler/frontend/parser.h"
 
 #include "vgre/common/atomic_rmw.h"
+#include "vgre/core/texture_manager.h"
 #include "vgre/xla/thread_pool.h"
 
 #include <algorithm>
@@ -916,6 +917,10 @@ struct Compiler {
                     fn == "__match_any_sync" || fn == "__match_all_sync" ||
                     fn == "__activemask")
                     return scalar(Type::Int);
+                // Texture/surface fetches return a float sample (VGRE's scalar path).
+                if (fn == "tex1D" || fn == "tex2D" || fn == "tex3D" || fn == "tex1Dfetch" ||
+                    fn == "surf2Dread")
+                    return scalar(Type::Float);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
                 return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
             }
@@ -1416,6 +1421,39 @@ struct Compiler {
                 };
             }
             fail("__match_all_sync: &pred must be &localInt or &global[i]"); return {};
+        }
+        // Texture / surface fetches — dispatch to the shared TextureManager (the same
+        // sampler the LLVM tier uses). Handles are opaque uint64 ids passed as params.
+        // The `<T>` template spelling (tex2D<float>) leaves targs behind; ignored (the
+        // scalar-float path). tex1Dfetch/surf coords are int; tex1D/2D/3D coords float.
+        {
+            using TM = ::vgre::core::TextureManager;
+            if (fn == "tex1D" && e.args.size() == 2) {
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); if (failed) return {};
+                return [h, x](TS& ts) -> Cell { return Cell::F(TM::instance().tex1D((uint64_t)h(ts).asI(), (float)x(ts).asF())); };
+            }
+            if (fn == "tex1Dfetch" && e.args.size() == 2) {
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); if (failed) return {};
+                return [h, x](TS& ts) -> Cell { return Cell::F(TM::instance().tex1Dfetch((uint64_t)h(ts).asI(), (int)x(ts).asI())); };
+            }
+            if (fn == "tex2D" && e.args.size() == 3) {
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn y = compileExpr(*e.args[2]); if (failed) return {};
+                return [h, x, y](TS& ts) -> Cell { return Cell::F(TM::instance().tex2D((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF())); };
+            }
+            if (fn == "tex3D" && e.args.size() == 4) {
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]);
+                ExprFn y = compileExpr(*e.args[2]); ExprFn z = compileExpr(*e.args[3]); if (failed) return {};
+                return [h, x, y, z](TS& ts) -> Cell { return Cell::F(TM::instance().tex3D((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (float)z(ts).asF())); };
+            }
+            if (fn == "surf2Dread" && e.args.size() == 3) {   // T v = surf2Dread<T>(surf, x, y)
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn y = compileExpr(*e.args[2]); if (failed) return {};
+                return [h, x, y](TS& ts) -> Cell { float v = 0.0f; TM::instance().surf2Dread((uint64_t)h(ts).asI(), v, (int)x(ts).asI(), (int)y(ts).asI()); return Cell::F(v); };
+            }
+            if (fn == "surf2Dwrite" && e.args.size() == 4) {  // surf2Dwrite(val, surf, x, y)
+                ExprFn v = compileExpr(*e.args[0]); ExprFn h = compileExpr(*e.args[1]);
+                ExprFn x = compileExpr(*e.args[2]); ExprFn y = compileExpr(*e.args[3]); if (failed) return {};
+                return [v, h, x, y](TS& ts) -> Cell { TM::instance().surf2Dwrite((uint64_t)h(ts).asI(), (float)v(ts).asF(), (int)x(ts).asI(), (int)y(ts).asI()); return Cell::I(0); };
+            }
         }
         if (fn == "atomicAdd" && e.args.size() == 2) return compileAtomicAdd(e);
         auto dfit = deviceFns.find(fn);

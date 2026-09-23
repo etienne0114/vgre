@@ -1456,6 +1456,13 @@ target_link_libraries(test_cuda_templates PRIVATE vgre Threads::Threads)
 add_test(NAME CudaTemplates COMMAND test_cuda_templates)
 set_tests_properties(CudaTemplates PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Texture/surface intrinsics on the from-scratch tiers (tex1D/2D/1Dfetch, surf2D
+# read/write) — compiled tier + interpreter, both via the shared TextureManager.
+add_executable(test_cuda_texture compiler/test_cuda_texture.cpp)
+target_link_libraries(test_cuda_texture PRIVATE vgre Threads::Threads)
+add_test(NAME CudaTexture COMMAND test_cuda_texture)
+set_tests_properties(CudaTexture PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

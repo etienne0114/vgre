@@ -3,6 +3,7 @@
 #include "vgre/debug/ptx_interpreter.h"
 
 #include "vgre/common/atomic_rmw.h"
+#include "vgre/core/texture_manager.h"   // shared sampler for vgretex*/vgresurf* ops
 #include "vgre/xla/half.h"   // f16<->f32 codec (header-only, dependency-free)
 
 #include <algorithm>
@@ -1296,6 +1297,24 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
             out = zeroExtend((uint64_t)v, typeSize(dstT));
         }
         t.regs[A(0)].u = out;
+    } else if (mnem == "vgretex1d" || mnem == "vgretex1dfetch" || mnem == "vgretex2d" ||
+               mnem == "vgretex3d" || mnem == "vgresurf2dread") {
+        // In-house texture/surface fetch (see codegen emitTex): dest, handle(u64),
+        // coords. Dispatches to the shared TextureManager → an f32 sample.
+        auto& TM = ::vgre::core::TextureManager::instance();
+        const uint64_t handle = evalOperand(t, tid, A(1), 8);
+        float res = 0.0f;
+        if (mnem == "vgretex1d")           res = TM.tex1D(handle, asF32(evalOperand(t, tid, A(2), 4)));
+        else if (mnem == "vgretex1dfetch") res = TM.tex1Dfetch(handle, (int)evalOperand(t, tid, A(2), 4));
+        else if (mnem == "vgretex2d")      res = TM.tex2D(handle, asF32(evalOperand(t, tid, A(2), 4)), asF32(evalOperand(t, tid, A(3), 4)));
+        else if (mnem == "vgretex3d")      res = TM.tex3D(handle, asF32(evalOperand(t, tid, A(2), 4)), asF32(evalOperand(t, tid, A(3), 4)), asF32(evalOperand(t, tid, A(4), 4)));
+        else { float v = 0.0f; TM.surf2Dread(handle, v, (int)evalOperand(t, tid, A(2), 4), (int)evalOperand(t, tid, A(3), 4)); res = v; }
+        setReg(A(0), fromF32(res));
+    } else if (mnem == "vgresurf2dwrite") {          // surf2Dwrite(val, surf, x, y) — no dest
+        const float v = asF32(evalOperand(t, tid, A(0), 4));
+        const uint64_t handle = evalOperand(t, tid, A(1), 8);
+        ::vgre::core::TextureManager::instance().surf2Dwrite(
+            handle, v, (int)evalOperand(t, tid, A(2), 4), (int)evalOperand(t, tid, A(3), 4));
     } else {
         throw std::runtime_error("PTX: unsupported instruction '" + I.op + "' (" + I.text + ")");
     }
