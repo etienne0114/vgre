@@ -60,6 +60,12 @@ int main() {
     // Extended math intrinsics: fma (3-arg, fused), exp2/log2/rsqrt/erf (1-arg), pow
     // (2-arg) — all computed in double then narrowed, bit-exact vs the compiled tier.
     check("math2",   R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; float w=fabsf(v)+1.0f; float r=fmaf(v,a,y[i]); r=r+exp2f(w*0.1f)+log2f(w)+rsqrtf(w)+powf(w,1.5f)+erff(v*0.5f); y[i]=r; } })", N, x, y0, 1.5f);
+    // __device__ helper inlining: nested calls, a helper with control flow + multiple
+    // returns (actv), and a helper whose local `i` collides with the kernel's `i`
+    // (bias) — the alpha-renaming must keep them distinct. Bit-exact vs the compiled tier.
+    check("devfn",   R"(__device__ float actv(float v, float a){ float r=v*a; if(r<0.0f) return -r; return r; } __device__ float bias(float v){ int i=3; return v+(float)i; } extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ y[i]=actv(bias(x[i]),a)+y[i]; } })", N, x, y0, 1.5f);
+    // __device__ helper containing a loop (its accumulator + counter are inlined locals).
+    check("devloop", R"(__device__ float poly(float x, int c){ float s=0.0f; for(int k=0;k<c;k++) s=s*x+1.0f; return s; } extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ y[i]=poly(x[i],5)*a; } })", N, x, y0, 0.5f);
 
     // Control flow with phi insertion (loops + if/else) — signature (x, y, n, m).
     auto checkCF = [&](const char* label, const char* src, int NN, int M) {

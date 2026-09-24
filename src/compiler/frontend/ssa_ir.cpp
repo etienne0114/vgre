@@ -153,6 +153,16 @@ struct Lowerer {
     std::unordered_map<int, std::unordered_map<std::string, int>> incPhis;  // block -> var -> phi id
     std::vector<std::pair<int, int>> loops;   // (breakTarget, continueTarget) per enclosing loop
 
+    // __device__ helper inlining: callee locals are alpha-renamed with `mpfx` so they
+    // never collide with the caller's names in curDef/vtype; a callee `return` writes
+    // the current inline's result var and branches to its exit block (inlineCtx.back()).
+    std::unordered_map<std::string, const Kernel*> deviceFns;   // name -> __device__ definition
+    std::string mpfx;                          // active mangling prefix ("" at top level)
+    int inlineUid = 0, inlineDepth = 0;
+    struct InlineCtx { int exitB; std::string retVar; Type rt; };
+    std::vector<InlineCtx> inlineCtx;
+    std::string mangle(const std::string& n) const { return mpfx.empty() ? n : mpfx + n; }
+
     explicit Lowerer(const Kernel& kern) : k(kern) {}
     void fail(const std::string& m) { if (ok) { ok = false; err = m; } }
 
@@ -219,8 +229,8 @@ struct Lowerer {
         switch (e.kind) {
             case Expr::IntLit:   { Type t; t.base = e.wide ? Type::Long : Type::Int; return t; }
             case Expr::FloatLit: return scalar(e.wide ? Type::Double : Type::Float);
-            case Expr::Ident: { auto it = vtype.find(e.str); return it != vtype.end() ? it->second : scalar(Type::Int); }
-            case Expr::Index: { Type b = e.args.empty() ? Type{} : vtype.count(e.args[0]->str) ? vtype[e.args[0]->str] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
+            case Expr::Ident: { auto it = vtype.find(mangle(e.str)); return it != vtype.end() ? it->second : scalar(Type::Int); }
+            case Expr::Index: { std::string bn = e.args.empty() ? std::string() : mangle(e.args[0]->str); Type b = vtype.count(bn) ? vtype[bn] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
             case Expr::Unary:  if (e.str == "!") return scalar(Type::Int);
                                return e.args.empty() ? scalar(Type::Int) : typeOf(*e.args[0]);
             case Expr::Cast:   return e.castType;
@@ -251,8 +261,9 @@ struct Lowerer {
             case Expr::IntLit:   return constI(e.ival, typeOf(e));
             case Expr::FloatLit: return constF(e.fval, typeOf(e));
             case Expr::Ident: {
-                if (!vtype.count(e.str)) { fail("SSA: unknown identifier '" + e.str + "'"); return 0; }
-                return readVar(e.str, cur);
+                std::string nm = mangle(e.str);
+                if (!vtype.count(nm)) { fail("SSA: unknown identifier '" + e.str + "'"); return 0; }
+                return readVar(nm, cur);
             }
             case Expr::Member: {
                 int dim;
@@ -264,7 +275,7 @@ struct Lowerer {
             }
             case Expr::Index: {   // p[idx] — a global load
                 if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident) { fail("SSA: bad index"); return 0; }
-                Type pt = vtype.count(e.args[0]->str) ? vtype[e.args[0]->str] : Type{};
+                Type pt = vtype.count(mangle(e.args[0]->str)) ? vtype[mangle(e.args[0]->str)] : Type{};
                 if (pt.ptr != 1) { fail("SSA: index base must be a pointer"); return 0; }
                 Type elem = pt; elem.ptr = 0;
                 int base = lowerExpr(*e.args[0]);
@@ -277,8 +288,8 @@ struct Lowerer {
                 if (e.str == "+") return lowerExpr(*e.args[0]);
                 // ++x / x++ / --x / x-- on a local variable (SSA rebind; returns old or new).
                 if (e.str == "pre++" || e.str == "post++" || e.str == "pre--" || e.str == "post--") {
-                    if (e.args[0]->kind != Expr::Ident || !vtype.count(e.args[0]->str)) { fail("SSA: ++/-- on a non-local"); return 0; }
-                    const std::string& nm = e.args[0]->str; Type vt = vtype[nm];
+                    if (e.args[0]->kind != Expr::Ident || !vtype.count(mangle(e.args[0]->str))) { fail("SSA: ++/-- on a non-local"); return 0; }
+                    const std::string nm = mangle(e.args[0]->str); Type vt = vtype[nm];
                     int old = readVar(nm, cur);
                     int one = vt.isFloating() ? constF(1.0, vt) : constI(1, vt);
                     Inst b; b.op = Op::Bin; b.s = (e.str[3] == '+' || e.str[4] == '+') ? "+" : "-"; b.ty = vt; b.a = {old, one};
@@ -334,13 +345,15 @@ struct Lowerer {
                     Inst in; in.op = Op::CallMath; in.s = fnn; in.ty = typeOf(e); in.a = {a, b, c};
                     return emit(std::move(in));
                 }
+                auto dit = deviceFns.find(fnn);
+                if (dit != deviceFns.end()) return lowerInlineCall(*dit->second, e);
                 fail("SSA: unsupported call '" + fnn + "'"); return 0;
             }
             case Expr::Assign: {
                 lowerAssign(e);
                 if (!ok) return 0;
                 // The assignment expression's value is the new value of the target.
-                if (e.args[0]->kind == Expr::Ident) return readVar(e.args[0]->str, cur);
+                if (e.args[0]->kind == Expr::Ident) return readVar(mangle(e.args[0]->str), cur);
                 return lowerExpr(*e.args[0]);   // p[i] = v used as a value: re-load
             }
             default: fail("SSA: unsupported expression"); return 0;
@@ -352,18 +365,19 @@ struct Lowerer {
         const Expr& lhs = *e.args[0];
         const std::string& op = e.str;
         if (lhs.kind == Expr::Ident) {
-            if (!vtype.count(lhs.str)) { fail("SSA: assign to unknown '" + lhs.str + "'"); return; }
-            Type vt = vtype[lhs.str];
+            std::string nm = mangle(lhs.str);
+            if (!vtype.count(nm)) { fail("SSA: assign to unknown '" + lhs.str + "'"); return; }
+            Type vt = vtype[nm];
             int rhs = lowerExpr(*e.args[1]); if (!ok) return;
             int val = rhs;
-            if (op != "=") { int old = readVar(lhs.str, cur); Inst in; in.op = Op::Bin; in.s = op.substr(0, op.size() - 1); in.ty = promoteT(vt, typeOf(*e.args[1])); in.a = {old, rhs}; val = emit(std::move(in)); }
+            if (op != "=") { int old = readVar(nm, cur); Inst in; in.op = Op::Bin; in.s = op.substr(0, op.size() - 1); in.ty = promoteT(vt, typeOf(*e.args[1])); in.a = {old, rhs}; val = emit(std::move(in)); }
             Inst c; c.op = Op::Cast; c.ty = vt; c.a = {val};      // narrow to the variable's type
-            writeVar(lhs.str, cur, emit(std::move(c)));
+            writeVar(nm, cur, emit(std::move(c)));
             return;
         }
         if (lhs.kind == Expr::Index) {
             if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident) { fail("SSA: bad store index"); return; }
-            Type pt = vtype.count(lhs.args[0]->str) ? vtype[lhs.args[0]->str] : Type{};
+            Type pt = vtype.count(mangle(lhs.args[0]->str)) ? vtype[mangle(lhs.args[0]->str)] : Type{};
             if (pt.ptr != 1) { fail("SSA: store base must be a pointer"); return; }
             Type elem = pt; elem.ptr = 0;
             int base = lowerExpr(*lhs.args[0]);
@@ -380,21 +394,70 @@ struct Lowerer {
         fail("SSA: unsupported assignment target");
     }
 
+    // Inline a __device__ helper call. The callee's params/locals are alpha-renamed
+    // (mpfx) so they never collide with the caller's; each `return` in the body writes
+    // this call's result var and branches to a fresh exit block; the call value is the
+    // result var read at the exit (a phi merging every return + a 0 fall-through). Args
+    // are lowered in the CALLER scope; recursion is bounded by inlineDepth.
+    int lowerInlineCall(const Kernel& F, const Expr& call) {
+        if (call.args.size() != F.params.size()) { fail("SSA: wrong argument count for '" + F.name + "'"); return 0; }
+        if (inlineDepth > 32) { fail("SSA: __device__ inline too deep (recursion?)"); return 0; }
+        std::vector<int> argv(F.params.size());
+        for (size_t i = 0; i < F.params.size(); ++i) { argv[i] = lowerExpr(*call.args[i]); if (!ok) return 0; }
+
+        const std::string savedPfx = mpfx;
+        mpfx = savedPfx + "$" + std::to_string(inlineUid++) + "@";   // fresh, unique scope
+        ++inlineDepth;
+        const Type rt = F.returnType;
+        const std::string retVar = mpfx + "#ret";                    // '#' can't occur in a source name
+        vtype[retVar] = (rt.base == Type::Void) ? scalar(Type::Int) : rt;
+        writeVar(retVar, cur, rt.isFloating() ? constF(0.0, vtype[retVar]) : constI(0, vtype[retVar]));
+        for (size_t i = 0; i < F.params.size(); ++i) {
+            const std::string pn = mangle(F.params[i].name);
+            vtype[pn] = F.params[i].type;
+            Inst c; c.op = Op::Cast; c.ty = F.params[i].type; c.a = {argv[i]}; writeVar(pn, cur, emit(std::move(c)));
+        }
+        int exitB = newBlock();
+        inlineCtx.push_back({exitB, retVar, rt});
+        for (auto& st : F.body) { lowerStmt(*st); if (!ok) { inlineCtx.pop_back(); mpfx = savedPfx; --inlineDepth; return 0; } }
+        emitBr(exitB); addEdge(cur, exitB);         // fall-through (no return on this path)
+        inlineCtx.pop_back();
+        sealBlock(exitB);
+        cur = exitB;
+        int result = readVar(retVar, cur);          // phi over all returns + the fall-through
+        mpfx = savedPfx; --inlineDepth;
+        return result;
+    }
+
     void lowerStmt(const Stmt& s) {
         if (!ok) return;
         switch (s.kind) {
             case Stmt::VarDecl: {
                 if (s.arraySize > 0 || s.type.isStruct()) { fail("SSA: local arrays/structs unsupported on this tier"); return; }
-                vtype[s.name] = s.type;
+                std::string nm = mangle(s.name);
+                vtype[nm] = s.type;
                 int v;
                 if (s.expr) { int r = lowerExpr(*s.expr); if (!ok) return; Inst c; c.op = Op::Cast; c.ty = s.type; c.a = {r}; v = emit(std::move(c)); }
                 else        { v = s.type.isFloating() ? constF(0.0, s.type) : constI(0, s.type); }
-                writeVar(s.name, cur, v);
+                writeVar(nm, cur, v);
                 return;
             }
             case Stmt::ExprStmt: if (s.expr) { if (s.expr->kind == Expr::Assign) lowerAssign(*s.expr); else lowerExpr(*s.expr); } return;
             case Stmt::Block: for (auto& st : s.body) { lowerStmt(*st); if (!ok) return; } return;
-            case Stmt::Return: { Inst in; in.op = Op::Ret; emit(std::move(in)); return; }
+            case Stmt::Return: {
+                if (!inlineCtx.empty()) {                       // return inside an inlined __device__ body
+                    const InlineCtx ic = inlineCtx.back();      // (innermost callee) — copy: writeVar may realloc
+                    if (s.expr && ic.rt.base != Type::Void) {
+                        int rv = lowerExpr(*s.expr); if (!ok) return;
+                        Inst c; c.op = Op::Cast; c.ty = ic.rt; c.a = {rv}; int cv = emit(std::move(c));
+                        writeVar(ic.retVar, cur, cv);
+                    }
+                    emitBr(ic.exitB); addEdge(cur, ic.exitB);
+                    cur = newBlock(/*seal=*/true);              // trailing stmts after return are unreachable
+                    return;
+                }
+                Inst in; in.op = Op::Ret; emit(std::move(in)); return;
+            }
             case Stmt::Empty: return;
             case Stmt::If: {
                 int c = lowerExpr(*s.expr); if (!ok) return;
@@ -1800,6 +1863,8 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
         if (kp->isGlobal && (name.empty() || kp->name == name)) { target = kp.get(); break; }
     if (!target) { err = "SSA: kernel '" + name + "' not found"; return nullptr; }
     Lowerer lo(*target);
+    for (auto& kp : pr.module->kernels)     // __device__ helpers available for inlining
+        if (kp->isDevice && !kp->isGlobal) lo.deviceFns[kp->name] = kp.get();
     if (!lo.run()) { err = lo.err; return nullptr; }
     if (!verify(lo.fn, err)) return nullptr;
     if (optimize) { runOpt(lo.fn); if (!verify(lo.fn, err)) return nullptr; }
