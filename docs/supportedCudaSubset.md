@@ -23,6 +23,17 @@ backend.
 > doesn't accept fall back transparently, so the *supported subset below is the same
 > on every tier*; the tiers differ only in speed. `VGRE_DISABLE_NATIVE=1` forces the
 > compiled tier.
+>
+> **Optional Tier-2 SSA backend (`VGRE_EXEC_BACKEND=ssa`).** A from-scratch SSA
+> optimizing backend (`ssa_ir.cpp`, VGRE-IR → const-fold/GVN/LICM/DCE → linear-scan
+> regalloc → x86-64 native, opt-in AArch64, portable evaluator elsewhere) is
+> feature-complete for the scalar + shared-memory + warp subset — full control flow
+> (incl. `switch`), `__device__` inlining, local arrays, `__shared__`/`__syncthreads`,
+> and the **full warp-intrinsic surface** (`__shfl_*`, vote, `__reduce_*_sync`, match,
+> `__syncwarp`, `__activemask`). Its cooperative shared/warp ops run on a per-block
+> evaluator on every host (native ucontext fibers for shared/barrier on x86-64/AArch64);
+> the warp intrinsics are held bit-exact vs the interpreter by `test_ssa_ir.cpp`. So the
+> warp rows below run on **all** tiers.
 
 It targets the practical subset of CUDA-C that real compute kernels use;
 anything outside it returns a **located error** (never wrong code) — enriched with

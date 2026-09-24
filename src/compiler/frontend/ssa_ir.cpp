@@ -460,6 +460,39 @@ struct Lowerer {
                     in.a = {mask, val};
                     return emit(std::move(in));
                 }
+                // __match_all_sync(mask, value, &pred): the participant mask if EVERY
+                // participating lane agrees (else 0), and *pred = agreed?1:0. The interpreter
+                // tier restricts &pred to a global element (&out[i]); we also accept &localInt.
+                // pred is derived as (result != 0) — bit-exact vs the tiers whenever there is
+                // at least one participant (the well-formed case; participants==0 is UB).
+                if (fnn=="__match_all_sync" && e.args.size() == 3) {
+                    const Expr& pe = *e.args[2];
+                    if (pe.kind != Expr::Unary || pe.str != "&" || pe.args.empty()) { fail("SSA: __match_all_sync expects &pred as its 3rd argument"); return 0; }
+                    int mask = lowerExpr(*e.args[0]); int val = lowerExpr(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::WarpMatch; { Type u = scalar(Type::Int); u.isUnsigned = true; in.ty = u; }
+                    in.dim = 1;   // all
+                    in.a = {mask, val};
+                    int result = emit(std::move(in));
+                    int zero = constI(0, scalar(Type::Int));
+                    Inst cm; cm.op = Op::Cmp; cm.s = "!="; cm.ty = scalar(Type::Int); cm.a = {result, zero};
+                    int pred = emit(std::move(cm));
+                    const Expr& tgt = *pe.args[0];
+                    if (tgt.kind == Expr::Ident) {                                     // &localInt
+                        std::string nm = mangle(tgt.str);
+                        Type vt = vtype.count(nm) ? vtype[nm] : scalar(Type::Int);
+                        Inst c; c.op = Op::Cast; c.ty = vt; c.a = {pred}; writeVar(nm, cur, emit(std::move(c)));
+                    } else if (tgt.kind == Expr::Index && tgt.args.size() == 2 && tgt.args[0]->kind == Expr::Ident &&
+                               !localArr.count(mangle(tgt.args[0]->str)) && !sharedArr.count(mangle(tgt.args[0]->str))) {   // &global[i]
+                        std::string bn = mangle(tgt.args[0]->str);
+                        Type pt = vtype.count(bn) ? vtype[bn] : Type{};
+                        if (pt.ptr != 1) { fail("SSA: __match_all_sync &pred base must be a pointer"); return 0; }
+                        Type elem = pt; elem.ptr = 0;
+                        int base = lowerExpr(*tgt.args[0]); int idx = lowerExpr(*tgt.args[1]); if (!ok) return 0;
+                        Inst c; c.op = Op::Cast; c.ty = elem; c.a = {pred}; int cv = emit(std::move(c));
+                        Inst st; st.op = Op::Store; st.a = {base, idx, cv}; st.elemBytes = elem.elemBytes(); st.ty = elem; emit(std::move(st));
+                    } else { fail("SSA: __match_all_sync &pred must be &localInt or &global[i]"); return 0; }
+                    return result;
+                }
                 // __activemask(): the warp's in-range lane mask (per-thread, no rendezvous —
                 // matches the interpreter's non-exited-lane query for convergent code).
                 if (fnn=="__activemask" && e.args.empty()) {
@@ -2473,14 +2506,15 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                             else if (rop == 4) acc |= vv; else acc ^= vv;
                         }
                         t.v[t.parkOp] = coerce(SI((int64_t)(uint32_t)acc), in.ty);
-                    } else {   // WarpMatch — dim 0 = __match_any_sync (mask of same-valued participants)
+                    } else {   // WarpMatch — dim 0 = __match_any_sync, dim 1 = __match_all_sync
                         uint32_t memMask = (uint32_t)asI(t.v[in.a[0]]);
                         uint32_t part = 0;
                         for (uint32_t k = 0; k < 32; ++k) if ((active & (1u << k)) && (memMask & (1u << k))) part |= (1u << k);
                         uint32_t mine = (uint32_t)asI(t.pub), same = 0;
                         for (uint32_t k = 0; k < 32; ++k)
                             if ((part & (1u << k)) && (uint32_t)asI(snap[k]) == mine) same |= (1u << k);
-                        t.v[t.parkOp] = coerce(SI((int64_t)same), in.ty);
+                        uint32_t r = (in.dim == 0) ? same : ((same == part) ? part : 0u);   // any → same; all → participants iff unanimous
+                        t.v[t.parkOp] = coerce(SI((int64_t)r), in.ty);
                     }
                     t.parkResolved = true; resolvedAny = true;
                 }

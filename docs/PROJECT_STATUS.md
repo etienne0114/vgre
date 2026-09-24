@@ -134,8 +134,12 @@ own speed step is now done too: a from-scratch **native x86-64 JIT**
 machine code for the scalar subset (all int/float ops, casts, comparisons, ternary,
 locals, gather/scatter, bounded-loop reductions, flattened + true-2-D GEMM, and the
 full math surface incl. transcendentals) at ~18–118× the compiled tier, held
-bit-exact by the `CudaNative` fuzzers. Remaining zero-burden work (the *optional*
-Tier-2 SSA backend, broader front-end coverage) is tracked in
+bit-exact by the `CudaNative` fuzzers. The *optional* Tier-2 SSA backend
+(`VGRE_EXEC_BACKEND=ssa`, tier 3) is now feature-complete for the scalar +
+shared-memory + warp subset (native x86-64, opt-in AArch64, portable evaluator
+elsewhere; held bit-exact by `test_ssa_ir.cpp`/`test_ssa_backend.cpp`); its remaining
+items are perf/hardware-gated (native codegen for the cooperative warp ops; ARM native
+default flip). Remaining zero-burden work is tracked in
 [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) and [`missingFeatures.md`](missingFeatures.md).
 
 For the comprehensive, definitive list of boundary conditions (such as physical PMU counters, SASS binary execution, and GPUDirect RDMA), please see [missingFeatures.md](missingFeatures.md).

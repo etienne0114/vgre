@@ -221,6 +221,32 @@ int main() {
     // second warp has 16 lanes ⇒ 0x0000ffff). uint32→float rounds identically on both tiers.
     checkVsInterp("wactive-full",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; unsigned a=__activemask(); if(i<n) y[i]=(float)a; })", 96, 4);
     checkVsInterpBD("wactive-partial", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; unsigned a=__activemask(); if(i<n) y[i]=(float)a; })", 144, 4, 48);
+    // __match_all_sync(mask, value, &pred): needs a global int pred out-param (the form the
+    // interpreter supports). Even warps agree (key=5 ⇒ mask=full, pred=1); odd warps differ
+    // (key=lane ⇒ mask=0, pred=0). Diff BOTH the returned mask AND the written pred.
+    {
+        const char* src = R"(extern "C" __global__ void k(const float* x, float* y, int* p, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(blockIdx.x & 1) ? (int)threadIdx.x : 5; int mask=__match_all_sync(0xffffffff, key, &p[i]); if(i<n){ y[i]=(float)mask; } })";
+        std::string err;
+        auto sp = SsaProgram::compile(src, "k", err);
+        auto cg = compileToPtx(src, "k");
+        auto ib = be::makeBackend("interpreter");
+        auto ik = (sp && cg.ok) ? ib->preparePtx(cg.ptx, "k") : nullptr;
+        if (!sp) { std::printf("FAIL: wmatch-all SSA: %s\n", err.c_str()); ++g_fail; }
+        else if (!ik) { std::printf("FAIL: wmatch-all interpreter prepare\n"); ++g_fail; }
+        else {
+            const int NN = 128, M = 4;
+            std::vector<float> xv(NN * M, 0.f); for (int i = 0; i < NN * M; ++i) xv[i] = (i % 17) * 0.5f - 4.0f;
+            std::vector<float> yi(NN, -1.f), ys(NN, -2.f);
+            std::vector<int> pi(NN, -1), ps(NN, -2);
+            float* xp = xv.data(); int n = NN, m = M;
+            { float* yp = yi.data(); int* pp = pi.data(); void* a[] = {&xp, &yp, &pp, &n, &m}; be::LaunchConfig lc; lc.gridDim[0] = (NN + 31) / 32; lc.blockDim[0] = 32; ib->launch(*ik, lc, a, 5); }
+            { float* yp = ys.data(); int* pp = ps.data(); void* a[] = {&xp, &yp, &pp, &n, &m}; Extent g{(uint32_t)((NN + 31) / 32), 1, 1}, b{32, 1, 1}; sp->launch(g, b, a, 5); }
+            int bad = 0;
+            for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yi[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v || pi[i] != ps[i]) ++bad; }
+            if (bad) { std::printf("FAIL: wmatch-all SSA vs interpreter: %d/%d\n", bad, NN); ++g_fail; }
+            else std::printf("  wmatch-all: SSA (blocks=%d) == interpreter (mask+pred, %d elems)\n", sp->numBlocks(), NN);
+        }
+    }
 
     // Native x86-64 emission: on Linux/x86-64 launch() must run real machine code
     // (not the evaluator fallback), and it must still match the compiled tier.

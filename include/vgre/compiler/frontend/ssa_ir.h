@@ -8,9 +8,10 @@
 // threadIdx/blockIdx/blockDim, arithmetic/bitwise/compare, ternary (→ select), inc/dec,
 // indexed load/store, per-thread local scratch arrays (`T a[N]`, dynamic index),
 // block-shared `__shared__` arrays + `__syncthreads()` barriers (run by a cooperative
-// per-block evaluator), warp intrinsics — `__shfl[_up|_down|_xor]_sync`,
-// `__ballot_sync`/`__any_sync`/`__all_sync`, `__syncwarp` — (warp-cooperative on the
-// evaluator; the native emitters fall back to it), casts, unary + binary math intrinsics, calls to `__device__`
+// per-block evaluator), the full warp-intrinsic surface — `__shfl[_up|_down|_xor]_sync`,
+// `__ballot_sync`/`__any_sync`/`__all_sync`, `__reduce_{add,min,max,and,or,xor}_sync`,
+// `__match_any_sync`/`__match_all_sync`, `__syncwarp`, `__activemask` — (warp-cooperative
+// on the evaluator; the native emitters fall back to it), casts, unary + binary math intrinsics, calls to `__device__`
 // helper functions (inlined, alpha-renamed, non-recursive), and FULL control flow —
 // `if`/`if-else`, `for`, `while`, `do-while`, `break`, `continue`, and `switch`
 // (C fall-through) — with proper SSA phi insertion (Braun et al.). compile() also runs

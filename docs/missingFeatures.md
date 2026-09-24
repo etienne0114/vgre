@@ -78,9 +78,14 @@ duplication): the zero-burden/LLVM-removal plan lives in
 >
 > **Remaining on the zero-burden track** (OpenMP is now *optional* too —
 > `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
-> threading requirement): the *optional* **Tier-2 SSA** backend for peak speed on
-> hot kernels; native-machine-code cooperative execution (fibers in the JIT tier);
-> and broader front-end coverage (vector/layered/mipmap texture fetches; recursion).
+> threading requirement): the *optional* **Tier-2 SSA** backend is now
+> feature-complete for the scalar + shared-memory + warp subset (wired as
+> `VGRE_EXEC_BACKEND=ssa`, tier 3; native x86-64, opt-in AArch64, portable evaluator
+> elsewhere) — its remaining items are perf/hardware-gated: native machine-code for
+> the *warp* cooperative ops (shared/`__syncthreads` already emit native ucontext
+> fibers; warp ops defer to the correct-everywhere evaluator), and flipping ARM native
+> on after real-HW validation. Also: broader front-end coverage (vector/layered/mipmap
+> texture fetches; recursion).
 > **Function templates are now done** — `template<typename T>`/`template<int N>`
 > `__device__` helpers monomorphize on the from-scratch front-end (deduced/explicit/
 > non-type args, chained, pointer deduction), compiled tier == interpreter
@@ -92,9 +97,10 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > whole-struct load/store (`float4 v = p[i]; p[i] = v;`), compiled tier == interpreter
 > (`test_cuda_vectypes.cpp`). (This also generalized struct support: whole-struct
 > load/store/constructor now work for user structs too.)
-> (warp **shuffle**, **vote**, **reduce** `__reduce_*_sync`, and **match**
-> `__match_any_sync`/`__match_all_sync` are done — the full sm_70+ warp intrinsic
-> surface, bit-exact on the compiled fiber tier and the interpreter.)
+> (warp **shuffle**, **vote**, **reduce** `__reduce_*_sync`, **match**
+> `__match_any_sync`/`__match_all_sync`, `__syncwarp` and `__activemask` are done — the
+> full sm_70+ warp intrinsic surface, bit-exact on the compiled fiber tier, the
+> interpreter, AND the **Tier-2 SSA backend** — `test_ssa_ir.cpp`.)
 > (`__device__` helper inlining and **all** the struct forms
 > the interpreter supports — by-value params, local values, `p->field`, and
 > `arr[i].field` struct arrays — now run on the Tier-1 compiled tier too, no longer

@@ -150,9 +150,14 @@ Executable Function Pointer (registered in kernelAddressMap_)
 >   transcendentals via libm calls. Tried first (`RuntimeEngine::makeBackendKernel`),
 >   falling back to Tier 1 then Tier 0; ~18–118× over Tier 1; differential-fuzzed
 >   bit-exact (`CudaNative`). `VGRE_DISABLE_NATIVE=1` opts out.
-> - **Tier 2 — own SSA backend (optional, remaining):** VGRE-IR → classic passes →
->   linear-scan register allocation → machine-code emitter (MIR/QBE-class), for peak
->   throughput on hot kernels.
+> - **Tier 3 — own SSA backend (`VGRE_EXEC_BACKEND=ssa`, feature-complete for its subset):**
+>   VGRE-IR → classic passes (const-fold, cross-block GVN, LICM, DCE) → linear-scan
+>   register allocation (GPR + XMM, loop-carried phis) → machine-code emitter (MIR/QBE-class,
+>   x86-64 native; AArch64 opt-in; portable evaluator elsewhere), for peak throughput on hot
+>   kernels. Covers full control flow (incl. `switch`), `__device__` inlining, local arrays,
+>   `__shared__`/`__syncthreads` (native ucontext fibers on x86-64/AArch64), and the full
+>   warp-intrinsic surface (`__shfl_*`, vote, reduce, match, `__syncwarp`, `__activemask` —
+>   on the cooperative evaluator). Tried first when selected, falling through Tier 1b→1→0.
 >
 > A hand-written CUDA-C lexer/parser → AST replaces the Clang front-end for the
 > documented CUDA-C subset. See [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
