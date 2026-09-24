@@ -9,6 +9,19 @@
 // backend bit-for-bit (same promotion + width-narrowing rules), which is how the
 // lowering is validated. Optimizer passes and native emission build on this IR next.
 
+// macOS gates the POSIX ucontext routines (used by the native cooperative fiber
+// scheduler for __shared__/__syncthreads) behind _XOPEN_SOURCE; _DARWIN_C_SOURCE
+// re-enables the BSD extensions it would otherwise hide. Both must be set before any
+// system header is included (mirrors the compiled tier, which is CI-proven on macos-arm64).
+#if defined(__APPLE__)
+#  ifndef _XOPEN_SOURCE
+#    define _XOPEN_SOURCE 700
+#  endif
+#  ifndef _DARWIN_C_SOURCE
+#    define _DARWIN_C_SOURCE 1
+#  endif
+#endif
+
 #include "vgre/compiler/frontend/ssa_ir.h"
 
 #include "vgre/compiler/frontend/ast.h"
@@ -46,6 +59,7 @@
 #if defined(__aarch64__) && !defined(VGRE_SSA_NO_NATIVE)
 #include <sys/mman.h>
 #include <cstdlib>
+#include <ucontext.h>   // ucontext fibers for native __shared__/__syncthreads scheduling
 #if defined(__APPLE__)
 #include <pthread.h>                 // pthread_jit_write_protect_np (Apple W^X toggle)
 #include <libkern/OSCacheControl.h>  // sys_icache_invalidate (ARM I-cache flush)
@@ -1184,16 +1198,15 @@ static int resultCacheKind(const Inst& in) {
         default: return 2;
     }
 }
-#endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
 
-#if VGRE_SSA_X64
 // ── Native cooperative execution for __shared__/__syncthreads (ucontext fibers) ───
 // Each CUDA thread runs its emitted machine code on its own ucontext fiber. At a
 // __syncthreads the JIT code `call`s vgre_ssa_barrier, which swapcontexts back to the
-// per-block scheduler; the scheduler releases all fibers once every live one is parked
-// at the barrier, then resumes them. swapcontext saves/restores the full register + FP
-// state, so a barrier is transparent to the emitted code — no state machine, and the
-// register allocation keeps working across barriers (values live on the fiber stack).
+// per-block scheduler; the scheduler resumes all fibers once every live one is parked
+// at the barrier. swapcontext/getcontext save/restore the callee-saved registers, and
+// values live on the fiber stack — so a barrier is transparent to the emitted code (no
+// state machine) and register allocation keeps working across it. Shared by both native
+// emitters; the launcher runs the scheduler (x86-64 + AArch64, POSIX ucontext).
 struct NFiber {
     ucontext_t ctx;
     ucontext_t* sched = nullptr;   // the block scheduler's context
@@ -1205,7 +1218,9 @@ struct NFiber {
 thread_local NFiber* g_nfCur = nullptr;   // fiber currently running (set before each resume)
 inline void nfTrampoline() { NFiber* f = g_nfCur; f->fn(f->tctx); f->done = true; }   // return → uc_link (scheduler)
 extern "C" void vgre_ssa_barrier() { NFiber* f = g_nfCur; f->atBarrier = true; swapcontext(&f->ctx, f->sched); }
+#endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
 
+#if VGRE_SSA_X64
 // A minimal x86-64 encoder + slot-based SSA→machine-code lowering. Every SSA value
 // lives in an 8-byte rbp-relative slot; each instruction loads operands into fixed
 // scratch registers (rax/rcx, xmm0/xmm1), computes, and stores its result. Hot ops
@@ -1572,6 +1587,7 @@ struct Arm64Asm {
     int cX0 = -1, cD0 = -1;                        // value currently in x0 / d0 (peephole), or -1
     std::vector<int> vreg, vxmm;                   // physical reg per value (x20–27 / d8–15), or -1
     std::vector<int> arrBase;                      // per local array: first element's slot index (element k = arrBase+k)
+    std::vector<int> sharedOff;                    // per __shared__ array: byte offset in the block shared buffer
 
     explicit Arm64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()),
         vreg((size_t)f.vals.size(), -1), vxmm((size_t)f.vals.size(), -1) {}
@@ -1841,7 +1857,18 @@ struct Arm64Asm {
                 if (in.ty.isFloating()) ldX(0, in.a[1]); else ldG(0, in.a[1]);
                 storeToBase(in.ty, 2); return;
             }
-            case Op::LoadS: case Op::StoreS: case Op::Barrier: bad(); return;   // __shared__/__syncthreads → cooperative evaluator
+            case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
+            case Op::LoadS: {   // x0 = ctx.shared + sharedOff[arrId] + idx*elemBytes
+                ldrXofs(0, 19, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); mul3(1, 1, 2);
+                movImm(2, (uint64_t)sharedOff[in.arrId]); add3(1, 1, 2); add3(0, 0, 1);
+                loadFromBase(in.ty, 0); if (in.ty.isFloating()) stX(0, id); else stG(0, id); return;
+            }
+            case Op::StoreS: {   // x2 = ctx.shared + sharedOff[arrId] + idx*elemBytes; write in.a[1]
+                ldrXofs(2, 19, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(0, (uint64_t)in.elemBytes); mul3(1, 1, 0);
+                movImm(0, (uint64_t)sharedOff[in.arrId]); add3(1, 1, 0); add3(2, 2, 1);
+                if (in.ty.isFloating()) ldX(0, in.a[1]); else ldG(0, in.a[1]);
+                storeToBase(in.ty, 2); return;
+            }
             default: return;
         }
     }
@@ -1869,6 +1896,10 @@ struct Arm64Asm {
         arrBase.assign(fn.localArrays.size(), 0);
         int arrElems = 0;
         for (size_t i = 0; i < fn.localArrays.size(); ++i) { arrBase[i] = nvals + maxTemps + arrElems; arrElems += fn.localArrays[i].second; }
+        // __shared__ arrays live in the block-shared buffer (ctx.shared), 8-byte aligned.
+        sharedOff.assign(fn.sharedArrays.size(), 0);
+        int so = 0;
+        for (size_t i = 0; i < fn.sharedArrays.size(); ++i) { sharedOff[i] = so; so += ((fn.sharedArrays[i].second * fn.sharedArrays[i].first.elemBytes() + 7) / 8) * 8; }
         frame = (((nvals + maxTemps + arrElems) * 8 + 15) / 16) * 16;
         if (frame > 32760) return false;   // beyond the scaled slot-offset imm range — fall back to the evaluator
         prologue();
@@ -2002,7 +2033,7 @@ bool arm64EncSelfTest(std::string& err) {
 #endif
 }
 
-#if VGRE_SSA_X64   // only the native coop path uses these; the evaluator is always cooperative
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64   // only the native coop path uses these; the evaluator is always cooperative
 // Total bytes of the block-shared buffer (matching the emitter's sharedOff layout).
 static size_t ssaSharedBytes(const Fn& fn) {
     size_t s = 0;
@@ -2058,7 +2089,7 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
     if (optimize) { runOpt(lo.fn); if (!verify(lo.fn, err)) return nullptr; }
     std::unique_ptr<SsaProgram> prog(new SsaProgram());
     prog->p_->fn = std::move(lo.fn);
-#if VGRE_SSA_X64
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
     prog->p_->coop = ssaIsCoop(prog->p_->fn);   // routes the native launch to the fiber scheduler
 #endif
 #if VGRE_SSA_X64
@@ -2130,7 +2161,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
             if (fn.ptypes[i].isFloating()) { double d = pv.d; std::memcpy(&pvals[i], &d, 8); }
             else pvals[i] = pv.i;
         }
-#if VGRE_SSA_X64
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
         if (p_->coop) {
             // __shared__/__syncthreads: run each thread's machine code on its own ucontext
             // fiber; a per-block scheduler resumes every runnable fiber to its next barrier
