@@ -19,6 +19,7 @@
 #include "vgre/compiler/frontend/compiled_kernel.h"
 #include "vgre/compiler/frontend/native_kernel.h"
 #include "vgre/compiler/frontend/parser.h"
+#include "vgre/compiler/frontend/ssa_ir.h"
 
 #include <cstdlib>
 #include <memory>
@@ -35,7 +36,8 @@ namespace be = vgre::compiler::backend;
 // closures) → the Tier-0 interpreter (shared-memory / __syncthreads path).
 struct RuntimeEngine::BackendKernel {
     int numArgs = 0;
-    std::unique_ptr<fe::NativeKernel>     native;     // native machine-code JIT (fastest)
+    std::unique_ptr<fe::SsaProgram>       ssa;        // Tier-2 SSA optimizing backend (opt-in)
+    std::unique_ptr<fe::NativeKernel>     native;     // native machine-code JIT (fastest default)
     std::unique_ptr<fe::CompiledKernel>   compiled;   // Tier-1
     std::unique_ptr<be::PreparedKernel>   prepared;   // Tier-0 (interpreter)
 };
@@ -53,12 +55,37 @@ static bool nativeDisabled() {
     return e && e[0] && e[0] != '0';
 }
 
+// VGRE_EXEC_BACKEND=ssa opts the Tier-2 SSA optimizing backend to the TOP of the
+// ladder (it emits its own register-allocated x86-64 machine code, or runs its
+// portable evaluator off-x86-64 — bit-exact either way). Anything it rejects falls
+// through to the usual native → compiled → interpreter tiers.
+static bool preferSsa() {
+    const char *e = std::getenv("VGRE_EXEC_BACKEND");
+    return e && (std::string(e) == "ssa");
+}
+
 std::shared_ptr<RuntimeEngine::BackendKernel>
 RuntimeEngine::makeBackendKernel(const std::string &name, const std::string &source) {
     auto bk = std::make_shared<BackendKernel>();
     std::string err;
 
-    // Native x86-64 JIT (fastest): the default first choice for the elementwise/
+    // Tier-2 SSA backend (opt-in via VGRE_EXEC_BACKEND=ssa): tried first when
+    // selected. compile() succeeds for the scalar per-thread subset on every host
+    // (native machine code on x86-64/Linux, the portable evaluator elsewhere).
+    if (preferSsa()) {
+        if (auto sp = fe::SsaProgram::compile(source, name, err)) {
+            if (auto pr = fe::parse(source); pr.ok && pr.module)
+                for (const auto &k : pr.module->kernels)
+                    if (k->name == name) { bk->numArgs = static_cast<int>(k->params.size()); break; }
+            bk->ssa = std::move(sp);
+            VGRE_LOG_INFO("RuntimeEngine", "backend kernel '" + name + "' on the Tier-2 SSA backend");
+            return bk;
+        }
+        VGRE_LOG_INFO("RuntimeEngine",
+                      "kernel '" + name + "' not SSA-tier eligible (" + err + ") — trying the native tier");
+    }
+
+    // Native x86-64 JIT (fastest default): the first choice for the elementwise/
     // reduction subset it accepts — a strict, differentially-proven-bit-exact
     // subset of the compiled tier. Falls through on anything it rejects (or any
     // non-x86-64/Linux host, where compileSource returns nullptr).
@@ -104,6 +131,12 @@ RuntimeEngine::makeBackendKernel(const std::string &name, const std::string &sou
 VGREResult RuntimeEngine::launchBackendKernel(const std::shared_ptr<BackendKernel> &bk,
                                               const dim3 &gridDim, const dim3 &blockDim,
                                               void **args, size_t sharedMem) {
+    if (bk->ssa) {
+        fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
+        fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
+        return bk->ssa->launch(g, b, args, bk->numArgs)
+                   ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+    }
     if (bk->native) {
         fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
         fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
@@ -150,6 +183,7 @@ int RuntimeEngine::backendKernelTierByName(const std::string &name) {
     if (nit == kernelNames_.end()) return -1;
     auto bit = backendKernels_.find(nit->second);
     if (bit == backendKernels_.end() || !bit->second) return -1;
+    if (bit->second->ssa) return 3;
     if (bit->second->native) return 2;
     if (bit->second->compiled) return 1;
     if (bit->second->prepared) return 0;

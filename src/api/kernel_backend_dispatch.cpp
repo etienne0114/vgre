@@ -8,6 +8,8 @@
 #include "vgre/compiler/frontend/codegen.h"
 #include "vgre/compiler/frontend/compiled_kernel.h"
 #include "vgre/compiler/frontend/native_kernel.h"
+#include "vgre/compiler/frontend/parser.h"
+#include "vgre/compiler/frontend/ssa_ir.h"
 #include "vgre/common/logger.h"
 
 #include <cstdlib>
@@ -28,7 +30,9 @@ namespace fe = vgre::compiler::frontend;
 // native x86-64 JIT (real machine code), else the Tier-1 compiled backend (bound
 // closures), else the Tier-0 interpreter (the fallback for barrier/shared kernels).
 struct Entry {
-    std::unique_ptr<fe::NativeKernel> native;       // native machine-code JIT (fastest)
+    int numArgs = 0;                                // for the SSA tier's launch
+    std::unique_ptr<fe::SsaProgram> ssa;            // Tier-2 SSA backend (opt-in via "ssa")
+    std::unique_ptr<fe::NativeKernel> native;       // native machine-code JIT (fastest default)
     std::unique_ptr<fe::CompiledKernel> compiled;   // Tier-1
     std::unique_ptr<be::PreparedKernel> ptx;        // Tier-0 (interpreter)
 };
@@ -70,14 +74,34 @@ bool tryRegisterBackendKernel(const std::string& name, const std::string& source
     // and "compiled"/"cp" both walk the whole ladder (they only document intent);
     // e.g. a __syncthreads kernel is rejected by native but taken by the compiled
     // fiber tier before the interpreter, in every mode.
+    const bool wantsSsa = (mode == "ssa");
     const bool wantsNative = (mode == "compiled" || mode == "cp" || mode == "native" || mode == "nv");
-    const bool wantsCompiled = wantsNative;
+    const bool wantsCompiled = wantsNative || wantsSsa;   // ssa still falls back to the compiled ladder
     Entry entry;
+
+    // Tier-2 SSA optimizing backend (opt-in via VGRE_EXEC_BACKEND=ssa): tried first
+    // when selected. compile() accepts the scalar per-thread subset on every host
+    // (register-allocated x86-64 machine code on Linux/x86-64, the portable evaluator
+    // elsewhere — bit-exact either way); on anything it rejects we fall through.
+    if (wantsSsa) {
+        std::string err;
+        auto sp = fe::SsaProgram::compile(source, name, err);
+        if (sp) {
+            if (auto pr = fe::parse(source); pr.ok && pr.module)
+                for (const auto &k : pr.module->kernels)
+                    if (k->name == name) { entry.numArgs = static_cast<int>(k->params.size()); break; }
+            entry.ssa = std::move(sp);
+            VGRE_LOG_INFO("BackendDispatch", "kernel '" + name + "' on the Tier-2 SSA backend");
+        } else {
+            VGRE_LOG_INFO("BackendDispatch",
+                          "kernel '" + name + "' not SSA-tier eligible (" + err + ")");
+        }
+    }
 
     // Native x86-64 JIT (fastest): tried first when the native/compiled tier is
     // selected. It's a strict, differentially-proven-bit-exact subset, so on
     // anything it rejects (or any non-x86-64/Linux host) we fall through.
-    if (wantsNative) {
+    if (wantsNative && !entry.ssa) {
         std::string err;
         auto nk = fe::NativeKernel::compileSource(source, name, err);
         if (nk) {
@@ -89,8 +113,8 @@ bool tryRegisterBackendKernel(const std::string& name, const std::string& source
         }
     }
 
-    // Tier-1: compiled backend when explicitly selected and native didn't take it.
-    if (!entry.native && wantsCompiled) {
+    // Tier-1: compiled backend when explicitly selected and no faster tier took it.
+    if (!entry.ssa && !entry.native && wantsCompiled) {
         std::string err;
         auto ck = fe::CompiledKernel::compileSource(source, name, err);
         if (ck) {
@@ -104,8 +128,8 @@ bool tryRegisterBackendKernel(const std::string& name, const std::string& source
     }
 
     // Tier-0 interpreter: the default backend mode, and the fallback for kernels
-    // the native/compiled tiers reject (e.g. __syncthreads).
-    if (!entry.native && !entry.compiled) {
+    // the SSA/native/compiled tiers reject (e.g. __syncthreads).
+    if (!entry.ssa && !entry.native && !entry.compiled) {
         be::ExecutionBackend* b = interpreter();
         if (!b) return false;
         auto cg = fe::compileToPtx(source, name);
@@ -129,16 +153,25 @@ bool tryRegisterBackendKernel(const std::string& name, const std::string& source
 
 int tryLaunchBackendKernel(uint64_t kid, const uint32_t grid[3], const uint32_t block[3],
                            void** args, int num_args, size_t shared_mem) {
+    fe::SsaProgram* sp = nullptr;
     fe::NativeKernel* nk = nullptr;
     fe::CompiledKernel* ck = nullptr;
     be::PreparedKernel* pk = nullptr;
+    int nargs = 0;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         auto it = g_kernels.find(kid);
         if (it == g_kernels.end()) return -1;  // not a backend kernel
+        sp = it->second.ssa.get();
         nk = it->second.native.get();
         ck = it->second.compiled.get();
         pk = it->second.ptx.get();
+        nargs = it->second.numArgs;
+    }
+    if (sp) {
+        fe::Extent g{nz(grid[0]), nz(grid[1]), nz(grid[2])};
+        fe::Extent b{nz(block[0]), nz(block[1]), nz(block[2])};
+        return sp->launch(g, b, args, nargs) ? 0 : 1;
     }
     if (nk) {
         fe::Extent g{nz(grid[0]), nz(grid[1]), nz(grid[2])};
@@ -166,6 +199,7 @@ int backendKernelTier(uint64_t kid) {
     std::lock_guard<std::mutex> lock(g_mu);
     auto it = g_kernels.find(kid);
     if (it == g_kernels.end()) return -1;
+    if (it->second.ssa) return 3;
     if (it->second.native) return 2;
     if (it->second.compiled) return 1;
     return 0;

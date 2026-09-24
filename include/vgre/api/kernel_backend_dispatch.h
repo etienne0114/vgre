@@ -31,8 +31,8 @@ int tryLaunchBackendKernel(uint64_t kid, const uint32_t grid[3], const uint32_t 
                            void** args, int num_args, size_t shared_mem);
 
 // Which tier holds a registered backend kernel (for tests/diagnostics):
-//   2  native x86-64 JIT   1  Tier-1 compiled   0  Tier-0 interpreter
-//  -1  not a backend kernel id
+//   3  Tier-2 SSA backend   2  native x86-64 JIT   1  Tier-1 compiled
+//   0  Tier-0 interpreter   -1  not a backend kernel id
 int backendKernelTier(uint64_t kid);
 
 }  // namespace api

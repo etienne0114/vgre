@@ -1505,6 +1505,14 @@ target_link_libraries(test_native_backend PRIVATE vgre Threads::Threads)
 add_test(NAME NativeBackend COMMAND test_native_backend)
 set_tests_properties(NativeBackend PROPERTIES TIMEOUT 60)
 
+# Tier-2 SSA backend wired into the runtime: VGRE_EXEC_BACKEND=ssa routes C-ABI
+# kernel launches onto the SSA optimizing backend (bit-exact), and a __syncthreads
+# kernel falls back. Portable — the SSA subset is accepted on every host.
+add_executable(test_ssa_backend api/test_ssa_backend.cpp)
+target_link_libraries(test_ssa_backend PRIVATE vgre Threads::Threads)
+add_test(NAME SsaBackend COMMAND test_ssa_backend)
+set_tests_properties(SsaBackend PROPERTIES TIMEOUT 60)
+
 # Track Z (Zero-Burden Engine): the pluggable ExecutionBackend seam — runs a
 # real saxpy PTX kernel through the Tier-0 interpreter backend via the public
 # interface + registry, with NO LLVM/codegen on the path.
