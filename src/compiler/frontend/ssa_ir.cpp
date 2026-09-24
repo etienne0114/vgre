@@ -318,6 +318,7 @@ struct Lowerer {
                     return (e.str.rfind("pre", 0) == 0) ? cv : old;
                 }
                 if (e.str != "-" && e.str != "!" && e.str != "~") { fail("SSA: unary '" + e.str + "'"); return 0; }
+                if (e.str == "~" && typeOf(*e.args[0]).isFloating()) { fail("SSA: '~' on a floating operand"); return 0; }
                 int a = lowerExpr(*e.args[0]); if (!ok) return 0;
                 Inst in; in.op = Op::Un; in.s = e.str; in.ty = e.str == "!" ? scalar(Type::Int) : typeOf(*e.args[0]); in.a = {a};
                 return emit(std::move(in));
@@ -332,18 +333,46 @@ struct Lowerer {
                 int a = lowerExpr(*e.args[1]);
                 int b = lowerExpr(*e.args[2]);
                 if (!ok) return 0;
-                Inst in; in.op = Op::Sel; in.ty = typeOf(e); in.a = {c, a, b};
+                Type rt = typeOf(e);   // promoteT of the two arms
+                // Coerce BOTH arms to the result type before selecting, so the chosen
+                // value is stored/loaded as that type (else e.g. `cond ? intE : floatE`
+                // would select an int value that the float Sel path reads as a double).
+                Inst ca; ca.op = Op::Cast; ca.ty = rt; ca.a = {a}; a = emit(std::move(ca));
+                Inst cb; cb.op = Op::Cast; cb.ty = rt; cb.a = {b}; b = emit(std::move(cb));
+                Inst in; in.op = Op::Sel; in.ty = rt; in.a = {c, a, b};
                 return emit(std::move(in));
             }
             case Expr::Binary: {
+                const std::string& o = e.str;
+                // `&&` / `||` yield an int and test each operand's truthiness — which is
+                // type-dependent (float 0.0 vs int 0). Lower them as (a!=0) &/| (b!=0) so
+                // the comparison handles the operand type correctly (a plain Bin "&&" would
+                // be typed by promoteT and mis-evaluated for float operands). Non-short-
+                // circuit, but equivalent for the side-effect-free kernel expression subset.
+                if (o == "&&" || o == "||") {
+                    auto truth = [&](const Expr& e2) -> int {
+                        int v = lowerExpr(e2); if (!ok) return 0;
+                        Type t = typeOf(e2);
+                        int z = t.isFloating() ? constF(0.0, t) : constI(0, t);
+                        Inst cm; cm.op = Op::Cmp; cm.s = "!="; cm.ty = scalar(Type::Int); cm.a = {v, z};
+                        return emit(std::move(cm));
+                    };
+                    int ta = truth(*e.args[0]); int tb = truth(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::Bin; in.s = (o == "&&") ? "&" : "|"; in.ty = scalar(Type::Int); in.a = {ta, tb};
+                    return emit(std::move(in));
+                }
                 int a = lowerExpr(*e.args[0]);
                 int b = lowerExpr(*e.args[1]);
                 if (!ok) return 0;
-                const std::string& o = e.str;
                 const bool isCmp = (o=="<"||o=="<="||o==">"||o==">="||o=="=="||o=="!=");
+                const bool arith = (o=="+"||o=="-"||o=="*"||o=="/");
+                const bool intBit = (o=="%"||o=="&"||o=="|"||o=="^"||o=="<<"||o==">>");
                 Inst in; in.s = o; in.a = {a, b};
                 if (isCmp) { in.op = Op::Cmp; in.ty = scalar(Type::Int); }
-                else       { in.op = Op::Bin; in.ty = promoteT(typeOf(*e.args[0]), typeOf(*e.args[1])); }
+                else if (arith || intBit) {
+                    in.op = Op::Bin; in.ty = promoteT(typeOf(*e.args[0]), typeOf(*e.args[1]));
+                    if (intBit && in.ty.isFloating()) { fail("SSA: bitwise/'%' operator '" + o + "' on floating operands"); return 0; }
+                } else { fail("SSA: unsupported binary operator '" + o + "'"); return 0; }   // never emit an op the tiers can't evaluate
                 return emit(std::move(in));
             }
             case Expr::Call: {
@@ -1127,6 +1156,31 @@ double vgre_ssa_m3(double x, double y, double z) { return std::fma(x, y, z); }  
 }
 
 using SsaFn = void (*)(ThreadCtx*);
+
+// Shared by both native emitters (ISA-independent). mathId maps a unary math intrinsic
+// to the vgre_ssa_m1 selector (erf's name ends in 'f', so it precedes the suffix strip).
+static int mathId(const std::string& s) {
+    if (s == "erf" || s == "erff") return 12;
+    std::string g = (!s.empty() && s.back() == 'f') ? s.substr(0, s.size() - 1) : s;
+    if (g == "sqrt") return 0; if (g == "fabs") return 1; if (g == "exp") return 2; if (g == "log") return 3;
+    if (g == "sin") return 4; if (g == "cos") return 5; if (g == "floor") return 6; if (g == "ceil") return 7;
+    if (g == "tanh") return 8; if (g == "exp2") return 9; if (g == "log2") return 10; if (g == "rsqrt") return 11;
+    return -1;
+}
+// Where an op leaves its result, for the redundant-load peephole: 0 = the integer
+// accumulator (rax / x0), 1 = the fp accumulator (xmm0 / d0), 2 = neither (reload needed).
+static int resultCacheKind(const Inst& in) {
+    switch (in.op) {
+        case Op::ConstI: case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: case Op::Cmp: return 0;
+        case Op::Param: return in.ty.isFloating() ? 2 : 0;
+        case Op::Bin:   return in.ty.isFloating() ? 1 : 0;
+        case Op::Un:    return (in.s == "!" || !in.ty.isFloating()) ? 0 : 2;
+        case Op::Sel:   return in.ty.isFloating() ? 2 : 0;
+        case Op::Cast: case Op::Load: case Op::LoadL: return in.ty.isFloating() ? 1 : 0;
+        case Op::CallMath: return 1;
+        default: return 2;
+    }
+}
 #endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
 
 #if VGRE_SSA_X64
@@ -1151,19 +1205,9 @@ struct X64Asm {
     // Record where an op left its result — precisely, per op (some "float" ops leave
     // the value in rax as bits, not xmm0, so the cache must not claim xmm0 for those).
     void setResultCache(const Inst& in, int id) {
-        auto inRax = [&] { cRax = id; cXmm = -1; };
-        auto inXmm = [&] { cXmm = id; cRax = -1; };
-        auto none  = [&] { cRax = cXmm = -1; };
-        switch (in.op) {
-            case Op::ConstI: case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: case Op::Cmp: inRax(); break;
-            case Op::Param: in.ty.isFloating() ? none() : inRax(); break;
-            case Op::Bin:   in.ty.isFloating() ? inXmm() : inRax(); break;
-            case Op::Un:    (in.s == "!" || !in.ty.isFloating()) ? inRax() : none(); break;
-            case Op::Sel:   in.ty.isFloating() ? none() : inRax(); break;
-            case Op::Cast:  case Op::Load: case Op::LoadL: in.ty.isFloating() ? inXmm() : inRax(); break;
-            case Op::CallMath: inXmm(); break;
-            default: none(); break;   // ConstF (bits in rax), Store, StoreL, Phi
-        }
+        int k = resultCacheKind(in);   // 0 rax / 1 xmm0 / 2 neither
+        cRax = (k == 0) ? id : -1;
+        cXmm = (k == 1) ? id : -1;
     }
 
     explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()), vreg((size_t)f.vals.size(), -1), vxmm((size_t)f.vals.size(), -1) {}
@@ -1223,6 +1267,7 @@ struct X64Asm {
     void cmpRR(int d, int s) { rr(0x39, d, s); }
     void testRR(int d, int s) { rr(0x85, d, s); }
     void imulRR(int d, int s) { b(0x48); b(0x0F); b(0xAF); b((uint8_t)(0xC0 | ((d & 7) << 3) | (s & 7))); }
+    void cmov(uint8_t cc, int dst, int src) { b(0x48); b(0x0F); b(cc); b((uint8_t)(0xC0 | ((dst & 7) << 3) | (src & 7))); }  // cmovCC dst,src (64-bit)
     void negR(int r) { b(0x48); b(0xF7); b((uint8_t)(0xD8 | (r & 7))); }
     void notR(int r) { b(0x48); b(0xF7); b((uint8_t)(0xD0 | (r & 7))); }
     void shlCl(int r) { b(0x48); b(0xD3); b((uint8_t)(0xE0 | (r & 7))); }
@@ -1276,15 +1321,24 @@ struct X64Asm {
         }
     }
 
-    int mathId(const std::string& s) const {
-        if (s == "erf" || s == "erff") return 12;   // base name ends in 'f' — must precede the suffix strip
-        std::string g = (!s.empty() && s.back() == 'f') ? s.substr(0, s.size() - 1) : s;
-        if (g == "sqrt") return 0; if (g == "fabs") return 1; if (g == "exp") return 2; if (g == "log") return 3;
-        if (g == "sin") return 4; if (g == "cos") return 5; if (g == "floor") return 6; if (g == "ceil") return 7;
-        if (g == "tanh") return 8; if (g == "exp2") return 9; if (g == "log2") return 10; if (g == "rsqrt") return 11;
-        return -1;
-    }
     void narrowIfFloat(const Type& t) { if (t.base == Type::Float) { cvtsd2ss0(); cvtss2sd0(); } }   // xmm0 → float32-rounded
+    // Type-width memory access shared by global Load/Store and local-array LoadL/StoreL:
+    // load reads [rax] → rax (int) / xmm0 (float); store writes the int in rax or the
+    // float in xmm0 to [rdx]. The caller computes the address into rax (load) / rdx (store).
+    void loadFromRax(const Type& t) {
+        if (t.isFloating()) { if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x10); b(0x00); } else { b(0xF3); b(0x0F); b(0x10); b(0x00); cvtss2sd0(); } return; }
+        if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x8B); b(0x00); }
+        else if (t.elemBytes() == 4) { if (t.isUnsigned) { b(0x8B); b(0x00); } else { b(0x48); b(0x63); b(0x00); } }
+        else if (t.elemBytes() == 2) { b(0x0F); b(t.isUnsigned ? 0xB7 : 0xBF); b(0x00); }
+        else { b(0x0F); b(t.isUnsigned ? 0xB6 : 0xBE); b(0x00); }
+    }
+    void storeToRdx(const Type& t) {
+        if (t.isFloating()) { if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x11); b(0x02); } else { cvtsd2ss0(); b(0xF3); b(0x0F); b(0x11); b(0x02); } return; }
+        if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x89); b(0x02); }
+        else if (t.elemBytes() == 4) { b(0x89); b(0x02); }
+        else if (t.elemBytes() == 2) { b(0x66); b(0x89); b(0x02); }
+        else { b(0x88); b(0x02); }
+    }
 
     void emitInst(int blk, int id) {
         (void)blk;
@@ -1365,71 +1419,35 @@ struct X64Asm {
                 }
                 ldG(0, op0); extRax(t.elemBytes(), t.isUnsigned); stG(0, id); return;   // int → int (width wrap)
             }
-            case Op::Load: {
-                loadG0(in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);  // rax = base + idx*bytes
-                const Type& t = in.ty;
-                if (t.isFloating()) {
-                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x10); b(0x00); } else { b(0xF3); b(0x0F); b(0x10); b(0x00); cvtss2sd0(); }
-                    stX(0, id); return;
-                }
-                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x8B); b(0x00); }
-                else if (t.elemBytes() == 4) { if (t.isUnsigned) { b(0x8B); b(0x00); } else { b(0x48); b(0x63); b(0x00); } }
-                else if (t.elemBytes() == 2) { b(0x0F); b(t.isUnsigned ? 0xB7 : 0xBF); b(0x00); }
-                else { b(0x0F); b(t.isUnsigned ? 0xB6 : 0xBE); b(0x00); }
-                stG(0, id); return;
+            case Op::Load: {   // rax = base + idx*bytes
+                loadG0(in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);
+                loadFromRax(in.ty); if (in.ty.isFloating()) stX(0, id); else stG(0, id); return;
             }
-            case Op::Store: {
-                ldG(2, in.a[0]); ldG(1, in.a[1]); movImm(0, (uint64_t)in.elemBytes); imulRR(1, 0); addRR(2, 1);  // rdx = base + idx*bytes
-                const Type& t = in.ty;
-                if (t.isFloating()) {
-                    ldX(0, in.a[2]);
-                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x11); b(0x02); } else { cvtsd2ss0(); b(0xF3); b(0x0F); b(0x11); b(0x02); }
-                    return;
-                }
-                ldG(0, in.a[2]);
-                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x89); b(0x02); }
-                else if (t.elemBytes() == 4) { b(0x89); b(0x02); }
-                else if (t.elemBytes() == 2) { b(0x66); b(0x89); b(0x02); }
-                else { b(0x88); b(0x02); }
-                return;
+            case Op::Store: {   // rdx = base + idx*bytes
+                ldG(2, in.a[0]); ldG(1, in.a[1]); movImm(0, (uint64_t)in.elemBytes); imulRR(1, 0); addRR(2, 1);
+                if (in.ty.isFloating()) ldX(0, in.a[2]); else ldG(0, in.a[2]);
+                storeToRdx(in.ty); return;
             }
             case Op::LoadS: case Op::StoreS: case Op::Barrier: bad(); return;   // __shared__/__syncthreads → cooperative evaluator
             case Op::LoadL: {   // rax = &arr[0] - idx*8 (elements are 8-byte slots, descending)
                 leaRbp(0, slot(arrBase[in.arrId])); ldG(1, in.a[0]); movImm(2, 8); imulRR(1, 2); subRR(0, 1);
-                const Type& t = in.ty;
-                if (t.isFloating()) {
-                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x10); b(0x00); } else { b(0xF3); b(0x0F); b(0x10); b(0x00); cvtss2sd0(); }
-                    stX(0, id); return;
-                }
-                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x8B); b(0x00); }
-                else if (t.elemBytes() == 4) { if (t.isUnsigned) { b(0x8B); b(0x00); } else { b(0x48); b(0x63); b(0x00); } }
-                else if (t.elemBytes() == 2) { b(0x0F); b(t.isUnsigned ? 0xB7 : 0xBF); b(0x00); }
-                else { b(0x0F); b(t.isUnsigned ? 0xB6 : 0xBE); b(0x00); }
-                stG(0, id); return;
+                loadFromRax(in.ty); if (in.ty.isFloating()) stX(0, id); else stG(0, id); return;
             }
             case Op::StoreL: {   // rdx = &arr[0] - idx*8; write in.a[1]
                 leaRbp(2, slot(arrBase[in.arrId])); ldG(1, in.a[0]); movImm(0, 8); imulRR(1, 0); subRR(2, 1);
-                const Type& t = in.ty;
-                if (t.isFloating()) {
-                    ldX(0, in.a[1]);
-                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x11); b(0x02); } else { cvtsd2ss0(); b(0xF3); b(0x0F); b(0x11); b(0x02); }
-                    return;
-                }
-                ldG(0, in.a[1]);
-                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x89); b(0x02); }
-                else if (t.elemBytes() == 4) { b(0x89); b(0x02); }
-                else if (t.elemBytes() == 2) { b(0x66); b(0x89); b(0x02); }
-                else { b(0x88); b(0x02); }
-                return;
+                if (in.ty.isFloating()) ldX(0, in.a[1]); else ldG(0, in.a[1]);
+                storeToRdx(in.ty); return;
             }
             case Op::CallMath: {
                 if (in.a.size() == 1) {
                     int mid = mathId(in.s); if (mid < 0) { bad(); return; }   // unknown intrinsic → evaluator fallback
                     ldX(0, in.a[0]); movImmReg(7, (uint32_t)mid); call((uint64_t)&vgre_ssa_m1);
                 } else if (in.a.size() == 2) {
-                    // The 2-arg helper is float-only; integer min/max must not go through it
-                    // (its slot bits aren't a double) — bail so the evaluator handles it exactly.
-                    if (!in.ty.isFloating()) { bad(); return; }
+                    if (!in.ty.isFloating()) {   // integer min/max via cmov (signed, matching the evaluator's x<y?x:y)
+                        ldG(0, in.a[0]); ldG(1, in.a[1]); cmpRR(0, 1);              // rax=a, rcx=b; flags = a-b
+                        cmov(in.s == "max" ? 0x4C : 0x4F, 0, 1);                   // max: cmovl (a<b→b); min: cmovg (a>b→b)
+                        extRax(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
+                    }
                     uint32_t op = (in.s == "fmax" || in.s == "fmaxf") ? 1u : (in.s == "pow" || in.s == "powf") ? 2u : 0u;
                     ldX(0, in.a[0]); ldX(1, in.a[1]); movImmReg(7, op); call((uint64_t)&vgre_ssa_m2);
                 } else {   // 3-arg: fma(x,y,z) → xmm0,xmm1,xmm2 (no int selector)
@@ -1514,6 +1532,7 @@ struct Arm64Asm {
     bool ok = true;
     int cX0 = -1, cD0 = -1;                        // value currently in x0 / d0 (peephole), or -1
     std::vector<int> vreg, vxmm;                   // physical reg per value (x20–27 / d8–15), or -1
+    std::vector<int> arrBase;                      // per local array: first element's slot index (element k = arrBase+k)
 
     explicit Arm64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()),
         vreg((size_t)f.vals.size(), -1), vxmm((size_t)f.vals.size(), -1) {}
@@ -1535,6 +1554,7 @@ struct Arm64Asm {
     void asrv(int d, int n, int m) { w(0x9ac02800u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
     void cmpRR(int n, int m)  { w(0xeb00001fu | ((uint32_t)m << 16) | ((uint32_t)n << 5)); }         // subs xzr,Xn,Xm
     void csetF(int d, int f)  { w(0x9a9f07e0u | ((uint32_t)f << 12) | (uint32_t)d); }                // cset Xd,cond(field)
+    void cselC(int d, int n, int m, int cond) { w(0x9a800000u | ((uint32_t)m << 16) | ((uint32_t)cond << 12) | ((uint32_t)n << 5) | d); }  // csel Xd,Xn,Xm,cond
     void negR(int d, int n)   { w(0xcb0003e0u | ((uint32_t)n << 16) | (uint32_t)d); }                // sub Xd,xzr,Xn
     void notR(int d, int n)   { w(0xaa2003e0u | ((uint32_t)n << 16) | (uint32_t)d); }                // orn Xd,xzr,Xn
     void sxtw(int d, int n)   { w(0x93407c00u | ((uint32_t)n << 5) | d); }
@@ -1582,8 +1602,19 @@ struct Arm64Asm {
     void scvtfD(int dd, int xn) { w(0x9e620000u | ((uint32_t)xn << 5) | dd); }   // Dd = (double)Xn (signed)
     void blr(int xn) { w(0xd63f0000u | ((uint32_t)xn << 5)); }
     void retI()      { w(0xd65f03c0u); }
-    void subSpImm(int imm) { w(0xd1000000u | ((uint32_t)imm << 10) | (31u << 5) | 31u); }
-    void addSpImm(int imm) { w(0x91000000u | ((uint32_t)imm << 10) | (31u << 5) | 31u); }
+    // sub/add sp,sp,#v — decomposed into an optional #hi,LSL#12 part + a #lo part so any
+    // frame up to (4095<<12)+4095 is reachable (a single #imm12 only covers 0..4095).
+    void subSpImm(int v) {
+        int hi = (v >> 12) & 0xfff, lo = v & 0xfff;
+        if (hi) w(0xd1400000u | ((uint32_t)hi << 10) | (31u << 5) | 31u);   // sub sp,sp,#hi,LSL#12
+        if (lo || !hi) w(0xd1000000u | ((uint32_t)lo << 10) | (31u << 5) | 31u);
+    }
+    void addSpImm(int v) {
+        int hi = (v >> 12) & 0xfff, lo = v & 0xfff;
+        if (lo || !hi) w(0x91000000u | ((uint32_t)lo << 10) | (31u << 5) | 31u);
+        if (hi) w(0x91400000u | ((uint32_t)hi << 10) | (31u << 5) | 31u);   // add sp,sp,#hi,LSL#12
+    }
+    void addFromSp(int d, int imm) { w(0x91000000u | ((uint32_t)imm << 10) | (31u << 5) | d); }   // add Xd, sp, #imm
     void stpPreX(int t1, int t2) { w(0xa9800000u | (0x7eu << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }  // stp Xt1,Xt2,[sp,#-16]!
     void ldpPostX(int t1, int t2){ w(0xa8c00000u | (0x02u << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }  // ldp Xt1,Xt2,[sp],#16
     void stpPreD(int t1, int t2) { w(0x6d800000u | (0x7eu << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }
@@ -1614,19 +1645,9 @@ struct Arm64Asm {
     void loadG0(int id) { if (cX0 == id) { cX0 = -1; return; } ldG(0, id); cX0 = -1; }
     void loadX0(int id) { if (cD0 == id) { cD0 = -1; return; } ldX(0, id); cD0 = -1; }
     void setResultCache(const Inst& in, int id) {
-        auto inX0 = [&] { cX0 = id; cD0 = -1; };
-        auto inD0 = [&] { cD0 = id; cX0 = -1; };
-        auto none = [&] { cX0 = cD0 = -1; };
-        switch (in.op) {
-            case Op::ConstI: case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: case Op::Cmp: inX0(); break;
-            case Op::Param: in.ty.isFloating() ? none() : inX0(); break;
-            case Op::Bin:   in.ty.isFloating() ? inD0() : inX0(); break;
-            case Op::Un:    (in.s == "!" || !in.ty.isFloating()) ? inX0() : none(); break;
-            case Op::Sel:   in.ty.isFloating() ? none() : inX0(); break;
-            case Op::Cast:  case Op::Load: in.ty.isFloating() ? inD0() : inX0(); break;
-            case Op::CallMath: inD0(); break;
-            default: none(); break;
-        }
+        int k = resultCacheKind(in);   // 0 x0 / 1 d0 / 2 neither
+        cX0 = (k == 0) ? id : -1;
+        cD0 = (k == 1) ? id : -1;
     }
     void narrowIfFloat(const Type& t) { if (t.base == Type::Float) { fcvtSD(0, 0); fcvtDS(0, 0); } }  // round d0 to float32
     void extX0(int bytes, bool uns) {
@@ -1635,13 +1656,21 @@ struct Arm64Asm {
         if (bytes == 2) { uns ? uxth(0, 0) : sxth(0, 0); return; }
         uns ? uxtb(0, 0) : sxtb(0, 0);
     }
-    int mathId(const std::string& s) const {
-        if (s == "erf" || s == "erff") return 12;
-        std::string g = (!s.empty() && s.back() == 'f') ? s.substr(0, s.size() - 1) : s;
-        if (g == "sqrt") return 0; if (g == "fabs") return 1; if (g == "exp") return 2; if (g == "log") return 3;
-        if (g == "sin") return 4; if (g == "cos") return 5; if (g == "floor") return 6; if (g == "ceil") return 7;
-        if (g == "tanh") return 8; if (g == "exp2") return 9; if (g == "log2") return 10; if (g == "rsqrt") return 11;
-        return -1;
+    // Type-width memory access shared by global Load/Store and local-array LoadL/StoreL:
+    // load reads [base] → x0 (int) / d0 (float); store writes x0/d0 to [base].
+    void loadFromBase(const Type& t, int base) {
+        if (t.isFloating()) { if (t.elemBytes() == 8) ldrDreg(0, base); else { ldrSreg(0, base); fcvtDS(0, 0); } return; }
+        if (t.isPointer() || t.elemBytes() == 8) ldrX(0, base);
+        else if (t.elemBytes() == 4) { t.isUnsigned ? ldrW(0, base) : ldrSW(0, base); }
+        else if (t.elemBytes() == 2) { t.isUnsigned ? ldrH(0, base) : ldrSH(0, base); }
+        else                         { t.isUnsigned ? ldrB(0, base) : ldrSB(0, base); }
+    }
+    void storeToBase(const Type& t, int base) {
+        if (t.isFloating()) { if (t.elemBytes() == 8) strDreg(0, base); else { fcvtSD(0, 0); strSreg(0, base); } return; }
+        if (t.isPointer() || t.elemBytes() == 8) strX(0, base);
+        else if (t.elemBytes() == 4) strW(0, base);
+        else if (t.elemBytes() == 2) strH(0, base);
+        else                         strB(0, base);
     }
 
     // Phi edge-copies pred→succ: two-phase (operands→temps, temps→phi), like x86.
@@ -1734,40 +1763,25 @@ struct Arm64Asm {
                                        call((uint64_t)&vgre_ssa_sat); stG(0, id); return; }
                 ldG(0, op0); extX0(t.elemBytes(), t.isUnsigned); stG(0, id); return;
             }
-            case Op::Load: {
+            case Op::Load: {   // x0 = base + idx*bytes
                 loadG0(in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); mul3(1, 1, 2); add3(0, 0, 1);
-                const Type& t = in.ty;
-                if (t.isFloating()) {
-                    if (t.elemBytes() == 8) ldrDreg(0, 0); else { ldrSreg(0, 0); fcvtDS(0, 0); }
-                    stX(0, id); return;
-                }
-                if (t.isPointer() || t.elemBytes() == 8) ldrX(0, 0);
-                else if (t.elemBytes() == 4) { t.isUnsigned ? ldrW(0, 0) : ldrSW(0, 0); }
-                else if (t.elemBytes() == 2) { t.isUnsigned ? ldrH(0, 0) : ldrSH(0, 0); }
-                else                         { t.isUnsigned ? ldrB(0, 0) : ldrSB(0, 0); }
-                stG(0, id); return;
+                loadFromBase(in.ty, 0); if (in.ty.isFloating()) stX(0, id); else stG(0, id); return;
             }
-            case Op::Store: {
-                ldG(2, in.a[0]); ldG(1, in.a[1]); movImm(0, (uint64_t)in.elemBytes); mul3(1, 1, 0); add3(2, 2, 1);  // x2 = base+idx*bytes
-                const Type& t = in.ty;
-                if (t.isFloating()) {
-                    ldX(0, in.a[2]);
-                    if (t.elemBytes() == 8) strDreg(0, 2); else { fcvtSD(0, 0); strSreg(0, 2); }
-                    return;
-                }
-                ldG(0, in.a[2]);
-                if (t.isPointer() || t.elemBytes() == 8) strX(0, 2);
-                else if (t.elemBytes() == 4) strW(0, 2);
-                else if (t.elemBytes() == 2) strH(0, 2);
-                else                         strB(0, 2);
-                return;
+            case Op::Store: {   // x2 = base + idx*bytes
+                ldG(2, in.a[0]); ldG(1, in.a[1]); movImm(0, (uint64_t)in.elemBytes); mul3(1, 1, 0); add3(2, 2, 1);
+                if (in.ty.isFloating()) ldX(0, in.a[2]); else ldG(0, in.a[2]);
+                storeToBase(in.ty, 2); return;
             }
             case Op::CallMath: {
                 if (in.a.size() == 1) {
                     int mid = mathId(in.s); if (mid < 0) { bad(); return; }
                     ldX(0, in.a[0]); movImm(0, (uint64_t)mid); call((uint64_t)&vgre_ssa_m1);
                 } else if (in.a.size() == 2) {
-                    if (!in.ty.isFloating()) { bad(); return; }
+                    if (!in.ty.isFloating()) {   // integer min/max via csel (signed, matching the evaluator)
+                        ldG(0, in.a[0]); ldG(1, in.a[1]); cmpRR(0, 1);
+                        cselC(0, 0, 1, in.s == "max" ? 10 : 13);   // max: ge (a>=b?a:b); min: le (a<=b?a:b)
+                        extX0(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
+                    }
                     uint64_t op = (in.s == "fmax" || in.s == "fmaxf") ? 1u : (in.s == "pow" || in.s == "powf") ? 2u : 0u;
                     ldX(0, in.a[0]); ldX(1, in.a[1]); movImm(0, op); call((uint64_t)&vgre_ssa_m2);
                 } else {
@@ -1775,7 +1789,19 @@ struct Arm64Asm {
                 }
                 narrowIfFloat(in.ty); stX(0, id); return;
             }
-            case Op::LoadL: case Op::StoreL:                  // local arrays: ARM native not yet supported → evaluator
+            case Op::LoadL: {   // x2 = sp + (arrBase+idx)*8 (elements are 8-byte slots)
+                ldG(1, in.a[0]); movImm(2, 8); mul3(1, 1, 2);
+                movImm(2, (uint64_t)(arrBase[in.arrId] * 8)); add3(1, 1, 2);
+                addFromSp(2, 0); add3(2, 2, 1);
+                loadFromBase(in.ty, 2); if (in.ty.isFloating()) stX(0, id); else stG(0, id); return;
+            }
+            case Op::StoreL: {  // x2 = sp + (arrBase+idx)*8; write in.a[1]
+                ldG(1, in.a[0]); movImm(2, 8); mul3(1, 1, 2);
+                movImm(2, (uint64_t)(arrBase[in.arrId] * 8)); add3(1, 1, 2);
+                addFromSp(2, 0); add3(2, 2, 1);
+                if (in.ty.isFloating()) ldX(0, in.a[1]); else ldG(0, in.a[1]);
+                storeToBase(in.ty, 2); return;
+            }
             case Op::LoadS: case Op::StoreS: case Op::Barrier: bad(); return;   // __shared__/__syncthreads → cooperative evaluator
             default: return;
         }
@@ -1799,9 +1825,15 @@ struct Arm64Asm {
         const int n = (int)fn.bbs.size();
         int maxTemps = 0;
         for (auto& bb : fn.bbs) { int p = 0; for (int id : bb.insts) { if (fn.vals[id].op == Op::Phi) ++p; else break; } if (p > maxTemps) maxTemps = p; }
-        frame = (((nvals + maxTemps) * 8 + 15) / 16) * 16;
-        if (frame > 4095) return false;   // slot area beyond a single add/sub-imm — fall back to the evaluator
+        // Local arrays get 8-byte slots after the value + phi-temp slots (element k of
+        // array a is slot arrBase[a]+k), sp-relative like every other slot.
+        arrBase.assign(fn.localArrays.size(), 0);
+        int arrElems = 0;
+        for (size_t i = 0; i < fn.localArrays.size(); ++i) { arrBase[i] = nvals + maxTemps + arrElems; arrElems += fn.localArrays[i].second; }
+        frame = (((nvals + maxTemps + arrElems) * 8 + 15) / 16) * 16;
+        if (frame > 32760) return false;   // beyond the scaled slot-offset imm range — fall back to the evaluator
         prologue();
+        if (arrElems) for (int i = 0; i < arrElems; ++i) strXslot(31, (nvals + maxTemps + i) * 8);  // zero-init scratch arrays (str xzr)
         off.assign(n, 0);
         for (int blk = 0; blk < n; ++blk) {
             off[blk] = c.size();
@@ -1920,6 +1952,10 @@ bool arm64EncSelfTest(std::string& err) {
     a.stpPreD(8, 9);      chk("stp d8,d9",   {0xe8, 0x27, 0xbf, 0x6d});
     a.ldpPostX(29, 30);   chk("ldp x29,x30", {0xfd, 0x7b, 0xc1, 0xa8});
     a.ldpPostD(8, 9);     chk("ldp d8,d9",   {0xe8, 0x27, 0xc1, 0x6c});
+    a.cselC(0, 0, 1, 13); chk("csel le",     {0x00, 0xd0, 0x81, 0x9a});
+    a.cselC(0, 0, 1, 10); chk("csel ge",     {0x00, 0xa0, 0x81, 0x9a});
+    a.addFromSp(2, 0);    chk("add x2,sp,#0",  {0xe2, 0x03, 0x00, 0x91});
+    a.addFromSp(2, 16);   chk("add x2,sp,#16", {0xe2, 0x43, 0x00, 0x91});
     if (ok) err.clear();
     return ok;
 #else

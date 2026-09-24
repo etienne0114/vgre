@@ -57,6 +57,12 @@ int main() {
     check("math",    R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; y[i]=sqrtf(fabsf(v))*a + y[i]; } })", N, x, y0, 1.5f);
     check("intmod",  R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int m=i%7; y[i]=(float)m + a; } })", N, x, y0, 0.25f);
     check("compound",R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=y[i]; acc += a*x[i]; acc *= 2.0f; y[i]=acc; } })", N, x, y0, 1.25f);
+    // Logical &&/|| with FLOAT operands (truthiness by type) and mixed operands — must
+    // match the reference exactly (a plain float-typed Bin "&&" was silently wrong).
+    check("logic",   R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; int c1=(v && (v-2.0f))?1:0; int c2=((i&1) || (v>0.0f))?4:0; int c3=(v>0.0f && v<10.0f)?8:0; y[i]=(float)(c1+c2+c3)+a; } })", N, x, y0, 0.5f);
+    // Ternary with MISMATCHED-type arms (int vs float): both must be coerced to the
+    // promoted result type or the float select reads an int arm as a double.
+    check("tern-mix",R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; int k2=i%5-2; y[i]=(v>0.0f)?(k2):(v*a); } })", N, x, y0, 1.5f);
     // Extended math intrinsics: fma (3-arg, fused), exp2/log2/rsqrt/erf (1-arg), pow
     // (2-arg) — all computed in double then narrowed, bit-exact vs the compiled tier.
     check("math2",   R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; float w=fabsf(v)+1.0f; float r=fmaf(v,a,y[i]); r=r+exp2f(w*0.1f)+log2f(w)+rsqrtf(w)+powf(w,1.5f)+erff(v*0.5f); y[i]=r; } })", N, x, y0, 1.5f);
@@ -101,6 +107,8 @@ int main() {
     // loops, and an int array with CONSTANT indices — both bit-exact vs the compiled tier.
     checkCF("larr-dyn", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float buf[8]; for(int k=0;k<8;k++) buf[k]=x[i*m+(k%m)]*(float)(k+1); float acc=0.0f; for(int k=0;k<8;k++) acc+=buf[k]; y[i]=acc; } })", 64, 20);
     checkCF("larr-const", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int t[4]; t[0]=i; t[1]=i*2; t[2]=i+m; t[3]=t[0]+t[1]; y[i]=(float)(t[3]-t[2])+x[i*m]; } })", 64, 20);
+    // Integer min/max — native cmov (x86) / csel (ARM), signed, matching the reference tiers.
+    checkCF("iminmax", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int a=(int)x[i*m]-8; int b=i%7-3; int lo=min(a,b); int hi=max(a,b); y[i]=(float)(hi*10+lo); } })", 64, 20);
 
     // Optimizer passes (const-fold / local GVN / DCE): the optimized IR must stay
     // bit-exact vs the compiled tier AND have fewer live instructions than the raw IR.
