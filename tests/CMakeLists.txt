@@ -1484,6 +1484,13 @@ target_link_libraries(test_ssa_ir PRIVATE vgre Threads::Threads)
 add_test(NAME SsaIr COMMAND test_ssa_ir)
 set_tests_properties(SsaIr PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 
+# Tier-2 AArch64 native emitter: its instruction encodings verified against llvm-mc
+# (baked-in bytes), runnable on any host incl. x86-64 CI.
+add_executable(test_ssa_arm64_enc compiler/test_ssa_arm64_enc.cpp)
+target_link_libraries(test_ssa_arm64_enc PRIVATE vgre Threads::Threads)
+add_test(NAME SsaArm64Enc COMMAND test_ssa_arm64_enc)
+set_tests_properties(SsaArm64Enc PROPERTIES TIMEOUT 60)
+
 # Track Z: Tier-1 compiled backend (AST -> bound closures) — correctness +
 # speed vs the interpreter + clean barrier-kernel fallback.
 add_executable(test_compiled_kernel compiler/test_compiled_kernel.cpp)

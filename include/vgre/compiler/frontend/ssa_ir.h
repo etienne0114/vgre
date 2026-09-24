@@ -61,6 +61,13 @@ private:
     std::unique_ptr<Impl> p_;
 };
 
+// Validate the AArch64 native emitter's instruction ENCODINGS against known-good bytes
+// (assembled by llvm-mc, baked in). Runs on any host — the encoder is arch-independent
+// byte generation — so ARM codegen is checked even on an x86-64 dev/CI machine. Returns
+// true if every encoding matches, else sets `err`. (Execution is validated separately
+// on real ARM: the macos-arm64 CI job's differential SsaIr test with VGRE_SSA_ARM_NATIVE.)
+bool arm64EncSelfTest(std::string& err);
+
 }  // namespace frontend
 }  // namespace compiler
 }  // namespace vgre

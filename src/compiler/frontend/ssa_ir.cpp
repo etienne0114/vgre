@@ -36,6 +36,24 @@
 #define VGRE_SSA_X64 0
 #endif
 
+// AArch64 native emitter (Apple Silicon + ARM Linux). Its ENCODINGS are unit-tested
+// locally against llvm-mc (test_ssa_arm64_enc); EXECUTION is validated on real ARM
+// (the macos-arm64 CI job's SsaIr differential test). Because that execution path
+// cannot be exercised on an x86-64 dev host, native activation is OPT-IN via
+// VGRE_SSA_ARM_NATIVE=1 (see SsaProgram::compile) — off by default so a latent codegen
+// bug can never regress the runtime; the portable evaluator runs the SSA otherwise.
+#if defined(__aarch64__) && !defined(VGRE_SSA_NO_NATIVE)
+#include <sys/mman.h>
+#include <cstdlib>
+#if defined(__APPLE__)
+#include <pthread.h>                 // pthread_jit_write_protect_np (Apple W^X toggle)
+#include <libkern/OSCacheControl.h>  // sys_icache_invalidate (ARM I-cache flush)
+#endif
+#define VGRE_SSA_ARM64 1
+#else
+#define VGRE_SSA_ARM64 0
+#endif
+
 namespace vgre {
 namespace compiler {
 namespace frontend {
@@ -838,12 +856,126 @@ static void licm(Fn& fn) {
 
 static void runOpt(Fn& fn) { constFold(fn); gvn(fn); licm(fn); constFold(fn); gvn(fn); dce(fn); }
 
+// ── Shared global linear-scan register allocation (used by both native emitters) ──
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
+// Poletto & Sarkar over the SSA, backend-agnostic: hands out physical registers from
+// `gprPool` (int/pointer values, incl. loop-carried phis) and `fpPool` (float values)
+// into vreg[]/vxmm[] (-1 = memory slot). Both pools must be callee-saved on the target
+// so no spill-around-call is needed. Live intervals are widened over every block a
+// value is live across (loops aren't in execution order, so a loop-carried value is
+// live in a back-edge block placed BEFORE its def — start is lowered to cover that).
+// Float values whose interval spans a helper call (fcmp/sat/idiv/mathfn) stay in slots
+// (conservative: correct on any target, incl. ones whose FP regs are caller-saved).
+// Registers are popped from the BACK of each pool, so pass them highest-first to match.
+static void computeRegAlloc(const Fn& fn, int nvals,
+                            const std::vector<int>& gprPool, const std::vector<int>& fpPool,
+                            std::vector<int>& vreg, std::vector<int>& vxmm) {
+    const int n = (int)fn.bbs.size();
+    std::vector<int> pos(nvals, -1), firstPos(n, 0), lastPos(n, 0);
+    int p = 0;
+    for (int b = 0; b < n; ++b) { firstPos[b] = p; for (int id : fn.bbs[b].insts) pos[id] = p++; lastPos[b] = p - 1; }
+    std::vector<int> defBlk(nvals, -1);
+    for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) defBlk[id] = b;
+    auto succOf = [&](int b) {
+        std::vector<int> s; const Inst& t = fn.vals[fn.bbs[b].insts.back()];
+        if (t.op == Op::Br) s.push_back(t.bbT);
+        else if (t.op == Op::CondBr) { s.push_back(t.bbT); s.push_back(t.bbF); }
+        return s;
+    };
+    std::vector<std::unordered_set<int>> liveIn(n), liveOut(n);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (int b = n - 1; b >= 0; --b) {
+            std::unordered_set<int> out;
+            for (int s : succOf(b)) {
+                for (int v : liveIn[s]) if (!(fn.vals[v].op == Op::Phi && defBlk[v] == s)) out.insert(v);
+                for (int id : fn.bbs[s].insts) {
+                    const Inst& in = fn.vals[id];
+                    if (in.op != Op::Phi) break;
+                    for (size_t k = 0; k < in.phiPred.size(); ++k) if (in.phiPred[k] == b) out.insert(in.a[k]);
+                }
+            }
+            std::unordered_set<int> live = out;
+            const auto& insts = fn.bbs[b].insts;
+            for (int i = (int)insts.size() - 1; i >= 0; --i) {
+                const Inst& in = fn.vals[insts[i]];
+                live.erase(insts[i]);
+                if (in.op != Op::Phi) for (int op : in.a) live.insert(op);
+            }
+            if (live != liveIn[b] || out != liveOut[b]) { liveIn[b] = std::move(live); liveOut[b] = std::move(out); changed = true; }
+        }
+    }
+    std::vector<int> start(nvals, 0), end(nvals, 0);
+    for (int id = 0; id < nvals; ++id) { start[id] = pos[id] < 0 ? 0 : pos[id]; end[id] = start[id]; }
+    for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) {
+        const Inst& in = fn.vals[id];
+        if (in.op == Op::Phi) {
+            for (size_t k = 0; k < in.phiPred.size(); ++k) {
+                int op = in.a[k], predEnd = lastPos[in.phiPred[k]];
+                end[op]  = std::max(end[op], predEnd);
+                start[id] = std::min(start[id], predEnd);
+                end[id]   = std::max(end[id], predEnd);
+            }
+        } else for (int op : in.a) end[op] = std::max(end[op], pos[id]);
+    }
+    for (int b = 0; b < n; ++b) {
+        for (int v : liveIn[b])  start[v] = std::min(start[v], firstPos[b]);
+        for (int v : liveOut[b]) end[v]   = std::max(end[v], lastPos[b]);
+    }
+    std::vector<int> order;
+    for (int id = 0; id < nvals; ++id) {
+        const Inst& in = fn.vals[id];
+        const bool intType = in.ty.base == Type::Int || in.ty.base == Type::Long || in.ty.base == Type::Char ||
+                             in.ty.base == Type::Short || in.ty.base == Type::Bool || in.ty.isPointer();
+        if (intType && pos[id] >= 0 && end[id] > start[id]) order.push_back(id);
+    }
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return start[a] < start[b]; });
+    std::vector<int> freeRegs = gprPool;
+    std::vector<std::pair<int, int>> active;
+    for (int id : order) {
+        for (size_t a = 0; a < active.size();) {
+            if (active[a].first < start[id]) { freeRegs.push_back(vreg[active[a].second]); active.erase(active.begin() + a); }
+            else ++a;
+        }
+        if (!freeRegs.empty()) { vreg[id] = freeRegs.back(); freeRegs.pop_back(); active.push_back({end[id], id}); }
+    }
+    auto emitsCall = [&](const Inst& in) {
+        if (in.op == Op::CallMath) return true;
+        if (in.op == Op::Cmp) return fn.vals[in.a[0]].ty.isFloating() || fn.vals[in.a[1]].ty.isFloating();
+        if (in.op == Op::Cast) return !in.ty.isFloating() && !in.ty.isPointer() && fn.vals[in.a[0]].ty.isFloating();
+        if (in.op == Op::Bin)  return (in.s == "/" || in.s == "%") && !in.ty.isFloating();
+        return false;
+    };
+    const int P = p;
+    std::vector<int> callPre(P + 1, 0);
+    for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) if (pos[id] >= 0 && emitsCall(fn.vals[id])) callPre[pos[id] + 1] = 1;
+    for (int i = 0; i < P; ++i) callPre[i + 1] += callPre[i];
+    std::vector<int> forder;
+    for (int id = 0; id < nvals; ++id) {
+        const Inst& in = fn.vals[id];
+        if (!in.ty.isFloating() || pos[id] < 0 || end[id] <= start[id]) continue;
+        if (callPre[end[id] + 1] - callPre[start[id]] != 0) continue;
+        forder.push_back(id);
+    }
+    std::sort(forder.begin(), forder.end(), [&](int a, int b) { return start[a] < start[b]; });
+    std::vector<int> freeX = fpPool;
+    std::vector<std::pair<int, int>> activeX;
+    for (int id : forder) {
+        for (size_t a = 0; a < activeX.size();) {
+            if (activeX[a].first < start[id]) { freeX.push_back(vxmm[activeX[a].second]); activeX.erase(activeX.begin() + a); }
+            else ++a;
+        }
+        if (!freeX.empty()) { vxmm[id] = freeX.back(); freeX.pop_back(); activeX.push_back({end[id], id}); }
+    }
+}
+#endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
+
 // ── Tier-2 native machine-code emission (x86-64 / Linux) ──────────────────────────
-#if VGRE_SSA_X64
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
 // Per-thread launch context. `pvals` holds one 8-byte value per kernel parameter,
 // pre-decoded by the launcher (pointer as-is; int sign/zero-extended; float/double as
 // the double's bit pattern) so the emitted code reads a uniform slot. `idx` is
-// tid[3],ctaid[3],ntid[3],nctaid[3].
+// tid[3],ctaid[3],ntid[3],nctaid[3]. Shared by both native emitters (x86-64 + AArch64).
 struct ThreadCtx { const int64_t* pvals; uint32_t idx[12]; };
 
 // Bit-exact C-ABI helpers for the ops the emitter delegates (same math the evaluator
@@ -875,7 +1007,9 @@ double vgre_ssa_m3(double x, double y, double z) { return std::fma(x, y, z); }  
 }
 
 using SsaFn = void (*)(ThreadCtx*);
+#endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
 
+#if VGRE_SSA_X64
 // A minimal x86-64 encoder + slot-based SSA→machine-code lowering. Every SSA value
 // lives in an 8-byte rbp-relative slot; each instruction loads operands into fixed
 // scratch registers (rax/rcx, xmm0/xmm1), computes, and stores its result. Hot ops
@@ -915,139 +1049,11 @@ struct X64Asm {
     explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()), vreg((size_t)f.vals.size(), -1), vxmm((size_t)f.vals.size(), -1) {}
     void bad() { ok = false; }
 
-    // Global linear-scan register allocation (Poletto & Sarkar). Integer/pointer
-    // values — INCLUDING loop-carried phis — get a callee-saved register r12–r15 for
-    // their whole live range, ACROSS blocks and loop iterations (e.g. a pointer param or
-    // a loop accumulator stays in a register through the loop instead of being reloaded/
-    // respilled each iteration); the rest use memory slots. Callee-saved ⇒ safe across
-    // the emitter's helper calls (no spill-around-call). The emitter accesses every value
-    // through ldG/stG (register or slot) and writes phis via the two-phase edge-copies in
-    // phiCopies(), so this pass alone enables it. A phi's register is written by those
-    // edge-copies at each predecessor terminator, so its interval must cover them; and
-    // because blocks are NOT laid out in execution order, a loop-carried value is live in
-    // a back-edge block placed BEFORE its own def — the interval widening below (live-in
-    // lowers start, live-out raises end) bridges that gap so the scan never reuses a
-    // register that is still holding a loop-carried value.
-    void allocateRegs() {
-        const int n = (int)fn.bbs.size();
-        std::vector<int> pos(nvals, -1), firstPos(n, 0), lastPos(n, 0);
-        int p = 0;
-        for (int b = 0; b < n; ++b) { firstPos[b] = p; for (int id : fn.bbs[b].insts) pos[id] = p++; lastPos[b] = p - 1; }
-        std::vector<int> defBlk(nvals, -1);
-        for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) defBlk[id] = b;
-        auto succOf = [&](int b) {
-            std::vector<int> s; const Inst& t = fn.vals[fn.bbs[b].insts.back()];
-            if (t.op == Op::Br) s.push_back(t.bbT);
-            else if (t.op == Op::CondBr) { s.push_back(t.bbT); s.push_back(t.bbF); }
-            return s;
-        };
-        // Backward liveness dataflow (per-block live-in / live-out value sets).
-        std::vector<std::unordered_set<int>> liveIn(n), liveOut(n);
-        for (bool changed = true; changed;) {
-            changed = false;
-            for (int b = n - 1; b >= 0; --b) {
-                std::unordered_set<int> out;
-                for (int s : succOf(b)) {
-                    for (int v : liveIn[s]) if (!(fn.vals[v].op == Op::Phi && defBlk[v] == s)) out.insert(v);   // phi defs aren't live-in from here
-                    for (int id : fn.bbs[s].insts) {                                                          // phi operands from b are live-out of b
-                        const Inst& in = fn.vals[id];
-                        if (in.op != Op::Phi) break;
-                        for (size_t k = 0; k < in.phiPred.size(); ++k) if (in.phiPred[k] == b) out.insert(in.a[k]);
-                    }
-                }
-                std::unordered_set<int> live = out;
-                const auto& insts = fn.bbs[b].insts;
-                for (int i = (int)insts.size() - 1; i >= 0; --i) {                        // walk the block backward
-                    const Inst& in = fn.vals[insts[i]];
-                    live.erase(insts[i]);                                                 // def
-                    if (in.op != Op::Phi) for (int op : in.a) live.insert(op);            // uses (phi operands are edge uses, not here)
-                }
-                if (live != liveIn[b] || out != liveOut[b]) { liveIn[b] = std::move(live); liveOut[b] = std::move(out); changed = true; }
-            }
-        }
-        // Live intervals: a conservative single [start,end] per value over LINEAR
-        // positions. start = def; end = last use. Then it is widened to cover every
-        // block the value is live across — crucial for loops, whose blocks are NOT
-        // in execution order: a loop-carried value defined in the merge/latch (high
-        // position) is live-in to the back-edge source block (low position), so its
-        // register must stay reserved from that low position too. We therefore lower
-        // start to firstPos of any block it is live-IN to, and raise end to lastPos
-        // of any block it is live-OUT of; the resulting single interval bridges the
-        // whole loop (safe: over-reservation only pushes values to slots, never wrong).
-        std::vector<int> start(nvals, 0), end(nvals, 0);
-        for (int id = 0; id < nvals; ++id) { start[id] = pos[id] < 0 ? 0 : pos[id]; end[id] = start[id]; }
-        for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) {
-            const Inst& in = fn.vals[id];
-            if (in.op == Op::Phi) {
-                // A phi is written by its edge-copies at EVERY predecessor's terminator
-                // (the back-edge latch comes after the phi's own position), and read at
-                // its uses. Its register must stay reserved across all of that, so its
-                // interval spans from the earliest to the latest predecessor terminator.
-                for (size_t k = 0; k < in.phiPred.size(); ++k) {
-                    int op = in.a[k], predEnd = lastPos[in.phiPred[k]];
-                    end[op]  = std::max(end[op], predEnd);          // operand: live until the copy
-                    start[id] = std::min(start[id], predEnd);       // phi: written at the copy
-                    end[id]   = std::max(end[id], predEnd);
-                }
-            } else for (int op : in.a) end[op] = std::max(end[op], pos[id]);
-        }
-        for (int b = 0; b < n; ++b) {
-            for (int v : liveIn[b])  start[v] = std::min(start[v], firstPos[b]);   // live across a back-edge into a block placed before its def
-            for (int v : liveOut[b]) end[v]   = std::max(end[v], lastPos[b]);
-        }
-        // Linear scan over intervals sorted by start.
-        std::vector<int> order;
-        for (int id = 0; id < nvals; ++id) {
-            const Inst& in = fn.vals[id];
-            const bool intType = in.ty.base == Type::Int || in.ty.base == Type::Long || in.ty.base == Type::Char ||
-                                 in.ty.base == Type::Short || in.ty.base == Type::Bool || in.ty.isPointer();
-            if (intType && pos[id] >= 0 && end[id] > start[id]) order.push_back(id);   // has a real interval (phis included)
-        }
-        std::sort(order.begin(), order.end(), [&](int a, int b) { return start[a] < start[b]; });
-        std::vector<int> freeRegs = {15, 14, 13, 12};
-        std::vector<std::pair<int, int>> active;   // (end, id)
-        for (int id : order) {
-            for (size_t a = 0; a < active.size();) {
-                if (active[a].first < start[id]) { freeRegs.push_back(vreg[active[a].second]); active.erase(active.begin() + a); }
-                else ++a;
-            }
-            if (!freeRegs.empty()) { vreg[id] = freeRegs.back(); freeRegs.pop_back(); active.push_back({end[id], id}); }
-        }
+    // x86-64 pools: int/pointer → callee-saved r12–r15; float → xmm2–xmm7 (xmm0/xmm1
+    // stay scratch, and XMM is caller-saved so call-spanning floats keep to slots).
+    // The shared linear-scan does the work (see computeRegAlloc).
+    void allocateRegs() { computeRegAlloc(fn, nvals, {15, 14, 13, 12}, {7, 6, 5, 4, 3, 2}, vreg, vxmm); }
 
-        // Float values → the caller-saved XMM regs xmm2–xmm7 (xmm0/xmm1 stay scratch).
-        // Unlike the GPR pool these are NOT preserved across the emitter's helper calls
-        // (fcmp/sat/idiv/mathfn), so a float value may only occupy an XMM register if its
-        // interval contains NO call — otherwise it stays in a slot. `callAt` marks each
-        // instruction that emits a helper call; the prefix sum tests an interval quickly.
-        auto emitsCall = [&](const Inst& in) {
-            if (in.op == Op::CallMath) return true;                                            // m1/m2
-            if (in.op == Op::Cmp) return fn.vals[in.a[0]].ty.isFloating() || fn.vals[in.a[1]].ty.isFloating();   // fcmp
-            if (in.op == Op::Cast) return !in.ty.isFloating() && !in.ty.isPointer() && fn.vals[in.a[0]].ty.isFloating();   // sat
-            if (in.op == Op::Bin)  return (in.s == "/" || in.s == "%") && !in.ty.isFloating();  // idiv
-            return false;
-        };
-        const int P = p;                                                     // total linear positions
-        std::vector<int> callPre(P + 1, 0);                                  // callPre[k] = # calls at positions < k
-        for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) if (pos[id] >= 0 && emitsCall(fn.vals[id])) callPre[pos[id] + 1] = 1;
-        for (int i = 0; i < P; ++i) callPre[i + 1] += callPre[i];            // prefix: calls in [s,e] = callPre[e+1]-callPre[s]
-        std::vector<int> forder;
-        for (int id = 0; id < nvals; ++id) {
-            const Inst& in = fn.vals[id];
-            if (!in.ty.isFloating() || pos[id] < 0 || end[id] <= start[id]) continue;
-            if (callPre[end[id] + 1] - callPre[start[id]] != 0) continue;    // interval spans a helper call
-            forder.push_back(id);
-        }
-        std::sort(forder.begin(), forder.end(), [&](int a, int b) { return start[a] < start[b]; });
-        std::vector<int> freeX = {7, 6, 5, 4, 3, 2};
-        std::vector<std::pair<int, int>> activeX;
-        for (int id : forder) {
-            for (size_t a = 0; a < activeX.size();) {
-                if (activeX[a].first < start[id]) { freeX.push_back(vxmm[activeX[a].second]); activeX.erase(activeX.begin() + a); }
-                else ++a;
-            }
-            if (!freeX.empty()) { vxmm[id] = freeX.back(); freeX.pop_back(); activeX.push_back({end[id], id}); }
-        }
-    }
     void b(uint8_t x) { c.push_back(x); }
     void d32(uint32_t v) { for (int i = 0; i < 4; ++i) b((uint8_t)(v >> (8 * i))); }
     void d64(uint64_t v) { for (int i = 0; i < 8; ++i) b((uint8_t)(v >> (8 * i))); }
@@ -1330,12 +1336,442 @@ struct X64Asm {
 };
 #endif  // VGRE_SSA_X64
 
+// ── Tier-2 native machine-code emission (AArch64 — Apple Silicon + ARM Linux) ─────
+// Compiled whenever EITHER native backend is on (the struct is pure, arch-independent
+// byte generation), so its encodings can be unit-tested on an x86-64 host against
+// llvm-mc (arm64EncSelfTest / test_ssa_arm64_enc). It is only INSTANTIATED and EXECUTED
+// on an actual aarch64 host (VGRE_SSA_ARM64), where compile() mmaps + runs it.
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
+// Mirrors X64Asm exactly — same IR, same slot model, same helper delegation, same
+// linear-scan reg alloc and two-phase phi copies — differing only in encodings and
+// the AAPCS64 calling convention. Fixed-width 32-bit instructions. Registers: x19 =
+// ThreadCtx*, x0/x1/x2/x9 = int scratch, d0/d1/d2 = fp scratch, x20–x27 = allocatable
+// GPRs (callee-saved), d8–d15 = allocatable FP (callee-saved). SSA values live in
+// sp-relative slots (positive offsets). Every instruction is a single 32-bit word.
+struct Arm64Asm {
+    std::vector<uint8_t> c;
+    const Fn& fn;
+    int nvals, frame = 0;
+    std::vector<size_t> off;                       // block start byte offsets
+    std::vector<std::pair<size_t, int>> jpatch;    // (b-instruction site, target block)
+    bool ok = true;
+    int cX0 = -1, cD0 = -1;                        // value currently in x0 / d0 (peephole), or -1
+    std::vector<int> vreg, vxmm;                   // physical reg per value (x20–27 / d8–15), or -1
+
+    explicit Arm64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()),
+        vreg((size_t)f.vals.size(), -1), vxmm((size_t)f.vals.size(), -1) {}
+    void bad() { ok = false; }
+    void allocateRegs() { computeRegAlloc(fn, nvals, {27, 26, 25, 24, 23, 22, 21, 20}, {15, 14, 13, 12, 11, 10, 9, 8}, vreg, vxmm); }
+
+    void w(uint32_t x) { for (int i = 0; i < 4; ++i) c.push_back((uint8_t)(x >> (8 * i))); }
+
+    // ── encoders (all verified against llvm-mc; see test_ssa_arm64_enc) ──
+    void movRR(int d, int n)  { w(0xaa0003e0u | ((uint32_t)n << 16) | (uint32_t)d); }               // mov Xd,Xn
+    void add3(int d, int n, int m) { w(0x8b000000u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void sub3(int d, int n, int m) { w(0xcb000000u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void mul3(int d, int n, int m) { w(0x9b007c00u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void and3(int d, int n, int m) { w(0x8a000000u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void orr3(int d, int n, int m) { w(0xaa000000u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void eor3(int d, int n, int m) { w(0xca000000u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void lslv(int d, int n, int m) { w(0x9ac02000u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void lsrv(int d, int n, int m) { w(0x9ac02400u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void asrv(int d, int n, int m) { w(0x9ac02800u | ((uint32_t)m << 16) | ((uint32_t)n << 5) | d); }
+    void cmpRR(int n, int m)  { w(0xeb00001fu | ((uint32_t)m << 16) | ((uint32_t)n << 5)); }         // subs xzr,Xn,Xm
+    void csetF(int d, int f)  { w(0x9a9f07e0u | ((uint32_t)f << 12) | (uint32_t)d); }                // cset Xd,cond(field)
+    void negR(int d, int n)   { w(0xcb0003e0u | ((uint32_t)n << 16) | (uint32_t)d); }                // sub Xd,xzr,Xn
+    void notR(int d, int n)   { w(0xaa2003e0u | ((uint32_t)n << 16) | (uint32_t)d); }                // orn Xd,xzr,Xn
+    void sxtw(int d, int n)   { w(0x93407c00u | ((uint32_t)n << 5) | d); }
+    void sxth(int d, int n)   { w(0x93403c00u | ((uint32_t)n << 5) | d); }
+    void sxtb(int d, int n)   { w(0x93401c00u | ((uint32_t)n << 5) | d); }
+    void uxtw(int d, int n)   { w(0x2a0003e0u | ((uint32_t)n << 16) | (uint32_t)d); }                // mov Wd,Wn
+    void uxth(int d, int n)   { w(0x53003c00u | ((uint32_t)n << 5) | d); }
+    void uxtb(int d, int n)   { w(0x53001c00u | ((uint32_t)n << 5) | d); }
+    void movz(int d, uint32_t imm16, int s) { w(0xd2800000u | ((uint32_t)s << 21) | ((imm16 & 0xffff) << 5) | d); }
+    void movk(int d, uint32_t imm16, int s) { w(0xf2800000u | ((uint32_t)s << 21) | ((imm16 & 0xffff) << 5) | d); }
+    void movImm(int d, uint64_t v) { movz(d, (uint32_t)(v & 0xffff), 0);
+        movk(d, (uint32_t)((v >> 16) & 0xffff), 1); movk(d, (uint32_t)((v >> 32) & 0xffff), 2); movk(d, (uint32_t)((v >> 48) & 0xffff), 3); }
+    // loads/stores through a base register, offset 0 (address already computed in Rn)
+    void ldrX(int rt, int rn)  { w(0xf9400000u | ((uint32_t)rn << 5) | rt); }
+    void ldrW(int rt, int rn)  { w(0xb9400000u | ((uint32_t)rn << 5) | rt); }
+    void ldrSW(int rt, int rn) { w(0xb9800000u | ((uint32_t)rn << 5) | rt); }
+    void ldrH(int rt, int rn)  { w(0x79400000u | ((uint32_t)rn << 5) | rt); }
+    void ldrSH(int rt, int rn) { w(0x79c00000u | ((uint32_t)rn << 5) | rt); }
+    void ldrB(int rt, int rn)  { w(0x39400000u | ((uint32_t)rn << 5) | rt); }
+    void ldrSB(int rt, int rn) { w(0x39c00000u | ((uint32_t)rn << 5) | rt); }
+    void strX(int rt, int rn)  { w(0xf9000000u | ((uint32_t)rn << 5) | rt); }
+    void strW(int rt, int rn)  { w(0xb9000000u | ((uint32_t)rn << 5) | rt); }
+    void strH(int rt, int rn)  { w(0x79000000u | ((uint32_t)rn << 5) | rt); }
+    void strB(int rt, int rn)  { w(0x39000000u | ((uint32_t)rn << 5) | rt); }
+    void ldrDreg(int dt, int rn) { w(0xfd400000u | ((uint32_t)rn << 5) | dt); }
+    void strDreg(int dt, int rn) { w(0xfd000000u | ((uint32_t)rn << 5) | dt); }
+    void ldrSreg(int st, int rn) { w(0xbd400000u | ((uint32_t)rn << 5) | st); }
+    void strSreg(int st, int rn) { w(0xbd000000u | ((uint32_t)rn << 5) | st); }
+    // sp-relative slot access (scaled immediate). off is a byte offset, multiple of 8.
+    void ldrXslot(int rt, int off) { w(0xf9400000u | ((uint32_t)(off / 8) << 10) | (31u << 5) | rt); }
+    void strXslot(int rt, int off) { w(0xf9000000u | ((uint32_t)(off / 8) << 10) | (31u << 5) | rt); }
+    void ldrDslot(int dt, int off) { w(0xfd400000u | ((uint32_t)(off / 8) << 10) | (31u << 5) | dt); }
+    void strDslot(int dt, int off) { w(0xfd000000u | ((uint32_t)(off / 8) << 10) | (31u << 5) | dt); }
+    void ldrXofs(int rt, int rn, int off) { w(0xf9400000u | ((uint32_t)(off / 8) << 10) | ((uint32_t)rn << 5) | rt); }
+    void ldrWofs(int rt, int rn, int off) { w(0xb9400000u | ((uint32_t)(off / 4) << 10) | ((uint32_t)rn << 5) | rt); }
+    void fmovDX(int dd, int xn) { w(0x9e670000u | ((uint32_t)xn << 5) | dd); }   // Dd = Xn bits
+    void fmovXD(int xd, int dn) { w(0x9e660000u | ((uint32_t)dn << 5) | xd); }   // Xd = Dn bits
+    void fmovDD(int dd, int dn) { w(0x1e604000u | ((uint32_t)dn << 5) | dd); }
+    void faddD(int dd, int dn, int dm) { w(0x1e602800u | ((uint32_t)dm << 16) | ((uint32_t)dn << 5) | dd); }
+    void fsubD(int dd, int dn, int dm) { w(0x1e603800u | ((uint32_t)dm << 16) | ((uint32_t)dn << 5) | dd); }
+    void fmulD(int dd, int dn, int dm) { w(0x1e600800u | ((uint32_t)dm << 16) | ((uint32_t)dn << 5) | dd); }
+    void fdivD(int dd, int dn, int dm) { w(0x1e601800u | ((uint32_t)dm << 16) | ((uint32_t)dn << 5) | dd); }
+    void fcvtSD(int sd, int dn) { w(0x1e624000u | ((uint32_t)dn << 5) | sd); }   // Sd = (float)Dn
+    void fcvtDS(int dd, int sn) { w(0x1e22c000u | ((uint32_t)sn << 5) | dd); }   // Dd = (double)Sn
+    void scvtfD(int dd, int xn) { w(0x9e620000u | ((uint32_t)xn << 5) | dd); }   // Dd = (double)Xn (signed)
+    void blr(int xn) { w(0xd63f0000u | ((uint32_t)xn << 5)); }
+    void retI()      { w(0xd65f03c0u); }
+    void subSpImm(int imm) { w(0xd1000000u | ((uint32_t)imm << 10) | (31u << 5) | 31u); }
+    void addSpImm(int imm) { w(0x91000000u | ((uint32_t)imm << 10) | (31u << 5) | 31u); }
+    void stpPreX(int t1, int t2) { w(0xa9800000u | (0x7eu << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }  // stp Xt1,Xt2,[sp,#-16]!
+    void ldpPostX(int t1, int t2){ w(0xa8c00000u | (0x02u << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }  // ldp Xt1,Xt2,[sp],#16
+    void stpPreD(int t1, int t2) { w(0x6d800000u | (0x7eu << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }
+    void ldpPostD(int t1, int t2){ w(0x6cc00000u | (0x02u << 15) | ((uint32_t)t2 << 10) | (31u << 5) | t1); }
+    void call(uint64_t addr) { movImm(9, addr); blr(9); }
+    void bBlock(int blk) { jpatch.push_back({c.size(), blk}); w(0x14000000u); }   // b <blk> (patched)
+    size_t cbz0() { size_t at = c.size(); w(0xb4000000u); return at; }             // cbz x0, . (patched)
+    void patchCbz(size_t at, size_t target) {
+        uint32_t word; std::memcpy(&word, &c[at], 4);
+        uint32_t imm19 = (uint32_t)(((int64_t)target - (int64_t)at) / 4) & 0x7ffff;
+        word |= (imm19 << 5); std::memcpy(&c[at], &word, 4);
+    }
+    static int csetField(const std::string& o) {   // signed cmp → cset condition field
+        return o == "==" ? 1 : o == "!=" ? 0 : o == "<" ? 10 : o == "<=" ? 12 : o == ">" ? 13 : /*>=*/ 11;
+    }
+
+    int slot(int id) const { return id * 8; }
+    int temp(int i) const { return (nvals + i) * 8; }
+    bool isFloatVal(int id) const { return fn.vals[id].ty.isFloating(); }
+
+    // value access: register (movReg) or sp slot. Mirrors x86 ldG/stG/ldX/stX.
+    void ldG(int rg, int id) { if (vreg[id] >= 0) movRR(rg, vreg[id]); else ldrXslot(rg, slot(id)); }
+    void stG(int rg, int id) { if (vreg[id] >= 0) movRR(vreg[id], rg); else strXslot(rg, slot(id)); }
+    void ldX(int dg, int id) { if (vxmm[id] >= 0) fmovDD(dg, vxmm[id]); else ldrDslot(dg, slot(id)); }
+    void stX(int dg, int id) { if (vxmm[id] >= 0) fmovDD(vxmm[id], dg); else strDslot(dg, slot(id)); }
+    void stFloatBits(int id) { if (vxmm[id] >= 0) fmovDX(vxmm[id], 0); else strXslot(0, slot(id)); }  // x0 bits → home
+    void ldFloatBits(int id) { if (vxmm[id] >= 0) fmovXD(0, vxmm[id]); else ldrXslot(0, slot(id)); }  // home → x0 bits
+    void loadG0(int id) { if (cX0 == id) { cX0 = -1; return; } ldG(0, id); cX0 = -1; }
+    void loadX0(int id) { if (cD0 == id) { cD0 = -1; return; } ldX(0, id); cD0 = -1; }
+    void setResultCache(const Inst& in, int id) {
+        auto inX0 = [&] { cX0 = id; cD0 = -1; };
+        auto inD0 = [&] { cD0 = id; cX0 = -1; };
+        auto none = [&] { cX0 = cD0 = -1; };
+        switch (in.op) {
+            case Op::ConstI: case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: case Op::Cmp: inX0(); break;
+            case Op::Param: in.ty.isFloating() ? none() : inX0(); break;
+            case Op::Bin:   in.ty.isFloating() ? inD0() : inX0(); break;
+            case Op::Un:    (in.s == "!" || !in.ty.isFloating()) ? inX0() : none(); break;
+            case Op::Sel:   in.ty.isFloating() ? none() : inX0(); break;
+            case Op::Cast:  case Op::Load: in.ty.isFloating() ? inD0() : inX0(); break;
+            case Op::CallMath: inD0(); break;
+            default: none(); break;
+        }
+    }
+    void narrowIfFloat(const Type& t) { if (t.base == Type::Float) { fcvtSD(0, 0); fcvtDS(0, 0); } }  // round d0 to float32
+    void extX0(int bytes, bool uns) {
+        if (bytes >= 8) return;
+        if (bytes == 4) { uns ? uxtw(0, 0) : sxtw(0, 0); return; }
+        if (bytes == 2) { uns ? uxth(0, 0) : sxth(0, 0); return; }
+        uns ? uxtb(0, 0) : sxtb(0, 0);
+    }
+    int mathId(const std::string& s) const {
+        if (s == "erf" || s == "erff") return 12;
+        std::string g = (!s.empty() && s.back() == 'f') ? s.substr(0, s.size() - 1) : s;
+        if (g == "sqrt") return 0; if (g == "fabs") return 1; if (g == "exp") return 2; if (g == "log") return 3;
+        if (g == "sin") return 4; if (g == "cos") return 5; if (g == "floor") return 6; if (g == "ceil") return 7;
+        if (g == "tanh") return 8; if (g == "exp2") return 9; if (g == "log2") return 10; if (g == "rsqrt") return 11;
+        return -1;
+    }
+
+    // Phi edge-copies pred→succ: two-phase (operands→temps, temps→phi), like x86.
+    void phiCopies(int pred, int succ) {
+        std::vector<std::pair<int, int>> pr;
+        for (int id : fn.bbs[succ].insts) {
+            const Inst& in = fn.vals[id];
+            if (in.op != Op::Phi) break;
+            for (size_t k = 0; k < in.phiPred.size(); ++k) if (in.phiPred[k] == pred) { pr.push_back({id, in.a[k]}); break; }
+        }
+        for (size_t i = 0; i < pr.size(); ++i) {
+            if (fn.vals[pr[i].first].ty.isFloating()) { ldX(0, pr[i].second); strDslot(0, temp((int)i)); }
+            else                                       { ldG(0, pr[i].second); strXslot(0, temp((int)i)); }
+        }
+        for (size_t i = 0; i < pr.size(); ++i) {
+            if (fn.vals[pr[i].first].ty.isFloating()) { ldrDslot(0, temp((int)i)); stX(0, pr[i].first); }
+            else                                       { ldrXslot(0, temp((int)i)); stG(0, pr[i].first); }
+        }
+    }
+
+    void emitInst(int id) {
+        const Inst& in = fn.vals[id];
+        switch (in.op) {
+            case Op::Phi: return;
+            case Op::ConstI: { movImm(0, (uint64_t)coerce(SI(in.ci), in.ty).i); stG(0, id); return; }
+            case Op::ConstF: { double d = coerce(SF(in.cf), in.ty).d; uint64_t bits; std::memcpy(&bits, &d, 8); movImm(0, bits); stFloatBits(id); return; }
+            case Op::Param: { ldrX(9, 19); ldrXofs(0, 9, (int)(in.paramIdx * 8));      // x9=pvals; x0=pvals[i]
+                              if (in.ty.isFloating()) stFloatBits(id); else stG(0, id); return; }
+            case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: {
+                int base = in.op == Op::Tid ? 0 : in.op == Op::Ctaid ? 3 : in.op == Op::Ntid ? 6 : 9;
+                ldrWofs(0, 19, 8 + (base + in.dim) * 4); stG(0, id); return;           // w load zero-extends
+            }
+            case Op::Bin: {
+                if (in.ty.isFloating()) {
+                    loadX0(in.a[0]); ldX(1, in.a[1]);
+                    if (in.s == "+") faddD(0, 0, 1); else if (in.s == "-") fsubD(0, 0, 1);
+                    else if (in.s == "*") fmulD(0, 0, 1); else if (in.s == "/") fdivD(0, 0, 1);
+                    else { bad(); return; }
+                    narrowIfFloat(in.ty); stX(0, id); return;
+                }
+                const std::string& o = in.s;
+                if (o == "/" || o == "%") {
+                    ldG(0, in.a[0]); ldG(1, in.a[1]);                                   // x0=a, x1=b
+                    movImm(2, o == "%" ? 1 : 0); movImm(3, in.ty.isUnsigned ? 1 : 0);
+                    call((uint64_t)&vgre_ssa_idiv); stG(0, id); return;
+                }
+                if (o == "&&" || o == "||") {
+                    ldG(0, in.a[0]); cmpRR(0, 31); csetF(0, 0); strXslot(0, temp(0));   // (a!=0)
+                    ldG(0, in.a[1]); cmpRR(0, 31); csetF(0, 0); ldrXslot(1, temp(0));   // x0=(b!=0), x1=(a!=0)
+                    if (o == "&&") and3(0, 0, 1); else orr3(0, 0, 1); stG(0, id); return;
+                }
+                loadG0(in.a[0]); ldG(1, in.a[1]);
+                if (o == "+") add3(0, 0, 1); else if (o == "-") sub3(0, 0, 1); else if (o == "*") mul3(0, 0, 1);
+                else if (o == "&") and3(0, 0, 1); else if (o == "|") orr3(0, 0, 1); else if (o == "^") eor3(0, 0, 1);
+                else if (o == "<<") lslv(0, 0, 1); else if (o == ">>") { in.ty.isUnsigned ? lsrv(0, 0, 1) : asrv(0, 0, 1); }
+                else { bad(); return; }
+                extX0(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
+            }
+            case Op::Cmp: {
+                bool fl = isFloatVal(in.a[0]) || isFloatVal(in.a[1]);
+                const std::string& o = in.s;
+                if (fl) {
+                    int pred = o == "<" ? 0 : o == "<=" ? 1 : o == ">" ? 2 : o == ">=" ? 3 : o == "==" ? 4 : 5;
+                    ldX(0, in.a[0]); ldX(1, in.a[1]); movImm(0, (uint64_t)pred);        // d0,d1 args; w0=pred
+                    call((uint64_t)&vgre_ssa_fcmp); sxtw(0, 0); stG(0, id); return;
+                }
+                loadG0(in.a[0]); ldG(1, in.a[1]); cmpRR(0, 1); csetF(0, csetField(o)); stG(0, id); return;
+            }
+            case Op::Un: {
+                if (in.s == "!") { ldG(0, in.a[0]); cmpRR(0, 31); csetF(0, 1); stG(0, id); return; }   // ==0
+                if (in.ty.isFloating()) { ldFloatBits(in.a[0]); movImm(1, 0x8000000000000000ull); eor3(0, 0, 1); stFloatBits(id); return; }
+                ldG(0, in.a[0]); if (in.s == "-") negR(0, 0); else notR(0, 0); extX0(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
+            }
+            case Op::Sel: {
+                const bool fl = in.ty.isFloating();
+                if (fl) { ldX(0, in.a[2]); stX(0, id); } else { ldG(0, in.a[2]); stG(0, id); }          // res = else
+                ldG(1, in.a[0]); size_t j = c.size(); w(0xb4000000u | 1u);                              // cbz x1, skip (patched)
+                if (fl) { ldX(0, in.a[1]); stX(0, id); } else { ldG(0, in.a[1]); stG(0, id); }          // res = then
+                patchCbz(j, c.size());
+                return;
+            }
+            case Op::Cast: {
+                const Type& t = in.ty; int op0 = in.a[0];
+                if (t.isFloating()) {
+                    if (isFloatVal(op0)) { ldX(0, op0); narrowIfFloat(t); } else { ldG(0, op0); scvtfD(0, 0); narrowIfFloat(t); }
+                    stX(0, id); return;
+                }
+                if (t.isPointer()) { ldG(0, op0); stG(0, id); return; }
+                if (isFloatVal(op0)) { ldX(0, op0); movImm(0, (uint64_t)t.base); movImm(1, t.isUnsigned ? 1 : 0);
+                                       call((uint64_t)&vgre_ssa_sat); stG(0, id); return; }
+                ldG(0, op0); extX0(t.elemBytes(), t.isUnsigned); stG(0, id); return;
+            }
+            case Op::Load: {
+                loadG0(in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); mul3(1, 1, 2); add3(0, 0, 1);
+                const Type& t = in.ty;
+                if (t.isFloating()) {
+                    if (t.elemBytes() == 8) ldrDreg(0, 0); else { ldrSreg(0, 0); fcvtDS(0, 0); }
+                    stX(0, id); return;
+                }
+                if (t.isPointer() || t.elemBytes() == 8) ldrX(0, 0);
+                else if (t.elemBytes() == 4) { t.isUnsigned ? ldrW(0, 0) : ldrSW(0, 0); }
+                else if (t.elemBytes() == 2) { t.isUnsigned ? ldrH(0, 0) : ldrSH(0, 0); }
+                else                         { t.isUnsigned ? ldrB(0, 0) : ldrSB(0, 0); }
+                stG(0, id); return;
+            }
+            case Op::Store: {
+                ldG(2, in.a[0]); ldG(1, in.a[1]); movImm(0, (uint64_t)in.elemBytes); mul3(1, 1, 0); add3(2, 2, 1);  // x2 = base+idx*bytes
+                const Type& t = in.ty;
+                if (t.isFloating()) {
+                    ldX(0, in.a[2]);
+                    if (t.elemBytes() == 8) strDreg(0, 2); else { fcvtSD(0, 0); strSreg(0, 2); }
+                    return;
+                }
+                ldG(0, in.a[2]);
+                if (t.isPointer() || t.elemBytes() == 8) strX(0, 2);
+                else if (t.elemBytes() == 4) strW(0, 2);
+                else if (t.elemBytes() == 2) strH(0, 2);
+                else                         strB(0, 2);
+                return;
+            }
+            case Op::CallMath: {
+                if (in.a.size() == 1) {
+                    int mid = mathId(in.s); if (mid < 0) { bad(); return; }
+                    ldX(0, in.a[0]); movImm(0, (uint64_t)mid); call((uint64_t)&vgre_ssa_m1);
+                } else if (in.a.size() == 2) {
+                    if (!in.ty.isFloating()) { bad(); return; }
+                    uint64_t op = (in.s == "fmax" || in.s == "fmaxf") ? 1u : (in.s == "pow" || in.s == "powf") ? 2u : 0u;
+                    ldX(0, in.a[0]); ldX(1, in.a[1]); movImm(0, op); call((uint64_t)&vgre_ssa_m2);
+                } else {
+                    ldX(0, in.a[0]); ldX(1, in.a[1]); ldX(2, in.a[2]); call((uint64_t)&vgre_ssa_m3);
+                }
+                narrowIfFloat(in.ty); stX(0, id); return;
+            }
+            default: return;
+        }
+    }
+
+    void prologue() {
+        stpPreX(29, 30); stpPreX(19, 20); stpPreX(21, 22); stpPreX(23, 24); stpPreX(25, 26); stpPreX(27, 28);
+        stpPreD(8, 9); stpPreD(10, 11); stpPreD(12, 13); stpPreD(14, 15);
+        if (frame) subSpImm(frame);
+        movRR(19, 0);   // x19 = ThreadCtx* (first arg)
+    }
+    void epilogue() {
+        if (frame) addSpImm(frame);
+        ldpPostD(14, 15); ldpPostD(12, 13); ldpPostD(10, 11); ldpPostD(8, 9);
+        ldpPostX(27, 28); ldpPostX(25, 26); ldpPostX(23, 24); ldpPostX(21, 22); ldpPostX(19, 20); ldpPostX(29, 30);
+        retI();
+    }
+
+    bool build() {
+        allocateRegs();
+        const int n = (int)fn.bbs.size();
+        int maxTemps = 0;
+        for (auto& bb : fn.bbs) { int p = 0; for (int id : bb.insts) { if (fn.vals[id].op == Op::Phi) ++p; else break; } if (p > maxTemps) maxTemps = p; }
+        frame = (((nvals + maxTemps) * 8 + 15) / 16) * 16;
+        if (frame > 4095) return false;   // slot area beyond a single add/sub-imm — fall back to the evaluator
+        prologue();
+        off.assign(n, 0);
+        for (int blk = 0; blk < n; ++blk) {
+            off[blk] = c.size();
+            cX0 = cD0 = -1;
+            const BB& bb = fn.bbs[blk];
+            for (int id : bb.insts) {
+                const Inst& in = fn.vals[id];
+                if (in.op == Op::Ret) { epilogue(); break; }
+                if (in.op == Op::Br) { phiCopies(blk, in.bbT); bBlock(in.bbT); break; }
+                if (in.op == Op::CondBr) {
+                    loadG0(in.a[0]); size_t j = cbz0();                // cbz x0, <false> (patched)
+                    phiCopies(blk, in.bbT); bBlock(in.bbT);
+                    patchCbz(j, c.size());
+                    phiCopies(blk, in.bbF); bBlock(in.bbF);
+                    break;
+                }
+                emitInst(id);
+                if (!ok) return false;
+                setResultCache(in, id);
+            }
+        }
+        for (auto& jp : jpatch) {
+            uint32_t word; std::memcpy(&word, &c[jp.first], 4);
+            uint32_t imm26 = (uint32_t)(((int64_t)off[jp.second] - (int64_t)jp.first) / 4) & 0x3ffffff;
+            word |= imm26; std::memcpy(&c[jp.first], &word, 4);
+        }
+        return ok;
+    }
+};
+#endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
+
 }  // namespace
+
+// Encoder self-test: every AArch64 instruction the emitter produces, checked against
+// the exact bytes llvm-mc assembles for the corresponding mnemonic (baked in, so the
+// test needs no external assembler). This validates the ENCODING layer on any host
+// (incl. x86-64 dev/CI), independent of ARM execution. Returns true (all match) or
+// sets err. On a host where neither native backend is compiled it is a no-op pass.
+bool arm64EncSelfTest(std::string& err) {
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
+    Fn dummy;
+    Arm64Asm a(dummy);
+    bool ok = true;
+    auto chk = [&](const char* name, std::initializer_list<uint8_t> exp) {
+        std::vector<uint8_t> e(exp);
+        if (a.c != e) { if (ok) err = std::string("arm64 enc: ") + name; ok = false; }
+        a.c.clear();
+    };
+    a.movRR(0, 1);        chk("mov x0,x1",   {0xe0, 0x03, 0x01, 0xaa});
+    a.movRR(19, 0);       chk("mov x19,x0",  {0xf3, 0x03, 0x00, 0xaa});
+    a.add3(0, 1, 2);      chk("add",         {0x20, 0x00, 0x02, 0x8b});
+    a.sub3(0, 1, 2);      chk("sub",         {0x20, 0x00, 0x02, 0xcb});
+    a.mul3(0, 1, 2);      chk("mul",         {0x20, 0x7c, 0x02, 0x9b});
+    a.and3(0, 1, 2);      chk("and",         {0x20, 0x00, 0x02, 0x8a});
+    a.orr3(0, 1, 2);      chk("orr",         {0x20, 0x00, 0x02, 0xaa});
+    a.eor3(0, 1, 2);      chk("eor",         {0x20, 0x00, 0x02, 0xca});
+    a.lslv(0, 1, 2);      chk("lsl",         {0x20, 0x20, 0xc2, 0x9a});
+    a.lsrv(0, 1, 2);      chk("lsr",         {0x20, 0x24, 0xc2, 0x9a});
+    a.asrv(0, 1, 2);      chk("asr",         {0x20, 0x28, 0xc2, 0x9a});
+    a.cmpRR(1, 2);        chk("cmp",         {0x3f, 0x00, 0x02, 0xeb});
+    a.csetF(0, 1);        chk("cset eq",     {0xe0, 0x17, 0x9f, 0x9a});
+    a.csetF(0, 0);        chk("cset ne",     {0xe0, 0x07, 0x9f, 0x9a});
+    a.csetF(0, 10);       chk("cset lt",     {0xe0, 0xa7, 0x9f, 0x9a});
+    a.csetF(0, 11);       chk("cset ge",     {0xe0, 0xb7, 0x9f, 0x9a});
+    a.csetF(0, 12);       chk("cset le",     {0xe0, 0xc7, 0x9f, 0x9a});
+    a.csetF(0, 13);       chk("cset gt",     {0xe0, 0xd7, 0x9f, 0x9a});
+    a.negR(0, 1);         chk("neg",         {0xe0, 0x03, 0x01, 0xcb});
+    a.notR(0, 1);         chk("mvn",         {0xe0, 0x03, 0x21, 0xaa});
+    a.sxtw(0, 1);         chk("sxtw",        {0x20, 0x7c, 0x40, 0x93});
+    a.sxth(0, 1);         chk("sxth",        {0x20, 0x3c, 0x40, 0x93});
+    a.sxtb(0, 1);         chk("sxtb",        {0x20, 0x1c, 0x40, 0x93});
+    a.uxtw(0, 1);         chk("uxtw",        {0xe0, 0x03, 0x01, 0x2a});
+    a.uxth(0, 1);         chk("uxth",        {0x20, 0x3c, 0x00, 0x53});
+    a.uxtb(0, 1);         chk("uxtb",        {0x20, 0x1c, 0x00, 0x53});
+    a.movz(0, 0, 0);      chk("movz",        {0x00, 0x00, 0x80, 0xd2});
+    a.movk(0, 0, 1);      chk("movk lsl16",  {0x00, 0x00, 0xa0, 0xf2});
+    a.ldrXslot(0, 0);     chk("ldr x,[sp]",  {0xe0, 0x03, 0x40, 0xf9});
+    a.strXslot(0, 0);     chk("str x,[sp]",  {0xe0, 0x03, 0x00, 0xf9});
+    a.strXslot(0, 4088);  chk("str x,[sp,#4088]", {0xe0, 0xff, 0x07, 0xf9});
+    a.ldrDslot(0, 0);     chk("ldr d,[sp]",  {0xe0, 0x03, 0x40, 0xfd});
+    a.strDslot(0, 0);     chk("str d,[sp]",  {0xe0, 0x03, 0x00, 0xfd});
+    a.ldrXofs(0, 9, 8);   chk("ldr x0,[x9,#8]",  {0x20, 0x05, 0x40, 0xf9});
+    a.ldrWofs(0, 19, 8);  chk("ldr w0,[x19,#8]", {0x60, 0x0a, 0x40, 0xb9});
+    a.ldrX(0, 0);         chk("ldr x,[x0]",  {0x00, 0x00, 0x40, 0xf9});
+    a.ldrW(0, 0);         chk("ldr w,[x0]",  {0x00, 0x00, 0x40, 0xb9});
+    a.ldrSW(0, 0);        chk("ldrsw",       {0x00, 0x00, 0x80, 0xb9});
+    a.ldrH(0, 0);         chk("ldrh",        {0x00, 0x00, 0x40, 0x79});
+    a.ldrSH(0, 0);        chk("ldrsh",       {0x00, 0x00, 0xc0, 0x79});
+    a.ldrB(0, 0);         chk("ldrb",        {0x00, 0x00, 0x40, 0x39});
+    a.ldrSB(0, 0);        chk("ldrsb",       {0x00, 0x00, 0xc0, 0x39});
+    a.strX(0, 2);         chk("str x,[x2]",  {0x40, 0x00, 0x00, 0xf9});
+    a.strW(0, 2);         chk("str w,[x2]",  {0x40, 0x00, 0x00, 0xb9});
+    a.strH(0, 2);         chk("strh",        {0x40, 0x00, 0x00, 0x79});
+    a.strB(0, 2);         chk("strb",        {0x40, 0x00, 0x00, 0x39});
+    a.ldrDreg(0, 0);      chk("ldr d,[x0]",  {0x00, 0x00, 0x40, 0xfd});
+    a.strDreg(0, 2);      chk("str d,[x2]",  {0x40, 0x00, 0x00, 0xfd});
+    a.ldrSreg(0, 0);      chk("ldr s,[x0]",  {0x00, 0x00, 0x40, 0xbd});
+    a.strSreg(0, 2);      chk("str s,[x2]",  {0x40, 0x00, 0x00, 0xbd});
+    a.fmovDX(0, 0);       chk("fmov d0,x0",  {0x00, 0x00, 0x67, 0x9e});
+    a.fmovXD(0, 0);       chk("fmov x0,d0",  {0x00, 0x00, 0x66, 0x9e});
+    a.fmovDD(0, 1);       chk("fmov d0,d1",  {0x20, 0x40, 0x60, 0x1e});
+    a.faddD(0, 0, 1);     chk("fadd",        {0x00, 0x28, 0x61, 0x1e});
+    a.fsubD(0, 0, 1);     chk("fsub",        {0x00, 0x38, 0x61, 0x1e});
+    a.fmulD(0, 0, 1);     chk("fmul",        {0x00, 0x08, 0x61, 0x1e});
+    a.fdivD(0, 0, 1);     chk("fdiv",        {0x00, 0x18, 0x61, 0x1e});
+    a.fcvtSD(0, 0);       chk("fcvt s,d",    {0x00, 0x40, 0x62, 0x1e});
+    a.fcvtDS(0, 0);       chk("fcvt d,s",    {0x00, 0xc0, 0x22, 0x1e});
+    a.scvtfD(0, 0);       chk("scvtf",       {0x00, 0x00, 0x62, 0x9e});
+    a.blr(9);             chk("blr x9",      {0x20, 0x01, 0x3f, 0xd6});
+    a.retI();             chk("ret",         {0xc0, 0x03, 0x5f, 0xd6});
+    a.subSpImm(16);       chk("sub sp,#16",  {0xff, 0x43, 0x00, 0xd1});
+    a.addSpImm(16);       chk("add sp,#16",  {0xff, 0x43, 0x00, 0x91});
+    a.subSpImm(4080);     chk("sub sp,#4080",{0xff, 0xc3, 0x3f, 0xd1});
+    a.stpPreX(29, 30);    chk("stp x29,x30", {0xfd, 0x7b, 0xbf, 0xa9});
+    a.stpPreX(19, 20);    chk("stp x19,x20", {0xf3, 0x53, 0xbf, 0xa9});
+    a.stpPreD(8, 9);      chk("stp d8,d9",   {0xe8, 0x27, 0xbf, 0x6d});
+    a.ldpPostX(29, 30);   chk("ldp x29,x30", {0xfd, 0x7b, 0xc1, 0xa8});
+    a.ldpPostD(8, 9);     chk("ldp d8,d9",   {0xe8, 0x27, 0xc1, 0x6c});
+    if (ok) err.clear();
+    return ok;
+#else
+    (void)err; return true;   // encoders not compiled on this host
+#endif
+}
 
 // ── SsaProgram wrapper ────────────────────────────────────────────────────────────
 struct SsaProgram::Impl {
     Fn fn;
-#if VGRE_SSA_X64
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
     void* code = nullptr;      // mmap'd W^X machine code (null ⇒ use the evaluator)
     size_t codeSize = 0;
     SsaFn nativeFn = nullptr;
@@ -1346,7 +1782,7 @@ struct SsaProgram::Impl {
 SsaProgram::SsaProgram() : p_(new Impl) {}
 SsaProgram::~SsaProgram() = default;
 bool SsaProgram::usedNative() const {
-#if VGRE_SSA_X64
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
     return p_->nativeFn != nullptr;
 #else
     return false;
@@ -1387,6 +1823,41 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
         }
     }
 #endif
+#if VGRE_SSA_ARM64
+    // AArch64 native emission is OPT-IN (VGRE_SSA_ARM_NATIVE=1) until validated on real
+    // ARM hardware — see the guard comment up top. Same best-effort contract: on any
+    // unsupported op build() bails and launch() uses the (identical) evaluator.
+    if (std::getenv("VGRE_SSA_ARM_NATIVE")) {
+        Arm64Asm asmb(prog->p_->fn);
+        if (asmb.build() && !asmb.c.empty()) {
+            size_t sz = ((asmb.c.size() + 4095) / 4096) * 4096;
+#if defined(__APPLE__)
+            // Apple Silicon: MAP_JIT memory, per-thread W^X toggle, and an explicit
+            // I-cache flush (mandatory for self-modifying code on ARM).
+            void* mem = mmap(nullptr, sz, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+            if (mem != MAP_FAILED) {
+                pthread_jit_write_protect_np(0);
+                std::memcpy(mem, asmb.c.data(), asmb.c.size());
+                pthread_jit_write_protect_np(1);
+                sys_icache_invalidate(mem, asmb.c.size());
+                prog->p_->code = mem; prog->p_->codeSize = sz;
+                prog->p_->nativeFn = reinterpret_cast<SsaFn>(mem);
+            }
+#else
+            // ARM Linux: RW → RX via mprotect, then flush the I-cache.
+            void* mem = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (mem != MAP_FAILED) {
+                std::memcpy(mem, asmb.c.data(), asmb.c.size());
+                if (mprotect(mem, sz, PROT_READ | PROT_EXEC) == 0) {
+                    __builtin___clear_cache(reinterpret_cast<char*>(mem), reinterpret_cast<char*>(mem) + asmb.c.size());
+                    prog->p_->code = mem; prog->p_->codeSize = sz;
+                    prog->p_->nativeFn = reinterpret_cast<SsaFn>(mem);
+                } else { munmap(mem, sz); }
+            }
+#endif
+        }
+    }
+#endif
     return prog;
 }
 
@@ -1394,7 +1865,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
     const Fn& fn = p_->fn;
     if (numArgs < (int)fn.ptypes.size()) return false;
     const uint32_t bx = block.x, by = block.y, bz = block.z;
-#if VGRE_SSA_X64
+#if VGRE_SSA_X64 || VGRE_SSA_ARM64
     if (p_->nativeFn) {
         // Pre-decode each parameter into a uniform 8-byte value (shared by all threads).
         std::vector<int64_t> pvals(fn.ptypes.size(), 0);
