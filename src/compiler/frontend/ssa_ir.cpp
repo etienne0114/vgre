@@ -776,24 +776,71 @@ struct X64Asm {
         }
     }
 
-    explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()) {}
+    explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()), vreg((size_t)f.vals.size(), -1) {}
     void bad() { ok = false; }
+
+    // Local register allocation: give block-local integer values (all uses in their
+    // def block, never a phi operand) a callee-saved register r12–r15 for their live
+    // range; everything else stays in a memory slot. Callee-saved ⇒ safe across the
+    // emitter's helper calls, so no spill-around-call handling is needed.
+    void allocateRegs() {
+        std::vector<int> defBlk(nvals, -1);
+        for (int b_ = 0; b_ < (int)fn.bbs.size(); ++b_) for (int id : fn.bbs[b_].insts) defBlk[id] = b_;
+        std::vector<char> nonLocal(nvals, 0);
+        for (int b_ = 0; b_ < (int)fn.bbs.size(); ++b_) for (int id : fn.bbs[b_].insts) {
+            const Inst& in = fn.vals[id];
+            if (in.op == Op::Phi) { for (int op : in.a) nonLocal[op] = 1; continue; }   // phi operands: keep in slots
+            for (int op : in.a) if (defBlk[op] != b_) nonLocal[op] = 1;                  // used outside its def block
+        }
+        for (int b_ = 0; b_ < (int)fn.bbs.size(); ++b_) {
+            const auto& insts = fn.bbs[b_].insts;
+            // last position (index in this block) at which each value is used as an operand.
+            std::unordered_map<int, int> lastUse;
+            for (int p = 0; p < (int)insts.size(); ++p) for (int op : fn.vals[insts[p]].a) lastUse[op] = p;
+            std::vector<int> freeRegs = {12, 13, 14, 15};
+            std::vector<std::pair<int, int>> active;   // (lastUsePos, valueId)
+            for (int p = 0; p < (int)insts.size(); ++p) {
+                for (size_t a = 0; a < active.size();) {                                 // expire dead values
+                    if (active[a].first < p) { freeRegs.push_back(vreg[active[a].second]); active.erase(active.begin() + a); }
+                    else ++a;
+                }
+                int id = insts[p];
+                const Inst& in = fn.vals[id];
+                const bool eligible = in.op != Op::Phi && !nonLocal[id] && lastUse.count(id) &&
+                                      (in.ty.base == Type::Int || in.ty.base == Type::Long || in.ty.base == Type::Char ||
+                                       in.ty.base == Type::Short || in.ty.base == Type::Bool || in.ty.isPointer());
+                if (eligible && !freeRegs.empty()) {
+                    int r = freeRegs.back(); freeRegs.pop_back();
+                    vreg[id] = r; active.push_back({lastUse[id], id});
+                }
+            }
+        }
+    }
     void b(uint8_t x) { c.push_back(x); }
     void d32(uint32_t v) { for (int i = 0; i < 4; ++i) b((uint8_t)(v >> (8 * i))); }
     void d64(uint64_t v) { for (int i = 0; i < 8; ++i) b((uint8_t)(v >> (8 * i))); }
 
-    int slot(int id) const { return -(16 + id * 8); }
-    int temp(int i) const { return -(16 + (nvals + i) * 8); }
+    // Slots sit below the 4 callee-saved GPRs (r12–r15) and rbx pushed in the prologue.
+    int slot(int id) const { return -(48 + id * 8); }
+    int temp(int i) const { return -(48 + (nvals + i) * 8); }
     void modRbp(int rg, int disp) { b((uint8_t)(0x80 | ((rg & 7) << 3) | 5)); d32((uint32_t)disp); }
+
+    // mov dst, src (64-bit), for registers 0..15 (REX.R for a high src, REX.B for a high dst).
+    void movReg(int dst, int src) {
+        b((uint8_t)(0x48 | ((src >= 8) ? 0x04 : 0) | ((dst >= 8) ? 0x01 : 0)));
+        b(0x89); b((uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7)));
+    }
+    std::vector<int> vreg;   // per value: a register 12..15 if allocated, else -1 (slot)
 
     // GPR (64-bit) and XMM (double) load/store to an rbp-relative displacement.
     void ldGd(int rg, int disp) { b(0x48); b(0x8B); modRbp(rg, disp); }
     void stGd(int rg, int disp) { b(0x48); b(0x89); modRbp(rg, disp); }
     void ldXd(int x, int disp)  { b(0xF2); b(0x0F); b(0x10); modRbp(x, disp); }
     void stXd(int x, int disp)  { b(0xF2); b(0x0F); b(0x11); modRbp(x, disp); }
-    void ldG(int rg, int id) { ldGd(rg, slot(id)); }
-    void stG(int rg, int id) { stGd(rg, slot(id)); }
-    void ldX(int x, int id)  { ldXd(x, slot(id)); }
+    // A register-resident value is copied to/from scratch; otherwise it uses its slot.
+    void ldG(int rg, int id) { if (vreg[id] >= 0) movReg(rg, vreg[id]); else ldGd(rg, slot(id)); }
+    void stG(int rg, int id) { if (vreg[id] >= 0) movReg(vreg[id], rg); else stGd(rg, slot(id)); }
+    void ldX(int x, int id)  { ldXd(x, slot(id)); }   // floats are never register-allocated
     void stX(int x, int id)  { stXd(x, slot(id)); }
 
     void movImm(int rg, uint64_t v) { b(0x48); b((uint8_t)(0xB8 | (rg & 7))); d64(v); }
@@ -971,15 +1018,21 @@ struct X64Asm {
         }
     }
 
-    void emitEpilogue() { b(0x48); b(0x81); b(0xC4); d32((uint32_t)frame); b(0x5B); b(0x5D); b(0xC3); }
+    void emitEpilogue() {
+        b(0x48); b(0x81); b(0xC4); d32((uint32_t)frame);                        // add rsp,frame
+        b(0x41); b(0x5F); b(0x41); b(0x5E); b(0x41); b(0x5D); b(0x41); b(0x5C);  // pop r15; r14; r13; r12
+        b(0x5B); b(0x5D); b(0xC3);                                              // pop rbx; pop rbp; ret
+    }
 
     bool build() {
+        allocateRegs();
         const int n = (int)fn.bbs.size();
         int maxTemps = 0;
         for (auto& bb : fn.bbs) { int p = 0; for (int id : bb.insts) { if (fn.vals[id].op == Op::Phi) ++p; else break; } if (p > maxTemps) maxTemps = p; }
         const int need = (nvals + maxTemps) * 8;
         frame = ((need + 15) / 16) * 16 + 8;         // keep rsp 16-aligned at calls
         b(0x55); b(0x48); b(0x89); b(0xE5); b(0x53);  // push rbp; mov rbp,rsp; push rbx
+        b(0x41); b(0x54); b(0x41); b(0x55); b(0x41); b(0x56); b(0x41); b(0x57);   // push r12; r13; r14; r15
         b(0x48); b(0x81); b(0xEC); d32((uint32_t)frame);   // sub rsp,frame
         b(0x48); b(0x89); b(0xFB);                    // mov rbx,rdi
         off.assign(n, 0);

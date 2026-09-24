@@ -208,17 +208,21 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      `SsaProgram::launch()` runs the emitted code (`usedNative()` reports it), matching
      the compiled tier bit-for-bit (`test_ssa_ir.cpp`, native probe). x86-64/Linux;
      other hosts keep running the portable evaluator, so Tier-2 works everywhere.
-   - **Increment 5 (started) 🚧**: register optimization. A **redundant-load-elimination
-     peephole** now keeps each op's result live in rax/xmm0 and skips reloading it as
-     the next op's first operand — provably correct (elides only when the value is
-     definitely in-register), cutting the slot-based emitter's dominant memory traffic
-     on expression chains. Full **linear-scan register allocation** (values held in
-     callee-saved registers across their live ranges, with spill-around-call handling)
-     is the remaining perf step.
-   - **Remaining**: linear-scan regalloc; an AArch64 emitter; cross-block GVN; `switch`;
-     and wiring Tier-2 into the runtime dispatch as `VGRE_EXEC_BACKEND=ssa` (the
-     execution-backend seam is PTX-based, so this needs a small AST→SSA adapter — the
-     backend itself is complete and exercised through `SsaProgram`).
+   - **Increment 5 ✅ DONE**: register optimization. (a) A **redundant-load-elimination
+     peephole** keeps each op's result live in rax/xmm0 and skips reloading it as the
+     next op's first operand. (b) **Local register allocation** — block-local integer
+     values (all uses in their def block, never a phi operand) are held in the
+     callee-saved registers **r12–r15** across their live range (linear-scan per block;
+     callee-saved ⇒ safe across the emitter's helper calls, no spill-around-call), so
+     index math, comparisons, and address computation stay in registers instead of
+     memory slots. Both are provably correct and verified bit-exact across the whole
+     `test_ssa_ir` suite (loops, break/continue, do-while, if/else, optimizer, LICM),
+     with the native path still running.
+   - **Remaining**: global linear-scan (loop-carried/phi values into callee-saved regs
+     across blocks — needs cross-block live intervals); float register allocation
+     (XMM, spill-around-call); an AArch64 emitter; cross-block GVN; `switch`; and wiring
+     Tier-2 into the runtime dispatch as `VGRE_EXEC_BACKEND=ssa` (the execution-backend
+     seam is PTX-based → a small AST→SSA adapter; the backend is complete via `SsaProgram`).
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries
