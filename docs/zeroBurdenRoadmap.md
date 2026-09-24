@@ -199,11 +199,20 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      loops via back-edges → hoist pure invariants to the preheader). Pure IR→IR,
      run in `SsaProgram::compile`. `test_ssa_ir.cpp` checks each stays bit-exact vs
      the reference tiers AND shrinks/hoists (fold 32→22, cse-dce 28→23, licm hoists).
-   - **Remaining**: cross-block GVN (dominance is now available); `switch`;
-     increment 4 — SSA-destruction + register allocation + an x86-64 / AArch64
-     machine-code emitter, then wire it as `VGRE_EXEC_BACKEND=ssa`. The IR, control
-     flow, optimizer, and evaluator are complete and **portable to every platform**;
-     the machine-code emitter is the remaining (arch-specific) peak-throughput layer.
+   - **Increment 4 ✅ DONE**: **native x86-64 machine-code emission**. A slot-per-value
+     emitter lowers the SSA to real machine code (mmap W^X): hot ops (int/float
+     arithmetic, compares, load/store, branches, phi edge-copies, const/param/tid,
+     select) inlined; the tricky ones (float↔int saturating casts, integer div/mod,
+     float compares, math intrinsics) delegated to bit-exact C-ABI helpers. Control
+     flow is block-structured with phi destruction, so ifs and loops both compile.
+     `SsaProgram::launch()` runs the emitted code (`usedNative()` reports it), matching
+     the compiled tier bit-for-bit (`test_ssa_ir.cpp`, native probe). x86-64/Linux;
+     other hosts keep running the portable evaluator, so Tier-2 works everywhere.
+   - **Remaining**: register allocation (the emitter is slot-based/correct — regalloc
+     is a perf refinement); an AArch64 emitter; cross-block GVN; `switch`; and wiring
+     Tier-2 into the runtime dispatch as `VGRE_EXEC_BACKEND=ssa` (the execution-backend
+     seam is PTX-based, so this needs a small AST→SSA adapter — the backend itself is
+     complete and exercised through `SsaProgram`).
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries

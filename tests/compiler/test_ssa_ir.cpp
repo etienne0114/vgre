@@ -127,7 +127,23 @@ int main() {
     checkVsInterp("continue", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) continue; acc+=v; } y[i]=acc; } })", 96, 16);
     checkVsInterp("do-while", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; int k=0; do { acc += x[i*m+k]; k++; } while(k<m); y[i]=acc; } })", 96, 16);
 
-    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering, phi, full control flow, verifier, evaluator, const-fold/GVN/DCE) == reference tiers\n");
+    // Native x86-64 emission: on Linux/x86-64 launch() must run real machine code
+    // (not the evaluator fallback), and it must still match the compiled tier.
+    {
+        std::string err;
+        auto sp = SsaProgram::compile("extern \"C\" __global__ void k(const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<i%8+1;k++) acc+=x[i]*2.0f; y[i]=acc; } }", "k", err);
+        if (!sp) { std::printf("FAIL: native probe compile: %s\n", err.c_str()); ++g_fail; }
+        else {
+#if defined(__x86_64__) && defined(__linux__)
+            if (!sp->usedNative()) { std::printf("FAIL: expected native x86-64 code on this host\n"); ++g_fail; }
+            else std::printf("  native: launch() runs emitted x86-64 machine code\n");
+#else
+            std::printf("  native: not x86-64/Linux — SSA runs on the portable evaluator\n");
+#endif
+        }
+    }
+
+    if (g_fail == 0) std::printf("PASS: Tier-2 SSA IR (lowering, phi, full control flow, verifier, evaluator, const-fold/GVN/DCE, native x86-64 emission) == reference tiers\n");
     else std::printf("FAILED: %d check(s)\n", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

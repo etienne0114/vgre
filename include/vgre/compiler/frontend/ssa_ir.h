@@ -41,6 +41,10 @@ public:
     // (the correctness oracle for the IR + lowering until native emission lands).
     bool launch(Extent grid, Extent block, void* const* args, int numArgs);
 
+    // True if the last compile produced native machine code (x86-64/Linux) that
+    // launch() will run; false means launch() uses the portable evaluator.
+    bool usedNative() const;
+
     // Human-readable IR dump (for tests / debugging).
     std::string dump() const;
 

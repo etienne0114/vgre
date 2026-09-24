@@ -22,6 +22,16 @@
 #include <unordered_set>
 #include <vector>
 
+// Tier-2 native machine-code emission is available on x86-64 Linux (SysV ABI, mmap
+// W^X). Everywhere else the portable reference evaluator runs the SSA, so Tier-2
+// still works — just not as native code.
+#if defined(__x86_64__) && defined(__linux__)
+#include <sys/mman.h>
+#define VGRE_SSA_X64 1
+#else
+#define VGRE_SSA_X64 0
+#endif
+
 namespace vgre {
 namespace compiler {
 namespace frontend {
@@ -696,16 +706,306 @@ static void licm(Fn& fn) {
 
 static void runOpt(Fn& fn) { constFold(fn); localGvn(fn); licm(fn); constFold(fn); dce(fn); }
 
+// ── Tier-2 native machine-code emission (x86-64 / Linux) ──────────────────────────
+#if VGRE_SSA_X64
+// Per-thread launch context. `pvals` holds one 8-byte value per kernel parameter,
+// pre-decoded by the launcher (pointer as-is; int sign/zero-extended; float/double as
+// the double's bit pattern) so the emitted code reads a uniform slot. `idx` is
+// tid[3],ctaid[3],ntid[3],nctaid[3].
+struct ThreadCtx { const int64_t* pvals; uint32_t idx[12]; };
+
+// Bit-exact C-ABI helpers for the ops the emitter delegates (same math the evaluator
+// uses), so the native result matches the reference tier exactly.
+extern "C" {
+int64_t vgre_ssa_sat(double d, int base, int uns) { Type t; t.base = (Type::Base)base; t.isUnsigned = uns != 0; return satFloatToInt(d, t); }
+int64_t vgre_ssa_idiv(int64_t a, int64_t bb, int op, int uns) {   // op 0=div 1=mod
+    if (bb == 0) return 0;
+    if (uns) return (int64_t)(op ? (uint64_t)a % (uint64_t)bb : (uint64_t)a / (uint64_t)bb);
+    if (bb == -1 && a == INT64_MIN) return op ? 0 : INT64_MIN;
+    return op ? a % bb : a / bb;
+}
+int vgre_ssa_fcmp(int pred, double a, double b) {
+    switch (pred) { case 0: return a < b; case 1: return a <= b; case 2: return a > b;
+                    case 3: return a >= b; case 4: return a == b; default: return a != b; }
+}
+double vgre_ssa_m1(int fn, double x) {
+    switch (fn) { case 0: return std::sqrt(x); case 1: return std::fabs(x); case 2: return std::exp(x);
+                  case 3: return std::log(x); case 4: return std::sin(x); case 5: return std::cos(x);
+                  case 6: return std::floor(x); case 7: return std::ceil(x); case 8: return std::tanh(x); }
+    return x;
+}
+double vgre_ssa_m2(int fn, double x, double y) { return fn ? std::fmax(x, y) : std::fmin(x, y); }
+}
+
+using SsaFn = void (*)(ThreadCtx*);
+
+// A minimal x86-64 encoder + slot-based SSA→machine-code lowering. Every SSA value
+// lives in an 8-byte rbp-relative slot; each instruction loads operands into fixed
+// scratch registers (rax/rcx, xmm0/xmm1), computes, and stores its result. Hot ops
+// are inlined; the tricky ones call the helpers above via the SysV ABI.
+struct X64Asm {
+    std::vector<uint8_t> c;
+    const Fn& fn;
+    int nvals, frame = 0;
+    std::vector<size_t> off;                       // block start offsets (filled while emitting)
+    std::vector<std::pair<size_t, int>> jpatch;    // (rel32 site, target block)
+    bool ok = true;
+
+    explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()) {}
+    void bad() { ok = false; }
+    void b(uint8_t x) { c.push_back(x); }
+    void d32(uint32_t v) { for (int i = 0; i < 4; ++i) b((uint8_t)(v >> (8 * i))); }
+    void d64(uint64_t v) { for (int i = 0; i < 8; ++i) b((uint8_t)(v >> (8 * i))); }
+
+    int slot(int id) const { return -(16 + id * 8); }
+    int temp(int i) const { return -(16 + (nvals + i) * 8); }
+    void modRbp(int rg, int disp) { b((uint8_t)(0x80 | ((rg & 7) << 3) | 5)); d32((uint32_t)disp); }
+
+    // GPR (64-bit) and XMM (double) load/store to an rbp-relative displacement.
+    void ldGd(int rg, int disp) { b(0x48); b(0x8B); modRbp(rg, disp); }
+    void stGd(int rg, int disp) { b(0x48); b(0x89); modRbp(rg, disp); }
+    void ldXd(int x, int disp)  { b(0xF2); b(0x0F); b(0x10); modRbp(x, disp); }
+    void stXd(int x, int disp)  { b(0xF2); b(0x0F); b(0x11); modRbp(x, disp); }
+    void ldG(int rg, int id) { ldGd(rg, slot(id)); }
+    void stG(int rg, int id) { stGd(rg, slot(id)); }
+    void ldX(int x, int id)  { ldXd(x, slot(id)); }
+    void stX(int x, int id)  { stXd(x, slot(id)); }
+
+    void movImm(int rg, uint64_t v) { b(0x48); b((uint8_t)(0xB8 | (rg & 7))); d64(v); }
+    void movImm32(int rg, uint32_t v) { b(0x48); b(0xC7); b((uint8_t)(0xC0 | (rg & 7))); d32(v); }
+    void rr(uint8_t op, int dst, int src) { b(0x48); b(op); b((uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7))); }
+    void addRR(int d, int s) { rr(0x01, d, s); }
+    void subRR(int d, int s) { rr(0x29, d, s); }
+    void andRR(int d, int s) { rr(0x21, d, s); }
+    void orRR(int d, int s)  { rr(0x09, d, s); }
+    void xorRR(int d, int s) { rr(0x31, d, s); }
+    void movRR(int d, int s) { rr(0x89, d, s); }
+    void cmpRR(int d, int s) { rr(0x39, d, s); }
+    void testRR(int d, int s) { rr(0x85, d, s); }
+    void imulRR(int d, int s) { b(0x48); b(0x0F); b(0xAF); b((uint8_t)(0xC0 | ((d & 7) << 3) | (s & 7))); }
+    void negR(int r) { b(0x48); b(0xF7); b((uint8_t)(0xD8 | (r & 7))); }
+    void notR(int r) { b(0x48); b(0xF7); b((uint8_t)(0xD0 | (r & 7))); }
+    void shlCl(int r) { b(0x48); b(0xD3); b((uint8_t)(0xE0 | (r & 7))); }
+    void sarCl(int r) { b(0x48); b(0xD3); b((uint8_t)(0xF8 | (r & 7))); }
+    void shrCl(int r) { b(0x48); b(0xD3); b((uint8_t)(0xE8 | (r & 7))); }
+    void movRAXtoRCX() { movRR(1, 0); }
+    // signed/unsigned extend eax's low `bytes` into rax
+    void extRax(int bytes, bool uns) {
+        if (bytes >= 8) return;
+        if (bytes == 4) { if (uns) { b(0x89); b(0xC0); } else { b(0x48); b(0x63); b(0xC0); } return; }
+        b(0x0F); b((uint8_t)(bytes == 1 ? (uns ? 0xB6 : 0xBE) : (uns ? 0xB7 : 0xBF))); b(0xC0);
+    }
+    // float: xmm0 op= xmm1 (add 58 / sub 5C / mul 59 / div 5E)
+    void fArith0(uint8_t op) { b(0xF2); b(0x0F); b(op); b(0xC1); }
+    void cvtsi2sd0() { b(0xF2); b(0x48); b(0x0F); b(0x2A); b(0xC0); }   // xmm0 = (double)rax
+    void cvtsd2ss0() { b(0xF2); b(0x0F); b(0x5A); b(0xC0); }            // xmm0 = (float)xmm0
+    void cvtss2sd0() { b(0xF3); b(0x0F); b(0x5A); b(0xC0); }
+    void movqX0R(int r) { b(0x66); b(0x48); b(0x0F); b(0x6E); b((uint8_t)(0xC0 | r)); }   // xmm0 = rax bits (r=0)
+    void movqRX0() { b(0x66); b(0x48); b(0x0F); b(0x7E); b(0xC0); }     // rax = xmm0 bits
+    // set rax = (rax <cc> 0)?1:0 after a cmp (cc byte for setcc)
+    void setcc(uint8_t cc) { b(0x0F); b(cc); b(0xC0); b(0x0F); b(0xB6); b(0xC0); }   // setcc al; movzx eax,al
+    void call(uint64_t addr) { movImm(0, addr); b(0xFF); b(0xD0); }    // mov rax,addr; call rax
+    // mov reg32, imm32 (zero-extends into reg64) — for small integer helper args.
+    void movImmReg(int rg, uint32_t v) { if (rg >= 8) b(0x41); b((uint8_t)(0xB8 | (rg & 7))); d32(v); }
+
+    bool isFloatVal(int id) const { return fn.vals[id].ty.isFloating(); }
+    void jmpBlock(int blk) { b(0xE9); jpatch.push_back({c.size(), blk}); d32(0); }
+
+    // Phi edge-copies pred→succ: two-phase (operands→temps, temps→phi slots).
+    void phiCopies(int pred, int succ) {
+        std::vector<std::pair<int, int>> pr;   // (phiId, operandId)
+        for (int id : fn.bbs[succ].insts) {
+            const Inst& in = fn.vals[id];
+            if (in.op != Op::Phi) break;
+            for (size_t k = 0; k < in.phiPred.size(); ++k) if (in.phiPred[k] == pred) { pr.push_back({id, in.a[k]}); break; }
+        }
+        for (size_t i = 0; i < pr.size(); ++i) { ldG(0, pr[i].second); stGd(0, temp((int)i)); }
+        for (size_t i = 0; i < pr.size(); ++i) { ldGd(0, temp((int)i)); stG(0, pr[i].first); }
+    }
+
+    int mathId(const std::string& s) const {
+        std::string g = (!s.empty() && s.back() == 'f') ? s.substr(0, s.size() - 1) : s;
+        if (g == "sqrt") return 0; if (g == "fabs") return 1; if (g == "exp") return 2; if (g == "log") return 3;
+        if (g == "sin") return 4; if (g == "cos") return 5; if (g == "floor") return 6; if (g == "ceil") return 7;
+        if (g == "tanh") return 8; return -1;
+    }
+    void narrowIfFloat(const Type& t) { if (t.base == Type::Float) { cvtsd2ss0(); cvtss2sd0(); } }   // xmm0 → float32-rounded
+
+    void emitInst(int blk, int id) {
+        (void)blk;
+        const Inst& in = fn.vals[id];
+        switch (in.op) {
+            case Op::Phi: return;
+            case Op::ConstI: { movImm(0, (uint64_t)coerce(SI(in.ci), in.ty).i); stG(0, id); return; }
+            case Op::ConstF: { double d = coerce(SF(in.cf), in.ty).d; uint64_t bits; std::memcpy(&bits, &d, 8); movImm(0, bits); stG(0, id); return; }
+            case Op::Param: { b(0x48); b(0x8B); b(0x03);                          // mov rax,[rbx]  (pvals)
+                              b(0x48); b(0x8B); b(0x80); d32((uint32_t)(in.paramIdx * 8));   // mov rax,[rax+p*8]
+                              stG(0, id); return; }
+            case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: {
+                int base = in.op == Op::Tid ? 0 : in.op == Op::Ctaid ? 3 : in.op == Op::Ntid ? 6 : 9;
+                b(0x8B); b(0x83); d32((uint32_t)(8 + (base + in.dim) * 4));       // mov eax,[rbx+off] (zero-extends)
+                stG(0, id); return;
+            }
+            case Op::Bin: {
+                if (in.ty.isFloating()) {
+                    ldX(0, in.a[0]); ldX(1, in.a[1]);
+                    uint8_t op = in.s == "+" ? 0x58 : in.s == "-" ? 0x5C : in.s == "*" ? 0x59 : in.s == "/" ? 0x5E : 0;
+                    if (!op) { bad(); return; }
+                    fArith0(op); narrowIfFloat(in.ty); stX(0, id); return;
+                }
+                const std::string& o = in.s;
+                if (o == "/" || o == "%") {
+                    ldG(7, in.a[0]); ldG(6, in.a[1]);                             // rdi=a, rsi=b
+                    movImmReg(2, o == "%" ? 1 : 0); movImmReg(1, in.ty.isUnsigned ? 1 : 0);   // edx=op, ecx=uns
+                    call((uint64_t)&vgre_ssa_idiv); stG(0, id); return;
+                }
+                if (o == "&&" || o == "||") {
+                    ldG(0, in.a[0]); testRR(0, 0); setcc(0x95); stGd(0, temp(0));  // (a!=0)
+                    ldG(0, in.a[1]); testRR(0, 0); setcc(0x95); ldGd(1, temp(0));  // rax=(b!=0), rcx=(a!=0)
+                    if (o == "&&") andRR(0, 1); else orRR(0, 1); stG(0, id); return;
+                }
+                ldG(0, in.a[0]); ldG(1, in.a[1]);
+                if (o == "+") addRR(0, 1); else if (o == "-") subRR(0, 1); else if (o == "*") imulRR(0, 1);
+                else if (o == "&") andRR(0, 1); else if (o == "|") orRR(0, 1); else if (o == "^") xorRR(0, 1);
+                else if (o == "<<") shlCl(0); else if (o == ">>") { if (in.ty.isUnsigned) shrCl(0); else sarCl(0); }
+                else { bad(); return; }
+                extRax(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
+            }
+            case Op::Cmp: {
+                bool fl = isFloatVal(in.a[0]) || isFloatVal(in.a[1]);
+                const std::string& o = in.s;
+                int pred = o == "<" ? 0 : o == "<=" ? 1 : o == ">" ? 2 : o == ">=" ? 3 : o == "==" ? 4 : 5;
+                if (fl) {
+                    movImmReg(7, (uint32_t)pred); ldX(0, in.a[0]); ldX(1, in.a[1]);
+                    call((uint64_t)&vgre_ssa_fcmp); b(0x48); b(0x63); b(0xC0); stG(0, id); return;   // movsxd rax,eax
+                }
+                ldG(0, in.a[0]); ldG(1, in.a[1]); cmpRR(0, 1);
+                uint8_t cc = o == "<" ? 0x9C : o == "<=" ? 0x9E : o == ">" ? 0x9F : o == ">=" ? 0x9D : o == "==" ? 0x94 : 0x95;
+                setcc(cc); stG(0, id); return;
+            }
+            case Op::Un: {
+                if (in.s == "!") { ldG(0, in.a[0]); testRR(0, 0); setcc(0x94); stG(0, id); return; }
+                if (in.ty.isFloating()) { ldG(0, in.a[0]); movImm(1, 0x8000000000000000ull); xorRR(0, 1); stG(0, id); return; }  // sign flip
+                ldG(0, in.a[0]); if (in.s == "-") negR(0); else notR(0); extRax(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
+            }
+            case Op::Sel: {
+                ldG(0, in.a[2]); stG(0, id);                                     // res = else
+                ldG(0, in.a[0]); testRR(0, 0);
+                b(0x0F); b(0x84); size_t js = c.size(); d32(0);                  // jz skip
+                ldG(0, in.a[1]); stG(0, id);                                     // res = then
+                uint32_t rel = (uint32_t)(c.size() - (js + 4)); std::memcpy(&c[js], &rel, 4);
+                return;
+            }
+            case Op::Cast: {
+                const Type& t = in.ty; int op0 = in.a[0];
+                if (t.isFloating()) {
+                    if (isFloatVal(op0)) { ldX(0, op0); narrowIfFloat(t); } else { ldG(0, op0); cvtsi2sd0(); narrowIfFloat(t); }
+                    stX(0, id); return;
+                }
+                if (t.isPointer()) { ldG(0, op0); stG(0, id); return; }
+                if (isFloatVal(op0)) {                                           // float → int (saturating helper)
+                    ldX(0, op0); movImmReg(7, (uint32_t)t.base); movImmReg(6, t.isUnsigned ? 1 : 0);
+                    call((uint64_t)&vgre_ssa_sat); stG(0, id); return;
+                }
+                ldG(0, op0); extRax(t.elemBytes(), t.isUnsigned); stG(0, id); return;   // int → int (width wrap)
+            }
+            case Op::Load: {
+                ldG(0, in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);  // rax = base + idx*bytes
+                const Type& t = in.ty;
+                if (t.isFloating()) {
+                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x10); b(0x00); } else { b(0xF3); b(0x0F); b(0x10); b(0x00); cvtss2sd0(); }
+                    stX(0, id); return;
+                }
+                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x8B); b(0x00); }
+                else if (t.elemBytes() == 4) { if (t.isUnsigned) { b(0x8B); b(0x00); } else { b(0x48); b(0x63); b(0x00); } }
+                else if (t.elemBytes() == 2) { b(0x0F); b(t.isUnsigned ? 0xB7 : 0xBF); b(0x00); }
+                else { b(0x0F); b(t.isUnsigned ? 0xB6 : 0xBE); b(0x00); }
+                stG(0, id); return;
+            }
+            case Op::Store: {
+                ldG(2, in.a[0]); ldG(1, in.a[1]); movImm(0, (uint64_t)in.elemBytes); imulRR(1, 0); addRR(2, 1);  // rdx = base + idx*bytes
+                const Type& t = in.ty;
+                if (t.isFloating()) {
+                    ldX(0, in.a[2]);
+                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x11); b(0x02); } else { cvtsd2ss0(); b(0xF3); b(0x0F); b(0x11); b(0x02); }
+                    return;
+                }
+                ldG(0, in.a[2]);
+                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x89); b(0x02); }
+                else if (t.elemBytes() == 4) { b(0x89); b(0x02); }
+                else if (t.elemBytes() == 2) { b(0x66); b(0x89); b(0x02); }
+                else { b(0x88); b(0x02); }
+                return;
+            }
+            case Op::CallMath: {
+                if (in.a.size() == 1) { ldX(0, in.a[0]); movImmReg(7, (uint32_t)mathId(in.s)); call((uint64_t)&vgre_ssa_m1); }
+                else { ldX(0, in.a[0]); ldX(1, in.a[1]); movImmReg(7, (in.s == "fmax" || in.s == "fmaxf") ? 1u : 0u); call((uint64_t)&vgre_ssa_m2); }
+                narrowIfFloat(in.ty); stX(0, id); return;
+            }
+            default: return;   // terminators handled by the block loop
+        }
+    }
+
+    void emitEpilogue() { b(0x48); b(0x81); b(0xC4); d32((uint32_t)frame); b(0x5B); b(0x5D); b(0xC3); }
+
+    bool build() {
+        const int n = (int)fn.bbs.size();
+        int maxTemps = 0;
+        for (auto& bb : fn.bbs) { int p = 0; for (int id : bb.insts) { if (fn.vals[id].op == Op::Phi) ++p; else break; } if (p > maxTemps) maxTemps = p; }
+        const int need = (nvals + maxTemps) * 8;
+        frame = ((need + 15) / 16) * 16 + 8;         // keep rsp 16-aligned at calls
+        b(0x55); b(0x48); b(0x89); b(0xE5); b(0x53);  // push rbp; mov rbp,rsp; push rbx
+        b(0x48); b(0x81); b(0xEC); d32((uint32_t)frame);   // sub rsp,frame
+        b(0x48); b(0x89); b(0xFB);                    // mov rbx,rdi
+        off.assign(n, 0);
+        for (int blk = 0; blk < n; ++blk) {
+            off[blk] = c.size();
+            const BB& bb = fn.bbs[blk];
+            for (size_t j = 0; j < bb.insts.size(); ++j) {
+                int id = bb.insts[j];
+                const Inst& in = fn.vals[id];
+                if (in.op == Op::Ret) { emitEpilogue(); break; }
+                if (in.op == Op::Br) { phiCopies(blk, in.bbT); jmpBlock(in.bbT); break; }
+                if (in.op == Op::CondBr) {
+                    ldG(0, in.a[0]); testRR(0, 0);
+                    b(0x0F); b(0x84); size_t js = c.size(); d32(0);            // jz to false edge
+                    phiCopies(blk, in.bbT); jmpBlock(in.bbT);
+                    uint32_t rel = (uint32_t)(c.size() - (js + 4)); std::memcpy(&c[js], &rel, 4);
+                    phiCopies(blk, in.bbF); jmpBlock(in.bbF);
+                    break;
+                }
+                emitInst(blk, id);
+                if (!ok) return false;
+            }
+        }
+        for (auto& jp : jpatch) { uint32_t rel = (uint32_t)(off[jp.second] - (jp.first + 4)); std::memcpy(&c[jp.first], &rel, 4); }
+        return ok;
+    }
+};
+#endif  // VGRE_SSA_X64
+
 }  // namespace
 
 // ── SsaProgram wrapper ────────────────────────────────────────────────────────────
 struct SsaProgram::Impl {
     Fn fn;
-    std::vector<std::string> pnames;   // (unused at runtime; args are positional)
+#if VGRE_SSA_X64
+    void* code = nullptr;      // mmap'd W^X machine code (null ⇒ use the evaluator)
+    size_t codeSize = 0;
+    SsaFn nativeFn = nullptr;
+    ~Impl() { if (code) munmap(code, codeSize); }
+#endif
 };
 
 SsaProgram::SsaProgram() : p_(new Impl) {}
 SsaProgram::~SsaProgram() = default;
+bool SsaProgram::usedNative() const {
+#if VGRE_SSA_X64
+    return p_->nativeFn != nullptr;
+#else
+    return false;
+#endif
+}
 int SsaProgram::numBlocks() const { return (int)p_->fn.bbs.size(); }
 int SsaProgram::numValues() const { return (int)p_->fn.vals.size(); }
 int SsaProgram::liveInsts() const { int n = 0; for (const auto& bb : p_->fn.bbs) n += (int)bb.insts.size(); return n; }
@@ -723,6 +1023,24 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
     if (optimize) { runOpt(lo.fn); if (!verify(lo.fn, err)) return nullptr; }
     std::unique_ptr<SsaProgram> prog(new SsaProgram());
     prog->p_->fn = std::move(lo.fn);
+#if VGRE_SSA_X64
+    // Best-effort: emit native machine code. On any unsupported op the emitter bails
+    // and launch() falls back to the (identical-semantics) evaluator.
+    {
+        X64Asm asmb(prog->p_->fn);
+        if (asmb.build() && !asmb.c.empty()) {
+            size_t sz = ((asmb.c.size() + 4095) / 4096) * 4096;
+            void* mem = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (mem != MAP_FAILED) {
+                std::memcpy(mem, asmb.c.data(), asmb.c.size());
+                if (mprotect(mem, sz, PROT_READ | PROT_EXEC) == 0) {
+                    prog->p_->code = mem; prog->p_->codeSize = sz;
+                    prog->p_->nativeFn = reinterpret_cast<SsaFn>(mem);
+                } else { munmap(mem, sz); }
+            }
+        }
+    }
+#endif
     return prog;
 }
 
@@ -730,6 +1048,31 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
     const Fn& fn = p_->fn;
     if (numArgs < (int)fn.ptypes.size()) return false;
     const uint32_t bx = block.x, by = block.y, bz = block.z;
+#if VGRE_SSA_X64
+    if (p_->nativeFn) {
+        // Pre-decode each parameter into a uniform 8-byte value (shared by all threads).
+        std::vector<int64_t> pvals(fn.ptypes.size(), 0);
+        for (size_t i = 0; i < fn.ptypes.size(); ++i) {
+            SVal pv = memLoad(reinterpret_cast<int64_t>(args[i]), fn.ptypes[i]);
+            if (fn.ptypes[i].isFloating()) { double d = pv.d; std::memcpy(&pvals[i], &d, 8); }
+            else pvals[i] = pv.i;
+        }
+        ThreadCtx ctx; ctx.pvals = pvals.data();
+        for (uint32_t gz = 0; gz < grid.z; ++gz)
+        for (uint32_t gy = 0; gy < grid.y; ++gy)
+        for (uint32_t gx = 0; gx < grid.x; ++gx)
+        for (uint32_t tz = 0; tz < bz; ++tz)
+        for (uint32_t ty = 0; ty < by; ++ty)
+        for (uint32_t tx = 0; tx < bx; ++tx) {
+            ctx.idx[0] = tx; ctx.idx[1] = ty; ctx.idx[2] = tz;
+            ctx.idx[3] = gx; ctx.idx[4] = gy; ctx.idx[5] = gz;
+            ctx.idx[6] = bx; ctx.idx[7] = by; ctx.idx[8] = bz;
+            ctx.idx[9] = grid.x; ctx.idx[10] = grid.y; ctx.idx[11] = grid.z;
+            p_->nativeFn(&ctx);
+        }
+        return true;
+    }
+#endif
     for (uint32_t gz = 0; gz < grid.z; ++gz)
     for (uint32_t gy = 0; gy < grid.y; ++gy)
     for (uint32_t gx = 0; gx < grid.x; ++gx)
