@@ -81,11 +81,12 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > threading requirement): the *optional* **Tier-2 SSA** backend is now
 > feature-complete for the scalar + shared-memory + warp subset (wired as
 > `VGRE_EXEC_BACKEND=ssa`, tier 3; native x86-64, opt-in AArch64, portable evaluator
-> elsewhere) — its remaining items are perf/hardware-gated: native machine-code for
-> the *warp* cooperative ops (shared/`__syncthreads` already emit native ucontext
-> fibers; warp ops defer to the correct-everywhere evaluator), and flipping ARM native
-> on after real-HW validation. Also: broader front-end coverage (vector/layered/mipmap
-> texture fetches; recursion).
+> elsewhere) — the **whole subset, including shared memory and every warp intrinsic,
+> now emits native x86-64 machine code** (`vgre_ssa_barrier`/`vgre_ssa_warp` on ucontext
+> fibers with a block + per-warp selective-release scheduler). Its remaining items are
+> hardware-gated only: flipping ARM native on after real-HW validation, and native
+> AArch64 codegen for the cooperative ops. Also: broader front-end coverage
+> (vector/layered/mipmap texture fetches; recursion).
 > **Function templates are now done** — `template<typename T>`/`template<int N>`
 > `__device__` helpers monomorphize on the from-scratch front-end (deduced/explicit/
 > non-type args, chained, pointer deduction), compiled tier == interpreter
@@ -133,7 +134,7 @@ self-contained HF reference forward is reproduced to ~2e-8 across
 {safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
 CPU path (batched prefill, unified int8 kernel, speculative decode).
 
-**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-20): 383/383 with LLVM, 363/363 LLVM-free — 100% green under full `-j`.**
+**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-24): 394/394 with LLVM, 374/374 LLVM-free — 100% green under full `-j`.**
 
 The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
 1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).

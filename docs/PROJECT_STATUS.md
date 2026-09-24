@@ -1,7 +1,7 @@
 # VGRE Project Status & Gap Analysis
 
 **Last Updated**: 2026-09-20 (front-end/backend differential-fuzzing hardening; test counts reconciled)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (**378 tests**, 100% green under full `-j`) on x86-64 Linux — the required CI job  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (**394 tests** with LLVM, **374** in the LLVM-free build, 100% green under full `-j`) on x86-64 Linux — the required CI job  
 **Build Status (Linux, LLVM-free)**: ✅ **CI-guarded zero-burden path** — a dedicated `linux-x86_64-llvm-free` job builds with `VGRE_ENABLE_JIT=OFF` + `VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**, running the **358-test** JIT-free subset (the ~20 JIT-only tests are gated out in CMake). Proves the lightweight, no-toolchain build stays green on every push  
 **Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64). Latest fix: the process-exit `recursive_mutex` abort (an `atexit` handler locking the `RuntimeEngine` singleton after its destruction — EINVAL on macOS libc++) resolved by a leaked, never-destroyed singleton  
 **Build Status (Windows)**: ✅ **CI-green** — builds and runs the full `ctest` suite on `windows-2022` (LLVM-18 tarball cached, clang-cl), confirmed on run 35325255176 (2026-09-18, Test step = success). The bring-up fixes: AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output. Still `continue-on-error` in the workflow (may be promoted to required after a few more consecutive green runs)  
@@ -77,8 +77,8 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ### 1.1 Linux (x86-64) — canonical
 
-**Verified on Linux (x86-64).** The full `ctest` suite (378 tests with LLVM,
-358 in the LLVM-free build) passes on Linux, exercised with property-based
+**Verified on Linux (x86-64).** The full `ctest` suite (394 tests with LLVM,
+374 in the LLVM-free build) passes on Linux, exercised with property-based
 exploration, differential fuzzing of the CUDA-C front-end against both execution
 tiers, ThreadSanitizer race analysis, and static-destruction verification.
 

@@ -204,7 +204,7 @@ int main() {
         CHECK(bad == 0, "warp __shfl_sync broadcast is bit-exact vs reference");
         int wt = tierOf("warpb", wid);
         if (wt >= 0) CHECK(wt == 3, "warp shuffle kernel runs on the Tier-2 SSA backend (tier 3)");
-        std::printf("  warpb : bad=%d/%d  tier=%d (expected 3 = SSA; warp intrinsics on the evaluator)\n", bad, NB, wt);
+        std::printf("  warpb : bad=%d/%d  tier=%d (expected 3 = SSA; warp intrinsics native on x86-64/Linux, else evaluator)\n", bad, NB, wt);
         vgre_free(dx); vgre_free(dy);
     }
 

@@ -30,10 +30,11 @@ backend.
 > feature-complete for the scalar + shared-memory + warp subset — full control flow
 > (incl. `switch`), `__device__` inlining, local arrays, `__shared__`/`__syncthreads`,
 > and the **full warp-intrinsic surface** (`__shfl_*`, vote, `__reduce_*_sync`, match,
-> `__syncwarp`, `__activemask`). Its cooperative shared/warp ops run on a per-block
-> evaluator on every host (native ucontext fibers for shared/barrier on x86-64/AArch64);
-> the warp intrinsics are held bit-exact vs the interpreter by `test_ssa_ir.cpp`. So the
-> warp rows below run on **all** tiers.
+> `__syncwarp`, `__activemask`). On **x86-64/Linux** the whole subset — including shared
+> memory and every warp intrinsic — emits **native machine code** (`vgre_ssa_barrier`/
+> `vgre_ssa_warp` on ucontext fibers, with a block + per-warp selective-release scheduler);
+> other hosts run the portable per-block evaluator. Held bit-exact vs the interpreter by
+> `test_ssa_ir.cpp`. So the warp rows below run on **all** tiers.
 
 It targets the practical subset of CUDA-C that real compute kernels use;
 anything outside it returns a **located error** (never wrong code) — enriched with
@@ -253,13 +254,13 @@ Grow this set test-first: add a kernel test under `tests/compiler/`, implement i
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 (`compiled_kernel.cpp`), and verify both tiers against a reference.
 
-## Test status of the two builds (2026-09-20)
+## Test status of the two builds (2026-09-24)
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **383 / 383 pass** under full `-j` load — full LLVM JIT + from-scratch backends. (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention; `XlaBlasGemm` remains a rare heavy-load timing flake that passes in isolation.) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **363 / 363 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel tier still parallelises CTAs via the in-tree thread pool). |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **363 / 363 pass, 0 crashes/aborts** (`Phase3ExtAPI` is an occasional `-j`-load flake — passes in isolation) |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **394 / 394 pass** under full `-j` load — full LLVM JIT + from-scratch backends (interpreter / compiled-fiber / native x86-64 JIT / **Tier-2 SSA**). (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention.) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **374 / 374 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel + SSA tiers still parallelise CTAs via the in-tree thread pool). The whole from-scratch stack — interpreter, compiled-fiber, native x86-64 JIT, and the Tier-2 SSA backend (incl. native shared-memory + warp intrinsics) — is exercised here. |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **374 / 374 pass, 0 crashes/aborts** |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +

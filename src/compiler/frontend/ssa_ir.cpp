@@ -1196,6 +1196,7 @@ static void computeRegAlloc(const Fn& fn, int nvals,
     }
     auto emitsCall = [&](const Inst& in) {
         if (in.op == Op::CallMath || in.op == Op::Barrier) return true;   // Barrier = call vgre_ssa_barrier (clobbers caller-saved XMM)
+        if (in.op == Op::WarpShfl || in.op == Op::WarpVote || in.op == Op::WarpReduce || in.op == Op::WarpMatch) return true;   // call vgre_ssa_warp
         if (in.op == Op::Cmp) return fn.vals[in.a[0]].ty.isFloating() || fn.vals[in.a[1]].ty.isFloating();
         if (in.op == Op::Cast) return !in.ty.isFloating() && !in.ty.isPointer() && fn.vals[in.a[0]].ty.isFloating();
         if (in.op == Op::Bin)  return (in.s == "/" || in.s == "%") && !in.ty.isFloating();
@@ -1304,11 +1305,26 @@ struct NFiber {
     std::vector<char> stack;
     SsaFn fn = nullptr;
     ThreadCtx* tctx = nullptr;
-    bool done = false, atBarrier = false;
+    bool done = false;
+    int wait = 0;                  // 0 = running/released, 1 = __syncthreads (block), 2 = warp op
+    int wdesc = 0;                 // warp-op descriptor: class(0-3) | sub<<3 | sgn<<7
+    uint64_t wa0 = 0, wa1 = 0, wa2 = 0, wres = 0;   // warp-op args in / result out
 };
 thread_local NFiber* g_nfCur = nullptr;   // fiber currently running (set before each resume)
 inline void nfTrampoline() { NFiber* f = g_nfCur; f->fn(f->tctx); f->done = true; }   // return → uc_link (scheduler)
-extern "C" void vgre_ssa_barrier() { NFiber* f = g_nfCur; f->atBarrier = true; swapcontext(&f->ctx, f->sched); }
+extern "C" void vgre_ssa_barrier() { NFiber* f = g_nfCur; f->wait = 1; swapcontext(&f->ctx, f->sched); }
+// A warp intrinsic parks like a barrier but warp-scoped, exchanging data: publish the
+// operands, yield to the per-block scheduler (which resolves the whole warp once every
+// live lane is parked here), then return the computed 64-bit result. `wdesc` encodes the
+// op class (0 shfl / 1 vote / 2 reduce / 3 match), the sub-op (mode/op/all) in bits 3-6,
+// and the reduce signedness in bit 7. Args: shfl {var,laneArg,width}; vote/reduce/match
+// {published value, membermask, -}. Result is placed in wres by the scheduler.
+extern "C" uint64_t vgre_ssa_warp(int wdesc, uint64_t a0, uint64_t a1, uint64_t a2) {
+    NFiber* f = g_nfCur;
+    f->wdesc = wdesc; f->wa0 = a0; f->wa1 = a1; f->wa2 = a2; f->wait = 2;
+    swapcontext(&f->ctx, f->sched);
+    return f->wres;
+}
 #endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
 
 #if VGRE_SSA_X64
@@ -1559,8 +1575,30 @@ struct X64Asm {
                 storeToRdx(in.ty); return;
             }
             case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
-            case Op::WarpShfl: case Op::WarpVote: case Op::WarpReduce:
-            case Op::WarpMatch: case Op::WarpActive: bad(); return;       // warp intrinsics run on the cooperative evaluator
+            // Warp intrinsics: marshal args per SysV ABI (rdi=wdesc, rsi=a0, rdx=a1, rcx=a2)
+            // and `call vgre_ssa_warp`, which yields to the block scheduler's per-warp resolve
+            // and returns the 64-bit result in rax. Values live across the call go to slots
+            // (Warp* is in emitsCall), so register allocation stays correct.
+            case Op::WarpShfl: {
+                int wdesc = 0 | (in.dim << 3);
+                if (in.a.size() > 2) ldG(1, in.a[2]); else movImm(1, 32);   // rcx = width
+                ldG(2, in.a[1]);                                            // rdx = laneArg
+                if (in.ty.isFloating()) { ldX(0, in.a[0]); movqRX(0); movReg(6, 0); }   // rsi = var bits
+                else ldG(6, in.a[0]);
+                movImmReg(7, (uint32_t)wdesc); call((uint64_t)&vgre_ssa_warp);
+                if (in.ty.isFloating()) { movqXR(0); stX(0, id); } else stG(0, id);
+                return;
+            }
+            case Op::WarpVote: case Op::WarpReduce: case Op::WarpMatch: {
+                int cls = in.op == Op::WarpVote ? 1 : in.op == Op::WarpReduce ? 2 : 3;
+                int wdesc = cls | (in.dim << 3) | (in.op == Op::WarpReduce && in.ci ? (1 << 7) : 0);
+                ldG(2, in.a[0]);                     // rdx = membermask (a[0])
+                ldG(6, in.a[1]);                     // rsi = predicate / value (a[1])
+                movImmReg(7, (uint32_t)wdesc); call((uint64_t)&vgre_ssa_warp);
+                stG(0, id);                          // integer result
+                return;
+            }
+            case Op::WarpActive: bad(); return;   // per-thread sequential-done mask — kept on the evaluator
             case Op::LoadS: {   // rax = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldRbxOfs(0, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);
                 movImm(1, (uint64_t)sharedOff[in.arrId]); addRR(0, 1);
@@ -2266,6 +2304,55 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
             // crosses it. Barriers `call vgre_ssa_barrier`, which swapcontexts back here.
             const uint32_t nT = bx * by * bz;
             const size_t shBytes = ssaSharedBytes(fn);
+            // Resolve one warp's rendezvous: compute every parked lane's result from the
+            // published operands (identical math to the evaluator + compiled tier). `base`
+            // is the warp's first lane; only live lanes parked at a warp op participate.
+            auto resolveWarp = [nT](std::vector<NFiber>& fib, uint32_t base) {
+                uint32_t active = 0; uint64_t snap[32] = {0};
+                for (uint32_t l = 0; l < 32 && base + l < nT; ++l)
+                    if (!fib[base + l].done && fib[base + l].wait == 2) { active |= (1u << l); snap[l] = fib[base + l].wa0; }
+                for (uint32_t l = 0; l < 32 && base + l < nT; ++l) {
+                    NFiber& f = fib[base + l];
+                    if (f.done || f.wait != 2) continue;
+                    const int cls = f.wdesc & 7, sub = (f.wdesc >> 3) & 15;
+                    if (cls == 0) {   // shfl: mode 0 idx 1 up 2 down 3 xor (var/result carried as 64-bit bits)
+                        int mode = sub, width = (int)(int64_t)f.wa2; if (width <= 0 || width > 32) width = 32;
+                        int laneArg = (int)(int64_t)f.wa1;
+                        int laneInSub = (int)l % width, subBase = ((int)l / width) * width;
+                        int srcSub = laneInSub; bool own = false;
+                        if (mode == 0)      srcSub = laneArg % width;
+                        else if (mode == 1) { srcSub = laneInSub - laneArg; if (srcSub < 0) own = true; }
+                        else if (mode == 2) { srcSub = laneInSub + laneArg; if (srcSub >= width) own = true; }
+                        else                { srcSub = laneInSub ^ laneArg; if (srcSub >= width) own = true; }
+                        int src = subBase + srcSub;
+                        f.wres = (own || src < 0 || src >= 32 || !(active & (1u << src))) ? f.wa0 : snap[src];
+                    } else if (cls == 1) {   // vote: 0 ballot 1 any 2 all
+                        uint32_t memMask = (uint32_t)f.wa1, ballot = 0;
+                        for (uint32_t k = 0; k < 32; ++k) if ((active & (1u << k)) && snap[k] != 0) ballot |= (1u << k);
+                        uint32_t masked = ballot & memMask;
+                        f.wres = sub == 0 ? masked : sub == 1 ? (masked != 0 ? 1u : 0u) : (masked == (memMask & active) ? 1u : 0u);
+                    } else if (cls == 2) {   // reduce: 0 add 1 min 2 max 3 and 4 or 5 xor
+                        const bool sgn = (f.wdesc >> 7) & 1;
+                        uint32_t memMask = (uint32_t)f.wa1; bool first = true; int64_t acc = 0;
+                        for (uint32_t k = 0; k < 32; ++k) {
+                            if (!(active & (1u << k)) || !(memMask & (1u << k))) continue;
+                            uint32_t raw = (uint32_t)snap[k];
+                            int64_t vv = sgn ? (int64_t)(int32_t)raw : (int64_t)raw;
+                            if (first) { acc = vv; first = false; continue; }
+                            if (sub == 0) acc = vv + acc; else if (sub == 1) acc = acc < vv ? acc : vv;
+                            else if (sub == 2) acc = acc > vv ? acc : vv; else if (sub == 3) acc &= vv;
+                            else if (sub == 4) acc |= vv; else acc ^= vv;
+                        }
+                        f.wres = (uint32_t)acc;
+                    } else {   // match: sub 0 any / 1 all
+                        uint32_t memMask = (uint32_t)f.wa1, part = 0;
+                        for (uint32_t k = 0; k < 32; ++k) if ((active & (1u << k)) && (memMask & (1u << k))) part |= (1u << k);
+                        uint32_t mine = (uint32_t)f.wa0, same = 0;
+                        for (uint32_t k = 0; k < 32; ++k) if ((part & (1u << k)) && (uint32_t)snap[k] == mine) same |= (1u << k);
+                        f.wres = (sub == 0) ? same : ((same == part) ? part : 0u);
+                    }
+                }
+            };
             for (uint32_t gz = 0; gz < grid.z; ++gz)
             for (uint32_t gy = 0; gy < grid.y; ++gy)
             for (uint32_t gx = 0; gx < grid.x; ++gx) {
@@ -2288,14 +2375,39 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                     makecontext(&f.ctx, nfTrampoline, 0);
                 }
                 for (long long round = 0; round < (1LL << 34); ++round) {
-                    bool allDone = true;
+                    bool ranAny = false, allDone = true;
                     for (uint32_t t = 0; t < nT; ++t) {
                         if (fib[t].done) continue;
                         allDone = false;
+                        if (fib[t].wait != 0) continue;           // parked — resume only after release
+                        ranAny = true;
                         g_nfCur = &fib[t];
-                        swapcontext(&sched, &fib[t].ctx);         // runs until barrier or done
+                        swapcontext(&sched, &fib[t].ctx);         // runs until it parks (barrier/warp) or done
                     }
                     if (allDone) break;
+                    bool released = false;
+                    bool allBlock = true;
+                    for (uint32_t t = 0; t < nT; ++t) if (!fib[t].done && fib[t].wait != 1) { allBlock = false; break; }
+                    if (allBlock) {                               // __syncthreads: release every live fiber together
+                        for (uint32_t t = 0; t < nT; ++t) if (!fib[t].done) fib[t].wait = 0;
+                        released = true;
+                    } else {                                      // warp ops: release each warp whose live lanes all arrived
+                        const uint32_t nwarps = (nT + 31) / 32;
+                        for (uint32_t w = 0; w < nwarps; ++w) {
+                            const uint32_t base = w * 32;
+                            bool anyLive = false, allWarp = true;
+                            for (uint32_t l = 0; l < 32 && base + l < nT; ++l) {
+                                if (fib[base + l].done) continue;
+                                anyLive = true;
+                                if (fib[base + l].wait != 2) { allWarp = false; break; }
+                            }
+                            if (!anyLive || !allWarp) continue;
+                            resolveWarp(fib, base);
+                            for (uint32_t l = 0; l < 32 && base + l < nT; ++l) if (!fib[base + l].done) fib[base + l].wait = 0;
+                            released = true;
+                        }
+                    }
+                    if (!released && !ranAny) break;              // no progress possible (divergent/UB) — avoid a hang
                 }
             }
             return true;

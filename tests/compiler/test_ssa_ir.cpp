@@ -221,6 +221,19 @@ int main() {
     // second warp has 16 lanes ⇒ 0x0000ffff). uint32→float rounds identically on both tiers.
     checkVsInterp("wactive-full",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; unsigned a=__activemask(); if(i<n) y[i]=(float)a; })", 96, 4);
     checkVsInterpBD("wactive-partial", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; unsigned a=__activemask(); if(i<n) y[i]=(float)a; })", 144, 4, 48);
+    // Warp intrinsics emit NATIVE machine code (via `call vgre_ssa_warp` + the block
+    // scheduler's per-warp resolve) on x86-64/Linux — not just the evaluator fallback.
+    {
+        std::string err;
+        auto sp = SsaProgram::compile("extern \"C\" __global__ void k(const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i]:0.0f; for(int o=16;o>0;o>>=1) v+=__shfl_down_sync(0xffffffff, v, o); unsigned b=__ballot_sync(0xffffffff, v>0.0f); if(i<n) y[i]=v+(float)(b&1); }", "k", err);
+        if (!sp) { std::printf("FAIL: warp native probe compile: %s\n", err.c_str()); ++g_fail; }
+#if defined(__x86_64__) && defined(__linux__) && !defined(VGRE_SSA_NO_NATIVE)
+        else if (!sp->usedNative()) { std::printf("FAIL: warp intrinsics expected native x86-64 code (shfl+ballot)\n"); ++g_fail; }
+        else std::printf("  warp-native: __shfl_down_sync + __ballot_sync emit native machine code\n");
+#else
+        else std::printf("  warp-native: not x86-64/Linux — warp intrinsics run on the evaluator\n");
+#endif
+    }
     // __match_all_sync(mask, value, &pred): needs a global int pred out-param (the form the
     // interpreter supports). Even warps agree (key=5 ⇒ mask=full, pred=1); odd warps differ
     // (key=lane ⇒ mask=0, pred=0). Diff BOTH the returned mask AND the written pred.

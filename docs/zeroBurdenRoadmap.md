@@ -15,9 +15,10 @@ Tier-1 compiled backend, and measures **~18–118× faster** than it (saxpy, `Na
 Anything outside the subset falls back to the compiled tier, then the interpreter.
 **What's left:** the *optional* Tier-2 SSA backend is now feature-complete for the
 scalar + shared-memory + warp subset (native x86-64, opt-in AArch64, portable
-evaluator elsewhere) and wired as `VGRE_EXEC_BACKEND=ssa`; its remaining items are
-perf/hardware-gated (native codegen for the warp cooperative ops, flipping ARM native
-on after real-HW validation). Then Phase E packaging.
+evaluator elsewhere) and wired as `VGRE_EXEC_BACKEND=ssa`; the whole subset — including
+shared memory and every warp intrinsic — now emits **native x86-64 machine code**. Its
+remaining items are hardware-gated only (flipping ARM native on after real-HW
+validation; native AArch64 codegen for the cooperative ops). Then Phase E packaging.
 
 ## Mission (why this project exists)
 
@@ -53,8 +54,9 @@ too). Everything else already degrades gracefully or is off by default. The
 *speed* work is now largely done too: the native x86-64 JIT (Tier 1b) is the
 default and runs ~18–118× faster than the portable compiled tier. The *optional*
 Tier-2 SSA backend is now feature-complete for the scalar + shared-memory + warp
-subset (wired as `VGRE_EXEC_BACKEND=ssa`, tier 3); only perf/hardware-gated items
-remain (native codegen for the cooperative warp ops; ARM native default flip).
+subset — native on x86-64 (shared memory and warp intrinsics included), opt-in AArch64,
+portable evaluator elsewhere — wired as `VGRE_EXEC_BACKEND=ssa`, tier 3; only
+hardware-gated items remain (flipping ARM native on after real-HW validation).
 
 ---
 
@@ -118,8 +120,9 @@ universal tier first, faster tiers added without breaking correctness:
   **x86-64 / AArch64 machine-code emitter**. Covers the scalar + shared-memory +
   warp subset (full control flow incl. `switch`, `__device__` inlining, local
   arrays, `__shared__`/`__syncthreads`, and the full warp-intrinsic surface); the
-  cooperative shared/warp ops run on a per-block evaluator everywhere and on native
-  ucontext fibers for shared/barrier on x86-64/AArch64. Wired as
+  cooperative shared/warp ops run on a per-block evaluator everywhere and as **native
+  ucontext-fiber machine code on x86-64** (`vgre_ssa_barrier`/`vgre_ssa_warp` + a block +
+  per-warp selective-release scheduler), AArch64 shared/barrier native (opt-in). Wired as
   `VGRE_EXEC_BACKEND=ssa`. Optional, for peak throughput on hot kernels.
 
 Backend chosen at runtime (`VGRE_EXEC_BACKEND=interp|cp|ssa`), Tier 0 as the
@@ -253,20 +256,30 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
    - **Increment 17–18 ✅ DONE**: the **full warp intrinsic surface** —
      `__shfl_{sync,up,down,xor}_sync`, `__ballot_sync`/`__any_sync`/`__all_sync`,
      `__reduce_{add,min,max,and,or,xor}_sync`, `__match_any_sync`/`__match_all_sync`,
-     `__syncwarp`, and `__activemask` — via a cross-lane publish→resolve rendezvous in the
-     cooperative evaluator, mirroring the interpreter/compiled tiers bit-for-bit (incl.
-     `__activemask`'s sequential-live-lane behavior). `__match_all_sync`'s `&pred` out-param
-     is written for `&localInt` and `&global[i]`. The native emitters bail on the warp ops
-     → the evaluator runs them, so warp kernels are correct on every platform. Diffed
-     bit-exact vs the interpreter in `test_ssa_ir.cpp`.
-   - **Remaining (perf/hardware-gated, not correctness):** **native machine-code** for the
-     shared/warp *cooperative* ops on the warp side (shared/barrier already emit native
-     fibers; warp ops currently defer to the evaluator — a perf-only follow-up, since the
-     evaluator is correct everywhere); flipping `VGRE_SSA_ARM_NATIVE` on by default once
-     validated on real ARM hardware; and the usual tiered fallbacks for out-of-subset
-     constructs (multi-dim arrays, struct params, dynamic `extern __shared__`) that match
-     the compiled tier's boundaries. The Tier-2 backend is otherwise **feature-complete for
-     the scalar + shared-memory + warp subset**.
+     `__syncwarp`, and `__activemask` — via a cross-lane publish→resolve rendezvous,
+     mirroring the interpreter/compiled tiers bit-for-bit (incl. `__activemask`'s
+     sequential-live-lane behavior). `__match_all_sync`'s `&pred` out-param is written for
+     `&localInt` and `&global[i]`. Diffed bit-exact vs the interpreter in `test_ssa_ir.cpp`.
+   - **Increment 19–20 ✅ DONE**: **native x86-64 machine-code for the warp intrinsics.**
+     `__shfl_*` / vote / reduce / match now emit `call vgre_ssa_warp` (SysV-marshalled
+     args), which parks the ucontext fiber and yields to the block scheduler; the scheduler
+     resolves the whole warp (same math as the evaluator) and resumes each lane with its
+     result — so warp kernels run as real machine code on x86-64/Linux, not the evaluator.
+     The fiber scheduler gained a **block + per-warp selective-release** model (a fiber
+     parks with a `wait` reason; a warp releases once all its live lanes have arrived). The
+     shared-memory `__syncthreads` path rides the same scheduler unchanged. `__activemask`
+     stays on the evaluator (its per-thread sequential-done mask needs no rendezvous), and
+     AArch64 keeps the evaluator (native is opt-in there). Verified: `test_ssa_ir` asserts
+     `usedNative()` for a `__shfl_down_sync`+`__ballot_sync` warp reduction and stays
+     bit-exact; the shared-memory native path is unregressed.
+   - **Remaining (hardware-gated / breadth, not correctness):** flipping
+     `VGRE_SSA_ARM_NATIVE` on by default once validated on real ARM hardware (encodings are
+     already llvm-mc-verified; execution is CI-checked on macos-arm64); native AArch64
+     codegen for the warp/`__activemask` ops (x86-64 is native; ARM uses the evaluator); and
+     the usual tiered fallbacks for out-of-subset constructs (multi-dim arrays, struct
+     params, dynamic `extern __shared__`) that match the compiled tier's boundaries. The
+     Tier-2 backend is otherwise **feature-complete for the scalar + shared-memory + warp
+     subset, native on x86-64/Linux**.
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries
