@@ -166,7 +166,7 @@ int main() {
         CHECK(bad == 0, "smem copies x->y through shared memory bit-exactly");
         int tt = tierOf("smem", sid);
         if (tt >= 0) CHECK(tt == 3, "smem (__shared__/__syncthreads) runs on the Tier-2 SSA backend (tier 3)");
-        std::printf("  smem  : bad=%d/%d  tier=%d (expected 3 = SSA, cooperative evaluator)\n", bad, N, tt);
+        std::printf("  smem  : bad=%d/%d  tier=%d (expected 3 = SSA; native fibers on x86-64/Linux, else evaluator)\n", bad, N, tt);
         vgre_free(dx); vgre_free(dy);
     }
 
