@@ -84,6 +84,10 @@ int main() {
     // both stress the phi register allocation's cross-block/back-edge live intervals.
     checkCF("dbl-loop", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int a=0;a<m;a++){ float t=0.0f; for(int b=0;b<m;b++){ t += x[i*m+b]; } acc += t*x[i*m+a]; } y[i]=acc; } })", 64, 20);
     checkCF("hi-press", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int s1=0,s2=0,s3=0,s4=0,s5=0; for(int k=0;k<m;k++){ int v=(int)x[i*m+k]; s1+=v; s2+=v*2; s3+=v-1; s4+=v%3; s5+=v*v; } y[i]=(float)(s1+s2+s3+s4+s5); } })", 64, 20);
+    // Call-free float loop: the accumulator phi, a float select, and a float negate all
+    // live in XMM registers across the loop — exercises the float register allocator's
+    // phi/select/unary paths together (k&1 and the int compare emit no helper call).
+    checkCF("fsel-loop", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; acc += (k&1) ? v : -v; } y[i]=acc; } })", 64, 20);
 
     // Optimizer passes (const-fold / local GVN / DCE): the optimized IR must stay
     // bit-exact vs the compiled tier AND have fewer live instructions than the raw IR.

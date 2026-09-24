@@ -791,7 +791,7 @@ struct X64Asm {
         }
     }
 
-    explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()), vreg((size_t)f.vals.size(), -1) {}
+    explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()), vreg((size_t)f.vals.size(), -1), vxmm((size_t)f.vals.size(), -1) {}
     void bad() { ok = false; }
 
     // Global linear-scan register allocation (Poletto & Sarkar). Integer/pointer
@@ -892,6 +892,40 @@ struct X64Asm {
             }
             if (!freeRegs.empty()) { vreg[id] = freeRegs.back(); freeRegs.pop_back(); active.push_back({end[id], id}); }
         }
+
+        // Float values → the caller-saved XMM regs xmm2–xmm7 (xmm0/xmm1 stay scratch).
+        // Unlike the GPR pool these are NOT preserved across the emitter's helper calls
+        // (fcmp/sat/idiv/mathfn), so a float value may only occupy an XMM register if its
+        // interval contains NO call — otherwise it stays in a slot. `callAt` marks each
+        // instruction that emits a helper call; the prefix sum tests an interval quickly.
+        auto emitsCall = [&](const Inst& in) {
+            if (in.op == Op::CallMath) return true;                                            // m1/m2
+            if (in.op == Op::Cmp) return fn.vals[in.a[0]].ty.isFloating() || fn.vals[in.a[1]].ty.isFloating();   // fcmp
+            if (in.op == Op::Cast) return !in.ty.isFloating() && !in.ty.isPointer() && fn.vals[in.a[0]].ty.isFloating();   // sat
+            if (in.op == Op::Bin)  return (in.s == "/" || in.s == "%") && !in.ty.isFloating();  // idiv
+            return false;
+        };
+        const int P = p;                                                     // total linear positions
+        std::vector<int> callPre(P + 1, 0);                                  // callPre[k] = # calls at positions < k
+        for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) if (pos[id] >= 0 && emitsCall(fn.vals[id])) callPre[pos[id] + 1] = 1;
+        for (int i = 0; i < P; ++i) callPre[i + 1] += callPre[i];            // prefix: calls in [s,e] = callPre[e+1]-callPre[s]
+        std::vector<int> forder;
+        for (int id = 0; id < nvals; ++id) {
+            const Inst& in = fn.vals[id];
+            if (!in.ty.isFloating() || pos[id] < 0 || end[id] <= start[id]) continue;
+            if (callPre[end[id] + 1] - callPre[start[id]] != 0) continue;    // interval spans a helper call
+            forder.push_back(id);
+        }
+        std::sort(forder.begin(), forder.end(), [&](int a, int b) { return start[a] < start[b]; });
+        std::vector<int> freeX = {7, 6, 5, 4, 3, 2};
+        std::vector<std::pair<int, int>> activeX;
+        for (int id : forder) {
+            for (size_t a = 0; a < activeX.size();) {
+                if (activeX[a].first < start[id]) { freeX.push_back(vxmm[activeX[a].second]); activeX.erase(activeX.begin() + a); }
+                else ++a;
+            }
+            if (!freeX.empty()) { vxmm[id] = freeX.back(); freeX.pop_back(); activeX.push_back({end[id], id}); }
+        }
     }
     void b(uint8_t x) { c.push_back(x); }
     void d32(uint32_t v) { for (int i = 0; i < 4; ++i) b((uint8_t)(v >> (8 * i))); }
@@ -907,7 +941,8 @@ struct X64Asm {
         b((uint8_t)(0x48 | ((src >= 8) ? 0x04 : 0) | ((dst >= 8) ? 0x01 : 0)));
         b(0x89); b((uint8_t)(0xC0 | ((src & 7) << 3) | (dst & 7)));
     }
-    std::vector<int> vreg;   // per value: a register 12..15 if allocated, else -1 (slot)
+    std::vector<int> vreg;   // per value: a GPR 12..15 if allocated, else -1 (slot)
+    std::vector<int> vxmm;   // per float value: an XMM reg 2..7 if allocated, else -1 (slot)
 
     // GPR (64-bit) and XMM (double) load/store to an rbp-relative displacement.
     void ldGd(int rg, int disp) { b(0x48); b(0x8B); modRbp(rg, disp); }
@@ -917,8 +952,15 @@ struct X64Asm {
     // A register-resident value is copied to/from scratch; otherwise it uses its slot.
     void ldG(int rg, int id) { if (vreg[id] >= 0) movReg(rg, vreg[id]); else ldGd(rg, slot(id)); }
     void stG(int rg, int id) { if (vreg[id] >= 0) movReg(vreg[id], rg); else stGd(rg, slot(id)); }
-    void ldX(int x, int id)  { ldXd(x, slot(id)); }   // floats are never register-allocated
-    void stX(int x, int id)  { stXd(x, slot(id)); }
+    // Float values live in an XMM register (vxmm 2..7) if allocated, else a memory slot.
+    // Every float access goes through these two (movsd for reg↔reg), so the allocator
+    // pass alone enables XMM residency. stFloatBits/ldFloatBits move a value whose bit
+    // pattern is currently in rax to/from its home (used by ConstF/Param/Un, which build
+    // the float as integer bits): movq to the register, or a plain store/load to the slot.
+    void ldX(int x, int id)  { if (vxmm[id] >= 0) movXmm(x, vxmm[id]); else ldXd(x, slot(id)); }
+    void stX(int x, int id)  { if (vxmm[id] >= 0) movXmm(vxmm[id], x); else stXd(x, slot(id)); }
+    void stFloatBits(int id) { if (vxmm[id] >= 0) movqXR(vxmm[id]); else stGd(0, slot(id)); }   // rax bits → home
+    void ldFloatBits(int id) { if (vxmm[id] >= 0) movqRX(vxmm[id]); else ldGd(0, slot(id)); }   // home → rax bits
 
     void movImm(int rg, uint64_t v) { b(0x48); b((uint8_t)(0xB8 | (rg & 7))); d64(v); }
     void movImm32(int rg, uint32_t v) { b(0x48); b(0xC7); b((uint8_t)(0xC0 | (rg & 7))); d32(v); }
@@ -951,6 +993,10 @@ struct X64Asm {
     void cvtss2sd0() { b(0xF3); b(0x0F); b(0x5A); b(0xC0); }
     void movqX0R(int r) { b(0x66); b(0x48); b(0x0F); b(0x6E); b((uint8_t)(0xC0 | r)); }   // xmm0 = rax bits (r=0)
     void movqRX0() { b(0x66); b(0x48); b(0x0F); b(0x7E); b(0xC0); }     // rax = xmm0 bits
+    // movsd xmm dst,src and movq xmm<->rax for the XMM register allocator (xmm0..7, no REX).
+    void movXmm(int d, int s) { b(0xF2); b(0x0F); b(0x10); b((uint8_t)(0xC0 | ((d & 7) << 3) | (s & 7))); }
+    void movqXR(int x) { b(0x66); b(0x48); b(0x0F); b(0x6E); b((uint8_t)(0xC0 | ((x & 7) << 3))); }   // xmm x = rax bits
+    void movqRX(int x) { b(0x66); b(0x48); b(0x0F); b(0x7E); b((uint8_t)(0xC0 | ((x & 7) << 3))); }   // rax = xmm x bits
     // set rax = (rax <cc> 0)?1:0 after a cmp (cc byte for setcc)
     void setcc(uint8_t cc) { b(0x0F); b(cc); b(0xC0); b(0x0F); b(0xB6); b(0xC0); }   // setcc al; movzx eax,al
     void call(uint64_t addr) { movImm(0, addr); b(0xFF); b(0xD0); }    // mov rax,addr; call rax
@@ -968,8 +1014,17 @@ struct X64Asm {
             if (in.op != Op::Phi) break;
             for (size_t k = 0; k < in.phiPred.size(); ++k) if (in.phiPred[k] == pred) { pr.push_back({id, in.a[k]}); break; }
         }
-        for (size_t i = 0; i < pr.size(); ++i) { ldG(0, pr[i].second); stGd(0, temp((int)i)); }
-        for (size_t i = 0; i < pr.size(); ++i) { ldGd(0, temp((int)i)); stG(0, pr[i].first); }
+        // Phase 1 reads every operand into a temp slot, phase 2 writes every phi from its
+        // temp — a parallel copy (breaks cycles). Float phis move via xmm (movsd), int/
+        // pointer phis via rax; each side is register- or slot-resident per ldX/stX/ldG/stG.
+        for (size_t i = 0; i < pr.size(); ++i) {
+            if (fn.vals[pr[i].first].ty.isFloating()) { ldX(0, pr[i].second); stXd(0, temp((int)i)); }
+            else                                       { ldG(0, pr[i].second); stGd(0, temp((int)i)); }
+        }
+        for (size_t i = 0; i < pr.size(); ++i) {
+            if (fn.vals[pr[i].first].ty.isFloating()) { ldXd(0, temp((int)i)); stX(0, pr[i].first); }
+            else                                       { ldGd(0, temp((int)i)); stG(0, pr[i].first); }
+        }
     }
 
     int mathId(const std::string& s) const {
@@ -986,10 +1041,10 @@ struct X64Asm {
         switch (in.op) {
             case Op::Phi: return;
             case Op::ConstI: { movImm(0, (uint64_t)coerce(SI(in.ci), in.ty).i); stG(0, id); return; }
-            case Op::ConstF: { double d = coerce(SF(in.cf), in.ty).d; uint64_t bits; std::memcpy(&bits, &d, 8); movImm(0, bits); stG(0, id); return; }
+            case Op::ConstF: { double d = coerce(SF(in.cf), in.ty).d; uint64_t bits; std::memcpy(&bits, &d, 8); movImm(0, bits); stFloatBits(id); return; }
             case Op::Param: { b(0x48); b(0x8B); b(0x03);                          // mov rax,[rbx]  (pvals)
                               b(0x48); b(0x8B); b(0x80); d32((uint32_t)(in.paramIdx * 8));   // mov rax,[rax+p*8]
-                              stG(0, id); return; }
+                              if (in.ty.isFloating()) stFloatBits(id); else stG(0, id); return; }
             case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: {
                 int base = in.op == Op::Tid ? 0 : in.op == Op::Ctaid ? 3 : in.op == Op::Ntid ? 6 : 9;
                 b(0x8B); b(0x83); d32((uint32_t)(8 + (base + in.dim) * 4));       // mov eax,[rbx+off] (zero-extends)
@@ -1034,14 +1089,15 @@ struct X64Asm {
             }
             case Op::Un: {
                 if (in.s == "!") { ldG(0, in.a[0]); testRR(0, 0); setcc(0x94); stG(0, id); return; }
-                if (in.ty.isFloating()) { ldG(0, in.a[0]); movImm(1, 0x8000000000000000ull); xorRR(0, 1); stG(0, id); return; }  // sign flip
+                if (in.ty.isFloating()) { ldFloatBits(in.a[0]); movImm(1, 0x8000000000000000ull); xorRR(0, 1); stFloatBits(id); return; }  // sign flip (bits in rax)
                 ldG(0, in.a[0]); if (in.s == "-") negR(0); else notR(0); extRax(in.ty.elemBytes(), in.ty.isUnsigned); stG(0, id); return;
             }
             case Op::Sel: {
-                ldG(0, in.a[2]); stG(0, id);                                     // res = else
-                ldG(0, in.a[0]); testRR(0, 0);
+                const bool fl = in.ty.isFloating();                              // arms are float ⇒ move via xmm
+                if (fl) { ldX(0, in.a[2]); stX(0, id); } else { ldG(0, in.a[2]); stG(0, id); }   // res = else
+                ldG(0, in.a[0]); testRR(0, 0);                                    // condition is always int
                 b(0x0F); b(0x84); size_t js = c.size(); d32(0);                  // jz skip
-                ldG(0, in.a[1]); stG(0, id);                                     // res = then
+                if (fl) { ldX(0, in.a[1]); stX(0, id); } else { ldG(0, in.a[1]); stG(0, id); }   // res = then
                 uint32_t rel = (uint32_t)(c.size() - (js + 4)); std::memcpy(&c[js], &rel, 4);
                 return;
             }
