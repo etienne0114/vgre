@@ -795,16 +795,18 @@ struct X64Asm {
     void bad() { ok = false; }
 
     // Global linear-scan register allocation (Poletto & Sarkar). Integer/pointer
-    // values get a callee-saved register r12–r15 for their whole live range, ACROSS
-    // blocks and loop iterations (e.g. a pointer param stays in a register through the
-    // loop instead of being reloaded each iteration); the rest use memory slots.
-    // Callee-saved ⇒ safe across the emitter's helper calls (no spill-around-call). The
-    // emitter accesses every value through ldG/stG (register or slot), so this pass
-    // alone enables it. Live intervals are conservative (a register is never freed
-    // before the value's last live position). Phi values are kept in slots for now —
-    // allocating them to registers needs the interval to also cover the edge-copy
-    // writes at every predecessor terminator, which has an unresolved overlap case on
-    // nested loop+conditional CFGs; a correct phi allocation is the next increment.
+    // values — INCLUDING loop-carried phis — get a callee-saved register r12–r15 for
+    // their whole live range, ACROSS blocks and loop iterations (e.g. a pointer param or
+    // a loop accumulator stays in a register through the loop instead of being reloaded/
+    // respilled each iteration); the rest use memory slots. Callee-saved ⇒ safe across
+    // the emitter's helper calls (no spill-around-call). The emitter accesses every value
+    // through ldG/stG (register or slot) and writes phis via the two-phase edge-copies in
+    // phiCopies(), so this pass alone enables it. A phi's register is written by those
+    // edge-copies at each predecessor terminator, so its interval must cover them; and
+    // because blocks are NOT laid out in execution order, a loop-carried value is live in
+    // a back-edge block placed BEFORE its own def — the interval widening below (live-in
+    // lowers start, live-out raises end) bridges that gap so the scan never reuses a
+    // register that is still holding a loop-carried value.
     void allocateRegs() {
         const int n = (int)fn.bbs.size();
         std::vector<int> pos(nvals, -1), firstPos(n, 0), lastPos(n, 0);
@@ -842,8 +844,15 @@ struct X64Asm {
                 if (live != liveIn[b] || out != liveOut[b]) { liveIn[b] = std::move(live); liveOut[b] = std::move(out); changed = true; }
             }
         }
-        // Live intervals: start = def; end = max over all uses + all blocks the value
-        // is live-out of (their last position). Conservative single interval per value.
+        // Live intervals: a conservative single [start,end] per value over LINEAR
+        // positions. start = def; end = last use. Then it is widened to cover every
+        // block the value is live across — crucial for loops, whose blocks are NOT
+        // in execution order: a loop-carried value defined in the merge/latch (high
+        // position) is live-in to the back-edge source block (low position), so its
+        // register must stay reserved from that low position too. We therefore lower
+        // start to firstPos of any block it is live-IN to, and raise end to lastPos
+        // of any block it is live-OUT of; the resulting single interval bridges the
+        // whole loop (safe: over-reservation only pushes values to slots, never wrong).
         std::vector<int> start(nvals, 0), end(nvals, 0);
         for (int id = 0; id < nvals; ++id) { start[id] = pos[id] < 0 ? 0 : pos[id]; end[id] = start[id]; }
         for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) {
@@ -861,14 +870,17 @@ struct X64Asm {
                 }
             } else for (int op : in.a) end[op] = std::max(end[op], pos[id]);
         }
-        for (int b = 0; b < n; ++b) for (int v : liveOut[b]) end[v] = std::max(end[v], lastPos[b]);
+        for (int b = 0; b < n; ++b) {
+            for (int v : liveIn[b])  start[v] = std::min(start[v], firstPos[b]);   // live across a back-edge into a block placed before its def
+            for (int v : liveOut[b]) end[v]   = std::max(end[v], lastPos[b]);
+        }
         // Linear scan over intervals sorted by start.
         std::vector<int> order;
         for (int id = 0; id < nvals; ++id) {
             const Inst& in = fn.vals[id];
             const bool intType = in.ty.base == Type::Int || in.ty.base == Type::Long || in.ty.base == Type::Char ||
                                  in.ty.base == Type::Short || in.ty.base == Type::Bool || in.ty.isPointer();
-            if (intType && in.op != Op::Phi && pos[id] >= 0 && end[id] > start[id]) order.push_back(id);   // has a real interval
+            if (intType && pos[id] >= 0 && end[id] > start[id]) order.push_back(id);   // has a real interval (phis included)
         }
         std::sort(order.begin(), order.end(), [&](int a, int b) { return start[a] < start[b]; });
         std::vector<int> freeRegs = {15, 14, 13, 12};

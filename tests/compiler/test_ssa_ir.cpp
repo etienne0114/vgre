@@ -79,6 +79,11 @@ int main() {
     checkCF("if-else",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float r; if(v>0.0f){ r=v*2.0f; } else { r=v-1.0f; } y[i]=r; } })", 64, 20);
     checkCF("while",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int k=0; float acc=0.0f; while(k<m){ acc += x[i*m+k]*2.0f; k++; } y[i]=acc; } })", 64, 20);
     checkCF("nested",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v>0.0f) acc+=v; else acc-=v; } y[i]=acc; } })", 64, 20);
+    // A nested loop (loop-carried values live across an inner loop's back-edge) and a
+    // high-register-pressure loop (6 loop-carried ints > the 4 callee-saved GPRs) —
+    // both stress the phi register allocation's cross-block/back-edge live intervals.
+    checkCF("dbl-loop", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int a=0;a<m;a++){ float t=0.0f; for(int b=0;b<m;b++){ t += x[i*m+b]; } acc += t*x[i*m+a]; } y[i]=acc; } })", 64, 20);
+    checkCF("hi-press", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int s1=0,s2=0,s3=0,s4=0,s5=0; for(int k=0;k<m;k++){ int v=(int)x[i*m+k]; s1+=v; s2+=v*2; s3+=v-1; s4+=v%3; s5+=v*v; } y[i]=(float)(s1+s2+s3+s4+s5); } })", 64, 20);
 
     // Optimizer passes (const-fold / local GVN / DCE): the optimized IR must stay
     // bit-exact vs the compiled tier AND have fewer live instructions than the raw IR.
@@ -126,6 +131,8 @@ int main() {
     checkVsInterp("break",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) break; acc+=v; } y[i]=acc; } })", 96, 16);
     checkVsInterp("continue", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) continue; acc+=v; } y[i]=acc; } })", 96, 16);
     checkVsInterp("do-while", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; int k=0; do { acc += x[i*m+k]; k++; } while(k<m); y[i]=acc; } })", 96, 16);
+    // Nested loop with a break in the inner body (back-edge live intervals + break edges).
+    checkVsInterp("nest-brk", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int a=0;a<m;a++){ for(int b=0;b<m;b++){ float v=x[i*m+b]; if(v<0.0f) break; acc+=v; } acc+=1.0f; } y[i]=acc; } })", 96, 16);
 
     // Native x86-64 emission: on Linux/x86-64 launch() must run real machine code
     // (not the evaluator fallback), and it must still match the compiled tier.
