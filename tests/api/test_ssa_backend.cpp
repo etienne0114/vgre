@@ -69,7 +69,8 @@ extern "C" __global__ void reduce(const float* x, float* y, int n, int m) {
 }
 )";
 
-// __shared__ + __syncthreads is outside the SSA subset → must fall back.
+// __shared__ + __syncthreads — now handled by the SSA tier's cooperative evaluator
+// (a block-shared staging buffer; here it copies x[i] through shared memory to y[i]).
 static const char* kSmem = R"(
 extern "C" __global__ void smem(const float* x, float* y, int n) {
     __shared__ float t[64];
@@ -144,13 +145,29 @@ int main() {
         vgre_free(dx); vgre_free(dy);
     }
 
-    // ── __syncthreads kernel falls back off the SSA tier ─────────────────────
+    // ── __shared__ + __syncthreads kernel on the SSA tier (cooperative evaluator) ──
     {
+        std::vector<float> hx(N), hy(N);
+        for (int i = 0; i < N; ++i) { hx[i] = i * 0.375f - 5.0f; }
+        void *dx = nullptr, *dy = nullptr;
+        CHECK(vgre_malloc(&dx, bytes) == VGRE_SUCCESS, "malloc sx");
+        CHECK(vgre_malloc(&dy, bytes) == VGRE_SUCCESS, "malloc sy");
+        CHECK(vgre_memcpy(dx, hx.data(), bytes, VGRE_MEMCPY_HOST_TO_DEVICE) == VGRE_SUCCESS, "H2D sx");
         uint64_t sid = 0;
         CHECK(vgre_register_kernel("smem", kSmem, &sid) == VGRE_SUCCESS, "register smem");
+        int n = N;
+        void* args[] = {&dx, &dy, &n};
+        uint32_t grid[3] = {(uint32_t)((N + 63) / 64), 1, 1}, block[3] = {64, 1, 1};
+        CHECK(vgre_launch_kernel(sid, grid, block, args, 3, 0, 0) == VGRE_SUCCESS, "launch smem");
+        CHECK(vgre_synchronize() == VGRE_SUCCESS, "synchronize");
+        CHECK(vgre_memcpy(hy.data(), dy, bytes, VGRE_MEMCPY_DEVICE_TO_HOST) == VGRE_SUCCESS, "D2H sy");
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { uint32_t u, v; std::memcpy(&u, &hy[i], 4); std::memcpy(&v, &hx[i], 4); if (u != v) ++bad; }
+        CHECK(bad == 0, "smem copies x->y through shared memory bit-exactly");
         int tt = tierOf("smem", sid);
-        if (tt >= 0) CHECK(tt != 3, "smem (__syncthreads) is not on the SSA tier (fell back)");
-        std::printf("  smem  : tier=%d (expected != 3; SSA subset rejects __syncthreads)\n", tt);
+        if (tt >= 0) CHECK(tt == 3, "smem (__shared__/__syncthreads) runs on the Tier-2 SSA backend (tier 3)");
+        std::printf("  smem  : bad=%d/%d  tier=%d (expected 3 = SSA, cooperative evaluator)\n", bad, N, tt);
+        vgre_free(dx); vgre_free(dy);
     }
 
     vgre_shutdown();

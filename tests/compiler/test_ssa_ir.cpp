@@ -156,6 +156,14 @@ int main() {
     checkVsInterp("nest-brk", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int a=0;a<m;a++){ for(int b=0;b<m;b++){ float v=x[i*m+b]; if(v<0.0f) break; acc+=v; } acc+=1.0f; } y[i]=acc; } })", 96, 16);
     // switch: multiple cases, break, C fall-through (case 2 → case 3), and default.
     checkVsInterp("switch",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float r=0.0f; switch(i%4){ case 0: r=v; break; case 1: r=v*2.0f; break; case 2: r=v*3.0f; case 3: r=r+1.0f; break; default: r=-v; } y[i]=r; } })", 96, 16);
+    // __shared__ + __syncthreads: each thread loads x[i] into a block-shared array, then
+    // (after a barrier) sums the whole block's shared data — exercises the cooperative
+    // evaluator (cross-thread reads through shared memory). NN is a multiple of the block
+    // (32) so every thread writes its y[i]. Bit-exact vs the interpreter.
+    checkVsInterp("shmem",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ __shared__ float s[32]; int t=threadIdx.x; int i=blockIdx.x*blockDim.x+t; s[t]=(i<n)?x[i*m]:0.0f; __syncthreads(); float acc=0.0f; for(int q=0;q<blockDim.x;q++) acc+=s[q]; if(i<n) y[i]=acc+x[i*m]; })", 96, 8);
+    // Barrier INSIDE a loop (tiling pattern) — stresses the scheduler's per-round re-entry
+    // across loop iterations, with two __syncthreads per iteration.
+    checkVsInterp("shmem-loop", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ __shared__ float s[32]; int t=threadIdx.x; int i=blockIdx.x*blockDim.x+t; float acc=0.0f; for(int tile=0;tile<m;tile++){ s[t]=(i<n)?x[i*m+(tile%m)]:0.0f; __syncthreads(); for(int q=0;q<blockDim.x;q++) acc+=s[q]; __syncthreads(); } if(i<n) y[i]=acc; })", 96, 4);
     // switch inside a loop with `continue` (forwarded to the loop) and a break (to the switch).
     checkVsInterp("sw-loop",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ switch(k%3){ case 0: continue; case 1: acc+=x[i*m+k]; break; default: acc-=x[i*m+k]; } acc+=0.5f; } y[i]=acc; } })", 96, 16);
 

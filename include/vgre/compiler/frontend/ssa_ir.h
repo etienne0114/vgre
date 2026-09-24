@@ -7,8 +7,9 @@
 // Subset: the scalar per-thread kernel shape — int/float/double scalars and pointers,
 // threadIdx/blockIdx/blockDim, arithmetic/bitwise/compare, ternary (→ select), inc/dec,
 // indexed load/store, per-thread local scratch arrays (`T a[N]`, dynamic index),
-// casts, unary + binary math intrinsics, calls to `__device__` helper functions
-// (inlined, alpha-renamed, non-recursive), and FULL control flow —
+// block-shared `__shared__` arrays + `__syncthreads()` barriers (run by a cooperative
+// per-block evaluator), casts, unary + binary math intrinsics, calls to `__device__`
+// helper functions (inlined, alpha-renamed, non-recursive), and FULL control flow —
 // `if`/`if-else`, `for`, `while`, `do-while`, `break`, `continue`, and `switch`
 // (C fall-through) — with proper SSA phi insertion (Braun et al.). compile() also runs
 // the optimizer (const-fold / global dominator-scoped GVN / LICM / DCE) unless

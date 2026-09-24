@@ -108,8 +108,8 @@ static Type promoteT(const Type& a, const Type& b) {
 // ── The IR ──────────────────────────────────────────────────────────────────────
 enum class Op {
     ConstI, ConstF, Param, Tid, Ctaid, Ntid, Nctaid,  // leaves
-    Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath, LoadL,   // value-producing (LoadL = local-array read)
-    Store, StoreL, CondBr, Br, Ret                    // effects / terminators (StoreL = local-array write)
+    Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath, LoadL, LoadS,   // value-producing (LoadL/LoadS = local/shared-array read)
+    Store, StoreL, StoreS, Barrier, CondBr, Br, Ret   // effects / terminators (StoreL/StoreS write; Barrier = __syncthreads)
 };
 struct Inst {
     Op op;
@@ -131,7 +131,8 @@ struct Fn {
     std::vector<Inst> vals;     // all instructions, indexed by SSA id
     std::vector<BB> bbs;
     std::vector<std::vector<int>> preds;   // per-block predecessor block ids
-    std::vector<std::pair<Type, int>> localArrays;   // per-thread scratch arrays: (element type, count)
+    std::vector<std::pair<Type, int>> localArrays;    // per-thread scratch arrays: (element type, count)
+    std::vector<std::pair<Type, int>> sharedArrays;   // block-shared arrays (__shared__): (element type, count)
     int entry = 0;
     bool isTerminator(int id) const {
         Op o = vals[id].op; return o == Op::Br || o == Op::CondBr || o == Op::Ret;
@@ -160,7 +161,8 @@ struct Lowerer {
     // the current inline's result var and branches to its exit block (inlineCtx.back()).
     std::unordered_map<std::string, const Kernel*> deviceFns;   // name -> __device__ definition
     std::string mpfx;                          // active mangling prefix ("" at top level)
-    std::unordered_map<std::string, std::pair<int, Type>> localArr;   // mangled name -> (arrId, element type)
+    std::unordered_map<std::string, std::pair<int, Type>> localArr;    // mangled name -> (localArrays id, element type)
+    std::unordered_map<std::string, std::pair<int, Type>> sharedArr;   // name -> (sharedArrays id, element type) — block scope
     int inlineUid = 0, inlineDepth = 0;
     struct InlineCtx { int exitB; std::string retVar; Type rt; };
     std::vector<InlineCtx> inlineCtx;
@@ -233,7 +235,7 @@ struct Lowerer {
             case Expr::IntLit:   { Type t; t.base = e.wide ? Type::Long : Type::Int; return t; }
             case Expr::FloatLit: return scalar(e.wide ? Type::Double : Type::Float);
             case Expr::Ident: { auto it = vtype.find(mangle(e.str)); return it != vtype.end() ? it->second : scalar(Type::Int); }
-            case Expr::Index: { std::string bn = e.args.empty() ? std::string() : mangle(e.args[0]->str); auto la = localArr.find(bn); if (la != localArr.end()) return la->second.second; Type b = vtype.count(bn) ? vtype[bn] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
+            case Expr::Index: { std::string bn = e.args.empty() ? std::string() : mangle(e.args[0]->str); auto la = localArr.find(bn); if (la != localArr.end()) return la->second.second; auto sa = sharedArr.find(bn); if (sa != sharedArr.end()) return sa->second.second; Type b = vtype.count(bn) ? vtype[bn] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
             case Expr::Unary:  if (e.str == "!") return scalar(Type::Int);
                                return e.args.empty() ? scalar(Type::Int) : typeOf(*e.args[0]);
             case Expr::Cast:   return e.castType;
@@ -283,6 +285,13 @@ struct Lowerer {
                     int idx = lowerExpr(*e.args[1]); if (!ok) return 0;
                     Inst in; in.op = Op::LoadL; in.ty = la->second.second; in.arrId = la->second.first;
                     in.elemBytes = la->second.second.elemBytes(); in.a = {idx};
+                    return emit(std::move(in));
+                }
+                auto sa = sharedArr.find(mangle(e.args[0]->str));
+                if (sa != sharedArr.end()) {
+                    int idx = lowerExpr(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::LoadS; in.ty = sa->second.second; in.arrId = sa->second.first;
+                    in.elemBytes = sa->second.second.elemBytes(); in.a = {idx};
                     return emit(std::move(in));
                 }
                 Type pt = vtype.count(mangle(e.args[0]->str)) ? vtype[mangle(e.args[0]->str)] : Type{};
@@ -339,6 +348,10 @@ struct Lowerer {
             }
             case Expr::Call: {
                 const std::string& fnn = e.str;
+                if (fnn == "__syncthreads" && e.args.empty()) {   // block barrier
+                    Inst in; in.op = Op::Barrier; in.ty = scalar(Type::Int); emit(std::move(in));
+                    return constI(0, scalar(Type::Int));   // void; the value is unused (statement context)
+                }
                 if (e.args.size() == 1 && (fnn=="sqrtf"||fnn=="fabsf"||fnn=="expf"||fnn=="logf"||fnn=="sinf"||fnn=="cosf"||fnn=="floorf"||fnn=="ceilf"||fnn=="tanhf"||fnn=="exp2f"||fnn=="log2f"||fnn=="rsqrtf"||fnn=="erff"||
                                            fnn=="sqrt"||fnn=="fabs"||fnn=="exp"||fnn=="log"||fnn=="sin"||fnn=="cos"||fnn=="floor"||fnn=="ceil"||fnn=="tanh"||fnn=="exp2"||fnn=="log2"||fnn=="rsqrt"||fnn=="erf")) {
                     int a = lowerExpr(*e.args[0]); if (!ok) return 0;
@@ -388,15 +401,19 @@ struct Lowerer {
         if (lhs.kind == Expr::Index) {
             if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident) { fail("SSA: bad store index"); return; }
             auto la = localArr.find(mangle(lhs.args[0]->str));
-            if (la != localArr.end()) {                        // a[idx] [op]= rhs — local-array write
-                Type elem = la->second.second; int arrId = la->second.first;
+            auto sa = sharedArr.find(mangle(lhs.args[0]->str));
+            if (la != localArr.end() || sa != sharedArr.end()) {   // a[idx] [op]= rhs — local- or shared-array write
+                const bool shared = (sa != sharedArr.end());
+                Type elem = shared ? sa->second.second : la->second.second;
+                int arrId = shared ? sa->second.first : la->second.first;
+                const Op ldOp = shared ? Op::LoadS : Op::LoadL, stOp = shared ? Op::StoreS : Op::StoreL;
                 int idx = lowerExpr(*lhs.args[1]);
                 int rhs = lowerExpr(*e.args[1]); if (!ok) return;
                 int val = rhs;
-                if (op != "=") { Inst ld; ld.op = Op::LoadL; ld.ty = elem; ld.arrId = arrId; ld.elemBytes = elem.elemBytes(); ld.a = {idx}; int old = emit(std::move(ld));
+                if (op != "=") { Inst ld; ld.op = ldOp; ld.ty = elem; ld.arrId = arrId; ld.elemBytes = elem.elemBytes(); ld.a = {idx}; int old = emit(std::move(ld));
                                  Inst in; in.op = Op::Bin; in.s = op.substr(0, op.size() - 1); in.ty = promoteT(elem, typeOf(*e.args[1])); in.a = {old, rhs}; val = emit(std::move(in)); }
                 Inst c; c.op = Op::Cast; c.ty = elem; c.a = {val}; int cv = emit(std::move(c));
-                Inst st; st.op = Op::StoreL; st.ty = elem; st.arrId = arrId; st.elemBytes = elem.elemBytes(); st.a = {idx, cv}; emit(std::move(st));
+                Inst st; st.op = stOp; st.ty = elem; st.arrId = arrId; st.elemBytes = elem.elemBytes(); st.a = {idx, cv}; emit(std::move(st));
                 return;
             }
             Type pt = vtype.count(mangle(lhs.args[0]->str)) ? vtype[mangle(lhs.args[0]->str)] : Type{};
@@ -456,6 +473,15 @@ struct Lowerer {
         switch (s.kind) {
             case Stmt::VarDecl: {
                 if (s.type.isStruct()) { fail("SSA: local structs unsupported on this tier"); return; }
+                if (s.isShared) {   // __shared__ array (block scope, 1-D, static size)
+                    if (s.isExternShared) { fail("SSA: dynamic extern __shared__ unsupported on this tier"); return; }
+                    if (s.arraySize <= 0) { fail("SSA: scalar __shared__ unsupported on this tier"); return; }
+                    if (!mpfx.empty()) { fail("SSA: __shared__ inside an inlined __device__ function unsupported"); return; }
+                    int arrId = (int)fn.sharedArrays.size();
+                    fn.sharedArrays.push_back({s.type, s.arraySize});
+                    sharedArr[s.name] = {arrId, s.type};
+                    return;
+                }
                 if (s.arraySize > 0) {   // per-thread scratch array (register/stack backed, 1-D flattened)
                     if (s.expr) { fail("SSA: local array initializers unsupported on this tier"); return; }
                     int arrId = (int)fn.localArrays.size();
@@ -859,7 +885,8 @@ static void dce(Fn& fn) {
     std::vector<int> work;
     for (auto& bb : fn.bbs) for (int id : bb.insts) {
         const Inst& in = fn.vals[id];
-        if (in.op == Op::Store || in.op == Op::StoreL || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
+        if (in.op == Op::Store || in.op == Op::StoreL || in.op == Op::StoreS || in.op == Op::Barrier ||
+            in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
             if (!live[id]) { live[id] = 1; work.push_back(id); }
         }
     }
@@ -868,7 +895,8 @@ static void dce(Fn& fn) {
         std::vector<int> keep;
         for (int id : bb.insts) {
             const Inst& in = fn.vals[id];
-            const bool effect = in.op == Op::Store || in.op == Op::StoreL || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
+            const bool effect = in.op == Op::Store || in.op == Op::StoreL || in.op == Op::StoreS || in.op == Op::Barrier ||
+                                in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
             if (effect || live[id]) keep.push_back(id);
         }
         bb.insts = std::move(keep);
@@ -1365,6 +1393,7 @@ struct X64Asm {
                 else { b(0x88); b(0x02); }
                 return;
             }
+            case Op::LoadS: case Op::StoreS: case Op::Barrier: bad(); return;   // __shared__/__syncthreads → cooperative evaluator
             case Op::LoadL: {   // rax = &arr[0] - idx*8 (elements are 8-byte slots, descending)
                 leaRbp(0, slot(arrBase[in.arrId])); ldG(1, in.a[0]); movImm(2, 8); imulRR(1, 2); subRR(0, 1);
                 const Type& t = in.ty;
@@ -1746,7 +1775,8 @@ struct Arm64Asm {
                 }
                 narrowIfFloat(in.ty); stX(0, id); return;
             }
-            case Op::LoadL: case Op::StoreL: bad(); return;   // local arrays: ARM native not yet supported → evaluator
+            case Op::LoadL: case Op::StoreL:                  // local arrays: ARM native not yet supported → evaluator
+            case Op::LoadS: case Op::StoreS: case Op::Barrier: bad(); return;   // __shared__/__syncthreads → cooperative evaluator
             default: return;
         }
     }
@@ -2021,48 +2051,44 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
         return true;
     }
 #endif
-    for (uint32_t gz = 0; gz < grid.z; ++gz)
-    for (uint32_t gy = 0; gy < grid.y; ++gy)
-    for (uint32_t gx = 0; gx < grid.x; ++gx)
-    for (uint32_t tz = 0; tz < bz; ++tz)
-    for (uint32_t ty = 0; ty < by; ++ty)
-    for (uint32_t tx = 0; tx < bx; ++tx) {
-        std::vector<SVal> v(fn.vals.size());
-        std::vector<char> done(fn.vals.size(), 0);
-        // Per-thread scratch arrays (zero-initialized, matching the native tier's prologue).
-        std::vector<std::vector<SVal>> larr(fn.localArrays.size());
-        for (size_t ai = 0; ai < fn.localArrays.size(); ++ai)
-            larr[ai].assign(fn.localArrays[ai].second, coerce(SI(0), fn.localArrays[ai].first));
-        const uint32_t tid[3] = {tx, ty, tz}, ctaid[3] = {gx, gy, gz};
-        const uint32_t ntid[3] = {bx, by, bz}, nctaid[3] = {grid.x, grid.y, grid.z};
-        int bb = fn.entry, prevBB = -1;
-        for (long long guard = 0; guard < (1LL << 34); ++guard) {   // bounded against runaway loops (long is 32-bit on Windows)
-            bool ret = false;
-            // Phis (which lead a block) resolve against the predecessor we arrived from,
-            // read as a parallel copy of the pre-block state.
-            {
+    // Cooperative per-block execution. All threads of a block run in lock-step across
+    // __syncthreads barriers and share the block's __shared__ arrays. Each thread keeps
+    // resumable state (v, local arrays, PC = block+inst-index); the scheduler runs every
+    // thread to its next barrier (or to Ret), then repeats — so no thread crosses barrier
+    // N until all threads have reached it. Barrier-free kernels just run to Ret in round 0.
+    struct TState {
+        std::vector<SVal> v;
+        std::vector<std::vector<SVal>> larr;
+        int bb = 0, j = 0, prevBB = -1;
+        bool entered = false, finished = false;
+    };
+    // Run one thread from its current PC until it hits a Barrier (suspend, PC past it) or
+    // Ret (finish). `shared` is the block's __shared__ storage (written across threads).
+    auto runSegment = [&](TState& t, std::vector<std::vector<SVal>>& shared,
+                          const uint32_t tid[3], const uint32_t ctaid[3],
+                          const uint32_t ntid[3], const uint32_t nctaid[3]) {
+        auto& v = t.v; auto& larr = t.larr;
+        for (long long guard = 0; guard < (1LL << 34); ++guard) {
+            if (!t.entered) {   // resolve phis on first entry to a block (parallel copy)
                 std::vector<std::pair<int, SVal>> phiSet;
-                for (int id : fn.bbs[bb].insts) {
-                    const Inst& in = fn.vals[id];
-                    if (in.op != Op::Phi) break;
+                for (int id : fn.bbs[t.bb].insts) {
+                    const Inst& in = fn.vals[id]; if (in.op != Op::Phi) break;
                     SVal sel{};
                     for (size_t kk = 0; kk < in.phiPred.size(); ++kk)
-                        if (in.phiPred[kk] == prevBB) { sel = v[in.a[kk]]; break; }
+                        if (in.phiPred[kk] == t.prevBB) { sel = v[in.a[kk]]; break; }
                     phiSet.push_back({id, sel});
                 }
                 for (auto& ps : phiSet) v[ps.first] = ps.second;
+                t.entered = true;
             }
-            for (int id : fn.bbs[bb].insts) {
-                const Inst& in = fn.vals[id];
+            const auto& insts = fn.bbs[t.bb].insts;
+            for (; t.j < (int)insts.size(); ++t.j) {
+                int id = insts[t.j]; const Inst& in = fn.vals[id];
                 switch (in.op) {
-                    case Op::Phi: break;   // already resolved above
+                    case Op::Phi: break;   // resolved on block entry
                     case Op::ConstI: v[id] = coerce(SI(in.ci), in.ty); break;
                     case Op::ConstF: v[id] = coerce(SF(in.cf), in.ty); break;
-                    case Op::Param: {
-                        const Type& t = fn.ptypes[in.paramIdx];
-                        v[id] = memLoad(reinterpret_cast<int64_t>(args[in.paramIdx]), t);
-                        break;
-                    }
+                    case Op::Param: v[id] = memLoad(reinterpret_cast<int64_t>(args[in.paramIdx]), fn.ptypes[in.paramIdx]); break;
                     case Op::Tid:    v[id] = SI(tid[in.dim]); break;
                     case Op::Ctaid:  v[id] = SI(ctaid[in.dim]); break;
                     case Op::Ntid:   v[id] = SI(ntid[in.dim]); break;
@@ -2077,32 +2103,48 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                     case Op::Sel:  v[id] = (asI(v[in.a[0]]) != 0) ? v[in.a[1]] : v[in.a[2]]; break;
                     case Op::Cast: v[id] = coerce(v[in.a[0]], in.ty); break;
                     case Op::CallMath: v[id] = mathfn(in.s, v[in.a[0]], in.a.size() > 1 ? &v[in.a[1]] : nullptr, in.a.size() > 2 ? &v[in.a[2]] : nullptr, in.ty); break;
-                    case Op::Load: {
-                        int64_t addr = asI(v[in.a[0]]) + asI(v[in.a[1]]) * in.elemBytes;
-                        v[id] = memLoad(addr, in.ty); break;
-                    }
-                    case Op::Store: {
-                        int64_t addr = asI(v[in.a[0]]) + asI(v[in.a[1]]) * in.elemBytes;
-                        memStore(addr, in.ty, v[in.a[2]]); break;
-                    }
-                    case Op::LoadL: {   // local-array read (bounds-guarded)
-                        int64_t k = asI(v[in.a[0]]); auto& arr = larr[in.arrId];
-                        v[id] = (k >= 0 && k < (int64_t)arr.size()) ? coerce(arr[(size_t)k], in.ty) : coerce(SI(0), in.ty);
-                        break;
-                    }
-                    case Op::StoreL: {  // local-array write (bounds-guarded)
-                        int64_t k = asI(v[in.a[0]]); auto& arr = larr[in.arrId];
-                        if (k >= 0 && k < (int64_t)arr.size()) arr[(size_t)k] = coerce(v[in.a[1]], in.ty);
-                        break;
-                    }
-                    case Op::Br: prevBB = bb; bb = in.bbT; goto nextblock;
-                    case Op::CondBr: prevBB = bb; bb = (asI(v[in.a[0]]) != 0) ? in.bbT : in.bbF; goto nextblock;
-                    case Op::Ret: ret = true; goto nextblock;
+                    case Op::Load:  { int64_t addr = asI(v[in.a[0]]) + asI(v[in.a[1]]) * in.elemBytes; v[id] = memLoad(addr, in.ty); break; }
+                    case Op::Store: { int64_t addr = asI(v[in.a[0]]) + asI(v[in.a[1]]) * in.elemBytes; memStore(addr, in.ty, v[in.a[2]]); break; }
+                    case Op::LoadL: { int64_t k = asI(v[in.a[0]]); auto& a = larr[in.arrId]; v[id] = (k >= 0 && k < (int64_t)a.size()) ? coerce(a[(size_t)k], in.ty) : coerce(SI(0), in.ty); break; }
+                    case Op::StoreL:{ int64_t k = asI(v[in.a[0]]); auto& a = larr[in.arrId]; if (k >= 0 && k < (int64_t)a.size()) a[(size_t)k] = coerce(v[in.a[1]], in.ty); break; }
+                    case Op::LoadS: { int64_t k = asI(v[in.a[0]]); auto& a = shared[in.arrId]; v[id] = (k >= 0 && k < (int64_t)a.size()) ? coerce(a[(size_t)k], in.ty) : coerce(SI(0), in.ty); break; }
+                    case Op::StoreS:{ int64_t k = asI(v[in.a[0]]); auto& a = shared[in.arrId]; if (k >= 0 && k < (int64_t)a.size()) a[(size_t)k] = coerce(v[in.a[1]], in.ty); break; }
+                    case Op::Barrier: ++t.j; return;   // suspend; resume at the next instruction
+                    case Op::Br:     t.prevBB = t.bb; t.bb = in.bbT; t.j = 0; t.entered = false; goto nextblock;
+                    case Op::CondBr: t.prevBB = t.bb; t.bb = (asI(v[in.a[0]]) != 0) ? in.bbT : in.bbF; t.j = 0; t.entered = false; goto nextblock;
+                    case Op::Ret:    t.finished = true; return;
                 }
-                done[id] = 1;
             }
-            nextblock:
-            if (ret) break;
+            nextblock:;
+        }
+    };
+
+    const uint32_t nT = bx * by * bz;
+    for (uint32_t gz = 0; gz < grid.z; ++gz)
+    for (uint32_t gy = 0; gy < grid.y; ++gy)
+    for (uint32_t gx = 0; gx < grid.x; ++gx) {
+        std::vector<std::vector<SVal>> shared(fn.sharedArrays.size());   // one instance per block
+        for (size_t si = 0; si < fn.sharedArrays.size(); ++si)
+            shared[si].assign(fn.sharedArrays[si].second, coerce(SI(0), fn.sharedArrays[si].first));
+        std::vector<TState> th(nT);
+        for (uint32_t lin = 0; lin < nT; ++lin) {
+            TState& t = th[lin];
+            t.v.assign(fn.vals.size(), SVal{});
+            t.larr.resize(fn.localArrays.size());
+            for (size_t ai = 0; ai < fn.localArrays.size(); ++ai)
+                t.larr[ai].assign(fn.localArrays[ai].second, coerce(SI(0), fn.localArrays[ai].first));
+            t.bb = fn.entry;
+        }
+        const uint32_t ctaid[3] = {gx, gy, gz}, nctaid[3] = {grid.x, grid.y, grid.z}, ntid[3] = {bx, by, bz};
+        for (long long round = 0; round < (1LL << 34); ++round) {   // one round advances every thread by one barrier segment
+            bool allDone = true;
+            for (uint32_t lin = 0; lin < nT; ++lin) {
+                if (th[lin].finished) continue;
+                const uint32_t tid[3] = {lin % bx, (lin / bx) % by, lin / (bx * by)};
+                runSegment(th[lin], shared, tid, ctaid, ntid, nctaid);
+                if (!th[lin].finished) allDone = false;   // suspended at a barrier
+            }
+            if (allDone) break;
         }
     }
     return true;
