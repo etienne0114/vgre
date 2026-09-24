@@ -26,10 +26,13 @@
 // Tier-2 native machine-code emission is available on x86-64 Linux (SysV ABI, mmap
 // W^X). Everywhere else the portable reference evaluator runs the SSA, so Tier-2
 // still works — just not as native code.
-#if defined(__x86_64__) && defined(__linux__)
+#if defined(__x86_64__) && defined(__linux__) && !defined(VGRE_SSA_NO_NATIVE)
 #include <sys/mman.h>
 #define VGRE_SSA_X64 1
 #else
+// VGRE_SSA_NO_NATIVE forces the portable evaluator even on x86-64/Linux — used
+// to exercise the evaluator under sanitizers (the mmap'd native code is opaque
+// to ASan/UBSan and its call rel32 range interacts with ASan's address layout).
 #define VGRE_SSA_X64 0
 #endif
 
@@ -167,7 +170,19 @@ struct Lowerer {
     }
     int addPhiOperands(const std::string& v, int phi) {
         int block = fn.vals[phi].block;
-        for (int p : fn.preds[block]) { fn.vals[phi].a.push_back(readVar(v, p)); fn.vals[phi].phiPred.push_back(p); }
+        // readVar() may recursively create phis and grow fn.vals, invalidating any
+        // reference into it. Snapshot the preds, then for each: compute the operand
+        // FIRST (into a local), and only AFTER that re-index fn.vals[phi] to append.
+        // Never write `fn.vals[phi].a.push_back(readVar(...))`: the object glvalue is
+        // sequenced before the argument, so a reallocation inside readVar leaves it
+        // dangling — benign on clang (materializes `this` after the arg), a
+        // use-after-free that corrupts the IR on MSVC (the Windows CI segfault).
+        std::vector<int> preds = fn.preds[block];
+        for (int p : preds) {
+            int operand = readVar(v, p);
+            fn.vals[phi].a.push_back(operand);
+            fn.vals[phi].phiPred.push_back(p);
+        }
         return phi;
     }
     void sealBlock(int block) {
