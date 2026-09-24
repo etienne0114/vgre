@@ -97,6 +97,10 @@ int main() {
     // live in XMM registers across the loop — exercises the float register allocator's
     // phi/select/unary paths together (k&1 and the int compare emit no helper call).
     checkCF("fsel-loop", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; acc += (k&1) ? v : -v; } y[i]=acc; } })", 64, 20);
+    // Per-thread local scratch arrays: a float array written+read with a DYNAMIC index in
+    // loops, and an int array with CONSTANT indices — both bit-exact vs the compiled tier.
+    checkCF("larr-dyn", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float buf[8]; for(int k=0;k<8;k++) buf[k]=x[i*m+(k%m)]*(float)(k+1); float acc=0.0f; for(int k=0;k<8;k++) acc+=buf[k]; y[i]=acc; } })", 64, 20);
+    checkCF("larr-const", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int t[4]; t[0]=i; t[1]=i*2; t[2]=i+m; t[3]=t[0]+t[1]; y[i]=(float)(t[3]-t[2])+x[i*m]; } })", 64, 20);
 
     // Optimizer passes (const-fold / local GVN / DCE): the optimized IR must stay
     // bit-exact vs the compiled tier AND have fewer live instructions than the raw IR.

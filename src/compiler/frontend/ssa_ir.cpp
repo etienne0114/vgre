@@ -108,8 +108,8 @@ static Type promoteT(const Type& a, const Type& b) {
 // ── The IR ──────────────────────────────────────────────────────────────────────
 enum class Op {
     ConstI, ConstF, Param, Tid, Ctaid, Ntid, Nctaid,  // leaves
-    Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath,      // value-producing
-    Store, CondBr, Br, Ret                             // effects / terminators
+    Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath, LoadL,   // value-producing (LoadL = local-array read)
+    Store, StoreL, CondBr, Br, Ret                    // effects / terminators (StoreL = local-array write)
 };
 struct Inst {
     Op op;
@@ -122,6 +122,7 @@ struct Inst {
     int elemBytes = 0;          // Load / Store element size
     int bbT = -1, bbF = -1;     // Br target / CondBr true,false
     int block = -1;             // Phi: the block it belongs to
+    int arrId = -1;             // LoadL / StoreL: local-array index (into Fn::localArrays)
 };
 struct BB { std::vector<int> insts; };   // value-ids, in order; last is a terminator
 
@@ -130,6 +131,7 @@ struct Fn {
     std::vector<Inst> vals;     // all instructions, indexed by SSA id
     std::vector<BB> bbs;
     std::vector<std::vector<int>> preds;   // per-block predecessor block ids
+    std::vector<std::pair<Type, int>> localArrays;   // per-thread scratch arrays: (element type, count)
     int entry = 0;
     bool isTerminator(int id) const {
         Op o = vals[id].op; return o == Op::Br || o == Op::CondBr || o == Op::Ret;
@@ -158,6 +160,7 @@ struct Lowerer {
     // the current inline's result var and branches to its exit block (inlineCtx.back()).
     std::unordered_map<std::string, const Kernel*> deviceFns;   // name -> __device__ definition
     std::string mpfx;                          // active mangling prefix ("" at top level)
+    std::unordered_map<std::string, std::pair<int, Type>> localArr;   // mangled name -> (arrId, element type)
     int inlineUid = 0, inlineDepth = 0;
     struct InlineCtx { int exitB; std::string retVar; Type rt; };
     std::vector<InlineCtx> inlineCtx;
@@ -230,7 +233,7 @@ struct Lowerer {
             case Expr::IntLit:   { Type t; t.base = e.wide ? Type::Long : Type::Int; return t; }
             case Expr::FloatLit: return scalar(e.wide ? Type::Double : Type::Float);
             case Expr::Ident: { auto it = vtype.find(mangle(e.str)); return it != vtype.end() ? it->second : scalar(Type::Int); }
-            case Expr::Index: { std::string bn = e.args.empty() ? std::string() : mangle(e.args[0]->str); Type b = vtype.count(bn) ? vtype[bn] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
+            case Expr::Index: { std::string bn = e.args.empty() ? std::string() : mangle(e.args[0]->str); auto la = localArr.find(bn); if (la != localArr.end()) return la->second.second; Type b = vtype.count(bn) ? vtype[bn] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
             case Expr::Unary:  if (e.str == "!") return scalar(Type::Int);
                                return e.args.empty() ? scalar(Type::Int) : typeOf(*e.args[0]);
             case Expr::Cast:   return e.castType;
@@ -273,8 +276,15 @@ struct Lowerer {
                 if (member(e, "gridDim", dim))   { Inst in; in.op = Op::Nctaid;in.ty = scalar(Type::Int); in.dim = dim; return emit(std::move(in)); }
                 fail("SSA: unsupported member access"); return 0;
             }
-            case Expr::Index: {   // p[idx] — a global load
+            case Expr::Index: {   // p[idx] — a global load, or a[idx] — a local-array read
                 if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident) { fail("SSA: bad index"); return 0; }
+                auto la = localArr.find(mangle(e.args[0]->str));
+                if (la != localArr.end()) {
+                    int idx = lowerExpr(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::LoadL; in.ty = la->second.second; in.arrId = la->second.first;
+                    in.elemBytes = la->second.second.elemBytes(); in.a = {idx};
+                    return emit(std::move(in));
+                }
                 Type pt = vtype.count(mangle(e.args[0]->str)) ? vtype[mangle(e.args[0]->str)] : Type{};
                 if (pt.ptr != 1) { fail("SSA: index base must be a pointer"); return 0; }
                 Type elem = pt; elem.ptr = 0;
@@ -377,6 +387,18 @@ struct Lowerer {
         }
         if (lhs.kind == Expr::Index) {
             if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident) { fail("SSA: bad store index"); return; }
+            auto la = localArr.find(mangle(lhs.args[0]->str));
+            if (la != localArr.end()) {                        // a[idx] [op]= rhs — local-array write
+                Type elem = la->second.second; int arrId = la->second.first;
+                int idx = lowerExpr(*lhs.args[1]);
+                int rhs = lowerExpr(*e.args[1]); if (!ok) return;
+                int val = rhs;
+                if (op != "=") { Inst ld; ld.op = Op::LoadL; ld.ty = elem; ld.arrId = arrId; ld.elemBytes = elem.elemBytes(); ld.a = {idx}; int old = emit(std::move(ld));
+                                 Inst in; in.op = Op::Bin; in.s = op.substr(0, op.size() - 1); in.ty = promoteT(elem, typeOf(*e.args[1])); in.a = {old, rhs}; val = emit(std::move(in)); }
+                Inst c; c.op = Op::Cast; c.ty = elem; c.a = {val}; int cv = emit(std::move(c));
+                Inst st; st.op = Op::StoreL; st.ty = elem; st.arrId = arrId; st.elemBytes = elem.elemBytes(); st.a = {idx, cv}; emit(std::move(st));
+                return;
+            }
             Type pt = vtype.count(mangle(lhs.args[0]->str)) ? vtype[mangle(lhs.args[0]->str)] : Type{};
             if (pt.ptr != 1) { fail("SSA: store base must be a pointer"); return; }
             Type elem = pt; elem.ptr = 0;
@@ -433,7 +455,14 @@ struct Lowerer {
         if (!ok) return;
         switch (s.kind) {
             case Stmt::VarDecl: {
-                if (s.arraySize > 0 || s.type.isStruct()) { fail("SSA: local arrays/structs unsupported on this tier"); return; }
+                if (s.type.isStruct()) { fail("SSA: local structs unsupported on this tier"); return; }
+                if (s.arraySize > 0) {   // per-thread scratch array (register/stack backed, 1-D flattened)
+                    if (s.expr) { fail("SSA: local array initializers unsupported on this tier"); return; }
+                    int arrId = (int)fn.localArrays.size();
+                    fn.localArrays.push_back({s.type, s.arraySize});
+                    localArr[mangle(s.name)] = {arrId, s.type};
+                    return;
+                }
                 std::string nm = mangle(s.name);
                 vtype[nm] = s.type;
                 int v;
@@ -830,7 +859,7 @@ static void dce(Fn& fn) {
     std::vector<int> work;
     for (auto& bb : fn.bbs) for (int id : bb.insts) {
         const Inst& in = fn.vals[id];
-        if (in.op == Op::Store || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
+        if (in.op == Op::Store || in.op == Op::StoreL || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
             if (!live[id]) { live[id] = 1; work.push_back(id); }
         }
     }
@@ -839,7 +868,7 @@ static void dce(Fn& fn) {
         std::vector<int> keep;
         for (int id : bb.insts) {
             const Inst& in = fn.vals[id];
-            const bool effect = in.op == Op::Store || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
+            const bool effect = in.op == Op::Store || in.op == Op::StoreL || in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
             if (effect || live[id]) keep.push_back(id);
         }
         bb.insts = std::move(keep);
@@ -1103,9 +1132,9 @@ struct X64Asm {
             case Op::Bin:   in.ty.isFloating() ? inXmm() : inRax(); break;
             case Op::Un:    (in.s == "!" || !in.ty.isFloating()) ? inRax() : none(); break;
             case Op::Sel:   in.ty.isFloating() ? none() : inRax(); break;
-            case Op::Cast:  case Op::Load: in.ty.isFloating() ? inXmm() : inRax(); break;
+            case Op::Cast:  case Op::Load: case Op::LoadL: in.ty.isFloating() ? inXmm() : inRax(); break;
             case Op::CallMath: inXmm(); break;
-            default: none(); break;   // ConstF (bits in rax), Store, Phi
+            default: none(); break;   // ConstF (bits in rax), Store, StoreL, Phi
         }
     }
 
@@ -1133,10 +1162,12 @@ struct X64Asm {
     }
     std::vector<int> vreg;   // per value: a GPR 12..15 if allocated, else -1 (slot)
     std::vector<int> vxmm;   // per float value: an XMM reg 2..7 if allocated, else -1 (slot)
+    std::vector<int> arrBase;   // per local array: its first element's slot index (element k = arrBase+k)
 
     // GPR (64-bit) and XMM (double) load/store to an rbp-relative displacement.
     void ldGd(int rg, int disp) { b(0x48); b(0x8B); modRbp(rg, disp); }
     void stGd(int rg, int disp) { b(0x48); b(0x89); modRbp(rg, disp); }
+    void leaRbp(int rg, int disp) { b(0x48); b(0x8D); modRbp(rg, disp); }   // lea Rreg,[rbp+disp]
     void ldXd(int x, int disp)  { b(0xF2); b(0x0F); b(0x10); modRbp(x, disp); }
     void stXd(int x, int disp)  { b(0xF2); b(0x0F); b(0x11); modRbp(x, disp); }
     // A register-resident value is copied to/from scratch; otherwise it uses its slot.
@@ -1334,6 +1365,34 @@ struct X64Asm {
                 else { b(0x88); b(0x02); }
                 return;
             }
+            case Op::LoadL: {   // rax = &arr[0] - idx*8 (elements are 8-byte slots, descending)
+                leaRbp(0, slot(arrBase[in.arrId])); ldG(1, in.a[0]); movImm(2, 8); imulRR(1, 2); subRR(0, 1);
+                const Type& t = in.ty;
+                if (t.isFloating()) {
+                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x10); b(0x00); } else { b(0xF3); b(0x0F); b(0x10); b(0x00); cvtss2sd0(); }
+                    stX(0, id); return;
+                }
+                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x8B); b(0x00); }
+                else if (t.elemBytes() == 4) { if (t.isUnsigned) { b(0x8B); b(0x00); } else { b(0x48); b(0x63); b(0x00); } }
+                else if (t.elemBytes() == 2) { b(0x0F); b(t.isUnsigned ? 0xB7 : 0xBF); b(0x00); }
+                else { b(0x0F); b(t.isUnsigned ? 0xB6 : 0xBE); b(0x00); }
+                stG(0, id); return;
+            }
+            case Op::StoreL: {   // rdx = &arr[0] - idx*8; write in.a[1]
+                leaRbp(2, slot(arrBase[in.arrId])); ldG(1, in.a[0]); movImm(0, 8); imulRR(1, 0); subRR(2, 1);
+                const Type& t = in.ty;
+                if (t.isFloating()) {
+                    ldX(0, in.a[1]);
+                    if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x11); b(0x02); } else { cvtsd2ss0(); b(0xF3); b(0x0F); b(0x11); b(0x02); }
+                    return;
+                }
+                ldG(0, in.a[1]);
+                if (t.isPointer() || t.elemBytes() == 8) { b(0x48); b(0x89); b(0x02); }
+                else if (t.elemBytes() == 4) { b(0x89); b(0x02); }
+                else if (t.elemBytes() == 2) { b(0x66); b(0x89); b(0x02); }
+                else { b(0x88); b(0x02); }
+                return;
+            }
             case Op::CallMath: {
                 if (in.a.size() == 1) {
                     int mid = mathId(in.s); if (mid < 0) { bad(); return; }   // unknown intrinsic → evaluator fallback
@@ -1364,12 +1423,18 @@ struct X64Asm {
         const int n = (int)fn.bbs.size();
         int maxTemps = 0;
         for (auto& bb : fn.bbs) { int p = 0; for (int id : bb.insts) { if (fn.vals[id].op == Op::Phi) ++p; else break; } if (p > maxTemps) maxTemps = p; }
-        const int need = (nvals + maxTemps) * 8;
+        // Local arrays get 8-byte slots after the value + phi-temp slots (element k of
+        // array a is slot arrBase[a]+k), so all the existing slot addressing applies.
+        arrBase.assign(fn.localArrays.size(), 0);
+        int arrElems = 0;
+        for (size_t i = 0; i < fn.localArrays.size(); ++i) { arrBase[i] = nvals + maxTemps + arrElems; arrElems += fn.localArrays[i].second; }
+        const int need = (nvals + maxTemps + arrElems) * 8;
         frame = ((need + 15) / 16) * 16 + 8;         // keep rsp 16-aligned at calls
         b(0x55); b(0x48); b(0x89); b(0xE5); b(0x53);  // push rbp; mov rbp,rsp; push rbx
         b(0x41); b(0x54); b(0x41); b(0x55); b(0x41); b(0x56); b(0x41); b(0x57);   // push r12; r13; r14; r15
         b(0x48); b(0x81); b(0xEC); d32((uint32_t)frame);   // sub rsp,frame
         b(0x48); b(0x89); b(0xFB);                    // mov rbx,rdi
+        if (arrElems) { xorRR(0, 0); for (int i = 0; i < arrElems; ++i) stGd(0, slot(nvals + maxTemps + i)); }  // zero-init scratch arrays
         off.assign(n, 0);
         for (int blk = 0; blk < n; ++blk) {
             off[blk] = c.size();
@@ -1681,6 +1746,7 @@ struct Arm64Asm {
                 }
                 narrowIfFloat(in.ty); stX(0, id); return;
             }
+            case Op::LoadL: case Op::StoreL: bad(); return;   // local arrays: ARM native not yet supported → evaluator
             default: return;
         }
     }
@@ -1963,6 +2029,10 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
     for (uint32_t tx = 0; tx < bx; ++tx) {
         std::vector<SVal> v(fn.vals.size());
         std::vector<char> done(fn.vals.size(), 0);
+        // Per-thread scratch arrays (zero-initialized, matching the native tier's prologue).
+        std::vector<std::vector<SVal>> larr(fn.localArrays.size());
+        for (size_t ai = 0; ai < fn.localArrays.size(); ++ai)
+            larr[ai].assign(fn.localArrays[ai].second, coerce(SI(0), fn.localArrays[ai].first));
         const uint32_t tid[3] = {tx, ty, tz}, ctaid[3] = {gx, gy, gz};
         const uint32_t ntid[3] = {bx, by, bz}, nctaid[3] = {grid.x, grid.y, grid.z};
         int bb = fn.entry, prevBB = -1;
@@ -2014,6 +2084,16 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                     case Op::Store: {
                         int64_t addr = asI(v[in.a[0]]) + asI(v[in.a[1]]) * in.elemBytes;
                         memStore(addr, in.ty, v[in.a[2]]); break;
+                    }
+                    case Op::LoadL: {   // local-array read (bounds-guarded)
+                        int64_t k = asI(v[in.a[0]]); auto& arr = larr[in.arrId];
+                        v[id] = (k >= 0 && k < (int64_t)arr.size()) ? coerce(arr[(size_t)k], in.ty) : coerce(SI(0), in.ty);
+                        break;
+                    }
+                    case Op::StoreL: {  // local-array write (bounds-guarded)
+                        int64_t k = asI(v[in.a[0]]); auto& arr = larr[in.arrId];
+                        if (k >= 0 && k < (int64_t)arr.size()) arr[(size_t)k] = coerce(v[in.a[1]], in.ty);
+                        break;
                     }
                     case Op::Br: prevBB = bb; bb = in.bbT; goto nextblock;
                     case Op::CondBr: prevBB = bb; bb = (asI(v[in.a[0]]) != 0) ? in.bbT : in.bbF; goto nextblock;
