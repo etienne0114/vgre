@@ -779,41 +779,91 @@ struct X64Asm {
     explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()), vreg((size_t)f.vals.size(), -1) {}
     void bad() { ok = false; }
 
-    // Local register allocation: give block-local integer values (all uses in their
-    // def block, never a phi operand) a callee-saved register r12–r15 for their live
-    // range; everything else stays in a memory slot. Callee-saved ⇒ safe across the
-    // emitter's helper calls, so no spill-around-call handling is needed.
+    // Global linear-scan register allocation (Poletto & Sarkar). Integer/pointer
+    // values get a callee-saved register r12–r15 for their whole live range, ACROSS
+    // blocks and loop iterations (e.g. a pointer param stays in a register through the
+    // loop instead of being reloaded each iteration); the rest use memory slots.
+    // Callee-saved ⇒ safe across the emitter's helper calls (no spill-around-call). The
+    // emitter accesses every value through ldG/stG (register or slot), so this pass
+    // alone enables it. Live intervals are conservative (a register is never freed
+    // before the value's last live position). Phi values are kept in slots for now —
+    // allocating them to registers needs the interval to also cover the edge-copy
+    // writes at every predecessor terminator, which has an unresolved overlap case on
+    // nested loop+conditional CFGs; a correct phi allocation is the next increment.
     void allocateRegs() {
+        const int n = (int)fn.bbs.size();
+        std::vector<int> pos(nvals, -1), firstPos(n, 0), lastPos(n, 0);
+        int p = 0;
+        for (int b = 0; b < n; ++b) { firstPos[b] = p; for (int id : fn.bbs[b].insts) pos[id] = p++; lastPos[b] = p - 1; }
         std::vector<int> defBlk(nvals, -1);
-        for (int b_ = 0; b_ < (int)fn.bbs.size(); ++b_) for (int id : fn.bbs[b_].insts) defBlk[id] = b_;
-        std::vector<char> nonLocal(nvals, 0);
-        for (int b_ = 0; b_ < (int)fn.bbs.size(); ++b_) for (int id : fn.bbs[b_].insts) {
-            const Inst& in = fn.vals[id];
-            if (in.op == Op::Phi) { for (int op : in.a) nonLocal[op] = 1; continue; }   // phi operands: keep in slots
-            for (int op : in.a) if (defBlk[op] != b_) nonLocal[op] = 1;                  // used outside its def block
-        }
-        for (int b_ = 0; b_ < (int)fn.bbs.size(); ++b_) {
-            const auto& insts = fn.bbs[b_].insts;
-            // last position (index in this block) at which each value is used as an operand.
-            std::unordered_map<int, int> lastUse;
-            for (int p = 0; p < (int)insts.size(); ++p) for (int op : fn.vals[insts[p]].a) lastUse[op] = p;
-            std::vector<int> freeRegs = {12, 13, 14, 15};
-            std::vector<std::pair<int, int>> active;   // (lastUsePos, valueId)
-            for (int p = 0; p < (int)insts.size(); ++p) {
-                for (size_t a = 0; a < active.size();) {                                 // expire dead values
-                    if (active[a].first < p) { freeRegs.push_back(vreg[active[a].second]); active.erase(active.begin() + a); }
-                    else ++a;
+        for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) defBlk[id] = b;
+        auto succOf = [&](int b) {
+            std::vector<int> s; const Inst& t = fn.vals[fn.bbs[b].insts.back()];
+            if (t.op == Op::Br) s.push_back(t.bbT);
+            else if (t.op == Op::CondBr) { s.push_back(t.bbT); s.push_back(t.bbF); }
+            return s;
+        };
+        // Backward liveness dataflow (per-block live-in / live-out value sets).
+        std::vector<std::unordered_set<int>> liveIn(n), liveOut(n);
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (int b = n - 1; b >= 0; --b) {
+                std::unordered_set<int> out;
+                for (int s : succOf(b)) {
+                    for (int v : liveIn[s]) if (!(fn.vals[v].op == Op::Phi && defBlk[v] == s)) out.insert(v);   // phi defs aren't live-in from here
+                    for (int id : fn.bbs[s].insts) {                                                          // phi operands from b are live-out of b
+                        const Inst& in = fn.vals[id];
+                        if (in.op != Op::Phi) break;
+                        for (size_t k = 0; k < in.phiPred.size(); ++k) if (in.phiPred[k] == b) out.insert(in.a[k]);
+                    }
                 }
-                int id = insts[p];
-                const Inst& in = fn.vals[id];
-                const bool eligible = in.op != Op::Phi && !nonLocal[id] && lastUse.count(id) &&
-                                      (in.ty.base == Type::Int || in.ty.base == Type::Long || in.ty.base == Type::Char ||
-                                       in.ty.base == Type::Short || in.ty.base == Type::Bool || in.ty.isPointer());
-                if (eligible && !freeRegs.empty()) {
-                    int r = freeRegs.back(); freeRegs.pop_back();
-                    vreg[id] = r; active.push_back({lastUse[id], id});
+                std::unordered_set<int> live = out;
+                const auto& insts = fn.bbs[b].insts;
+                for (int i = (int)insts.size() - 1; i >= 0; --i) {                        // walk the block backward
+                    const Inst& in = fn.vals[insts[i]];
+                    live.erase(insts[i]);                                                 // def
+                    if (in.op != Op::Phi) for (int op : in.a) live.insert(op);            // uses (phi operands are edge uses, not here)
                 }
+                if (live != liveIn[b] || out != liveOut[b]) { liveIn[b] = std::move(live); liveOut[b] = std::move(out); changed = true; }
             }
+        }
+        // Live intervals: start = def; end = max over all uses + all blocks the value
+        // is live-out of (their last position). Conservative single interval per value.
+        std::vector<int> start(nvals, 0), end(nvals, 0);
+        for (int id = 0; id < nvals; ++id) { start[id] = pos[id] < 0 ? 0 : pos[id]; end[id] = start[id]; }
+        for (int b = 0; b < n; ++b) for (int id : fn.bbs[b].insts) {
+            const Inst& in = fn.vals[id];
+            if (in.op == Op::Phi) {
+                // A phi is written by its edge-copies at EVERY predecessor's terminator
+                // (the back-edge latch comes after the phi's own position), and read at
+                // its uses. Its register must stay reserved across all of that, so its
+                // interval spans from the earliest to the latest predecessor terminator.
+                for (size_t k = 0; k < in.phiPred.size(); ++k) {
+                    int op = in.a[k], predEnd = lastPos[in.phiPred[k]];
+                    end[op]  = std::max(end[op], predEnd);          // operand: live until the copy
+                    start[id] = std::min(start[id], predEnd);       // phi: written at the copy
+                    end[id]   = std::max(end[id], predEnd);
+                }
+            } else for (int op : in.a) end[op] = std::max(end[op], pos[id]);
+        }
+        for (int b = 0; b < n; ++b) for (int v : liveOut[b]) end[v] = std::max(end[v], lastPos[b]);
+        // Linear scan over intervals sorted by start.
+        std::vector<int> order;
+        for (int id = 0; id < nvals; ++id) {
+            const Inst& in = fn.vals[id];
+            const bool intType = in.ty.base == Type::Int || in.ty.base == Type::Long || in.ty.base == Type::Char ||
+                                 in.ty.base == Type::Short || in.ty.base == Type::Bool || in.ty.isPointer();
+            if (intType && in.op != Op::Phi && pos[id] >= 0 && end[id] > start[id]) order.push_back(id);   // has a real interval
+        }
+        std::sort(order.begin(), order.end(), [&](int a, int b) { return start[a] < start[b]; });
+        std::vector<int> freeRegs = {15, 14, 13, 12};
+        std::vector<std::pair<int, int>> active;   // (end, id)
+        for (int id : order) {
+            for (size_t a = 0; a < active.size();) {
+                if (active[a].first < start[id]) { freeRegs.push_back(vreg[active[a].second]); active.erase(active.begin() + a); }
+                else ++a;
+            }
+            if (!freeRegs.empty()) { vreg[id] = freeRegs.back(); freeRegs.pop_back(); active.push_back({end[id], id}); }
         }
     }
     void b(uint8_t x) { c.push_back(x); }

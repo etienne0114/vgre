@@ -208,21 +208,23 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      `SsaProgram::launch()` runs the emitted code (`usedNative()` reports it), matching
      the compiled tier bit-for-bit (`test_ssa_ir.cpp`, native probe). x86-64/Linux;
      other hosts keep running the portable evaluator, so Tier-2 works everywhere.
-   - **Increment 5 ✅ DONE**: register optimization. (a) A **redundant-load-elimination
+   - **Increment 5 ✅ DONE**: register allocation. (a) A **redundant-load-elimination
      peephole** keeps each op's result live in rax/xmm0 and skips reloading it as the
-     next op's first operand. (b) **Local register allocation** — block-local integer
-     values (all uses in their def block, never a phi operand) are held in the
-     callee-saved registers **r12–r15** across their live range (linear-scan per block;
-     callee-saved ⇒ safe across the emitter's helper calls, no spill-around-call), so
-     index math, comparisons, and address computation stay in registers instead of
-     memory slots. Both are provably correct and verified bit-exact across the whole
-     `test_ssa_ir` suite (loops, break/continue, do-while, if/else, optimizer, LICM),
-     with the native path still running.
-   - **Remaining**: global linear-scan (loop-carried/phi values into callee-saved regs
-     across blocks — needs cross-block live intervals); float register allocation
-     (XMM, spill-around-call); an AArch64 emitter; cross-block GVN; `switch`; and wiring
-     Tier-2 into the runtime dispatch as `VGRE_EXEC_BACKEND=ssa` (the execution-backend
-     seam is PTX-based → a small AST→SSA adapter; the backend is complete via `SsaProgram`).
+     next op's first operand. (b) **Global linear-scan register allocation** (Poletto &
+     Sarkar): integer/pointer values get a callee-saved register **r12–r15** for their
+     whole live range **across blocks and loop iterations** — computed from a full
+     backward liveness dataflow + conservative live intervals — so e.g. a pointer param
+     stays in a register through a loop instead of being reloaded each iteration.
+     Callee-saved ⇒ safe across the emitter's helper calls (no spill-around-call). The
+     emitter reaches every value through the same register-or-slot accessor, so the
+     allocator alone drives it. Verified bit-exact across the whole `test_ssa_ir` suite
+     (nested loops, break/continue, do-while, if/else, optimizer, LICM), native running.
+   - **Remaining**: **phi register allocation** (loop-carried accumulators/counters into
+     registers — the interval must also cover the edge-copy writes at every predecessor
+     terminator; kept in slots for now pending a fix for a nested-loop overlap case);
+     float/XMM allocation (spill-around-call); an AArch64 emitter; cross-block GVN;
+     `switch`; and wiring Tier-2 into the runtime as `VGRE_EXEC_BACKEND=ssa` (a small
+     AST→SSA adapter; the backend is complete via `SsaProgram`).
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries
