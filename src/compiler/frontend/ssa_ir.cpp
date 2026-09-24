@@ -124,7 +124,8 @@ static Type promoteT(const Type& a, const Type& b) {
 enum class Op {
     ConstI, ConstF, Param, Tid, Ctaid, Ntid, Nctaid,  // leaves
     Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath, LoadL, LoadS,   // value-producing (LoadL/LoadS = local/shared-array read)
-    Store, StoreL, StoreS, Barrier, CondBr, Br, Ret   // effects / terminators (StoreL/StoreS write; Barrier = __syncthreads)
+    WarpShfl, WarpVote,                               // value-producing, warp-cooperative (__shfl_*_sync / __ballot|any|all_sync)
+    Store, StoreL, StoreS, Barrier, CondBr, Br, Ret   // effects / terminators (StoreL/StoreS write; Barrier = __syncthreads/__syncwarp)
 };
 struct Inst {
     Op op;
@@ -410,6 +411,32 @@ struct Lowerer {
                 if ((fnn=="fmaf"||fnn=="fma") && e.args.size()==3) {
                     int a = lowerExpr(*e.args[0]); int b = lowerExpr(*e.args[1]); int c = lowerExpr(*e.args[2]); if (!ok) return 0;
                     Inst in; in.op = Op::CallMath; in.s = fnn; in.ty = typeOf(e); in.a = {a, b, c};
+                    return emit(std::move(in));
+                }
+                // __syncwarp(): a warp-scoped barrier. A block-wide barrier is a correct
+                // superset (it also synchronizes the warp) and exchanges no data, so the
+                // evaluator/interpreter results are identical — lower it to Barrier.
+                if (fnn == "__syncwarp" && e.args.size() <= 1) {
+                    Inst in; in.op = Op::Barrier; in.ty = scalar(Type::Int); emit(std::move(in));
+                    return constI(0, scalar(Type::Int));
+                }
+                // Warp shuffle: __shfl[_up|_down|_xor]_sync(mask, var, laneArg[, width]).
+                // mode 0=idx 1=up 2=down 3=xor. The `mask` arg (participation) is honored by
+                // the rendezvous of the lanes that actually reach the op, matching the tiers.
+                if ((fnn=="__shfl_sync"||fnn=="__shfl_up_sync"||fnn=="__shfl_down_sync"||fnn=="__shfl_xor_sync") && e.args.size() >= 3) {
+                    int var = lowerExpr(*e.args[1]); int lane = lowerExpr(*e.args[2]); if (!ok) return 0;
+                    Inst in; in.op = Op::WarpShfl; in.ty = typeOf(*e.args[1]);
+                    in.dim = fnn=="__shfl_sync"?0 : fnn=="__shfl_up_sync"?1 : fnn=="__shfl_down_sync"?2 : 3;
+                    in.a = {var, lane};
+                    if (e.args.size() >= 4) { int w = lowerExpr(*e.args[3]); if (!ok) return 0; in.a.push_back(w); }
+                    return emit(std::move(in));
+                }
+                // Warp vote: __ballot_sync/__any_sync/__all_sync(mask, pred). op 0=ballot 1=any 2=all.
+                if ((fnn=="__ballot_sync"||fnn=="__any_sync"||fnn=="__all_sync") && e.args.size() == 2) {
+                    int mask = lowerExpr(*e.args[0]); int pred = lowerExpr(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::WarpVote; in.ty = scalar(Type::Int);
+                    in.dim = fnn=="__ballot_sync"?0 : fnn=="__any_sync"?1 : 2;
+                    in.a = {mask, pred};
                     return emit(std::move(in));
                 }
                 auto dit = deviceFns.find(fnn);
@@ -930,6 +957,7 @@ static void dce(Fn& fn) {
     for (auto& bb : fn.bbs) for (int id : bb.insts) {
         const Inst& in = fn.vals[id];
         if (in.op == Op::Store || in.op == Op::StoreL || in.op == Op::StoreS || in.op == Op::Barrier ||
+            in.op == Op::WarpShfl || in.op == Op::WarpVote ||   // cross-lane rendezvous — keep (every lane executes it)
             in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
             if (!live[id]) { live[id] = 1; work.push_back(id); }
         }
@@ -940,6 +968,7 @@ static void dce(Fn& fn) {
         for (int id : bb.insts) {
             const Inst& in = fn.vals[id];
             const bool effect = in.op == Op::Store || in.op == Op::StoreL || in.op == Op::StoreS || in.op == Op::Barrier ||
+                                in.op == Op::WarpShfl || in.op == Op::WarpVote ||
                                 in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
             if (effect || live[id]) keep.push_back(id);
         }
@@ -1468,6 +1497,7 @@ struct X64Asm {
                 storeToRdx(in.ty); return;
             }
             case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
+            case Op::WarpShfl: case Op::WarpVote: bad(); return;          // warp intrinsics run on the cooperative evaluator
             case Op::LoadS: {   // rax = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldRbxOfs(0, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);
                 movImm(1, (uint64_t)sharedOff[in.arrId]); addRR(0, 1);
@@ -1858,6 +1888,7 @@ struct Arm64Asm {
                 storeToBase(in.ty, 2); return;
             }
             case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
+            case Op::WarpShfl: case Op::WarpVote: bad(); return;          // warp intrinsics run on the cooperative evaluator
             case Op::LoadS: {   // x0 = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldrXofs(0, 19, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); mul3(1, 1, 2);
                 movImm(2, (uint64_t)sharedOff[in.arrId]); add3(1, 1, 2); add3(0, 0, 1);
@@ -2044,7 +2075,8 @@ static size_t ssaSharedBytes(const Fn& fn) {
 // memory or a __syncthreads barrier.
 static bool ssaIsCoop(const Fn& fn) {
     if (!fn.sharedArrays.empty()) return true;
-    for (const auto& in : fn.vals) if (in.op == Op::Barrier) return true;
+    for (const auto& in : fn.vals)
+        if (in.op == Op::Barrier || in.op == Op::WarpShfl || in.op == Op::WarpVote) return true;
     return false;
 }
 #endif
@@ -2230,6 +2262,13 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
         std::vector<std::vector<SVal>> larr;
         int bb = 0, j = 0, prevBB = -1;
         bool entered = false, finished = false;
+        // Warp-cooperative rendezvous (WarpShfl/WarpVote): when a thread reaches a warp
+        // op it publishes its operand in `pub`, records the op id in `parkOp`, and
+        // suspends; the scheduler resolves the whole warp, writes each lane's result into
+        // v[parkOp], and sets `parkResolved` so the resumed thread consumes it.
+        SVal pub{};
+        int parkOp = -1;
+        bool parkResolved = false;
     };
     // Run one thread from its current PC until it hits a Barrier (suspend, PC past it) or
     // Ret (finish). `shared` is the block's __shared__ storage (written across threads).
@@ -2279,6 +2318,14 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                     case Op::LoadS: { int64_t k = asI(v[in.a[0]]); auto& a = shared[in.arrId]; v[id] = (k >= 0 && k < (int64_t)a.size()) ? coerce(a[(size_t)k], in.ty) : coerce(SI(0), in.ty); break; }
                     case Op::StoreS:{ int64_t k = asI(v[in.a[0]]); auto& a = shared[in.arrId]; if (k >= 0 && k < (int64_t)a.size()) a[(size_t)k] = coerce(v[in.a[1]], in.ty); break; }
                     case Op::Barrier: ++t.j; return;   // suspend; resume at the next instruction
+                    case Op::WarpShfl:
+                    case Op::WarpVote:
+                        if (t.parkOp == id && t.parkResolved) {   // scheduler resolved the warp → v[id] is set
+                            t.parkOp = -1; t.parkResolved = false; break;   // consume, fall through to ++t.j
+                        }
+                        t.pub = (in.op == Op::WarpShfl) ? v[in.a[0]] : v[in.a[1]];   // publish var (shfl) / predicate (vote)
+                        t.parkOp = id; t.parkResolved = false;
+                        return;   // suspend WITHOUT advancing j — re-enter this op once the warp is resolved
                     case Op::Br:     t.prevBB = t.bb; t.bb = in.bbT; t.j = 0; t.entered = false; goto nextblock;
                     case Op::CondBr: t.prevBB = t.bb; t.bb = (asI(v[in.a[0]]) != 0) ? in.bbT : in.bbF; t.j = 0; t.entered = false; goto nextblock;
                     case Op::Ret:    t.finished = true; return;
@@ -2305,15 +2352,78 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
             t.bb = fn.entry;
         }
         const uint32_t ctaid[3] = {gx, gy, gz}, nctaid[3] = {grid.x, grid.y, grid.z}, ntid[3] = {bx, by, bz};
+        const uint32_t nwarps = (nT + 31) / 32;
         for (long long round = 0; round < (1LL << 34); ++round) {   // one round advances every thread by one barrier segment
             bool allDone = true;
             for (uint32_t lin = 0; lin < nT; ++lin) {
                 if (th[lin].finished) continue;
                 const uint32_t tid[3] = {lin % bx, (lin / bx) % by, lin / (bx * by)};
                 runSegment(th[lin], shared, tid, ctaid, ntid, nctaid);
-                if (!th[lin].finished) allDone = false;   // suspended at a barrier
+                if (!th[lin].finished) allDone = false;   // suspended at a barrier / warp op
             }
             if (allDone) break;
+
+            // Warp rendezvous: release each warp whose live lanes are all parked at a
+            // warp op (__shfl_*_sync / __ballot|any|all_sync). Compute the active mask
+            // (parked lanes), snapshot the published operands, then write each lane's
+            // result into v[parkOp]. Mirrors the compiled tier's coopShuffle/coopVote.
+            bool resolvedAny = false;
+            for (uint32_t w = 0; w < nwarps; ++w) {
+                const uint32_t base = w * 32;
+                bool anyLive = false, allParked = true;
+                for (uint32_t l = 0; l < 32 && base + l < nT; ++l) {
+                    if (th[base + l].finished) continue;
+                    anyLive = true;
+                    if (th[base + l].parkOp < 0) { allParked = false; break; }
+                }
+                if (!anyLive || !allParked) continue;
+                uint32_t active = 0; SVal snap[32] = {};
+                for (uint32_t l = 0; l < 32 && base + l < nT; ++l)
+                    if (!th[base + l].finished && th[base + l].parkOp >= 0) { active |= (1u << l); snap[l] = th[base + l].pub; }
+                for (uint32_t l = 0; l < 32 && base + l < nT; ++l) {
+                    TState& t = th[base + l];
+                    if (t.finished || t.parkOp < 0) continue;
+                    const Inst& in = fn.vals[t.parkOp];
+                    if (in.op == Op::WarpShfl) {
+                        int mode = in.dim;
+                        int width = in.a.size() > 2 ? (int)asI(t.v[in.a[2]]) : 32;
+                        if (width <= 0 || width > 32) width = 32;
+                        int laneArg = (int)asI(t.v[in.a[1]]);
+                        int laneInSub = (int)l % width, subBase = ((int)l / width) * width;
+                        int srcSub = laneInSub; bool own = false;
+                        if (mode == 0)      srcSub = laneArg % width;
+                        else if (mode == 1) { srcSub = laneInSub - laneArg; if (srcSub < 0) own = true; }
+                        else if (mode == 2) { srcSub = laneInSub + laneArg; if (srcSub >= width) own = true; }
+                        else                { srcSub = laneInSub ^ laneArg; if (srcSub >= width) own = true; }
+                        int src = subBase + srcSub;
+                        SVal res = (own || src < 0 || src >= 32 || !(active & (1u << src))) ? t.pub : snap[src];
+                        t.v[t.parkOp] = coerce(res, in.ty);
+                    } else {   // WarpVote — op 0=ballot 1=any 2=all
+                        uint32_t memMask = (uint32_t)asI(t.v[in.a[0]]);
+                        uint32_t ballot = 0;
+                        for (uint32_t k = 0; k < 32; ++k)
+                            if ((active & (1u << k)) && asI(snap[k]) != 0) ballot |= (1u << k);
+                        uint32_t masked = ballot & memMask;
+                        int64_t r = in.dim == 0 ? (int64_t)masked
+                                  : in.dim == 1 ? (masked != 0 ? 1 : 0)
+                                  : (masked == (memMask & active) ? 1 : 0);
+                        t.v[t.parkOp] = SI(r);
+                    }
+                    t.parkResolved = true; resolvedAny = true;
+                }
+            }
+            // No warp advanced and no thread finished, yet threads remain — if every
+            // remaining thread is stuck at a warp op, the rendezvous can never complete
+            // (divergent/ill-formed). Break instead of spinning to the round cap.
+            if (!resolvedAny) {
+                bool anyNF = false, allParkedGlobal = true;
+                for (uint32_t lin = 0; lin < nT; ++lin) {
+                    if (th[lin].finished) continue;
+                    anyNF = true;
+                    if (th[lin].parkOp < 0) { allParkedGlobal = false; break; }
+                }
+                if (anyNF && allParkedGlobal) break;
+            }
         }
     }
     return true;

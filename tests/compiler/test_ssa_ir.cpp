@@ -140,7 +140,9 @@ int main() {
     // break / continue / do-while: the compiled tier doesn't support these, so the
     // SSA tier is diffed against the Tier-0 interpreter (which does).
     namespace be = vgre::compiler::backend;
-    auto checkVsInterp = [&](const char* label, const char* src, int NN, int M) {
+    // BD = block size in x (default 32 = one warp/block; pass 64+ to exercise multi-warp
+    // blocks, where warp scope — lane = lin&31, warp = lin>>5 — must stay isolated).
+    auto checkVsInterpBD = [&](const char* label, const char* src, int NN, int M, int BD) {
         std::string err;
         auto sp = SsaProgram::compile(src, "k", err);
         if (!sp) { std::printf("FAIL: %s SSA: %s\n", label, err.c_str()); ++g_fail; return; }
@@ -151,12 +153,13 @@ int main() {
         std::vector<float> xv(NN * M); for (int i = 0; i < NN * M; ++i) xv[i] = (i % 17) * 0.5f - 4.0f;
         std::vector<float> yi(NN, -1.f), ys(NN, -2.f);
         float* xp = xv.data(); int n = NN, m = M;
-        { float* yp = yi.data(); void* a[] = {&xp, &yp, &n, &m}; be::LaunchConfig lc; lc.gridDim[0] = (NN + 31) / 32; lc.blockDim[0] = 32; ib->launch(*ik, lc, a, 4); }
-        { float* yp = ys.data(); void* a[] = {&xp, &yp, &n, &m}; Extent g{(uint32_t)((NN + 31) / 32), 1, 1}, b{32, 1, 1}; sp->launch(g, b, a, 4); }
+        { float* yp = yi.data(); void* a[] = {&xp, &yp, &n, &m}; be::LaunchConfig lc; lc.gridDim[0] = (NN + BD - 1) / BD; lc.blockDim[0] = (uint32_t)BD; ib->launch(*ik, lc, a, 4); }
+        { float* yp = ys.data(); void* a[] = {&xp, &yp, &n, &m}; Extent g{(uint32_t)((NN + BD - 1) / BD), 1, 1}, b{(uint32_t)BD, 1, 1}; sp->launch(g, b, a, 4); }
         int bad = 0; for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yi[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v) ++bad; }
         if (bad) { std::printf("FAIL: %s SSA vs interpreter: %d/%d\n", label, bad, NN); ++g_fail; }
         else std::printf("  %s: SSA (blocks=%d) == interpreter (%d elems)\n", label, sp->numBlocks(), NN);
     };
+    auto checkVsInterp = [&](const char* label, const char* src, int NN, int M) { checkVsInterpBD(label, src, NN, M, 32); };
     checkVsInterp("break",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) break; acc+=v; } y[i]=acc; } })", 96, 16);
     checkVsInterp("continue", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float v=x[i*m+k]; if(v<0.0f) continue; acc+=v; } y[i]=acc; } })", 96, 16);
     checkVsInterp("do-while", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; int k=0; do { acc += x[i*m+k]; k++; } while(k<m); y[i]=acc; } })", 96, 16);
@@ -175,6 +178,33 @@ int main() {
     // switch inside a loop with `continue` (forwarded to the loop) and a break (to the switch).
     checkVsInterp("sw-loop",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ switch(k%3){ case 0: continue; case 1: acc+=x[i*m+k]; break; default: acc-=x[i*m+k]; } acc+=0.5f; } y[i]=acc; } })", 96, 16);
 
+    // ── Warp intrinsics (blockDim.x=32 ⇒ one warp per block; run on the cooperative
+    //    evaluator, cross-lane rendezvous) — each bit-exact vs the interpreter. ──
+    // __shfl_sync (idx): broadcast lane 0's value to the whole warp.
+    checkVsInterp("wshfl-bcast", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=__shfl_sync(0xffffffff, x[i*m], 0); if(i<n) y[i]=v; })", 96, 4);
+    // __shfl_down_sync: a full warp reduction (lane 0 ends with the sum, others partials).
+    checkVsInterp("wshfl-down",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; for(int o=16;o>0;o>>=1) v+=__shfl_down_sync(0xffffffff, v, o); if(i<n) y[i]=v; })", 96, 4);
+    // __shfl_xor_sync: a butterfly all-reduce (every lane ends with the warp sum).
+    checkVsInterp("wshfl-xor",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; for(int o=16;o>=1;o>>=1) v+=__shfl_xor_sync(0xffffffff, v, o); if(i<n) y[i]=v; })", 96, 4);
+    // __shfl_up_sync: lane l reads lane l-1 (lane 0 keeps its own value).
+    checkVsInterp("wshfl-up",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; float p=__shfl_up_sync(0xffffffff, v, 1); if(i<n) y[i]=p; })", 96, 4);
+    // __shfl_xor_sync with an explicit sub-warp width (8) — the width operand path.
+    checkVsInterp("wshfl-width", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; float r=__shfl_xor_sync(0xffffffff, v, 1, 8); if(i<n) y[i]=r; })", 96, 4);
+    // __any_sync / __all_sync: warp-wide predicate reductions (0/1 results).
+    checkVsInterp("wvote-any",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int p=(x[i*m]>0.0f); int a=__any_sync(0xffffffff, p); if(i<n) y[i]=(float)a; })", 96, 4);
+    checkVsInterp("wvote-all",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int p=(x[i*m]>0.0f); int a=__all_sync(0xffffffff, p); if(i<n) y[i]=(float)a; })", 96, 4);
+    // __ballot_sync: the low 4 bits of the participation mask (signedness-agnostic, exact in float).
+    checkVsInterp("wballot",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int p=(x[i*m]>0.0f); int b=__ballot_sync(0xffffffff, p); if(i<n) y[i]=(float)(b&15); })", 96, 4);
+    // __syncwarp: a warp barrier (lowered to a block barrier — a correct superset).
+    checkVsInterp("wsyncwarp",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; __syncwarp(); if(i<n) y[i]=v*2.0f; })", 96, 4);
+    // Multi-warp block (64 threads = 2 warps): a shfl must stay within its own warp — a
+    // block-scoped implementation would leak warp 0's lane-0 value into warp 1. Also a
+    // full butterfly all-reduce per warp, so each warp's lanes sum only their own 32.
+    checkVsInterpBD("wshfl-2warp-bcast", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; float b=__shfl_sync(0xffffffff, v, 0); if(i<n) y[i]=b; })", 128, 4, 64);
+    checkVsInterpBD("wshfl-2warp-xor",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i*m]:0.0f; for(int o=16;o>=1;o>>=1) v+=__shfl_xor_sync(0xffffffff, v, o); if(i<n) y[i]=v; })", 128, 4, 64);
+    // Multi-warp vote: __any_sync reduces only within each warp, not the whole block.
+    checkVsInterpBD("wvote-2warp-any",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int p=(x[i*m]>0.0f); int a=__any_sync(0xffffffff, p); if(i<n) y[i]=(float)a; })", 128, 4, 64);
+
     // Native x86-64 emission: on Linux/x86-64 launch() must run real machine code
     // (not the evaluator fallback), and it must still match the compiled tier.
     {
@@ -182,7 +212,7 @@ int main() {
         auto sp = SsaProgram::compile("extern \"C\" __global__ void k(const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<i%8+1;k++) acc+=x[i]*2.0f; y[i]=acc; } }", "k", err);
         if (!sp) { std::printf("FAIL: native probe compile: %s\n", err.c_str()); ++g_fail; }
         else {
-#if defined(__x86_64__) && defined(__linux__)
+#if defined(__x86_64__) && defined(__linux__) && !defined(VGRE_SSA_NO_NATIVE)
             if (!sp->usedNative()) { std::printf("FAIL: expected native x86-64 code on this host\n"); ++g_fail; }
             else std::printf("  native: launch() runs emitted x86-64 machine code\n");
 #else

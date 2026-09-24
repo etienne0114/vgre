@@ -81,6 +81,17 @@ extern "C" __global__ void smem(const float* x, float* y, int n) {
 }
 )";
 
+// Warp shuffle broadcast — __shfl_sync(mask, v, 0) copies lane 0's value across the
+// warp. In the SSA subset (warp-cooperative evaluator); each lane's result is the
+// warp base lane's input, so y[i] == x[(i/32)*32].
+static const char* kWarp = R"(
+extern "C" __global__ void warpb(const float* x, float* y, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    float v = __shfl_sync(0xffffffff, (i < n) ? x[i] : 0.0f, 0);
+    if (i < n) { y[i] = v; }
+}
+)";
+
 int main() {
     setenv("VGRE_EXEC_BACKEND", "ssa", 1);
     CHECK(vgre_init() == VGRE_SUCCESS, "vgre_init");
@@ -167,6 +178,33 @@ int main() {
         int tt = tierOf("smem", sid);
         if (tt >= 0) CHECK(tt == 3, "smem (__shared__/__syncthreads) runs on the Tier-2 SSA backend (tier 3)");
         std::printf("  smem  : bad=%d/%d  tier=%d (expected 3 = SSA; native fibers on x86-64/Linux, else evaluator)\n", bad, N, tt);
+        vgre_free(dx); vgre_free(dy);
+    }
+
+    // ── warp shuffle kernel on the SSA tier (cooperative evaluator) ──────────────
+    {
+        const int NB = 256;   // 8 warps of 32
+        std::vector<float> hx(NB), hy(NB), ref(NB);
+        for (int i = 0; i < NB; ++i) hx[i] = i * 0.25f - 7.0f;
+        for (int i = 0; i < NB; ++i) ref[i] = hx[(i / 32) * 32];   // lane 0 of each warp, broadcast
+        void *dx = nullptr, *dy = nullptr;
+        CHECK(vgre_malloc(&dx, NB * sizeof(float)) == VGRE_SUCCESS, "malloc wx");
+        CHECK(vgre_malloc(&dy, NB * sizeof(float)) == VGRE_SUCCESS, "malloc wy");
+        CHECK(vgre_memcpy(dx, hx.data(), NB * sizeof(float), VGRE_MEMCPY_HOST_TO_DEVICE) == VGRE_SUCCESS, "H2D wx");
+        uint64_t wid = 0;
+        CHECK(vgre_register_kernel("warpb", kWarp, &wid) == VGRE_SUCCESS, "register warpb");
+        int n = NB;
+        void* args[] = {&dx, &dy, &n};
+        uint32_t grid[3] = {(uint32_t)(NB / 32), 1, 1}, block[3] = {32, 1, 1};
+        CHECK(vgre_launch_kernel(wid, grid, block, args, 3, 0, 0) == VGRE_SUCCESS, "launch warpb");
+        CHECK(vgre_synchronize() == VGRE_SUCCESS, "synchronize");
+        CHECK(vgre_memcpy(hy.data(), dy, NB * sizeof(float), VGRE_MEMCPY_DEVICE_TO_HOST) == VGRE_SUCCESS, "D2H wy");
+        int bad = 0;
+        for (int i = 0; i < NB; ++i) { uint32_t u, v; std::memcpy(&u, &hy[i], 4); std::memcpy(&v, &ref[i], 4); if (u != v) ++bad; }
+        CHECK(bad == 0, "warp __shfl_sync broadcast is bit-exact vs reference");
+        int wt = tierOf("warpb", wid);
+        if (wt >= 0) CHECK(wt == 3, "warp shuffle kernel runs on the Tier-2 SSA backend (tier 3)");
+        std::printf("  warpb : bad=%d/%d  tier=%d (expected 3 = SSA; warp intrinsics on the evaluator)\n", bad, NB, wt);
         vgre_free(dx); vgre_free(dy);
     }
 
