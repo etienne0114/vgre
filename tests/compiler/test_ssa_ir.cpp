@@ -111,6 +111,10 @@ int main() {
     checkOpt("fold",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int a=2+3; int b=a*4; float c=1.0f+2.0f; y[i]=x[i*m]*(float)b + c; } })", 128, 16);
     checkOpt("cse-dce",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float dead=v*99.0f; float r=(v*2.0f)+(v*2.0f); y[i]=r; } })", 128, 16);
     checkOpt("licm",     R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ float inv=(float)(m*2)+3.0f; acc += x[i*m+k]+inv; } y[i]=acc; } })", 128, 16);
+    // Cross-block GVN: the index math `i*m+2` recomputed inside a guarded nested block
+    // is redundant with the copy in the dominating block — only a dominator-scoped GVN
+    // (not per-block CSE) can eliminate it. Must stay correct and shrink the IR.
+    checkOpt("gvn-cross", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int base=i*m+2; float acc=x[base]; if(acc>0.0f){ int base2=i*m+2; acc=acc+x[base2]*3.0f; } y[i]=acc; } })", 128, 16);
 
     // break / continue / do-while: the compiled tier doesn't support these, so the
     // SSA tier is diffed against the Tier-0 interpreter (which does).

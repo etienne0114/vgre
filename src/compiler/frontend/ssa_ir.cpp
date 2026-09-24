@@ -595,29 +595,79 @@ static void constFold(Fn& fn) {
     }
 }
 
-// Local value numbering (safe GVN within a block): dedupe identical pure instructions;
-// the canonical precedes the duplicate in the same block, so it dominates all uses.
-static void localGvn(Fn& fn) {
+static std::vector<std::vector<char>> computeDom(const Fn& fn);   // defined below (used by gvn + licm)
+
+// Global value numbering (dominator-scoped CSE): dedupe identical pure instructions
+// across the whole CFG, not just within a block. Blocks are walked in dominator-tree
+// preorder carrying a scoped key→value table: a pure op whose (opcode, type, resolved
+// operands) key already appears — in this block or any DOMINATOR — is replaced by that
+// earlier value. Because every visible entry is from the current block or an ancestor,
+// the canonical definition always dominates the use, so the rewrite is legal (and its
+// value is available: SSA defs dominate their uses, and dominance is transitive). Phis
+// and effectful ops are never value-numbered. This subsumes the old per-block CSE.
+static void gvn(Fn& fn) {
+    const int n = (int)fn.bbs.size();
     std::vector<int> remap(fn.vals.size());
     for (size_t i = 0; i < remap.size(); ++i) remap[i] = (int)i;
     std::function<int(int)> resolve = [&](int id) { while (remap[id] != id) id = remap[id]; return id; };
-    for (auto& bb : fn.bbs) {
-        std::unordered_map<std::string, int> seen;
-        for (int id : bb.insts) {
-            Inst& in = fn.vals[id];
-            const bool pure = in.op == Op::ConstI || in.op == Op::ConstF || in.op == Op::Bin ||
-                              in.op == Op::Un || in.op == Op::Cmp || in.op == Op::Cast || in.op == Op::Sel;
-            for (int& op : in.a) op = resolve(op);
-            if (!pure) continue;
-            uint64_t fb; std::memcpy(&fb, &in.cf, 8);
-            std::string key = std::to_string((int)in.op) + "|" + in.s + "|" + std::to_string(in.ci) + "|" +
-                              std::to_string(fb) + "|" + std::to_string((int)in.ty.base) + std::to_string(in.ty.ptr) +
-                              std::to_string(in.ty.isUnsigned ? 1 : 0);
-            for (int op : in.a) key += "," + std::to_string(op);
-            auto it = seen.find(key);
-            if (it != seen.end()) remap[id] = it->second; else seen[key] = id;
+
+    // Immediate dominators → dominator-tree children. idom[b] is b's deepest strict
+    // dominator (the strict dominator with the most dominators; dominators are totally
+    // ordered along any path, so this is unique).
+    auto dom = computeDom(fn);
+    std::vector<int> idom(n, -1), domCount(n, 0);
+    for (int b = 0; b < n; ++b) for (int d = 0; d < n; ++d) if (dom[b][d]) ++domCount[b];
+    std::vector<std::vector<int>> children(n);
+    for (int b = 0; b < n; ++b) {
+        if (b == fn.entry) continue;
+        int best = -1;
+        for (int d = 0; d < n; ++d) if (d != b && dom[b][d] && (best < 0 || domCount[d] > domCount[best])) best = d;
+        idom[b] = best;
+        if (best >= 0) children[best].push_back(b);
+    }
+
+    auto keyOf = [&](const Inst& in) {
+        uint64_t fb; std::memcpy(&fb, &in.cf, 8);
+        std::string key = std::to_string((int)in.op) + "|" + in.s + "|" + std::to_string(in.ci) + "|" +
+                          std::to_string(fb) + "|" + std::to_string((int)in.ty.base) + std::to_string(in.ty.ptr) +
+                          std::to_string(in.ty.isUnsigned ? 1 : 0);
+        for (int op : in.a) key += "," + std::to_string(op);
+        return key;
+    };
+
+    std::unordered_map<std::string, int> table;   // scoped: entries live only for the current dom-tree path
+    // Iterative dom-tree DFS with a scope stack: ENTER a block numbers its pure insts,
+    // LEAVE undoes exactly the table changes it made (restoring any shadowed ancestor entry).
+    struct Frame { int b; bool entered; };
+    std::vector<Frame> stack{{fn.entry, false}};
+    std::vector<std::vector<std::pair<std::string, int>>> undo;   // per active block: (key, prevValue or -1)
+    while (!stack.empty()) {
+        Frame& f = stack.back();
+        if (!f.entered) {
+            f.entered = true;
+            undo.emplace_back();
+            for (int id : fn.bbs[f.b].insts) {
+                Inst& in = fn.vals[id];
+                for (int& op : in.a) op = resolve(op);
+                const bool pure = in.op == Op::ConstI || in.op == Op::ConstF || in.op == Op::Bin ||
+                                  in.op == Op::Un || in.op == Op::Cmp || in.op == Op::Cast || in.op == Op::Sel;
+                if (!pure) continue;
+                std::string key = keyOf(in);
+                auto it = table.find(key);
+                if (it != table.end()) { remap[id] = it->second; }
+                else { undo.back().push_back({key, -1}); table[key] = id; }
+            }
+            int b = f.b;
+            for (int ch : children[b]) stack.push_back({ch, false});
+        } else {
+            for (auto it = undo.back().rbegin(); it != undo.back().rend(); ++it) {
+                if (it->second == -1) table.erase(it->first); else table[it->first] = it->second;
+            }
+            undo.pop_back();
+            stack.pop_back();
         }
     }
+
     for (auto& in : fn.vals) for (int& op : in.a) op = resolve(op);
     for (auto& bb : fn.bbs) {
         std::vector<int> keep;
@@ -720,7 +770,7 @@ static void licm(Fn& fn) {
     }
 }
 
-static void runOpt(Fn& fn) { constFold(fn); localGvn(fn); licm(fn); constFold(fn); dce(fn); }
+static void runOpt(Fn& fn) { constFold(fn); gvn(fn); licm(fn); constFold(fn); gvn(fn); dce(fn); }
 
 // ── Tier-2 native machine-code emission (x86-64 / Linux) ──────────────────────────
 #if VGRE_SSA_X64
