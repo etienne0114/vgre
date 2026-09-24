@@ -124,7 +124,8 @@ static Type promoteT(const Type& a, const Type& b) {
 enum class Op {
     ConstI, ConstF, Param, Tid, Ctaid, Ntid, Nctaid,  // leaves
     Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath, LoadL, LoadS,   // value-producing (LoadL/LoadS = local/shared-array read)
-    WarpShfl, WarpVote,                               // value-producing, warp-cooperative (__shfl_*_sync / __ballot|any|all_sync)
+    WarpShfl, WarpVote, WarpReduce, WarpMatch,        // value-producing, warp-cooperative (__shfl_*_sync / __ballot|any|all_sync / __reduce_*_sync / __match_any_sync)
+    WarpActive,                                       // value-producing, per-thread (__activemask — mask of the warp's in-range lanes)
     Store, StoreL, StoreS, Barrier, CondBr, Br, Ret   // effects / terminators (StoreL/StoreS write; Barrier = __syncthreads/__syncwarp)
 };
 struct Inst {
@@ -437,6 +438,32 @@ struct Lowerer {
                     Inst in; in.op = Op::WarpVote; in.ty = scalar(Type::Int);
                     in.dim = fnn=="__ballot_sync"?0 : fnn=="__any_sync"?1 : 2;
                     in.a = {mask, pred};
+                    return emit(std::move(in));
+                }
+                // Warp reduce: __reduce_{add,min,max,and,or,xor}_sync(mask, value). op 0-5.
+                // Folds `value` over the warp's participating lanes; signedness from `value`.
+                if ((fnn=="__reduce_add_sync"||fnn=="__reduce_min_sync"||fnn=="__reduce_max_sync"||
+                     fnn=="__reduce_and_sync"||fnn=="__reduce_or_sync"||fnn=="__reduce_xor_sync") && e.args.size() == 2) {
+                    int mask = lowerExpr(*e.args[0]); int val = lowerExpr(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::WarpReduce; in.ty = typeOf(*e.args[1]);
+                    in.dim = fnn=="__reduce_add_sync"?0 : fnn=="__reduce_min_sync"?1 : fnn=="__reduce_max_sync"?2
+                           : fnn=="__reduce_and_sync"?3 : fnn=="__reduce_or_sync"?4 : 5;
+                    in.ci = typeOf(*e.args[1]).isUnsigned ? 0 : 1;   // sgn flag for min/max fold
+                    in.a = {mask, val};
+                    return emit(std::move(in));
+                }
+                // Warp match: __match_any_sync(mask, value) → mask of same-valued lanes.
+                if (fnn=="__match_any_sync" && e.args.size() == 2) {
+                    int mask = lowerExpr(*e.args[0]); int val = lowerExpr(*e.args[1]); if (!ok) return 0;
+                    Inst in; in.op = Op::WarpMatch; { Type u = scalar(Type::Int); u.isUnsigned = true; in.ty = u; }
+                    in.dim = 0;   // any
+                    in.a = {mask, val};
+                    return emit(std::move(in));
+                }
+                // __activemask(): the warp's in-range lane mask (per-thread, no rendezvous —
+                // matches the interpreter's non-exited-lane query for convergent code).
+                if (fnn=="__activemask" && e.args.empty()) {
+                    Inst in; in.op = Op::WarpActive; { Type u = scalar(Type::Int); u.isUnsigned = true; in.ty = u; }
                     return emit(std::move(in));
                 }
                 auto dit = deviceFns.find(fnn);
@@ -958,6 +985,7 @@ static void dce(Fn& fn) {
         const Inst& in = fn.vals[id];
         if (in.op == Op::Store || in.op == Op::StoreL || in.op == Op::StoreS || in.op == Op::Barrier ||
             in.op == Op::WarpShfl || in.op == Op::WarpVote ||   // cross-lane rendezvous — keep (every lane executes it)
+            in.op == Op::WarpReduce || in.op == Op::WarpMatch ||
             in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr) {
             if (!live[id]) { live[id] = 1; work.push_back(id); }
         }
@@ -969,6 +997,7 @@ static void dce(Fn& fn) {
             const Inst& in = fn.vals[id];
             const bool effect = in.op == Op::Store || in.op == Op::StoreL || in.op == Op::StoreS || in.op == Op::Barrier ||
                                 in.op == Op::WarpShfl || in.op == Op::WarpVote ||
+                                in.op == Op::WarpReduce || in.op == Op::WarpMatch ||
                                 in.op == Op::Ret || in.op == Op::Br || in.op == Op::CondBr;
             if (effect || live[id]) keep.push_back(id);
         }
@@ -1497,7 +1526,8 @@ struct X64Asm {
                 storeToRdx(in.ty); return;
             }
             case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
-            case Op::WarpShfl: case Op::WarpVote: bad(); return;          // warp intrinsics run on the cooperative evaluator
+            case Op::WarpShfl: case Op::WarpVote: case Op::WarpReduce:
+            case Op::WarpMatch: case Op::WarpActive: bad(); return;       // warp intrinsics run on the cooperative evaluator
             case Op::LoadS: {   // rax = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldRbxOfs(0, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);
                 movImm(1, (uint64_t)sharedOff[in.arrId]); addRR(0, 1);
@@ -1888,7 +1918,8 @@ struct Arm64Asm {
                 storeToBase(in.ty, 2); return;
             }
             case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
-            case Op::WarpShfl: case Op::WarpVote: bad(); return;          // warp intrinsics run on the cooperative evaluator
+            case Op::WarpShfl: case Op::WarpVote: case Op::WarpReduce:
+            case Op::WarpMatch: case Op::WarpActive: bad(); return;       // warp intrinsics run on the cooperative evaluator
             case Op::LoadS: {   // x0 = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldrXofs(0, 19, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); mul3(1, 1, 2);
                 movImm(2, (uint64_t)sharedOff[in.arrId]); add3(1, 1, 2); add3(0, 0, 1);
@@ -2076,7 +2107,8 @@ static size_t ssaSharedBytes(const Fn& fn) {
 static bool ssaIsCoop(const Fn& fn) {
     if (!fn.sharedArrays.empty()) return true;
     for (const auto& in : fn.vals)
-        if (in.op == Op::Barrier || in.op == Op::WarpShfl || in.op == Op::WarpVote) return true;
+        if (in.op == Op::Barrier || in.op == Op::WarpShfl || in.op == Op::WarpVote ||
+            in.op == Op::WarpReduce || in.op == Op::WarpMatch) return true;
     return false;
 }
 #endif
@@ -2320,12 +2352,31 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                     case Op::Barrier: ++t.j; return;   // suspend; resume at the next instruction
                     case Op::WarpShfl:
                     case Op::WarpVote:
+                    case Op::WarpReduce:
+                    case Op::WarpMatch:
                         if (t.parkOp == id && t.parkResolved) {   // scheduler resolved the warp → v[id] is set
                             t.parkOp = -1; t.parkResolved = false; break;   // consume, fall through to ++t.j
                         }
-                        t.pub = (in.op == Op::WarpShfl) ? v[in.a[0]] : v[in.a[1]];   // publish var (shfl) / predicate (vote)
+                        // publish var (shfl a[0]) / predicate|value (vote/reduce/match a[1])
+                        t.pub = (in.op == Op::WarpShfl) ? v[in.a[0]] : v[in.a[1]];
                         t.parkOp = id; t.parkResolved = false;
                         return;   // suspend WITHOUT advancing j — re-enter this op once the warp is resolved
+                    case Op::WarpActive: {
+                        // __activemask() = the warp's non-exited lanes. Both this scheduler and
+                        // the interpreter retire lanes in strictly increasing lane order (each
+                        // runs to Ret before the next starts, absent a rendezvous), so when
+                        // lane L reads activemask the lower lanes 0..L-1 have already retired:
+                        // mask = fullWarpMask with bits [0,lane) cleared. Bit-exact vs the
+                        // interpreter/compiled tiers for convergent code (their documented
+                        // sequential-done behavior; real HW returns the full mask).
+                        uint32_t lin = tid[0] + tid[1] * bx + tid[2] * bx * by, ntot = bx * by * bz;
+                        uint32_t wbase = (lin / 32u) * 32u, lane = lin & 31u;
+                        uint32_t cnt = ntot - wbase; if (cnt > 32u) cnt = 32u;
+                        uint32_t full = (cnt >= 32u) ? 0xFFFFFFFFu : ((1u << cnt) - 1u);
+                        uint32_t mask = full & ~((1u << lane) - 1u);
+                        v[id] = coerce(SI((int64_t)mask), in.ty);
+                        break;
+                    }
                     case Op::Br:     t.prevBB = t.bb; t.bb = in.bbT; t.j = 0; t.entered = false; goto nextblock;
                     case Op::CondBr: t.prevBB = t.bb; t.bb = (asI(v[in.a[0]]) != 0) ? in.bbT : in.bbF; t.j = 0; t.entered = false; goto nextblock;
                     case Op::Ret:    t.finished = true; return;
@@ -2398,7 +2449,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                         int src = subBase + srcSub;
                         SVal res = (own || src < 0 || src >= 32 || !(active & (1u << src))) ? t.pub : snap[src];
                         t.v[t.parkOp] = coerce(res, in.ty);
-                    } else {   // WarpVote — op 0=ballot 1=any 2=all
+                    } else if (in.op == Op::WarpVote) {   // op 0=ballot 1=any 2=all
                         uint32_t memMask = (uint32_t)asI(t.v[in.a[0]]);
                         uint32_t ballot = 0;
                         for (uint32_t k = 0; k < 32; ++k)
@@ -2408,6 +2459,28 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                                   : in.dim == 1 ? (masked != 0 ? 1 : 0)
                                   : (masked == (memMask & active) ? 1 : 0);
                         t.v[t.parkOp] = SI(r);
+                    } else if (in.op == Op::WarpReduce) {   // op 0=add 1=min 2=max 3=and 4=or 5=xor
+                        const int rop = in.dim; const bool sgn = in.ci != 0;
+                        uint32_t memMask = (uint32_t)asI(t.v[in.a[0]]);
+                        bool first = true; int64_t acc = 0;
+                        for (uint32_t k = 0; k < 32; ++k) {
+                            if (!(active & (1u << k)) || !(memMask & (1u << k))) continue;
+                            uint32_t raw = (uint32_t)asI(snap[k]);
+                            int64_t vv = sgn ? (int64_t)(int32_t)raw : (int64_t)raw;
+                            if (first) { acc = vv; first = false; continue; }
+                            if (rop == 0) acc = vv + acc; else if (rop == 1) acc = acc < vv ? acc : vv;
+                            else if (rop == 2) acc = acc > vv ? acc : vv; else if (rop == 3) acc &= vv;
+                            else if (rop == 4) acc |= vv; else acc ^= vv;
+                        }
+                        t.v[t.parkOp] = coerce(SI((int64_t)(uint32_t)acc), in.ty);
+                    } else {   // WarpMatch — dim 0 = __match_any_sync (mask of same-valued participants)
+                        uint32_t memMask = (uint32_t)asI(t.v[in.a[0]]);
+                        uint32_t part = 0;
+                        for (uint32_t k = 0; k < 32; ++k) if ((active & (1u << k)) && (memMask & (1u << k))) part |= (1u << k);
+                        uint32_t mine = (uint32_t)asI(t.pub), same = 0;
+                        for (uint32_t k = 0; k < 32; ++k)
+                            if ((part & (1u << k)) && (uint32_t)asI(snap[k]) == mine) same |= (1u << k);
+                        t.v[t.parkOp] = coerce(SI((int64_t)same), in.ty);
                     }
                     t.parkResolved = true; resolvedAny = true;
                 }

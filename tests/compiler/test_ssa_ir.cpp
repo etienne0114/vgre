@@ -205,6 +205,23 @@ int main() {
     // Multi-warp vote: __any_sync reduces only within each warp, not the whole block.
     checkVsInterpBD("wvote-2warp-any",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int p=(x[i*m]>0.0f); int a=__any_sync(0xffffffff, p); if(i<n) y[i]=(float)a; })", 128, 4, 64);
 
+    // ── Warp reduce / match / activemask (evaluator, cross-lane where cooperative) ──
+    // __reduce_*_sync: fold a per-lane int over the warp (keys kept small+positive so the
+    // uint32 result is exact in float and signedness-agnostic).
+    checkVsInterp("wred-add", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(int)(x[i*m])+8; int r=__reduce_add_sync(0xffffffff, key); if(i<n) y[i]=(float)r; })", 96, 4);
+    checkVsInterp("wred-min", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(int)(x[i*m])+8; int r=__reduce_min_sync(0xffffffff, key); if(i<n) y[i]=(float)r; })", 96, 4);
+    checkVsInterp("wred-max", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(int)(x[i*m])+8; int r=__reduce_max_sync(0xffffffff, key); if(i<n) y[i]=(float)r; })", 96, 4);
+    checkVsInterp("wred-xor", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(int)(x[i*m])+8; int r=__reduce_xor_sync(0xffffffff, key); if(i<n) y[i]=(float)r; })", 96, 4);
+    checkVsInterp("wred-or",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(int)(x[i*m])+8; int r=__reduce_or_sync(0xffffffff, key); if(i<n) y[i]=(float)r; })", 96, 4);
+    // reduce within each warp of a 64-thread block (two independent 32-lane folds).
+    checkVsInterpBD("wred-2warp-add", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=(int)(x[i*m])+8; int r=__reduce_add_sync(0xffffffff, key); if(i<n) y[i]=(float)r; })", 128, 4, 64);
+    // __match_any_sync: mask of lanes whose key equals mine (low 8 bits, signedness-safe).
+    checkVsInterp("wmatch-any", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; int key=((int)(x[i*m])+64)%4; int mm=__match_any_sync(0xffffffff, key); if(i<n) y[i]=(float)(mm & 255); })", 96, 4);
+    // __activemask: full warp (block=32 ⇒ 0xffffffff) and a partial warp (block=48 ⇒ the
+    // second warp has 16 lanes ⇒ 0x0000ffff). uint32→float rounds identically on both tiers.
+    checkVsInterp("wactive-full",    R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; unsigned a=__activemask(); if(i<n) y[i]=(float)a; })", 96, 4);
+    checkVsInterpBD("wactive-partial", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; unsigned a=__activemask(); if(i<n) y[i]=(float)a; })", 144, 4, 48);
+
     // Native x86-64 emission: on Linux/x86-64 launch() must run real machine code
     // (not the evaluator fallback), and it must still match the compiled tier.
     {
