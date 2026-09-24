@@ -14,6 +14,7 @@
 #include "vgre/compiler/frontend/ast.h"
 #include "vgre/compiler/frontend/parser.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -750,6 +751,30 @@ struct X64Asm {
     std::vector<size_t> off;                       // block start offsets (filled while emitting)
     std::vector<std::pair<size_t, int>> jpatch;    // (rel32 site, target block)
     bool ok = true;
+    // Redundant-load elimination: the SSA value currently known to be live in rax /
+    // xmm0 (from the immediately-preceding op's result), or -1. A first-operand load
+    // of that value can be skipped. Invalidated at every block boundary and consumed
+    // (set to -1) the moment it is used, so it can never elide a load unsafely.
+    int cRax = -1, cXmm = -1;
+    void loadG0(int id) { if (cRax == id) { cRax = -1; return; } ldG(0, id); cRax = -1; }
+    void loadX0(int id) { if (cXmm == id) { cXmm = -1; return; } ldX(0, id); cXmm = -1; }
+    // Record where an op left its result — precisely, per op (some "float" ops leave
+    // the value in rax as bits, not xmm0, so the cache must not claim xmm0 for those).
+    void setResultCache(const Inst& in, int id) {
+        auto inRax = [&] { cRax = id; cXmm = -1; };
+        auto inXmm = [&] { cXmm = id; cRax = -1; };
+        auto none  = [&] { cRax = cXmm = -1; };
+        switch (in.op) {
+            case Op::ConstI: case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: case Op::Cmp: inRax(); break;
+            case Op::Param: in.ty.isFloating() ? none() : inRax(); break;
+            case Op::Bin:   in.ty.isFloating() ? inXmm() : inRax(); break;
+            case Op::Un:    (in.s == "!" || !in.ty.isFloating()) ? inRax() : none(); break;
+            case Op::Sel:   in.ty.isFloating() ? none() : inRax(); break;
+            case Op::Cast:  case Op::Load: in.ty.isFloating() ? inXmm() : inRax(); break;
+            case Op::CallMath: inXmm(); break;
+            default: none(); break;   // ConstF (bits in rax), Store, Phi
+        }
+    }
 
     explicit X64Asm(const Fn& f) : fn(f), nvals((int)f.vals.size()) {}
     void bad() { ok = false; }
@@ -848,7 +873,7 @@ struct X64Asm {
             }
             case Op::Bin: {
                 if (in.ty.isFloating()) {
-                    ldX(0, in.a[0]); ldX(1, in.a[1]);
+                    loadX0(in.a[0]); ldX(1, in.a[1]);
                     uint8_t op = in.s == "+" ? 0x58 : in.s == "-" ? 0x5C : in.s == "*" ? 0x59 : in.s == "/" ? 0x5E : 0;
                     if (!op) { bad(); return; }
                     fArith0(op); narrowIfFloat(in.ty); stX(0, id); return;
@@ -864,7 +889,7 @@ struct X64Asm {
                     ldG(0, in.a[1]); testRR(0, 0); setcc(0x95); ldGd(1, temp(0));  // rax=(b!=0), rcx=(a!=0)
                     if (o == "&&") andRR(0, 1); else orRR(0, 1); stG(0, id); return;
                 }
-                ldG(0, in.a[0]); ldG(1, in.a[1]);
+                loadG0(in.a[0]); ldG(1, in.a[1]);
                 if (o == "+") addRR(0, 1); else if (o == "-") subRR(0, 1); else if (o == "*") imulRR(0, 1);
                 else if (o == "&") andRR(0, 1); else if (o == "|") orRR(0, 1); else if (o == "^") xorRR(0, 1);
                 else if (o == "<<") shlCl(0); else if (o == ">>") { if (in.ty.isUnsigned) shrCl(0); else sarCl(0); }
@@ -876,10 +901,10 @@ struct X64Asm {
                 const std::string& o = in.s;
                 int pred = o == "<" ? 0 : o == "<=" ? 1 : o == ">" ? 2 : o == ">=" ? 3 : o == "==" ? 4 : 5;
                 if (fl) {
-                    movImmReg(7, (uint32_t)pred); ldX(0, in.a[0]); ldX(1, in.a[1]);
+                    movImmReg(7, (uint32_t)pred); loadX0(in.a[0]); ldX(1, in.a[1]);
                     call((uint64_t)&vgre_ssa_fcmp); b(0x48); b(0x63); b(0xC0); stG(0, id); return;   // movsxd rax,eax
                 }
-                ldG(0, in.a[0]); ldG(1, in.a[1]); cmpRR(0, 1);
+                loadG0(in.a[0]); ldG(1, in.a[1]); cmpRR(0, 1);
                 uint8_t cc = o == "<" ? 0x9C : o == "<=" ? 0x9E : o == ">" ? 0x9F : o == ">=" ? 0x9D : o == "==" ? 0x94 : 0x95;
                 setcc(cc); stG(0, id); return;
             }
@@ -910,7 +935,7 @@ struct X64Asm {
                 ldG(0, op0); extRax(t.elemBytes(), t.isUnsigned); stG(0, id); return;   // int → int (width wrap)
             }
             case Op::Load: {
-                ldG(0, in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);  // rax = base + idx*bytes
+                loadG0(in.a[0]); ldG(1, in.a[1]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);  // rax = base + idx*bytes
                 const Type& t = in.ty;
                 if (t.isFloating()) {
                     if (t.elemBytes() == 8) { b(0xF2); b(0x0F); b(0x10); b(0x00); } else { b(0xF3); b(0x0F); b(0x10); b(0x00); cvtss2sd0(); }
@@ -960,6 +985,7 @@ struct X64Asm {
         off.assign(n, 0);
         for (int blk = 0; blk < n; ++blk) {
             off[blk] = c.size();
+            cRax = cXmm = -1;                                     // register cache is per-block
             const BB& bb = fn.bbs[blk];
             for (size_t j = 0; j < bb.insts.size(); ++j) {
                 int id = bb.insts[j];
@@ -967,7 +993,7 @@ struct X64Asm {
                 if (in.op == Op::Ret) { emitEpilogue(); break; }
                 if (in.op == Op::Br) { phiCopies(blk, in.bbT); jmpBlock(in.bbT); break; }
                 if (in.op == Op::CondBr) {
-                    ldG(0, in.a[0]); testRR(0, 0);
+                    loadG0(in.a[0]); testRR(0, 0);
                     b(0x0F); b(0x84); size_t js = c.size(); d32(0);            // jz to false edge
                     phiCopies(blk, in.bbT); jmpBlock(in.bbT);
                     uint32_t rel = (uint32_t)(c.size() - (js + 4)); std::memcpy(&c[js], &rel, 4);
@@ -976,6 +1002,7 @@ struct X64Asm {
                 }
                 emitInst(blk, id);
                 if (!ok) return false;
+                setResultCache(in, id);       // update the register cache for the next op
             }
         }
         for (auto& jp : jpatch) { uint32_t rel = (uint32_t)(off[jp.second] - (jp.first + 4)); std::memcpy(&c[jp.first], &rel, 4); }
@@ -1084,7 +1111,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
         const uint32_t tid[3] = {tx, ty, tz}, ctaid[3] = {gx, gy, gz};
         const uint32_t ntid[3] = {bx, by, bz}, nctaid[3] = {grid.x, grid.y, grid.z};
         int bb = fn.entry, prevBB = -1;
-        for (long guard = 0; guard < (1L << 34); ++guard) {   // bounded against runaway loops
+        for (long long guard = 0; guard < (1LL << 34); ++guard) {   // bounded against runaway loops (long is 32-bit on Windows)
             bool ret = false;
             // Phis (which lead a block) resolve against the predecessor we arrived from,
             // read as a parallel copy of the pre-block state.
