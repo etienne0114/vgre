@@ -300,14 +300,20 @@ struct Lowerer {
             }
             case Expr::Call: {
                 const std::string& fnn = e.str;
-                if (e.args.size() == 1 && (fnn=="sqrtf"||fnn=="fabsf"||fnn=="expf"||fnn=="logf"||fnn=="sinf"||fnn=="cosf"||fnn=="floorf"||fnn=="ceilf"||fnn=="tanhf"||fnn=="sqrt"||fnn=="fabs"||fnn=="exp"||fnn=="log"||fnn=="sin"||fnn=="cos"||fnn=="floor"||fnn=="ceil"||fnn=="tanh")) {
+                if (e.args.size() == 1 && (fnn=="sqrtf"||fnn=="fabsf"||fnn=="expf"||fnn=="logf"||fnn=="sinf"||fnn=="cosf"||fnn=="floorf"||fnn=="ceilf"||fnn=="tanhf"||fnn=="exp2f"||fnn=="log2f"||fnn=="rsqrtf"||fnn=="erff"||
+                                           fnn=="sqrt"||fnn=="fabs"||fnn=="exp"||fnn=="log"||fnn=="sin"||fnn=="cos"||fnn=="floor"||fnn=="ceil"||fnn=="tanh"||fnn=="exp2"||fnn=="log2"||fnn=="rsqrt"||fnn=="erf")) {
                     int a = lowerExpr(*e.args[0]); if (!ok) return 0;
                     Inst in; in.op = Op::CallMath; in.s = fnn; in.ty = typeOf(e); in.a = {a};
                     return emit(std::move(in));
                 }
-                if ((fnn=="min"||fnn=="max"||fnn=="fminf"||fnn=="fmaxf"||fnn=="fmin"||fnn=="fmax") && e.args.size()==2) {
+                if ((fnn=="min"||fnn=="max"||fnn=="fminf"||fnn=="fmaxf"||fnn=="fmin"||fnn=="fmax"||fnn=="powf"||fnn=="pow") && e.args.size()==2) {
                     int a = lowerExpr(*e.args[0]); int b = lowerExpr(*e.args[1]); if (!ok) return 0;
                     Inst in; in.op = Op::CallMath; in.s = fnn; in.ty = typeOf(e); in.a = {a, b};
+                    return emit(std::move(in));
+                }
+                if ((fnn=="fmaf"||fnn=="fma") && e.args.size()==3) {
+                    int a = lowerExpr(*e.args[0]); int b = lowerExpr(*e.args[1]); int c = lowerExpr(*e.args[2]); if (!ok) return 0;
+                    Inst in; in.op = Op::CallMath; in.s = fnn; in.ty = typeOf(e); in.a = {a, b, c};
                     return emit(std::move(in));
                 }
                 fail("SSA: unsupported call '" + fnn + "'"); return 0;
@@ -441,13 +447,68 @@ struct Lowerer {
             }
             case Stmt::Break:
             case Stmt::Continue: {
-                if (loops.empty()) { fail("SSA: break/continue outside a loop"); return; }
+                // `loops` holds (breakTgt, continueTgt) for each enclosing loop AND switch;
+                // a switch is a break target but forwards the enclosing loop's continue
+                // (or -1 when there is none — `continue` inside a switch with no loop).
+                if (loops.empty()) { fail("SSA: break/continue outside a loop or switch"); return; }
                 int tgt = (s.kind == Stmt::Break) ? loops.back().first : loops.back().second;
+                if (tgt < 0) { fail("SSA: continue not inside a loop"); return; }
                 emitBr(tgt); addEdge(cur, tgt);
                 cur = newBlock(/*seal=*/true);             // fresh unreachable block for any trailing stmts
                 return;
             }
-            default: fail("SSA: unsupported statement (switch → later increment)"); return;
+            case Stmt::Switch: {
+                // switch(sw){ case L: ... default: ... } — C fall-through. The body is a
+                // flat list of stmts with Case/Default label markers; segment i is the
+                // stmts after label i up to the next label. Lowering: a dispatch chain of
+                // (sw == Li) → segBlk[i] tests, ending in a jump to the default segment
+                // (or the exit); each segment falls through to the next (unless it breaks),
+                // and `break` jumps to the exit. Braun seals each segment once its preds
+                // (its dispatch edge + the fall-through from the previous segment) exist.
+                int sw = lowerExpr(*s.expr); if (!ok) return;
+                struct Seg { bool isDefault; const Expr* label; std::vector<const Stmt*> stmts; };
+                std::vector<Seg> segs;
+                for (auto& st : s.body) {
+                    if (st->kind == Stmt::Case)         segs.push_back({false, st->expr.get(), {}});
+                    else if (st->kind == Stmt::Default) segs.push_back({true, nullptr, {}});
+                    else if (!segs.empty())             segs.back().stmts.push_back(st.get());
+                    // stmts before the first label are unreachable in C — dropped.
+                }
+                const int nseg = (int)segs.size();
+                int exitB = newBlock();
+                std::vector<int> segBlk(nseg);
+                for (int i = 0; i < nseg; ++i) segBlk[i] = newBlock();
+                int defaultIdx = -1;
+                for (int i = 0; i < nseg; ++i) if (segs[i].isDefault) { defaultIdx = i; break; }
+                // Dispatch chain (each test in its own block; single-pred blocks, sealed at once).
+                for (int i = 0; i < nseg; ++i) {
+                    if (segs[i].isDefault) continue;
+                    int lab = lowerExpr(*segs[i].label); if (!ok) return;
+                    Inst cmp; cmp.op = Op::Cmp; cmp.s = "=="; cmp.ty = scalar(Type::Int); cmp.a = {sw, lab};
+                    int c = emit(std::move(cmp));
+                    int next = newBlock();
+                    Inst cb; cb.op = Op::CondBr; cb.a = {c}; cb.bbT = segBlk[i]; cb.bbF = next; emit(std::move(cb));
+                    addEdge(cur, segBlk[i]); addEdge(cur, next);
+                    sealBlock(next);
+                    cur = next;
+                }
+                int dflt = (defaultIdx >= 0) ? segBlk[defaultIdx] : exitB;
+                emitBr(dflt); addEdge(cur, dflt);
+                const int contTgt = loops.empty() ? -1 : loops.back().second;   // forward enclosing continue
+                loops.push_back({exitB, contTgt});
+                for (int i = 0; i < nseg; ++i) {
+                    sealBlock(segBlk[i]);                  // preds: dispatch edge + fall-through from i-1
+                    cur = segBlk[i];
+                    for (const Stmt* st : segs[i].stmts) { lowerStmt(*st); if (!ok) { loops.pop_back(); return; } }
+                    int fall = (i + 1 < nseg) ? segBlk[i + 1] : exitB;
+                    emitBr(fall); addEdge(cur, fall);      // C fall-through (dead edge if the segment broke)
+                }
+                loops.pop_back();
+                sealBlock(exitB);
+                cur = exitB;
+                return;
+            }
+            default: fail("SSA: unsupported statement"); return;
         }
     }
 
@@ -520,13 +581,16 @@ static SVal cmpop(const std::string& o, const SVal& A, const SVal& B) {
         r = o=="<"?a<b:o=="<="?a<=b:o==">"?a>b:o==">="?a>=b:o=="=="?a==b:a!=b; }
     return SI(r ? 1 : 0);
 }
-static SVal mathfn(const std::string& fn, const SVal& a, const SVal* b, const Type& rt) {
+static SVal mathfn(const std::string& fn, const SVal& a, const SVal* b, const SVal* c, const Type& rt) {
     if (fn == "min" || fn == "max") {
         if (rt.isFloating()) { double x = asF(a), y = asF(*b); return coerce(SF(fn=="min"?std::fmin(x,y):std::fmax(x,y)), rt); }
         int64_t x = a.i, y = b->i; return coerce(SI(fn=="min"?(x<y?x:y):(x>y?x:y)), rt);
     }
     if (fn == "fminf" || fn == "fmin") return coerce(SF(std::fmin(asF(a), asF(*b))), rt);
     if (fn == "fmaxf" || fn == "fmax") return coerce(SF(std::fmax(asF(a), asF(*b))), rt);
+    if (fn == "powf"  || fn == "pow")  return coerce(SF(std::pow(asF(a), asF(*b))), rt);
+    if (fn == "fmaf"  || fn == "fma")  return coerce(SF(std::fma(asF(a), asF(*b), asF(*c))), rt);
+    if (fn == "erff"  || fn == "erf")  return coerce(SF(std::erf(asF(a))), rt);   // base name ends in 'f' — no suffix strip
     double x = asF(a), r = x;
     const std::string g = (!fn.empty() && fn.back() == 'f') ? fn.substr(0, fn.size() - 1) : fn;
     if (g == "sqrt") r = std::sqrt(x); else if (g == "fabs") r = std::fabs(x);
@@ -534,6 +598,8 @@ static SVal mathfn(const std::string& fn, const SVal& a, const SVal* b, const Ty
     else if (g == "sin") r = std::sin(x); else if (g == "cos") r = std::cos(x);
     else if (g == "floor") r = std::floor(x); else if (g == "ceil") r = std::ceil(x);
     else if (g == "tanh") r = std::tanh(x);
+    else if (g == "exp2") r = std::exp2(x); else if (g == "log2") r = std::log2(x);
+    else if (g == "rsqrt") r = 1.0 / std::sqrt(x);
     return coerce(SF(r), rt);
 }
 static SVal memLoad(int64_t addr, const Type& t) {
@@ -797,10 +863,15 @@ int vgre_ssa_fcmp(int pred, double a, double b) {
 double vgre_ssa_m1(int fn, double x) {
     switch (fn) { case 0: return std::sqrt(x); case 1: return std::fabs(x); case 2: return std::exp(x);
                   case 3: return std::log(x); case 4: return std::sin(x); case 5: return std::cos(x);
-                  case 6: return std::floor(x); case 7: return std::ceil(x); case 8: return std::tanh(x); }
+                  case 6: return std::floor(x); case 7: return std::ceil(x); case 8: return std::tanh(x);
+                  case 9: return std::exp2(x); case 10: return std::log2(x);
+                  case 11: return 1.0 / std::sqrt(x); case 12: return std::erf(x); }
     return x;
 }
-double vgre_ssa_m2(int fn, double x, double y) { return fn ? std::fmax(x, y) : std::fmin(x, y); }
+double vgre_ssa_m2(int op, double x, double y) {   // 0=fmin 1=fmax 2=pow
+    switch (op) { case 1: return std::fmax(x, y); case 2: return std::pow(x, y); default: return std::fmin(x, y); }
+}
+double vgre_ssa_m3(double x, double y, double z) { return std::fma(x, y, z); }   // fma(x,y,z)=x*y+z
 }
 
 using SsaFn = void (*)(ThreadCtx*);
@@ -1078,10 +1149,12 @@ struct X64Asm {
     }
 
     int mathId(const std::string& s) const {
+        if (s == "erf" || s == "erff") return 12;   // base name ends in 'f' — must precede the suffix strip
         std::string g = (!s.empty() && s.back() == 'f') ? s.substr(0, s.size() - 1) : s;
         if (g == "sqrt") return 0; if (g == "fabs") return 1; if (g == "exp") return 2; if (g == "log") return 3;
         if (g == "sin") return 4; if (g == "cos") return 5; if (g == "floor") return 6; if (g == "ceil") return 7;
-        if (g == "tanh") return 8; return -1;
+        if (g == "tanh") return 8; if (g == "exp2") return 9; if (g == "log2") return 10; if (g == "rsqrt") return 11;
+        return -1;
     }
     void narrowIfFloat(const Type& t) { if (t.base == Type::Float) { cvtsd2ss0(); cvtss2sd0(); } }   // xmm0 → float32-rounded
 
@@ -1193,8 +1266,18 @@ struct X64Asm {
                 return;
             }
             case Op::CallMath: {
-                if (in.a.size() == 1) { ldX(0, in.a[0]); movImmReg(7, (uint32_t)mathId(in.s)); call((uint64_t)&vgre_ssa_m1); }
-                else { ldX(0, in.a[0]); ldX(1, in.a[1]); movImmReg(7, (in.s == "fmax" || in.s == "fmaxf") ? 1u : 0u); call((uint64_t)&vgre_ssa_m2); }
+                if (in.a.size() == 1) {
+                    int mid = mathId(in.s); if (mid < 0) { bad(); return; }   // unknown intrinsic → evaluator fallback
+                    ldX(0, in.a[0]); movImmReg(7, (uint32_t)mid); call((uint64_t)&vgre_ssa_m1);
+                } else if (in.a.size() == 2) {
+                    // The 2-arg helper is float-only; integer min/max must not go through it
+                    // (its slot bits aren't a double) — bail so the evaluator handles it exactly.
+                    if (!in.ty.isFloating()) { bad(); return; }
+                    uint32_t op = (in.s == "fmax" || in.s == "fmaxf") ? 1u : (in.s == "pow" || in.s == "powf") ? 2u : 0u;
+                    ldX(0, in.a[0]); ldX(1, in.a[1]); movImmReg(7, op); call((uint64_t)&vgre_ssa_m2);
+                } else {   // 3-arg: fma(x,y,z) → xmm0,xmm1,xmm2 (no int selector)
+                    ldX(0, in.a[0]); ldX(1, in.a[1]); ldX(2, in.a[2]); call((uint64_t)&vgre_ssa_m3);
+                }
                 narrowIfFloat(in.ty); stX(0, id); return;
             }
             default: return;   // terminators handled by the block loop
@@ -1387,7 +1470,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                         break;
                     case Op::Sel:  v[id] = (asI(v[in.a[0]]) != 0) ? v[in.a[1]] : v[in.a[2]]; break;
                     case Op::Cast: v[id] = coerce(v[in.a[0]], in.ty); break;
-                    case Op::CallMath: v[id] = mathfn(in.s, v[in.a[0]], in.a.size() > 1 ? &v[in.a[1]] : nullptr, in.ty); break;
+                    case Op::CallMath: v[id] = mathfn(in.s, v[in.a[0]], in.a.size() > 1 ? &v[in.a[1]] : nullptr, in.a.size() > 2 ? &v[in.a[2]] : nullptr, in.ty); break;
                     case Op::Load: {
                         int64_t addr = asI(v[in.a[0]]) + asI(v[in.a[1]]) * in.elemBytes;
                         v[id] = memLoad(addr, in.ty); break;

@@ -57,6 +57,9 @@ int main() {
     check("math",    R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; y[i]=sqrtf(fabsf(v))*a + y[i]; } })", N, x, y0, 1.5f);
     check("intmod",  R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ int m=i%7; y[i]=(float)m + a; } })", N, x, y0, 0.25f);
     check("compound",R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=y[i]; acc += a*x[i]; acc *= 2.0f; y[i]=acc; } })", N, x, y0, 1.25f);
+    // Extended math intrinsics: fma (3-arg, fused), exp2/log2/rsqrt/erf (1-arg), pow
+    // (2-arg) — all computed in double then narrowed, bit-exact vs the compiled tier.
+    check("math2",   R"(extern "C" __global__ void k(float a, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i]; float w=fabsf(v)+1.0f; float r=fmaf(v,a,y[i]); r=r+exp2f(w*0.1f)+log2f(w)+rsqrtf(w)+powf(w,1.5f)+erff(v*0.5f); y[i]=r; } })", N, x, y0, 1.5f);
 
     // Control flow with phi insertion (loops + if/else) — signature (x, y, n, m).
     auto checkCF = [&](const char* label, const char* src, int NN, int M) {
@@ -141,6 +144,10 @@ int main() {
     checkVsInterp("do-while", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; int k=0; do { acc += x[i*m+k]; k++; } while(k<m); y[i]=acc; } })", 96, 16);
     // Nested loop with a break in the inner body (back-edge live intervals + break edges).
     checkVsInterp("nest-brk", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int a=0;a<m;a++){ for(int b=0;b<m;b++){ float v=x[i*m+b]; if(v<0.0f) break; acc+=v; } acc+=1.0f; } y[i]=acc; } })", 96, 16);
+    // switch: multiple cases, break, C fall-through (case 2 → case 3), and default.
+    checkVsInterp("switch",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float r=0.0f; switch(i%4){ case 0: r=v; break; case 1: r=v*2.0f; break; case 2: r=v*3.0f; case 3: r=r+1.0f; break; default: r=-v; } y[i]=r; } })", 96, 16);
+    // switch inside a loop with `continue` (forwarded to the loop) and a break (to the switch).
+    checkVsInterp("sw-loop",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ switch(k%3){ case 0: continue; case 1: acc+=x[i*m+k]; break; default: acc-=x[i*m+k]; } acc+=0.5f; } y[i]=acc; } })", 96, 16);
 
     // Native x86-64 emission: on Linux/x86-64 launch() must run real machine code
     // (not the evaluator fallback), and it must still match the compiled tier.

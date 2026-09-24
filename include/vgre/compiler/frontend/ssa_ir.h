@@ -4,14 +4,15 @@
 // the x86-64/AArch64 machine-code emitter layer onto in later increments. Built from
 // the AST (like the Tier-1 compiled backend), not from PTX. See docs/zeroBurdenRoadmap.md.
 //
-// Subset so far: the scalar per-thread kernel shape — int/float/double scalars and
-// pointers, threadIdx/blockIdx/blockDim, arithmetic/bitwise/compare, ternary
-// (→ select), inc/dec, indexed load/store, casts, unary math intrinsics, and FULL
-// structured control flow — `if`/`if-else`, `for`, `while`, `do-while`, `break`,
-// `continue` — with proper SSA phi insertion (Braun et al.). compile() also runs the
-// optimizer (const-fold / local GVN / DCE / LICM) unless optimize=false. Still to
-// come: `switch`, cross-block GVN, and the native machine-code emitter. Anything
-// outside the subset makes compile() return null (callers fall back to another tier).
+// Subset: the scalar per-thread kernel shape — int/float/double scalars and pointers,
+// threadIdx/blockIdx/blockDim, arithmetic/bitwise/compare, ternary (→ select), inc/dec,
+// indexed load/store, casts, unary + binary math intrinsics, and FULL control flow —
+// `if`/`if-else`, `for`, `while`, `do-while`, `break`, `continue`, and `switch`
+// (C fall-through) — with proper SSA phi insertion (Braun et al.). compile() also runs
+// the optimizer (const-fold / global dominator-scoped GVN / LICM / DCE) unless
+// optimize=false, then emits register-allocated x86-64 machine code on Linux/x86-64
+// (the portable evaluator runs it everywhere else). Anything outside the subset makes
+// compile() return null (callers fall back to another tier).
 #ifndef VGRE_COMPILER_FRONTEND_SSA_IR_H
 #define VGRE_COMPILER_FRONTEND_SSA_IR_H
 
