@@ -41,8 +41,10 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   CI-checked on `macos-arm64`).
 
 ### 1.3 Front-end breadth (from-scratch tiers)
-- **Texture / surface**: vector fetches (`float4` etc.), layered / cubemap / mipmap sampling, and
-  `tex2DLod` (scalar `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` already run on both tiers).
+- **Texture / surface**: `tex2DLayeredLod` / cubemap-array variants (scalar `tex1D/2D/3D`,
+  `tex1Dfetch`, `surf2Dread/write`, vector fetches `texND<float4>`/`float2`, `tex2DLod`,
+  layered `tex1DLayered`/`tex2DLayered`, and **cubemap `texCubemap`** already run on both tiers,
+  bit-exact vs the shared `TextureManager`).
 - **Recursion** in `__device__` helpers (currently rejected; templates + inlining are done).
 - *(The SSA tier now runs the full scalar CUDA-C subset: multi-dimensional arrays
   — `float As[H][W]` —, dynamic `extern __shared__` — launch-sized shared buffers —,

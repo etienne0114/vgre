@@ -1078,10 +1078,42 @@ struct Codegen {
     // Initialise a local struct `dst` from `src`: a `make_<vectype>(...)` constructor
     // (one arg per member), a whole-struct load `p[i]` (struct-array element), or a
     // struct-variable copy (emitStructCopy). Used for `V v = …;`.
+    // A vector texture fetch `texND<vecT>(tex, coords…)` — fill each member of local
+    // struct `dst` from the matching channel (member i ← channel i). Returns true if
+    // `src` is such a fetch (tex1D/2D/3D into a struct), false to fall through.
+    bool emitVecTexInit(const std::string& dst, const StructDef* def, const Expr& src) {
+        if (src.kind != Expr::Call) return false;
+        const std::string& fn = src.str;
+        int ncoord; std::string op;
+        if      (fn == "tex1D" && src.args.size() == 2) { ncoord = 1; op = "vgretex1dchan"; }
+        else if (fn == "tex2D" && src.args.size() == 3) { ncoord = 2; op = "vgretex2dchan"; }
+        else if (fn == "tex3D" && src.args.size() == 4) { ncoord = 3; op = "vgretex3dchan"; }
+        else return false;
+        Type u64t; u64t.base = Type::Long; u64t.isUnsigned = true;
+        Val h = coerce(emitExpr(*src.args[0]), u64t); if (failed) return true;
+        std::vector<std::string> coords;
+        for (int c = 0; c < ncoord; ++c) {
+            Val cc = coerce(emitExpr(*src.args[1 + c]), floatType()); if (failed) return true;
+            coords.push_back(cc.reg);
+        }
+        std::string coordStr; for (auto& cr : coords) coordStr += ", " + cr;
+        auto& dm = localStructMembers_[dst];
+        for (size_t i = 0; i < def->members.size(); ++i) {
+            const auto& m = def->members[i];
+            std::string chReg = fresh(RC::F32);                        // one f32 channel lane
+            emit(op + ".f32 " + chReg + ", " + h.reg + coordStr + ", " + std::to_string(i) + ";");
+            Val cv = coerce({chReg, floatType()}, m.type);             // f32 → member type (int textures)
+            if (failed) return true;
+            emit(std::string(movFor(m.type)) + dm[m.name].reg + ", " + cv.reg + ";");
+        }
+        return true;
+    }
+
     void emitStructInit(const std::string& dst, const Expr& src, const Type& dstType) {
         const StructDef* def = mod_ ? mod_->findStruct(dstType.structName) : nullptr;
         if (!def) { fail("unknown struct '" + dstType.structName + "'"); return; }
         auto& dm = localStructMembers_[dst];
+        if (emitVecTexInit(dst, def, src)) return;                              // vecT v = texND<vecT>(…)
         if (src.kind == Expr::Call && src.str.rfind("make_", 0) == 0) {          // make_T(c0,…)
             if (src.args.size() != def->members.size()) { fail("'" + src.str + "' component count mismatch"); return; }
             for (size_t i = 0; i < def->members.size(); ++i) {
@@ -1168,9 +1200,9 @@ struct Codegen {
             auto it = vars.find(lhs.str);
             if (it == vars.end()) { line = lhs.line; col = lhs.col; fail("assignment to undeclared '" + lhs.str + "'"); return {}; }
             Val& var = it->second;
-            if (var.space == Space::LocalStruct) {   // whole-struct copy: s1 = s2
+            if (var.space == Space::LocalStruct) {   // s = s2 / make_T(…) / texND<vecT>(…) / p[i]
                 if (op != "=") { fail("compound assignment on a struct is unsupported"); return {}; }
-                emitStructCopy(lhs.str, *e.args[1]);
+                emitStructInit(lhs.str, *e.args[1], var.type);
                 return var;
             }
             if (isScalarShared(var)) {
@@ -1636,6 +1668,18 @@ struct Codegen {
         } else if (fn == "tex3D" && e.args.size() == 4) {
             Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val z = fc(*e.args[3]); if (failed) return {};
             emit("vgretex3d.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + z.reg + ";");
+        } else if (fn == "tex2DLod" && e.args.size() == 4) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val lod = fc(*e.args[3]); if (failed) return {};
+            emit("vgretex2dlod.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + lod.reg + ";");
+        } else if (fn == "tex2DLayered" && e.args.size() == 4) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val layer = ic(*e.args[3]); if (failed) return {};
+            emit("vgretex2dlayered.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + layer.reg + ";");
+        } else if (fn == "tex1DLayered" && e.args.size() == 3) {
+            Val x = fc(*e.args[1]); Val layer = ic(*e.args[2]); if (failed) return {};
+            emit("vgretex1dlayered.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + layer.reg + ";");
+        } else if (fn == "texCubemap" && e.args.size() == 4) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val z = fc(*e.args[3]); if (failed) return {};
+            emit("vgretexcubemap.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + z.reg + ";");
         } else if (fn == "surf2Dread" && e.args.size() == 3) {
             Val x = ic(*e.args[1]); Val y = ic(*e.args[2]); if (failed) return {};
             emit("vgresurf2dread.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ";");
@@ -1856,7 +1900,8 @@ struct Codegen {
             fn == "__reduce_and_sync" || fn == "__reduce_or_sync"  || fn == "__reduce_xor_sync") return emitReduce(e);
         if (fn == "__match_any_sync" || fn == "__match_all_sync") return emitMatch(e);
         if (fn == "tex1D" || fn == "tex2D" || fn == "tex3D" || fn == "tex1Dfetch" ||
-            fn == "surf2Dread" || fn == "surf2Dwrite") return emitTex(e);
+            fn == "tex2DLod" || fn == "tex1DLayered" || fn == "tex2DLayered" ||
+            fn == "texCubemap" || fn == "surf2Dread" || fn == "surf2Dwrite") return emitTex(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);

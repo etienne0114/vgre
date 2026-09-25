@@ -167,6 +167,17 @@ public:
   float tex1DChan(TextureId id, float x, unsigned channel) const;
   float tex3DChan(TextureId id, float x, float y, float z, unsigned channel) const;
 
+  // Layered (array) texture fetch: sample layer `layer` (clamped to [0,layers)) at
+  // the given coords. The backing data is laid out layer-major (layer × H × W).
+  // Interpolation/addressing apply within a layer; the layer index is exact.
+  float tex1DLayered(TextureId id, float x, int layer) const;
+  float tex2DLayered(TextureId id, float x, float y, int layer) const;
+
+  // Cubemap fetch: `x,y,z` is a direction vector. The major axis selects one of the
+  // six faces (stored as layers 0..5: +X,-X,+Y,-Y,+Z,-Z), and the other two
+  // components give the face-local coords. Bilinear within the face.
+  float texCubemap(TextureId id, float x, float y, float z) const;
+
   // ── 3D Texture creation (explicit depth) ─────────────────────────────────
   VGREResult createTexture3D(TextureId &outId, const void *data,
                              size_t width, size_t height, size_t depth,
@@ -240,6 +251,9 @@ private:
   double sampleTexel(const TextureObject &tex, int x, int y, int z) const;
   float  sampleTexelChan(const TextureObject &tex,
                           int x, int y, int z, unsigned channel) const;
+  // Bilinear/point sample of layer `layer` at pixel-space (sx,sy). Shared by the
+  // layered and cubemap fetches (the backing data is layer-major, layer × H × W).
+  float  sampleLayer2D(const TextureObject &tex, float sx, float sy, int layer) const;
 };
 
 } // namespace core

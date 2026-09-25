@@ -922,7 +922,8 @@ struct Compiler {
                     return scalar(Type::Int);
                 // Texture/surface fetches return a float sample (VGRE's scalar path).
                 if (fn == "tex1D" || fn == "tex2D" || fn == "tex3D" || fn == "tex1Dfetch" ||
-                    fn == "surf2Dread")
+                    fn == "tex2DLod" || fn == "tex1DLayered" || fn == "tex2DLayered" ||
+                    fn == "texCubemap" || fn == "surf2Dread")
                     return scalar(Type::Float);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
                 return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
@@ -1558,6 +1559,25 @@ struct Compiler {
                 ExprFn y = compileExpr(*e.args[2]); ExprFn z = compileExpr(*e.args[3]); if (failed) return {};
                 return [h, x, y, z](TS& ts) -> Cell { return Cell::F(TM::instance().tex3D((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (float)z(ts).asF())); };
             }
+            if (fn == "tex2DLod" && e.args.size() == 4) {     // explicit-LOD 2D fetch
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]);
+                ExprFn y = compileExpr(*e.args[2]); ExprFn lod = compileExpr(*e.args[3]); if (failed) return {};
+                return [h, x, y, lod](TS& ts) -> Cell { return Cell::F(TM::instance().tex2DLod((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (float)lod(ts).asF())); };
+            }
+            if (fn == "tex2DLayered" && e.args.size() == 4) {  // layered (array) 2D fetch
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]);
+                ExprFn y = compileExpr(*e.args[2]); ExprFn ly = compileExpr(*e.args[3]); if (failed) return {};
+                return [h, x, y, ly](TS& ts) -> Cell { return Cell::F(TM::instance().tex2DLayered((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (int)ly(ts).asI())); };
+            }
+            if (fn == "tex1DLayered" && e.args.size() == 3) {  // layered (array) 1D fetch
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn ly = compileExpr(*e.args[2]); if (failed) return {};
+                return [h, x, ly](TS& ts) -> Cell { return Cell::F(TM::instance().tex1DLayered((uint64_t)h(ts).asI(), (float)x(ts).asF(), (int)ly(ts).asI())); };
+            }
+            if (fn == "texCubemap" && e.args.size() == 4) {    // cubemap direction fetch
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]);
+                ExprFn y = compileExpr(*e.args[2]); ExprFn z = compileExpr(*e.args[3]); if (failed) return {};
+                return [h, x, y, z](TS& ts) -> Cell { return Cell::F(TM::instance().texCubemap((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (float)z(ts).asF())); };
+            }
             if (fn == "surf2Dread" && e.args.size() == 3) {   // T v = surf2Dread<T>(surf, x, y)
                 ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn y = compileExpr(*e.args[2]); if (failed) return {};
                 return [h, x, y](TS& ts) -> Cell { float v = 0.0f; TM::instance().surf2Dread((uint64_t)h(ts).asI(), v, (int)x(ts).asI(), (int)y(ts).asI()); return Cell::F(v); };
@@ -1646,6 +1666,42 @@ struct Compiler {
         };
     }
 
+    // `V v = texND<V>(tex, coords…)` — set member i from texture channel i (member
+    // slots are contiguous from `db`). Returns an empty StmtFn if `e` isn't a vector
+    // texture fetch (tex1D/2D/3D), so the caller falls through.
+    StmtFn compileVecTexInit(const Expr& e, const StructDef* def, size_t db) {
+        if (e.kind != Expr::Call) return {};
+        const std::string& fn = e.str;
+        int ncoord;
+        if      (fn == "tex1D" && e.args.size() == 2) ncoord = 1;
+        else if (fn == "tex2D" && e.args.size() == 3) ncoord = 2;
+        else if (fn == "tex3D" && e.args.size() == 4) ncoord = 3;
+        else return {};
+        ExprFn h = compileExpr(*e.args[0]);
+        std::vector<ExprFn> coords;
+        for (int c = 0; c < ncoord; ++c) coords.push_back(compileExpr(*e.args[1 + c]));
+        if (failed) return {};
+        const size_t cnt = def->members.size();
+        std::vector<Type> mt; for (const auto& m : def->members) mt.push_back(m.type);
+        return [db, h, coords, ncoord, cnt, mt](TS& ts) {
+            using TM = ::vgre::core::TextureManager;
+            const uint64_t handle = (uint64_t)h(ts).asI();
+            for (size_t i = 0; i < cnt; ++i) {
+                float v;
+                if (ncoord == 1)
+                    v = TM::instance().tex1DChan(handle, (float)coords[0](ts).asF(), (unsigned)i);
+                else if (ncoord == 2)
+                    v = TM::instance().tex2DChan(handle, (float)coords[0](ts).asF(),
+                                                 (float)coords[1](ts).asF(), (unsigned)i);
+                else
+                    v = TM::instance().tex3DChan(handle, (float)coords[0](ts).asF(),
+                                                 (float)coords[1](ts).asF(),
+                                                 (float)coords[2](ts).asF(), (unsigned)i);
+                ts.regs[db + i] = coerce(Cell::F(v), mt[i]);
+            }
+        };
+    }
+
     StmtFn compileStmt(const Stmt& s) {
         line = s.line; col = s.col;
         switch (s.kind) {
@@ -1664,6 +1720,9 @@ struct Compiler {
                     const StructDef* def = dit->second.def;
                     const size_t db = dit->second.base, cnt = def->members.size();
                     if (!s.expr) return [](TS&) {};
+                    // Vector texture fetch: `V v = texND<V>(tex, coords…)`.
+                    if (StmtFn tx = compileVecTexInit(*s.expr, def, db)) return tx;
+                    if (failed) return {};
                     // Constructor make_<vectype>(c0, c1, …): set each member from an arg.
                     if (s.expr->kind == Expr::Call && s.expr->str.rfind("make_", 0) == 0) {
                         if (s.expr->args.size() != cnt) { fail("'" + s.expr->str + "' expects " + std::to_string(cnt) + " components"); return {}; }

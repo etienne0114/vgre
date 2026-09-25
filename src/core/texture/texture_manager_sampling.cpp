@@ -550,5 +550,79 @@ float TextureManager::tex3DChan(TextureId id, float x, float y, float z,
   return sampleTexelChan(tex, ix, iy, iz, channel);
 }
 
+// ── Layered (array) fetch ────────────────────────────────────────────────────
+// The backing data is layer-major: layer × height × width. The layer index is
+// exact (clamped to [0,layers)); x/y are addressed + filtered within the layer.
+
+// Sample layer `layer` at pixel-space (sx,sy) with the texture's filter/address
+// modes. Shared by tex2DLayered and texCubemap.
+float TextureManager::sampleLayer2D(const TextureObject &tex, float sx, float sy, int layer) const {
+  const int w = static_cast<int>(tex.width), h = static_cast<int>(tex.height);
+  const int L = tex.layers > 0 ? static_cast<int>(tex.layers) : 1;
+  if (layer < 0) layer = 0; else if (layer >= L) layer = L - 1;
+  const size_t layerBase = static_cast<size_t>(layer) * w * h;
+  auto texel = [&](int ix, int iy) -> float {
+    int rx = applyAddressMode(ix, w, tex.desc.addressMode);
+    int ry = applyAddressMode(iy, h, tex.desc.addressMode);
+    if (rx < 0 || ry < 0) return tex.desc.borderColor;
+    return static_cast<float>(readElementValue(tex, layerBase + static_cast<size_t>(ry) * w + rx));
+  };
+  if (tex.desc.filterMode == TextureFilterMode::POINT)
+    return texel(static_cast<int>(std::floor(sx)), static_cast<int>(std::floor(sy)));
+  float fx = sx - 0.5f, fy = sy - 0.5f;
+  int x0 = static_cast<int>(std::floor(fx)), y0 = static_cast<int>(std::floor(fy));
+  float frX = fx - static_cast<float>(x0), frY = fy - static_cast<float>(y0);
+  float top = texel(x0, y0) * (1.0f - frX) + texel(x0 + 1, y0) * frX;
+  float bot = texel(x0, y0 + 1) * (1.0f - frX) + texel(x0 + 1, y0 + 1) * frX;
+  return top * (1.0f - frY) + bot * frY;
+}
+
+float TextureManager::tex2DLayered(TextureId id, float x, float y, int layer) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  float sx = tex.desc.normalizedCoords ? x * static_cast<float>(tex.width)  : x;
+  float sy = tex.desc.normalizedCoords ? y * static_cast<float>(tex.height) : y;
+  return sampleLayer2D(tex, sx, sy, layer);
+}
+
+// Cubemap: the direction (x,y,z)'s major axis picks a face (layers 0..5:
+// +X,-X,+Y,-Y,+Z,-Z), the other two components give the face-local [0,1] coords
+// (standard OpenGL/D3D cube mapping). Sampled as that layer at pixel coords.
+float TextureManager::texCubemap(TextureId id, float x, float y, float z) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  const float ax = std::fabs(x), ay = std::fabs(y), az = std::fabs(z);
+  int face; float uc, vc, ma;
+  if (ax >= ay && ax >= az) {                 // major axis X
+    ma = ax; if (x >= 0.0f) { face = 0; uc = -z; vc = -y; } else { face = 1; uc = z;  vc = -y; }
+  } else if (ay >= az) {                       // major axis Y
+    ma = ay; if (y >= 0.0f) { face = 2; uc = x;  vc = z;  } else { face = 3; uc = x;  vc = -z; }
+  } else {                                      // major axis Z
+    ma = az; if (z >= 0.0f) { face = 4; uc = x;  vc = -y; } else { face = 5; uc = -x; vc = -y; }
+  }
+  if (ma == 0.0f) return tex.desc.borderColor;
+  const float s = 0.5f * (uc / ma + 1.0f);     // face-local [0,1]
+  const float t = 0.5f * (vc / ma + 1.0f);
+  return sampleLayer2D(tex, s * static_cast<float>(tex.width), t * static_cast<float>(tex.height), face);
+}
+
+float TextureManager::tex1DLayered(TextureId id, float x, int layer) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  const int w = static_cast<int>(tex.width);
+  const int L = tex.layers > 0 ? static_cast<int>(tex.layers) : 1;
+  if (layer < 0) layer = 0; else if (layer >= L) layer = L - 1;
+  float sx = tex.desc.normalizedCoords ? x * static_cast<float>(w) : x;
+  int rx = applyAddressMode(static_cast<int>(std::floor(sx)), w, tex.desc.addressMode);
+  if (rx < 0) return tex.desc.borderColor;
+  return static_cast<float>(readElementValue(tex, static_cast<size_t>(layer) * w + rx));
+}
+
 } // namespace core
 } // namespace vgre

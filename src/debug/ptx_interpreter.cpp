@@ -1310,6 +1310,50 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         else if (mnem == "vgretex3d")      res = TM.tex3D(handle, asF32(evalOperand(t, tid, A(2), 4)), asF32(evalOperand(t, tid, A(3), 4)), asF32(evalOperand(t, tid, A(4), 4)));
         else { float v = 0.0f; TM.surf2Dread(handle, v, (int)evalOperand(t, tid, A(2), 4), (int)evalOperand(t, tid, A(3), 4)); res = v; }
         setReg(A(0), fromF32(res));
+    } else if (mnem == "vgretex1dlayered" || mnem == "vgretex2dlayered" ||
+               mnem == "vgretexcubemap") {
+        // Layered (array) fetch: dest, handle(u64), coords…, layer index.
+        // Cubemap fetch: dest, handle(u64), direction x,y,z.
+        auto& TM = ::vgre::core::TextureManager::instance();
+        const uint64_t handle = evalOperand(t, tid, A(1), 8);
+        float res = 0.0f;
+        if (mnem == "vgretex1dlayered")
+            res = TM.tex1DLayered(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                                  (int)evalOperand(t, tid, A(3), 4));
+        else if (mnem == "vgretex2dlayered")
+            res = TM.tex2DLayered(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                                  asF32(evalOperand(t, tid, A(3), 4)),
+                                  (int)evalOperand(t, tid, A(4), 4));
+        else
+            res = TM.texCubemap(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                                asF32(evalOperand(t, tid, A(3), 4)),
+                                asF32(evalOperand(t, tid, A(4), 4)));
+        setReg(A(0), fromF32(res));
+    } else if (mnem == "vgretex1dchan" || mnem == "vgretex2dchan" ||
+               mnem == "vgretex3dchan" || mnem == "vgretex2dlod") {
+        // Per-channel vector fetch (float2/3/4 textures) + explicit-LOD 2D fetch.
+        // dest, handle(u64), coords…, and a trailing channel index (chan ops) or LOD
+        // (lod op). Each returns one f32 lane; the front-end packs channels into a vector.
+        auto& TM = ::vgre::core::TextureManager::instance();
+        const uint64_t handle = evalOperand(t, tid, A(1), 8);
+        float res = 0.0f;
+        if (mnem == "vgretex1dchan")
+            res = TM.tex1DChan(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                               (unsigned)evalOperand(t, tid, A(3), 4));
+        else if (mnem == "vgretex2dchan")
+            res = TM.tex2DChan(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                               asF32(evalOperand(t, tid, A(3), 4)),
+                               (unsigned)evalOperand(t, tid, A(4), 4));
+        else if (mnem == "vgretex3dchan")
+            res = TM.tex3DChan(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                               asF32(evalOperand(t, tid, A(3), 4)),
+                               asF32(evalOperand(t, tid, A(4), 4)),
+                               (unsigned)evalOperand(t, tid, A(5), 4));
+        else  // vgretex2dlod
+            res = TM.tex2DLod(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                              asF32(evalOperand(t, tid, A(3), 4)),
+                              asF32(evalOperand(t, tid, A(4), 4)));
+        setReg(A(0), fromF32(res));
     } else if (mnem == "vgresurf2dwrite") {          // surf2Dwrite(val, surf, x, y) — no dest
         const float v = asF32(evalOperand(t, tid, A(0), 4));
         const uint64_t handle = evalOperand(t, tid, A(1), 8);
