@@ -39,5 +39,24 @@ done
 echo "==> Building wheel"
 ( cd "$HERE" && python -m build --wheel )
 
+# The wheel bundles a platform-specific native library (.so/.dylib/.dll), so it is
+# NOT platform-agnostic — setuptools tags a pure-Python package `py3-none-any`, which
+# would make three OS wheels collide in one release and let pip install a Linux wheel
+# on macOS. Retag it with this host's platform (e.g. py3-none-linux_x86_64) so each
+# OS ships a distinct, correctly-resolved wheel. Falls back to the `any` wheel if the
+# `wheel` CLI is unavailable.
+PLAT="$(python - <<'PY'
+import sysconfig
+print(sysconfig.get_platform().replace('-', '_').replace('.', '_'))
+PY
+)"
+if [[ -n "$PLAT" ]] && python -m wheel version >/dev/null 2>&1; then
+    for w in "$HERE"/dist/*-any.whl; do
+        [[ -e "$w" ]] || continue
+        echo "==> Retagging $(basename "$w") → platform $PLAT"
+        python -m wheel tags --platform-tag "$PLAT" --remove "$w" >/dev/null
+    done
+fi
+
 echo "==> Done. Wheel(s):"
 ls -1 "$HERE"/dist/*.whl

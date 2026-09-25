@@ -1,0 +1,134 @@
+name: Release wheels
+
+# Build self-contained, LLVM-free VGRE wheels on each OS runner and publish them
+# to a GitHub Release. Each wheel bundles the native libvgre / libvgre_cudart
+# (built with VGRE_ENABLE_JIT=OFF so there is no LLVM runtime dependency) under
+# vgre/lib/, so `pip install vgre-*.whl` needs only a C++-free Python + numpy and
+# then trains/runs the in-tree LM and executes CUDA-C kernels on CPU.
+#
+# Trigger:
+#   • push a SemVer tag  vX.Y.Z          → build all OS wheels + create the Release
+#   • workflow_dispatch (make_release=false, default) → build + upload artifacts only
+#     (a dry run so the multi-OS build can be validated in CI before tagging)
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: "Create a GitHub Release from the built wheels"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write        # create the Release / upload assets
+
+jobs:
+  build:
+    name: wheel-${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, name: linux-x86_64 }
+          - { os: macos-14,     name: macos-arm64  }
+          - { os: windows-2022, name: windows-x86_64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── Linux: clang-18, LLVM-free (matches the linux-x86_64-llvm-free CI lane) ──
+      - name: Build native + wheel (Linux, LLVM-free)
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build clang-18 \
+            libsqlite3-dev liblapack-dev libkeyutils-dev libssl-dev zlib1g-dev
+          python -m pip install --upgrade build wheel setuptools numpy
+          cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
+          cmake --build build_rel --target vgre vgre_cudart --parallel
+          bash bindings/python/build_wheel.sh "$PWD/build_rel"
+
+      # ── macOS: Apple clang, LLVM-free ──
+      - name: Build native + wheel (macOS, LLVM-free)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          brew install cmake ninja || true
+          python -m pip install --upgrade build wheel setuptools numpy
+          cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF
+          cmake --build build_rel --target vgre vgre_cudart --parallel
+          bash bindings/python/build_wheel.sh "$PWD/build_rel"
+
+      # ── Windows: clang-cl (choco llvm), LLVM-free; git-bash runs build_wheel.sh ──
+      - name: Build native + wheel (Windows, LLVM-free)
+        if: matrix.os == 'windows-2022'
+        shell: bash
+        run: |
+          choco install ninja sqlite -y --no-progress
+          python -m pip install --upgrade build wheel setuptools numpy
+          cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+            -DVGRE_WARNINGS_AS_ERRORS=OFF \
+            -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          cmake --build build_rel --target vgre vgre_cudart --parallel
+          bash bindings/python/build_wheel.sh "$PWD/build_rel"
+
+      - name: Smoke-test the wheel (install fresh, import + LM train)
+        shell: bash
+        run: |
+          SMOKE="$PWD/bindings/python/smoke_test.py"
+          python -m pip install numpy "$(ls bindings/python/dist/*.whl)"
+          cd "$RUNNER_TEMP" && python "$SMOKE"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.name }}
+          path: bindings/python/dist/*.whl
+          if-no-files-found: error
+
+  release:
+    name: publish-release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.make_release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -R dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          name: VGRE ${{ github.ref_name }}
+          body: |
+            **VGRE — Virtual GPU Runtime Engine** — self-contained, LLVM-free CPU wheels.
+
+            `pip install` the wheel for your platform, then:
+            ```python
+            import vgre
+            tok = vgre.Tokenizer().train(open("corpus.txt").read(), num_merges=1024)
+            lm  = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=6, d_model=256, n_head=8)
+            # train_step / generate — CPU only, no GPU, no LLVM, no external BLAS.
+            ```
+            Wheels are built with `VGRE_ENABLE_JIT=OFF` (no LLVM runtime dependency);
+            the bundled native library runs CUDA-C kernels and the in-tree transformer LM
+            on CPU. See the README for the full CUDA-emulation API.
