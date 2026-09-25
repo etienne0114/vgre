@@ -145,6 +145,18 @@ See `docs/missingFeatures.md` for the complete exhaustive list.
 
 ## Quick Start
 
+**Fastest — install a prebuilt, self-contained wheel (no toolchain):** each
+[GitHub Release](https://github.com/etienne0114/vgre/releases) ships an **LLVM-free**
+wheel per platform (Linux / macOS / Windows) that bundles the native engine, so you
+need only Python 3.8+ and NumPy:
+
+```bash
+pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or the macOS / Windows wheel
+python -c "import vgre; print('native:', vgre.NATIVE_AVAILABLE)"
+```
+
+**Build from source:**
+
 ```bash
 # Automated (Linux / macOS) — recommended
 bash install_local.sh
@@ -153,6 +165,11 @@ bash install_local.sh
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+# Zero-burden build (no LLVM / no OpenMP — runs on any C++17 compiler):
+#   cmake .. -DCMAKE_BUILD_TYPE=Release -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF
+
+# Build the wheel yourself: bash bindings/python/build_wheel.sh build
 
 # Run tests (Linux: parallel; macOS: use -j1 for JIT stability)
 ctest --output-on-failure -j$(nproc 2>/dev/null || echo 1)
