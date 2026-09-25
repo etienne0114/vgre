@@ -18,10 +18,15 @@ elif command -v sysctl >/dev/null 2>&1; then JOBS="$(sysctl -n hw.ncpu)";
 else JOBS=4; fi
 
 # Native shared-library names differ per OS (Linux .so, macOS .dylib, Windows .dll).
+# Bundle EVERY matching native library — including the real versioned file, not just
+# the unversioned/soname symlinks. (The Linux soname chain is libvgre.so → .so.0 →
+# .so.0.1.0 and macOS is libvgre.dylib → .0.dylib → .0.1.0.dylib; copying only the
+# first two leaves a dangling symlink and the loader can't dlopen it — which silently
+# made NATIVE_AVAILABLE False in the macOS wheel.) A glob picks up all of them.
 case "$(uname -s)" in
-    Darwin) LIBS="libvgre.dylib libvgre.0.dylib libvgre_cudart.dylib libvgre_cudart.0.dylib"; PRIMARY="libvgre.dylib" ;;
-    MINGW*|MSYS*|CYGWIN*) LIBS="vgre.dll vgre_cudart.dll"; PRIMARY="vgre.dll" ;;
-    *)      LIBS="libvgre.so libvgre.so.0 libvgre.so.0.1.0 libvgre_cudart.so libvgre_cudart.so.0"; PRIMARY="libvgre.so" ;;
+    Darwin)               GLOB="libvgre*.dylib"; PRIMARY="libvgre.dylib" ;;
+    MINGW*|MSYS*|CYGWIN*) GLOB="vgre*.dll";      PRIMARY="vgre.dll" ;;
+    *)                    GLOB="libvgre*.so*";   PRIMARY="libvgre.so" ;;
 esac
 
 echo "==> Ensuring native libraries are built in $BUILD_DIR"
@@ -32,9 +37,12 @@ fi
 
 echo "==> Bundling shared libraries into vgre/lib/"
 mkdir -p "$HERE/vgre/lib"
-for lib in $LIBS; do
-    if [[ -e "$BUILD_DIR/$lib" ]]; then cp -P "$BUILD_DIR/$lib" "$HERE/vgre/lib/" || cp "$BUILD_DIR/$lib" "$HERE/vgre/lib/"; fi
+shopt -s nullglob
+for lib in "$BUILD_DIR"/$GLOB; do
+    cp -P "$lib" "$HERE/vgre/lib/" 2>/dev/null || cp "$lib" "$HERE/vgre/lib/"
 done
+shopt -u nullglob
+echo "==> Bundled:"; ls -l "$HERE/vgre/lib/" | sed 's/^/    /'
 
 echo "==> Building wheel"
 ( cd "$HERE" && python -m build --wheel )
