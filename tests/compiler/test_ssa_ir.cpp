@@ -178,6 +178,12 @@ int main() {
     // Barrier INSIDE a loop (tiling pattern) — stresses the scheduler's per-round re-entry
     // across loop iterations, with two __syncthreads per iteration.
     checkVsInterp("shmem-loop", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ __shared__ float s[32]; int t=threadIdx.x; int i=blockIdx.x*blockDim.x+t; float acc=0.0f; for(int tile=0;tile<m;tile++){ s[t]=(i<n)?x[i*m+(tile%m)]:0.0f; __syncthreads(); for(int q=0;q<blockDim.x;q++) acc+=s[q]; __syncthreads(); } if(i<n) y[i]=acc; })", 96, 4);
+    // Multi-dimensional arrays (row-major flatten): a 2-D per-thread LOCAL array written
+    // then read transposed exercises the [r][c] → r*C+c index lowering.
+    checkVsInterp("mdarr-local", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; float a[3][4]; for(int r=0;r<3;r++) for(int c=0;c<4;c++) a[r][c]=x[i*m+(r*4+c)]+(float)(r-c); float s=0.0f; for(int r=0;r<3;r++) for(int c=0;c<4;c++) s+=a[r][c]*(float)(c+1); if(i<n) y[i]=s; })", 96, 16);
+    // 2-D __shared__ array + __syncthreads: each thread writes s[t/8][t%8], barrier, then
+    // every thread sums the whole 4×8 tile (cross-thread reads through 2-D shared memory).
+    checkVsInterp("mdarr-shared", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int t=threadIdx.x; int i=blockIdx.x*blockDim.x+t; __shared__ float s[4][8]; s[t/8][t%8]=(i<n)?x[i*m]:0.0f; __syncthreads(); float acc=0.0f; for(int r=0;r<4;r++) for(int c=0;c<8;c++) acc+=s[r][c]; if(i<n) y[i]=acc+s[t/8][t%8]; })", 96, 4);
     // switch inside a loop with `continue` (forwarded to the loop) and a break (to the switch).
     checkVsInterp("sw-loop",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ switch(k%3){ case 0: continue; case 1: acc+=x[i*m+k]; break; default: acc-=x[i*m+k]; } acc+=0.5f; } y[i]=acc; } })", 96, 16);
 

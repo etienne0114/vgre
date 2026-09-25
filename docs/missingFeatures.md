@@ -44,8 +44,10 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 - **Texture / surface**: vector fetches (`float4` etc.), layered / cubemap / mipmap sampling, and
   `tex2DLod` (scalar `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` already run on both tiers).
 - **Recursion** in `__device__` helpers (currently rejected; templates + inlining are done).
-- **On the SSA tier specifically**: dynamic `extern __shared__`, multi-dimensional arrays, and
-  struct kernel params (these run on the interpreter/compiled tiers; the SSA tier defers to them today).
+- **On the SSA tier specifically**: dynamic `extern __shared__` and struct kernel params
+  (these run on the interpreter/compiled tiers; the SSA tier defers to them today).
+  *(Multi-dimensional arrays — `float As[H][W]`, N-D row-major indexing on local and
+  `__shared__` arrays — are now supported natively on the SSA tier.)*
 
 ### 1.4 Serving / KV cache
 - Wire the **int8 / int4 KV-cache quantization** into `KVCacheManager`'s paged pools so the

@@ -180,6 +180,7 @@ struct Lowerer {
     std::string mpfx;                          // active mangling prefix ("" at top level)
     std::unordered_map<std::string, std::pair<int, Type>> localArr;    // mangled name -> (localArrays id, element type)
     std::unordered_map<std::string, std::pair<int, Type>> sharedArr;   // name -> (sharedArrays id, element type) — block scope
+    std::unordered_map<std::string, std::vector<int>> arrDims;         // (mangled) array name -> per-dimension sizes (row-major); empty ⇒ 1-D
     int inlineUid = 0, inlineDepth = 0;
     struct InlineCtx { int exitB; std::string retVar; Type rt; };
     std::vector<InlineCtx> inlineCtx;
@@ -252,7 +253,17 @@ struct Lowerer {
             case Expr::IntLit:   { Type t; t.base = e.wide ? Type::Long : Type::Int; return t; }
             case Expr::FloatLit: return scalar(e.wide ? Type::Double : Type::Float);
             case Expr::Ident: { auto it = vtype.find(mangle(e.str)); return it != vtype.end() ? it->second : scalar(Type::Int); }
-            case Expr::Index: { std::string bn = e.args.empty() ? std::string() : mangle(e.args[0]->str); auto la = localArr.find(bn); if (la != localArr.end()) return la->second.second; auto sa = sharedArr.find(bn); if (sa != sharedArr.end()) return sa->second.second; Type b = vtype.count(bn) ? vtype[bn] : Type{}; if (b.ptr > 0) b.ptr--; return b; }
+            case Expr::Index: {
+                // Walk a nested Index chain (a[i0][i1]…) to the innermost base ident so a
+                // multi-dimensional array element has the array's element type, not `pointee`.
+                const Expr* base = &e;
+                while (base->kind == Expr::Index && !base->args.empty()) base = base->args[0].get();
+                std::string bn = (base->kind == Expr::Ident) ? mangle(base->str) : std::string();
+                auto la = localArr.find(bn); if (la != localArr.end()) return la->second.second;
+                auto sa = sharedArr.find(bn); if (sa != sharedArr.end()) return sa->second.second;
+                std::string bn0 = e.args.empty() ? std::string() : mangle(e.args[0]->str);
+                Type b = vtype.count(bn0) ? vtype[bn0] : Type{}; if (b.ptr > 0) b.ptr--; return b;
+            }
             case Expr::Unary:  if (e.str == "!") return scalar(Type::Int);
                                return e.args.empty() ? scalar(Type::Int) : typeOf(*e.args[0]);
             case Expr::Cast:   return e.castType;
@@ -276,6 +287,44 @@ struct Lowerer {
     int constI(int64_t v, Type t) { Inst in; in.op = Op::ConstI; in.ty = t; in.ci = v; return emit(std::move(in)); }
     int constF(double v, Type t)  { Inst in; in.op = Op::ConstF; in.ty = t; in.cf = v; return emit(std::move(in)); }
 
+    // If `e` is an element access on a registered local/shared array — `a[i]` (1-D) or
+    // `a[i0][i1]…` (N-D, `Index` nested left) — resolve it: set `shared`/`arrId`/`elem`, and
+    // return the flattened row-major index SSA value (`Σ i_k · stride_k`, stride_k =
+    // product of the trailing dims). Returns -1 if `e` is not such an access (so callers
+    // fall through to the pointer path). A partial index (rank mismatch, i.e. a sub-array)
+    // returns -2 so callers can reject it cleanly rather than mis-flatten.
+    int lowerArrayFlatIndex(const Expr& e, bool& shared, int& arrId, Type& elem) {
+        std::vector<const Expr*> idxs;   // collected innermost-Index-first
+        const Expr* base = &e;
+        while (base->kind == Expr::Index && base->args.size() == 2) {
+            idxs.push_back(base->args[1].get());
+            base = base->args[0].get();
+        }
+        if (base->kind != Expr::Ident || idxs.empty()) return -1;
+        const std::string key = mangle(base->str);
+        auto la = localArr.find(key);
+        auto sa = sharedArr.find(key);
+        if      (la != localArr.end())  { shared = false; arrId = la->second.first; elem = la->second.second; }
+        else if (sa != sharedArr.end()) { shared = true;  arrId = sa->second.first; elem = sa->second.second; }
+        else return -1;                                    // not an array — a pointer, handled elsewhere
+        std::reverse(idxs.begin(), idxs.end());            // now outermost-first: [i0, i1, …]
+        const std::vector<int>& dims = arrDims[key];
+        const int rank = dims.empty() ? 1 : (int)dims.size();
+        if ((int)idxs.size() != rank) return -2;           // partial/over index (sub-array) — unsupported, reject
+        if (rank == 1) return lowerExpr(*idxs[0]);         // 1-D fast path (no strides)
+        int flat = -1;
+        for (size_t k = 0; k < idxs.size(); ++k) {
+            int stride = 1;
+            for (size_t j = k + 1; j < dims.size(); ++j) stride *= dims[j];   // row-major trailing product
+            int ik = lowerExpr(*idxs[k]); if (!ok) return -1;
+            int term = ik;
+            if (stride != 1) { Inst m; m.op = Op::Bin; m.s = "*"; m.ty = scalar(Type::Int); m.a = {ik, constI(stride, scalar(Type::Int))}; term = emit(std::move(m)); }
+            if (flat < 0) flat = term;
+            else { Inst a; a.op = Op::Bin; a.s = "+"; a.ty = scalar(Type::Int); a.a = {flat, term}; flat = emit(std::move(a)); }
+        }
+        return flat;
+    }
+
     // Lower an expression to an SSA value id (its result coerced to `typeOf`).
     int lowerExpr(const Expr& e) {
         if (!ok) return 0;
@@ -295,22 +344,18 @@ struct Lowerer {
                 if (member(e, "gridDim", dim))   { Inst in; in.op = Op::Nctaid;in.ty = scalar(Type::Int); in.dim = dim; return emit(std::move(in)); }
                 fail("SSA: unsupported member access"); return 0;
             }
-            case Expr::Index: {   // p[idx] — a global load, or a[idx] — a local-array read
-                if (e.args.size() != 2 || e.args[0]->kind != Expr::Ident) { fail("SSA: bad index"); return 0; }
-                auto la = localArr.find(mangle(e.args[0]->str));
-                if (la != localArr.end()) {
-                    int idx = lowerExpr(*e.args[1]); if (!ok) return 0;
-                    Inst in; in.op = Op::LoadL; in.ty = la->second.second; in.arrId = la->second.first;
-                    in.elemBytes = la->second.second.elemBytes(); in.a = {idx};
-                    return emit(std::move(in));
+            case Expr::Index: {   // p[idx] global load, or a[i]/a[i0][i1]… local/shared-array read
+                if (e.args.size() != 2) { fail("SSA: bad index"); return 0; }
+                { bool shared = false; int arrId = -1; Type elem;
+                  int flat = lowerArrayFlatIndex(e, shared, arrId, elem);
+                  if (flat == -2) { fail("SSA: partial array indexing (sub-array) unsupported on this tier"); return 0; }
+                  if (flat >= 0) {
+                      Inst in; in.op = shared ? Op::LoadS : Op::LoadL; in.ty = elem; in.arrId = arrId;
+                      in.elemBytes = elem.elemBytes(); in.a = {flat};
+                      return emit(std::move(in));
+                  }
                 }
-                auto sa = sharedArr.find(mangle(e.args[0]->str));
-                if (sa != sharedArr.end()) {
-                    int idx = lowerExpr(*e.args[1]); if (!ok) return 0;
-                    Inst in; in.op = Op::LoadS; in.ty = sa->second.second; in.arrId = sa->second.first;
-                    in.elemBytes = sa->second.second.elemBytes(); in.a = {idx};
-                    return emit(std::move(in));
-                }
+                if (e.args[0]->kind != Expr::Ident) { fail("SSA: bad index"); return 0; }
                 Type pt = vtype.count(mangle(e.args[0]->str)) ? vtype[mangle(e.args[0]->str)] : Type{};
                 if (pt.ptr != 1) { fail("SSA: index base must be a pointer"); return 0; }
                 Type elem = pt; elem.ptr = 0;
@@ -530,23 +575,22 @@ struct Lowerer {
             return;
         }
         if (lhs.kind == Expr::Index) {
-            if (lhs.args.size() != 2 || lhs.args[0]->kind != Expr::Ident) { fail("SSA: bad store index"); return; }
-            auto la = localArr.find(mangle(lhs.args[0]->str));
-            auto sa = sharedArr.find(mangle(lhs.args[0]->str));
-            if (la != localArr.end() || sa != sharedArr.end()) {   // a[idx] [op]= rhs — local- or shared-array write
-                const bool shared = (sa != sharedArr.end());
-                Type elem = shared ? sa->second.second : la->second.second;
-                int arrId = shared ? sa->second.first : la->second.first;
-                const Op ldOp = shared ? Op::LoadS : Op::LoadL, stOp = shared ? Op::StoreS : Op::StoreL;
-                int idx = lowerExpr(*lhs.args[1]);
-                int rhs = lowerExpr(*e.args[1]); if (!ok) return;
-                int val = rhs;
-                if (op != "=") { Inst ld; ld.op = ldOp; ld.ty = elem; ld.arrId = arrId; ld.elemBytes = elem.elemBytes(); ld.a = {idx}; int old = emit(std::move(ld));
-                                 Inst in; in.op = Op::Bin; in.s = op.substr(0, op.size() - 1); in.ty = promoteT(elem, typeOf(*e.args[1])); in.a = {old, rhs}; val = emit(std::move(in)); }
-                Inst c; c.op = Op::Cast; c.ty = elem; c.a = {val}; int cv = emit(std::move(c));
-                Inst st; st.op = stOp; st.ty = elem; st.arrId = arrId; st.elemBytes = elem.elemBytes(); st.a = {idx, cv}; emit(std::move(st));
-                return;
+            if (lhs.args.size() != 2) { fail("SSA: bad store index"); return; }
+            { bool shared = false; int arrId = -1; Type elem;      // a[i]/a[i0][i1]… [op]= rhs — local/shared array write
+              int flat = lowerArrayFlatIndex(lhs, shared, arrId, elem);
+              if (flat == -2) { fail("SSA: partial array indexing (sub-array) unsupported on this tier"); return; }
+              if (flat >= 0) {
+                  const Op ldOp = shared ? Op::LoadS : Op::LoadL, stOp = shared ? Op::StoreS : Op::StoreL;
+                  int rhs = lowerExpr(*e.args[1]); if (!ok) return;
+                  int val = rhs;
+                  if (op != "=") { Inst ld; ld.op = ldOp; ld.ty = elem; ld.arrId = arrId; ld.elemBytes = elem.elemBytes(); ld.a = {flat}; int old = emit(std::move(ld));
+                                   Inst in; in.op = Op::Bin; in.s = op.substr(0, op.size() - 1); in.ty = promoteT(elem, typeOf(*e.args[1])); in.a = {old, rhs}; val = emit(std::move(in)); }
+                  Inst c; c.op = Op::Cast; c.ty = elem; c.a = {val}; int cv = emit(std::move(c));
+                  Inst st; st.op = stOp; st.ty = elem; st.arrId = arrId; st.elemBytes = elem.elemBytes(); st.a = {flat, cv}; emit(std::move(st));
+                  return;
+              }
             }
+            if (lhs.args[0]->kind != Expr::Ident) { fail("SSA: bad store index"); return; }
             Type pt = vtype.count(mangle(lhs.args[0]->str)) ? vtype[mangle(lhs.args[0]->str)] : Type{};
             if (pt.ptr != 1) { fail("SSA: store base must be a pointer"); return; }
             Type elem = pt; elem.ptr = 0;
@@ -611,6 +655,7 @@ struct Lowerer {
                     int arrId = (int)fn.sharedArrays.size();
                     fn.sharedArrays.push_back({s.type, s.arraySize});
                     sharedArr[s.name] = {arrId, s.type};
+                    arrDims[mangle(s.name)] = s.arrayDims;   // per-dim sizes for N-D indexing (mpfx empty ⇒ mangle == name)
                     return;
                 }
                 if (s.arraySize > 0) {   // per-thread scratch array (register/stack backed, 1-D flattened)
@@ -618,6 +663,7 @@ struct Lowerer {
                     int arrId = (int)fn.localArrays.size();
                     fn.localArrays.push_back({s.type, s.arraySize});
                     localArr[mangle(s.name)] = {arrId, s.type};
+                    arrDims[mangle(s.name)] = s.arrayDims;   // per-dim sizes for N-D indexing
                     return;
                 }
                 std::string nm = mangle(s.name);

@@ -28,7 +28,8 @@ backend.
 > optimizing backend (`ssa_ir.cpp`, VGRE-IR → const-fold/GVN/LICM/DCE → linear-scan
 > regalloc → x86-64 native, opt-in AArch64, portable evaluator elsewhere) is
 > feature-complete for the scalar + shared-memory + warp subset — full control flow
-> (incl. `switch`), `__device__` inlining, local arrays, `__shared__`/`__syncthreads`,
+> (incl. `switch`), `__device__` inlining, local **and multi-dimensional** arrays
+> (`float As[H][W]`, N-D row-major), `__shared__`/`__syncthreads`,
 > and the **full warp-intrinsic surface** (`__shfl_*`, vote, `__reduce_*_sync`, match,
 > `__syncwarp`, `__activemask`). On **x86-64/Linux** the whole subset — including shared
 > memory and every warp intrinsic — emits **native machine code** (`vgre_ssa_barrier`/
