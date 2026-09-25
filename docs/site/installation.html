@@ -23,24 +23,31 @@
   <nav class="header-links">
     <a href="index.html">Docs</a>
     <a href="api.html">API</a>
-    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
   </nav>
 </header>
 <div class="layout">
   <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link active" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
   <main class="content">
-    <h1>Installation</h1><p class="lead">Manual build steps and platform notes.</p><h2>Prerequisites</h2><pre><code class="lang-bash"># Ubuntu / Debian
+    <h1>Installation</h1><p class="lead">Manual build steps and platform notes.</p><div class="callout tip"><div class="callout-title">Tip</div><p>The quickest way to get running is the prebuilt wheel — see <a href="downloads.html">Downloads</a>. Build from source when you want the dashboard, the cluster tools, or to hack on the engine.</p></div><h2>Prerequisites</h2><h3>Linux (Ubuntu / Debian)</h3><pre><code class="lang-bash"># Full build (with the optional LLVM JIT):
 sudo apt install -y cmake ninja-build clang llvm-18-dev \
-    libomp-dev libssl-dev libsqlite3-dev
+    libomp-dev libssl-dev libsqlite3-dev libkeyutils-dev zlib1g-dev
 
-# macOS (Homebrew — paths discovered automatically at configure time)
-brew install cmake llvm@18 libomp ninja sqlite
+# LLVM-free build needs no llvm-18-dev / libomp-dev — just clang + the above.</code></pre><h3>macOS (Homebrew — paths discovered automatically at configure time)</h3><pre><code class="lang-bash">brew install cmake llvm@18 libomp ninja sqlite lapack
+# LLVM-free build needs only:  brew install cmake ninja sqlite</code></pre><h3>Windows (PowerShell, VS 2022 present)</h3><pre><code class="lang-powershell"># One-shot: installs LLVM 18 + Ninja + CMake and configures the build.
+powershell -ExecutionPolicy Bypass -File scripts\Install-BuildTools.ps1
+powershell -ExecutionPolicy Bypass -File scripts\Install-VGRETools.ps1
 
-# Flutter (for the dashboard) — one of:
-sudo snap install flutter --classic
-# or: brew install --cask flutter</code></pre><h2>Build (full, with LLVM JIT)</h2><pre><code class="lang-bash">cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+# Or by hand with Chocolatey:
+choco install -y llvm ninja sqlite cmake</code></pre><h3>Flutter (optional — only for the dashboard)</h3><pre><code class="lang-bash">sudo snap install flutter --classic     # Linux
+brew install --cask flutter              # macOS
+choco install flutter                    # Windows</code></pre><h2>Build — Linux / macOS (full, with LLVM JIT)</h2><pre><code class="lang-bash">cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
-ctest --test-dir build -j$(nproc)     # full suite: 394/394 on Linux</code></pre><h2>Zero-burden build (no LLVM, no OpenMP)</h2><p>VGRE does not need LLVM to execute kernels — a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter, compiled-fiber tier, native x86-64 JIT, and an optional SSA optimizing backend). Build with only a C++17 compiler:</p><pre><code class="lang-bash">cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+ctest --test-dir build -j$(nproc)     # full suite: 394/394 on Linux</code></pre><h2>Build — Windows (clang-cl + Ninja)</h2><p>Windows builds LLVM-free-friendly with clang-cl; the full suite is green in CI on <code>windows-2022</code>. From a <em>Developer PowerShell for VS 2022</em>:</p><pre><code class="lang-powershell">cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl `
+  -DVGRE_ENABLE_OPENMP=OFF -DVGRE_WARNINGS_AS_ERRORS=OFF
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure</code></pre><h2>Zero-burden build (no LLVM, no OpenMP)</h2><p>VGRE does not need LLVM to execute kernels — a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter, compiled-fiber tier, native x86-64 JIT, and an optional SSA optimizing backend). Build with only a C++17 compiler:</p><pre><code class="lang-bash">cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF
 cmake --build build -j$(nproc)
 ctest --test-dir build -j$(nproc)     # LLVM-free suite: 374/374</code></pre><h2>Build the Python wheel</h2><pre><code class="lang-bash">bash bindings/python/build_wheel.sh build   # → bindings/python/dist/*.whl
@@ -52,7 +59,7 @@ pip install bindings/python/dist/vgre-*.whl</code></pre><h2>System requirements<
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js?v=c7c7345a1e"></script>
+<script src="assets/search-index.js?v=b90822216b"></script>
 <script src="assets/docs.js?v=087808cb8b"></script>
 </body>
 </html>

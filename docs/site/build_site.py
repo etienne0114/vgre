@@ -173,18 +173,20 @@ def page_downloads():
           "only <strong>Python 3.8+ and NumPy</strong>. The wheels are built and smoke-tested "
           "(import + train a language model) on Linux, macOS and Windows runners in CI."),
         h2("Latest release — v0.1.0"),
-        table(["Platform", "Wheel", "Install"], [
-            ["Linux x86-64",
-             '<a href="' + DL + '/vgre-0.1.0-py3-none-linux_x86_64.whl">vgre-0.1.0-…-linux_x86_64.whl</a>',
-             "<code>pip install vgre-0.1.0-py3-none-linux_x86_64.whl</code>"],
-            ["macOS (Apple Silicon)",
-             '<a href="' + DL + '/vgre-0.1.0-py3-none-macosx_10_13_universal2.whl">vgre-0.1.0-…-macosx_universal2.whl</a>',
-             "<code>pip install vgre-0.1.0-py3-none-macosx_10_13_universal2.whl</code>"],
-            ["Windows x86-64",
-             '<a href="' + DL + '/vgre-0.1.0-py3-none-win_amd64.whl">vgre-0.1.0-…-win_amd64.whl</a>',
-             "<code>pip install vgre-0.1.0-py3-none-win_amd64.whl</code>"],
-        ]),
-        callout(p("Install straight from the release URL without downloading first:"), "tip"),
+        p("Pick your platform, download the wheel, then copy the <code>pip install</code> "
+          "command (each block has a <strong>Copy</strong> button):"),
+        h3("🐧 Linux x86-64"),
+        p('<a href="' + DL + '/vgre-0.1.0-py3-none-linux_x86_64.whl">⬇ Download vgre-0.1.0-py3-none-linux_x86_64.whl</a>'),
+        code("pip install vgre-0.1.0-py3-none-linux_x86_64.whl"),
+        h3("🍎 macOS (Apple Silicon)"),
+        p('<a href="' + DL + '/vgre-0.1.0-py3-none-macosx_10_13_universal2.whl">⬇ Download vgre-0.1.0-py3-none-macosx_10_13_universal2.whl</a>'),
+        code("pip install vgre-0.1.0-py3-none-macosx_10_13_universal2.whl"),
+        h3("🪟 Windows x86-64"),
+        p('<a href="' + DL + '/vgre-0.1.0-py3-none-win_amd64.whl">⬇ Download vgre-0.1.0-py3-none-win_amd64.whl</a>'),
+        code("pip install vgre-0.1.0-py3-none-win_amd64.whl"),
+        h2("Install straight from the release URL"),
+        p("No manual download — <code>pip</code> fetches the wheel for you (swap the filename "
+          "for your platform):"),
         code("pip install " + DL + "/vgre-0.1.0-py3-none-linux_x86_64.whl\n"
              "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
         h2("Verify it works"),
@@ -255,19 +257,40 @@ def page_quickstart():
 def page_installation():
     return "".join([
         h1("Installation", "Manual build steps and platform notes."),
+        callout(p("The quickest way to get running is the prebuilt wheel — see "
+                  "<a href=\"downloads.html\">Downloads</a>. Build from source when you want the "
+                  "dashboard, the cluster tools, or to hack on the engine."), "tip"),
         h2("Prerequisites"),
-        code("# Ubuntu / Debian\n"
+        h3("Linux (Ubuntu / Debian)"),
+        code("# Full build (with the optional LLVM JIT):\n"
              "sudo apt install -y cmake ninja-build clang llvm-18-dev \\\n"
-             "    libomp-dev libssl-dev libsqlite3-dev\n\n"
-             "# macOS (Homebrew — paths discovered automatically at configure time)\n"
-             "brew install cmake llvm@18 libomp ninja sqlite\n\n"
-             "# Flutter (for the dashboard) — one of:\n"
-             "sudo snap install flutter --classic\n"
-             "# or: brew install --cask flutter"),
-        h2("Build (full, with LLVM JIT)"),
+             "    libomp-dev libssl-dev libsqlite3-dev libkeyutils-dev zlib1g-dev\n\n"
+             "# LLVM-free build needs no llvm-18-dev / libomp-dev — just clang + the above."),
+        h3("macOS (Homebrew — paths discovered automatically at configure time)"),
+        code("brew install cmake llvm@18 libomp ninja sqlite lapack\n"
+             "# LLVM-free build needs only:  brew install cmake ninja sqlite"),
+        h3("Windows (PowerShell, VS 2022 present)"),
+        code("# One-shot: installs LLVM 18 + Ninja + CMake and configures the build.\n"
+             "powershell -ExecutionPolicy Bypass -File scripts\\Install-BuildTools.ps1\n"
+             "powershell -ExecutionPolicy Bypass -File scripts\\Install-VGRETools.ps1\n\n"
+             "# Or by hand with Chocolatey:\n"
+             "choco install -y llvm ninja sqlite cmake", "powershell"),
+        h3("Flutter (optional — only for the dashboard)"),
+        code("sudo snap install flutter --classic     # Linux\n"
+             "brew install --cask flutter              # macOS\n"
+             "choco install flutter                    # Windows"),
+        h2("Build — Linux / macOS (full, with LLVM JIT)"),
         code("cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release\n"
              "cmake --build build -j$(nproc)\n"
              "ctest --test-dir build -j$(nproc)     # full suite: 394/394 on Linux"),
+        h2("Build — Windows (clang-cl + Ninja)"),
+        p("Windows builds LLVM-free-friendly with clang-cl; the full suite is green in CI "
+          "on <code>windows-2022</code>. From a <em>Developer PowerShell for VS 2022</em>:"),
+        code("cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `\n"
+             "  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl `\n"
+             "  -DVGRE_ENABLE_OPENMP=OFF -DVGRE_WARNINGS_AS_ERRORS=OFF\n"
+             "cmake --build build --parallel\n"
+             "ctest --test-dir build --output-on-failure", "powershell"),
         h2("Zero-burden build (no LLVM, no OpenMP)"),
         p("VGRE does not need LLVM to execute kernels — a from-scratch CUDA-C front-end "
           "feeds a four-tier CPU backend (PTX interpreter, compiled-fiber tier, native "
@@ -301,10 +324,15 @@ def page_running_cuda():
     return "".join([
         h1("Running CUDA Applications", "How VGRE intercepts and executes CUDA on the CPU."),
         h2("Execution model"),
-        p("VGRE parses CUDA-C kernels through a Clang AST, lowers them to LLVM IR, and "
-          "JIT-compiles to native code with <code>-O3 -march=native</code>. Kernel "
-          "grids run on an OpenMP thread pool with SIMD vectorization; managed memory "
-          "is backed by an OS page-fault handler."),
+        p("VGRE parses each CUDA-C kernel with its <strong>own from-scratch front-end</strong> "
+          "(no Clang required) and runs it on the fastest of four bit-exact CPU tiers that "
+          "accepts it: a PTX interpreter, a compiled-closure tier with a cooperative fiber "
+          "executor, a hand-emitted native x86-64 JIT, and an optional SSA optimizing backend. "
+          "When LLVM dev libraries are present, an optional Clang → LLVM IR → ORC-JIT path "
+          "(<code>-O3 -march=native</code>) is available as the high-performance tier. Kernel "
+          "grids run on an in-tree work-stealing thread pool with SIMD vectorization (OpenMP is "
+          "optional); managed memory is backed by an OS page-fault handler. See "
+          "<a href=\"architecture.html\">Architecture</a> for the tier table."),
         h2("What works"),
         ul([
             "CUDA Runtime API (~101 functions): memory, streams, events, graphs, textures/surfaces, cooperative launch, CDP.",
@@ -537,20 +565,65 @@ def page_api():
 
 def page_cli():
     return "".join([
-        h1("CLI Tools", "The command-line utilities installed with VGRE."),
-        table(["Command", "Purpose"], [
-            ["<code>vgre-dashboard</code>", "Launch the real-time Flutter monitor."],
-            ["<code>vgre-start</code>", "Start a master or worker node (<code>--master</code> / <code>--worker</code> / <code>--test</code>)."],
-            ["<code>vgre-token</code>", "Generate / set / fingerprint the shared cluster auth token."],
-            ["<code>vgre-discover</code>", "Public-IP discovery and cross-LAN registration."],
-            ["<code>vgre_ptx_gdbserver</code>", "Serve a PTX kernel to a stock gdb for step debugging."],
-            ["<code>gpt2_infer</code>", "Real GPT-2 inference from safetensors/GGUF (matches Hugging Face)."],
+        h1("CLI Tools", "Every command installed with VGRE, what it does, and how to use it."),
+        p("<code>install_local.sh</code> links the runtime tools into <code>~/.local/bin</code> "
+          "(add it to <code>PATH</code> — the installer does this for you). On Windows the same "
+          "commands ship as <code>.bat</code> / <code>.ps1</code> scripts (see the note at the "
+          "bottom). Every command below prints usage with <code>--help</code>."),
+
+        h2("Cluster &amp; runtime"),
+        table(["Command", "What it does", "Common usage"], [
+            ["<code>vgre-start</code>", "Start a master or worker node (auto-sources <code>~/.vgre/env</code>).",
+             "<code>vgre-start --master</code> · <code>--worker</code> · <code>--worker --master-ip 10.0.0.5</code> · <code>--worker --port 7778</code> · <code>--test</code> (master+worker on one box)"],
+            ["<code>vgre-worker</code>", "The worker binary itself (usually launched by <code>vgre-start</code>).",
+             "<code>vgre-worker --version</code> (prints build-info JSON) · <code>--is-master</code> (headless master in containers)"],
+            ["<code>vgre-dashboard</code>", "Launch the real-time Flutter monitor (utilization, kernels, cluster, memory, logs).",
+             "<code>vgre-dashboard</code>"],
+            ["<code>vgre-token</code>", "Manage the shared cluster auth token (HMAC-SHA256 / AES-256-CTR channels).",
+             "<code>vgre-token generate</code> · <code>fingerprint</code> · <code>set &lt;TOKEN&gt;</code> · <code>copy</code> · <code>push user@HOST</code>"],
+            ["<code>vgre-discover</code>", "Public-IP discovery + token-keyed cross-LAN registration (find a master over WAN).",
+             "<code>vgre-discover</code> (show public IP) · <code>--set-master</code> · <code>--register</code> · <code>--find</code> · <code>--unregister</code>"],
+            ["<code>vgre-connect-check</code>", "Verify WAN/LAN connectivity to a master before starting a worker.",
+             "<code>vgre-connect-check &lt;master-ip&gt; [port]</code>"],
         ]),
-        h2("Examples"),
-        code("vgre-start --test                       # local self-test\n"
-             "vgre-token generate                     # new token + fingerprint\n"
-             "vgre-discover --set-master              # publish public IP\n"
-             "gpt2_infer model.safetensors --gen 'Hello'"),
+
+        h2("Cluster quick recipes"),
+        code("# One machine — spin up a master + worker and self-test:\n"
+             "vgre-start --test\n\n"
+             "# Master node:\n"
+             "vgre-token generate           # create the shared token (prints its fingerprint)\n"
+             "vgre-token copy               # prints the scp command to share it with workers\n"
+             "vgre-start --master           # starts the master + dashboard\n\n"
+             "# Worker node (after receiving the token):\n"
+             "vgre-token set <TOKEN>        # or: vgre-token push user@worker  (from the master)\n"
+             "vgre-connect-check 10.0.0.5   # confirm reachability first\n"
+             "vgre-start --worker --master-ip 10.0.0.5"),
+
+        h2("Developer tools"),
+        p("Built binaries land in <code>build/tools/</code> (run them from there, or add it to "
+          "<code>PATH</code>):"),
+        table(["Command", "What it does", "Common usage"], [
+            ["<code>vgre_ptx_gdbserver</code>", "Serve a PTX kernel to a stock <code>gdb</code> for source-level step debugging (CUDA-GDB-style, no GPU).",
+             "<code>vgre_ptx_gdbserver kernel.ptx</code> then <code>gdb</code> → <code>target remote :1234</code> (see <a href=\"debugging.html\">Debugging PTX</a>)"],
+            ["<code>gpt2_infer</code>", "Real GPT-2 inference from a safetensors / GGUF checkpoint (matches Hugging Face bit-for-bit).",
+             "<code>gpt2_infer model.safetensors --gen \"Hello\"</code>"],
+        ]),
+
+        h2("Setup helpers"),
+        table(["Script", "What it does"], [
+            ["<code>install_local.sh</code>", "One-command Linux/macOS install: deps, build, <code>~/.vgre/env</code>, auth token, CLI symlinks."],
+            ["<code>scripts/vgre-cli-install.sh</code>", "(Re)install the CLI symlinks and ensure <code>~/.local/bin</code> is on <code>PATH</code>."],
+            ["<code>scripts/vgre_sync.sh</code>", "Refresh <code>~/.vgre/env</code> and re-link the CLIs after a rebuild."],
+            ["<code>scripts/vgre-mac-worker-setup.sh</code>", "macOS worker bring-up (launchd, DYLD paths)."],
+            ["<code>scripts/vgre-print-linux-setup.sh</code>", "Linux desktop-launcher / print setup for the dashboard."],
+        ]),
+
+        callout(p("<strong>Windows:</strong> the same commands ship as scripts under "
+                  "<code>scripts\\</code> — <code>vgre-start.bat</code>, <code>vgre-token.bat</code> / "
+                  "<code>vgre-token.ps1</code>, <code>vgre-discover.bat</code> / <code>.ps1</code>, plus "
+                  "PowerShell installers <code>Install-VGRETools.ps1</code>, "
+                  "<code>Setup-VGRECluster.ps1</code>, and <code>Start-VGRE.ps1</code>. Env vars are set in "
+                  "User scope by <code>vgre_sync.bat</code> / <code>vgre_env.ps1</code>."), "tip"),
     ])
 
 
@@ -600,11 +673,12 @@ def page_faq():
           "closer with AVX-512. VGRE targets learning, CI, development, and moderate "
           "workloads — not latency-critical production inference."),
         h3("Which platforms are supported?"),
-        p("<strong>Linux x86-64/ARM64</strong> is fully verified (full <code>ctest</code> green). "
-          "<strong>macOS</strong> (Apple Silicon and Intel) is build-verified: the native engine "
-          "compiles with auto-detected Homebrew <code>llvm@18</code>, runs JIT kernels, and passes "
-          "integration tests locally — run <code>bash install_local.sh</code>. "
-          "<strong>Windows</strong> is code-complete but not yet CI-verified."),
+        p("<strong>All three are CI-green.</strong> The full <code>ctest</code> suite passes on "
+          "<strong>Linux x86-64</strong> (394 tests with LLVM, 374 in the LLVM-free build — the "
+          "required CI job), on <strong>macOS</strong> (Apple Silicon, auto-detected Homebrew "
+          "<code>llvm@18</code>), and on <strong>Windows</strong> (clang-cl on windows-2022). Linux "
+          "ARM64 builds and tests via NEON. Prebuilt wheels ship for Linux, macOS (arm64) and "
+          "Windows — see <a href=\"downloads.html\">Downloads</a>."),
         h3("macOS: OpenMP or JIT failures?"),
         ul([
             "Install <code>brew install llvm@18 libomp</code> and reconfigure: "
@@ -707,7 +781,7 @@ def render(active, body):
   <nav class="header-links">
     <a href="index.html">Docs</a>
     <a href="api.html">API</a>
-    <a href="https://github.com/vgre-org/vgre-runtime">GitHub</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
   </nav>
 </header>
 <div class="layout">
