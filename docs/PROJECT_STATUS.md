@@ -14,10 +14,11 @@
 > (`continue-on-error`) until fully green. The prior text below (billing failing
 > since 2026-06-22) is **historical and no longer true**.
 
-> **Next version:** a staged plan to make the heavy **LLVM dependency optional**
-> (drop `llvm::json`; add `VGRE_ENABLE_JIT`; promote the in-tree PTX interpreter
-> to a runtime backend) is in `docs/vNext_audit_and_llvm_reduction.md`. It
-> targets the slow/never-completing Windows LLVM download directly.
+> **LLVM is now optional (delivered):** kernel execution no longer requires LLVM —
+> a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter,
+> compiled-fiber tier, native x86-64 JIT, and an optional SSA optimizing backend),
+> and the full suite passes LLVM-free (374 tests, `VGRE_ENABLE_JIT=OFF`). See
+> [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) for the plan and what remains.
 
 > **2026-07-03 macOS bring-up** (in-tree, not yet full CI-green):
 > - `cmake/VGREPlatform.cmake` auto-detects Homebrew `llvm@18`, `libomp`, SDK,

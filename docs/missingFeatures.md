@@ -18,9 +18,9 @@ duplication): the zero-burden/LLVM-removal plan lives in
 > (LLVM/BLAS/CUDA-free). This is now the **top in-tree priority** — it is *not*
 > an "optional flag", it is a from-scratch replacement.
 >
-> Full plan + internet research + phased 0→100% program:
-> **[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)**. Footprint audit + repo
-> hygiene: [`vNext_audit_and_llvm_reduction.md`](vNext_audit_and_llvm_reduction.md).
+> Full plan + internet research + phased 0→100% program — now largely delivered
+> (LLVM is optional; the from-scratch four-tier stack runs the full suite LLVM-free):
+> **[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)**.
 >
 > Layered execution backend (ship in order): **Tier 0** promote the existing PTX
 > interpreter to a runtime backend (zero codegen, works everywhere); **Tier 1**
