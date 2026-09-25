@@ -11,12 +11,23 @@ left nav, right auto-TOC, search). Everything is real: commands, env vars, and
 API signatures are taken verbatim from README.md / docs/USER_GUIDE.md /
 docs/api_reference.md and the shipped tools.
 """
+import hashlib
 import html
 import json
 import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def asset_ver(rel):
+    """Short content hash of an asset, appended as ?v=… so browsers refetch it the
+    moment it changes (otherwise a cached style.css/JS hides content/CSS updates)."""
+    try:
+        with open(os.path.join(HERE, rel), "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()[:10]
+    except OSError:
+        return "0"
 
 # Public site URL used for canonical links / the dashboard "Docs" button.
 SITE_URL = "https://vgre.dev/docs"
@@ -681,7 +692,7 @@ def render(active, body):
 <link rel="canonical" href="{SITE_URL}/{active}">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/style.css?v={asset_ver('assets/style.css')}">
 </head>
 <body>
 <header class="site-header">
@@ -710,8 +721,8 @@ def render(active, body):
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js"></script>
-<script src="assets/docs.js"></script>
+<script src="assets/search-index.js?v={asset_ver('assets/search-index.js')}"></script>
+<script src="assets/docs.js?v={asset_ver('assets/docs.js')}"></script>
 </body>
 </html>
 """
