@@ -146,10 +146,20 @@ def page_index():
 
 def page_quickstart():
     return "".join([
-        h1("Quick Start", "From clone to a running CUDA kernel on CPU in a few commands."),
-        h2("Automated install (Linux / macOS)"),
-        code("git clone https://github.com/vgre-org/vgre-runtime.git\n"
-             "cd vgre-runtime\n"
+        h1("Quick Start", "From a one-line install to a running CUDA kernel on CPU in minutes."),
+        h2("Fastest: install the prebuilt wheel (no toolchain)"),
+        p("Each GitHub Release ships a self-contained, <strong>LLVM-free</strong> wheel per "
+          "platform (Linux / macOS / Windows). It bundles the native engine, so you need "
+          "nothing but Python 3.8+ and NumPy — no compiler, no CUDA, no GPU:"),
+        code("# Grab the wheel for your platform from the latest release, then:\n"
+             "pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n\n"
+             "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
+        callout(p("Releases: <a href=\"https://github.com/etienne0114/vgre/releases\">"
+                  "github.com/etienne0114/vgre/releases</a>. The wheel runs CUDA-C kernels "
+                  "and trains/serves the in-tree transformer LM entirely on CPU."), "tip"),
+        h2("Build from source (Linux / macOS)"),
+        code("git clone https://github.com/etienne0114/vgre.git\n"
+             "cd vgre\n"
              "bash install_local.sh"),
         p("<code>install_local.sh</code> detects and installs missing dependencies "
           "(CMake, LLVM, OpenMP, Flutter), builds the native engine and dashboard, "
@@ -191,23 +201,35 @@ def page_installation():
              "# Flutter (for the dashboard) — one of:\n"
              "sudo snap install flutter --classic\n"
              "# or: brew install --cask flutter"),
-        h2("Build"),
+        h2("Build (full, with LLVM JIT)"),
         code("cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release\n"
              "cmake --build build -j$(nproc)\n"
-             "ctest --test-dir build -j$(nproc)     # full suite, 300/300 on Linux"),
+             "ctest --test-dir build -j$(nproc)     # full suite: 394/394 on Linux"),
+        h2("Zero-burden build (no LLVM, no OpenMP)"),
+        p("VGRE does not need LLVM to execute kernels — a from-scratch CUDA-C front-end "
+          "feeds a four-tier CPU backend (PTX interpreter, compiled-fiber tier, native "
+          "x86-64 JIT, and an optional SSA optimizing backend). Build with only a C++17 "
+          "compiler:"),
+        code("cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \\\n"
+             "    -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF\n"
+             "cmake --build build -j$(nproc)\n"
+             "ctest --test-dir build -j$(nproc)     # LLVM-free suite: 374/374"),
+        h2("Build the Python wheel"),
+        code("bash bindings/python/build_wheel.sh build   # → bindings/python/dist/*.whl\n"
+             "pip install bindings/python/dist/vgre-*.whl"),
         h2("System requirements"),
         table(["Component", "Minimum", "Recommended"], [
             ["CPU", "x86-64 (SSE4) or ARM64", "AVX2 / AVX-512, 8+ cores"],
             ["RAM", "4 GB", "16 GB+ (large-model work)"],
             ["OS", "Linux (glibc 2.31+)", "Ubuntu 22.04 / 24.04"],
-            ["Compiler", "Clang 16 / GCC 11", "Clang 18 + LLVM 18"],
+            ["Compiler", "any C++17 (LLVM-free) / Clang 18 + LLVM 18 (JIT)", "Clang 18 + LLVM 18"],
         ]),
         h2("Platform support"),
         table(["Platform", "Status", "Notes"], [
-            ["Linux x86-64", "✅ Verified", "Full test suite green; NUMA + keyring."],
+            ["Linux x86-64", "✅ Verified", "Full suite green in CI (394 LLVM / 374 LLVM-free); the required job."],
             ["Linux ARM64", "✅ Builds/tests", "SIMD via NEON."],
-            ["macOS ARM64/Intel", "✅ Build-verified", "Auto Homebrew llvm@18; JIT + integration tests pass locally; full serial ctest bring-up ongoing."],
-            ["Windows", "⚠️ Experimental", "Code-complete (CredMan, Winsock); not yet CI-verified."],
+            ["macOS ARM64", "✅ CI-green", "Full ctest suite runs green on Apple Silicon; auto Homebrew llvm@18."],
+            ["Windows x86-64", "✅ CI-green", "Full ctest suite green (clang-cl on windows-2022)."],
         ]),
     ])
 
