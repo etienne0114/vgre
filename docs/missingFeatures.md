@@ -1,267 +1,75 @@
-# VGRE — Remaining Work & Advanced Roadmap
+# VGRE — Missing Features & Next-Release Roadmap
 
-**Last Updated**: 2026-09-20
+**Last Updated**: 2026-09-25
 
-This file tracks **what is not yet done**. Canonical cross-references (to avoid
-duplication): the zero-burden/LLVM-removal plan lives in
-[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md); the live CUDA-C support matrix in
-[`supportedCudaSubset.md`](supportedCudaSubset.md); platform/CI status in
-[`PROJECT_STATUS.md`](PROJECT_STATUS.md).
+This file lists **only what is not yet done** — the targets for the next release and the
+items blocked on external hardware, accounts, or content. It is deliberately short.
+Everything already delivered is documented elsewhere (do not duplicate it here):
 
-> ## ⭐ Primary in-tree program (new, 2026-09): the Zero-Burden Engine
->
-> The mission is that **anyone can run/train big models on the computer they
-> already own, installing nothing heavy first.** The single hard build burden
-> left is **LLVM 18** (~1 GB; the slow/never-finishing Windows step). The next
-> major version **removes it by building the CUDA-C → machine-code pipeline from
-> scratch, in-tree**, so the whole engine matches the `libvgre_nn` discipline
-> (LLVM/BLAS/CUDA-free). This is now the **top in-tree priority** — it is *not*
-> an "optional flag", it is a from-scratch replacement.
->
-> Full plan + internet research + phased 0→100% program — now largely delivered
-> (LLVM is optional; the from-scratch four-tier stack runs the full suite LLVM-free):
-> **[`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)**.
->
-> Layered execution backend (ship in order): **Tier 0** promote the existing PTX
-> interpreter to a runtime backend (zero codegen, works everywhere); **Tier 1**
-> copy-and-patch codegen (stencils baked in CI, stitched at runtime — no runtime
-> LLVM, à la CPython 3.13); **Tier 2** optional MIR/QBE-class SSA backend for
-> peak speed. Plus an in-tree CUDA-C front-end (own lexer/parser → VGRE-IR) and
-> making the in-tree thread pool the only threading requirement (OpenMP optional).
->
-> **✅ ACHIEVED (2026-09-08): the LLVM-optional build.** `-DVGRE_ENABLE_JIT=OFF`
-> builds and runs CUDA kernels with **NO LLVM/Clang** — `find_package(LLVM)` is
-> skipped, `libvgre.so` drops **114 MB → 9.8 MB (~12×)**, and kernels compile via
-> the from-scratch CUDA-C front-end (lexer→parser→PTX codegen) and run on the
-> Tier-0 interpreter / Tier-1 compiled backends through the real C-ABI
-> (`vgre_register_kernel`/`vgre_launch_kernel`). Done with no `runtime_engine`
-> surgery via `src/compiler/jit_stubs.cpp` (no-op `LLVMTranslationEngine` + a
-> regex-delegating `ClangKernelParser`). The supported CUDA-C subset is kept
-> current, test-first, in [`supportedCudaSubset.md`](supportedCudaSubset.md); it now
-> covers `int`/`unsigned`/`char`/`short`/`bool`/`float`/`double`/`long`/`__half`,
-> pointers + pointer arithmetic, **structs** (by-value params, local, and `struct*`
-> in memory), **`__device__` helper functions**, per-thread local arrays,
-> `__shared__` + `__syncthreads`, `atomicAdd`, warp-shuffle, and the full
-> math-intrinsic surface — a complete **flash-attention** kernel compiles and runs
-> on it with no LLVM. Both execution tiers are held **bit-exact** by thirteen
-> differential fuzzers (int/float/double/cast/float→int-saturate on Tier-0 vs host;
-> expression/loop/array/atomic/`__device__`-inlining/struct/struct-array/pointer-arith on Tier-0 vs Tier-1),
-> which caught six real silent-wrong bugs, now fixed.
->
-> **✅ ACHIEVED (2026-09-22): the native x86-64 JIT (Tier 1b).** A from-scratch
-> hand-written machine-code emitter (`src/compiler/frontend/native_kernel_x64.cpp`)
-> is now the **default** execution tier in the no-LLVM build: it mmaps W^X memory
-> and emits real x86-64 for the scalar CUDA-C subset — every int/float operator
-> (`+ - * / %`, `& | ^ << >>`, unary `-`/`~`), comparisons (as conditions *and*
-> values), ternary select, casts (round + saturating/quantizing), scalar locals +
-> reassignment/compound-assign, general-index gather/scatter, bounded `for`-loop
-> reductions, GEMM in both flattened and **true-2-D** (`threadIdx.y`) form, and the
-> **complete math-function surface** (`sqrtf`/`rsqrtf`/`fabsf`/`fminf`/`fmaxf`/`min`/
-> `max`/`powf` and the transcendentals `expf`/`logf`/`sinf`/`cosf`/`floorf`/`ceilf`
-> via calls into the same libm the compiled tier uses). It is tried first, falling
-> back to the compiled tier then the interpreter, and measures **~18–118× faster**
-> than the compiled tier (`NativePerf`). Every op is held **bit-exact** vs the
-> compiled tier by the `CudaNative` differential-fuzzing suite (float / int / quant
-> / locals / gather / scatter / reduce / 2-D, 800 kernels each). `VGRE_DISABLE_NATIVE=1`
-> opts out.
->
-> **✅ ACHIEVED (2026-09-22): the full cooperative surface on the fast tier.** The
-> Tier-1 compiled backend gained a **fiber executor** (each CUDA thread a stackful
-> fiber; a per-block scheduler releasing barriers/warp ops) so `__shared__`,
-> `__syncthreads`, `__syncwarp`, `__shfl_{sync,up,down,xor}`, `__ballot/any/all_sync`,
-> `__reduce_{add,min,max,and,or,xor}_sync`, `__syncthreads_{count,and,or}` and
-> `__activemask` all run **~30–200× faster than the interpreter** — tiled GEMM,
-> block & warp reductions and shared-memory attention no longer defer to Tier-0.
-> The executor is **portable to every host** (`ucontext` on POSIX incl. macOS, the
-> Win32 Fibers API on Windows), with no interpreter fallback. Held **bit-exact**
-> against the interpreter by `test_cuda_coop.cpp` (8 patterns).
->
-> **Remaining on the zero-burden track** (OpenMP is now *optional* too —
-> `VGRE_ENABLE_OPENMP=OFF` builds green, the in-tree thread pool is the only
-> threading requirement): the *optional* **Tier-2 SSA** backend is now
-> feature-complete for the scalar + shared-memory + warp subset (wired as
-> `VGRE_EXEC_BACKEND=ssa`, tier 3; native x86-64, opt-in AArch64, portable evaluator
-> elsewhere) — the **whole subset, including shared memory and every warp intrinsic,
-> now emits native x86-64 machine code** (`vgre_ssa_barrier`/`vgre_ssa_warp` on ucontext
-> fibers with a block + per-warp selective-release scheduler). Its remaining items are
-> hardware-gated only: flipping ARM native on after real-HW validation, and native
-> AArch64 codegen for the cooperative ops. Also: broader front-end coverage
-> (vector/layered/mipmap texture fetches; recursion).
-> **Function templates are now done** — `template<typename T>`/`template<int N>`
-> `__device__` helpers monomorphize on the from-scratch front-end (deduced/explicit/
-> non-type args, chained, pointer deduction), compiled tier == interpreter
-> (`test_cuda_templates.cpp`). **Scalar texture/surface fetches are now done too** —
-> `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` (incl. the `tex2D<float>` spelling)
-> run on both tiers via the shared `TextureManager`, bit-exact (`test_cuda_texture.cpp`).
-> **CUDA built-in vector types are now done too** — `float4`/`int2`/`double3`/… as
-> auto-registered structs: `make_<T>` constructors, `.x/.y/.z/.w`, and vectorized
-> whole-struct load/store (`float4 v = p[i]; p[i] = v;`), compiled tier == interpreter
-> (`test_cuda_vectypes.cpp`). (This also generalized struct support: whole-struct
-> load/store/constructor now work for user structs too.)
-> (warp **shuffle**, **vote**, **reduce** `__reduce_*_sync`, **match**
-> `__match_any_sync`/`__match_all_sync`, `__syncwarp` and `__activemask` are done — the
-> full sm_70+ warp intrinsic surface, bit-exact on the compiled fiber tier, the
-> interpreter, AND the **Tier-2 SSA backend** — `test_ssa_ir.cpp`.)
-> (`__device__` helper inlining and **all** the struct forms
-> the interpreter supports — by-value params, local values, `p->field`, and
-> `arr[i].field` struct arrays — now run on the Tier-1 compiled tier too, no longer
-> deferring to the interpreter.) Phased plan:
-> [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md).
+- **Execution stack** — the from-scratch, LLVM-free four-tier CPU backend: [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md)
+- **CUDA-C support matrix** — per tier, bit-exact: [`supportedCudaSubset.md`](supportedCudaSubset.md)
+- **Capabilities, test metrics, platform/CI status**: [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
+- **ML tracks (T1–T6)** — build steps + success criteria: [`implementationPlan.md`](implementationPlan.md)
 
-The rest of this file tracks the **ML feature tracks** (T1–T6 and the next
-frontier), which were delivered to the project's *real, no-stub* standard; the
-externally-blocked items are unchanged. Note that the earlier claim "everything
-implementable in-tree is done" is **superseded** by the Zero-Burden program above.
-
-**Delivered baseline.** The complete in-tree large-model programme — bf16/fp16 + int4/int8
-storage, mmap safetensors / GGUF (Q4_0/Q4_1/Q8_0/Q4_K/Q6_K) + GPTQ/AWQ, BLAS-backed GEMM (82×)
-with dequant-in-GEMM, autoregressive generation + samplers, a byte-level BPE tokenizer matching
-HF token-for-token (incl. unified `tokenizer.json`), tensor/pipeline parallelism + GSPMD
-auto-partitioner over real RDMA/TCP sockets, CUDA-C→JIT with the full device-intrinsic surface, a
-CUDA-GDB RSP debugger, LoRA fine-tuning, an HNSW vector index (local RAG), the lightweight
-LLVM-free `libvgre_nn` with a real from-scratch TCP all-reduce, and a hardened C-ABI error
-channel. Verified end-to-end on **real GPT-2 (124M)** matching Hugging Face, and on **real
-multi-process distributed training** (data-, tensor-, pipeline-parallel).
-
-**Real Llama-family checkpoints run through the optimized `libvgre_nn` GPT.**
-`load_llama_safetensors` / `load_gguf_llama` map a Hugging Face safetensors or a
-llama.cpp GGUF Llama checkpoint into the GPT — handling the `[out,in]→[in,out]`
-transpose, the HF↔VGRE RoPE convention (a per-head q/k permute for safetensors;
-GGUF already bakes it in), and grouped-query attention (KV-head replication).
-Exposed on the C ABI (`vgre_lm_load_llama`/`vgre_lm_load_gguf`) and Python
-(`LanguageModel.load_llama`/`.load_gguf`). Verified without any download: a
-self-contained HF reference forward is reproduced to ~2e-8 across
-{safetensors,gguf} × {tied,untied} with GQA. So a real Llama model gets the fast
-CPU path (batched prefill, unified int8 kernel, speculative decode).
-
-**Plus the six 2026 advanced tracks (T1–T6), now all delivered — see §1.** **Suite (2026-09-24): 394/394 with LLVM, 374/374 LLVM-free — 100% green under full `-j`.**
-
-The next-frontier in-tree items in §2 are now delivered. Remaining work is in **three** buckets:
-1. **§1 — Narrow remainders inside the delivered T1–T6 tracks** (breadth/perf, not correctness).
-2. **§3 — Externally-blocked tracks** (hardware / accounts / auditors / gated downloads).
-3. **§4 — Physical large-model runs** (a real cluster or a license-gated multi-GB download).
+**Current baseline (2026-09-25):** the full `ctest` suite is green on all three platforms in CI —
+**394/394 with LLVM, 374/374 in the LLVM-free build** on Linux x86-64, and the whole suite passes
+on macOS (Apple Silicon) and Windows (clang-cl). Released **v0.1.0** ships self-contained,
+LLVM-free wheels for Linux, macOS (arm64) and Windows.
 
 ---
 
-## 1. Delivered: the 2026 advanced tracks (T1–T6) — and what's narrowly left
+## 1. Next release — in-tree, buildable now
 
-All six are **in-tree, from scratch, dependency-free, numerically verified against independent
-references**, and live in the LLVM-free `libvgre_nn`. Build steps and success criteria are in
-`implementationPlan.md`.
+Net-new or breadth work we can do without external hardware. (Items marked *correctness done*
+already run on some tier and are bit-exact — what's left is a native path, a loader, or breadth.)
 
-| Track | Delivered | Verified by |
-|-------|-----------|-------------|
-| **T1** Ternary / BitNet b1.58 | absmean ternary codec + **multiplication-free** GEMM (AVX2 add/sub masks + scalar); `BitLinear` quantization-aware training via a straight-through `ternary_quantize` op | kernel == dense dequantized GEMM to 1.6e-05; STE grad exact; BitLinear net trains (loss 1.3→0.34) |
-| **T2** Mixture-of-Experts | top-k router; **compute-sparse** dispatch via new `index_select`/`index_add` gather-scatter ops; **expert-parallel** across cluster ranks (all_reduce of partials); Switch load-balance aux loss; MoE drop-in transformer FFN | combine == NumPy 2.4e-07; exactly k experts/token; **2 real OS processes**: forward bit-identical, router-grad sum == full (1.8e-08); MoE-LM regenerates 12/12 |
-| **T3** Speculative decoding | lossless **greedy** speculative decode; **sampler-exact** speculative sampling (min(1,q/p) accept + residual resample); `ngram_draft_fn` and `model_draft_fn` drafters | == greedy token-for-token at 4.0 tokens/forward; sampler-exact empirical dist == analytic target (TV 0.038 on a diffuse q); temp→0 == greedy |
-| **T4** State-space models (Mamba/S6) | `selective_scan` autograd op with exact adjoint, **parallelized over the state channels**; full multi-state selective SSM (Δ=softplus, Ā=exp(Δ⊙A), per-state scan, C-contraction, D-skip); attention-free Mamba LM | scan fwd exact + grads ~1e-5 vs finite differences; parallel path bit-identical (par_err 0.0), **~4.9× at 8 threads**; full block == NumPy Δ/A/B/C reference 7.6e-06; Mamba-LM regenerates 14/14 |
-| **T5** MXFP4 microscaling | OCP E2M1 + shared E8M0 block-scale codec, dequant-in-GEMM | round-trip bound + MXFP4-GEMM == fp reference |
-| **T6** QLoRA | frozen **ternary** base (~2 bits/weight, stored as codes, *not* a parameter, no gradient) + trainable LoRA adapters; `from_linear` | params == {A,B} exactly; base 2.25 bits/weight; init == quantized base; adapter grads == NumPy; base frozen; fine-tune converges (4.1→0.000) |
+### 1.1 Packaging & distribution
+- **macOS Intel (x86-64) wheel** — the v0.1.0 macOS wheel bundles an **arm64-only** dylib, so Intel
+  Macs must build from source. Add an x86-64 build (or a true universal2 fat dylib) to the
+  release-wheels matrix.
+- **PyPI publish** — wheels currently live on the GitHub Release only. Add a trusted-publisher
+  workflow so `pip install vgre` resolves from PyPI directly.
+- **Docker image** — the multi-arch build (arm64 via QEMU) is slow. Ship the **amd64** image fast,
+  and build arm64 on a native ARM runner instead of emulation.
 
-**Narrow remainders (breadth/perf — no correctness gaps):**
+### 1.2 SSA / native codegen (Tier-2)
+- **Native AArch64 codegen for the cooperative ops** — shared-memory/`__syncthreads` and the warp
+  intrinsics emit native machine code on x86-64 but fall to the portable evaluator on ARM. Emit them
+  natively on AArch64 (the `Arm64Asm` encoders and the ucontext-fiber scheduler already exist).
+- **Flip `VGRE_SSA_ARM_NATIVE` on by default** — after validating native AArch64 *execution* on real
+  Apple-Silicon / ARM hardware (the encodings are already llvm-mc-verified and execution is
+  CI-checked on `macos-arm64`).
 
-Only three of the six tracks have anything left, all breadth/perf (T5 SIMD-unpack
-and T6 int4/MXFP4 base were completed and are removed from this list):
+### 1.3 Front-end breadth (from-scratch tiers)
+- **Texture / surface**: vector fetches (`float4` etc.), layered / cubemap / mipmap sampling, and
+  `tex2DLod` (scalar `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` already run on both tiers).
+- **Recursion** in `__device__` helpers (currently rejected; templates + inlining are done).
+- **On the SSA tier specifically**: dynamic `extern __shared__`, multi-dimensional arrays, and
+  struct kernel params (these run on the interpreter/compiled tiers; the SSA tier defers to them today).
 
+### 1.4 Serving / KV cache
+- Wire the **int8 / int4 KV-cache quantization** into `KVCacheManager`'s paged pools so the
+  continuous-batching serving path gets the same 3–5× KV-memory reduction the generation path
+  already has (the codecs and the paged scheduler both exist; only the serving wiring is left).
+
+### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |
 |-------|------|--------|
-| T1 | GGUF `I2_S`/TL1/TL2 ternary tensor loader | needs a real BitNet-b1.58 checkpoint to verify end-to-end (**external download**) |
-| T3 | tree verification; early-exit self-speculative drafting | **throughput optimization** (greedy speculative decode + KV reuse/rollback + prompt-lookup drafter already land in-tree) |
-| T4 | **Mamba-3 MIMO** (matrix-matrix) state update; Mamba safetensors/GGUF loader | breadth / richer parameterization (depthwise causal conv1d before the SSM already done) |
+| **T3** Speculative decoding | tree verification; early-exit self-speculative drafting | throughput optimization (greedy + sampler-exact speculative decode, KV rollback, prompt-lookup drafter already land) |
+| **T4** State-space models | **Mamba-3 MIMO** (matrix-matrix) state update; a Mamba safetensors/GGUF loader | breadth / richer parameterization (single-state selective scan + depthwise conv1d already done) |
 
 ---
 
-## 2. Delivered: the next frontier
+## 2. Blocked on external content (in-tree code is ready; needs a gated download)
 
-Each is in-tree, from scratch, and composes primitives we now have. Ordered by
-mission impact (**run/train large models on CPUs + clusters, no GPU, lightweight**).
-
-### 2.1 Hybrid Mamba–Transformer blocks (Jamba-style) — **DONE**
-`vgre.nn.hybrid_blocks(dim, n_layers, num_heads, attn_every=4, d_state=8, moe_experts=…)` builds an
-interleaved stack: every `attn_every`-th layer is a `TransformerBlock`, the rest are `MambaBlock`s
-(and the attention layers can themselves be MoE). Only 1-in-`attn_every` layer carries a KV cache —
-at `attn_every=4` that is a ~4× cut in KV memory versus an all-attention stack of the same depth,
-while attention is retained where exact long-range recall matters.
-
-Required making the SSM **batch-aware**: `SSMBlock` now accepts `[B,T,dim]` and scans each sequence
-independently (a flattened `[B*T,dim]` scan would leak state across sequence boundaries — the test
-asserts the batched result equals per-sequence scans **exactly (0.0)** *and* differs from the leaky
-flat scan). Verified (`test_nn.py::test_hybrid_mamba_transformer`): batch-independence exact, the
-stack interleaves as `MMMAMMMA`, and a 4-layer hybrid LM trains (3.4 → 0.000) and greedily
-regenerates its sequence 14/14.
-
-### 2.2 KV-cache quantization (int8) — **DONE**
-At long context the KV cache, not the weights, dominates memory. `GPT::set_int8_kv_cache(true)`
-(C-ABI `vgre_lm_set_int8_kv_cache`, Python `LanguageModel.set_int8_kv_cache()`) stores the
-generation KV cache as int8 with a **per-(position, head) absmax scale** instead of fp32: per head
-that is Dh bytes + one fp32 scale rather than 4·Dh bytes — a **4·Dh/(Dh+4)** reduction (3.2× at
-Dh=16, 3.8× at Dh=64, → 4× as the head dim grows). Only one representation is allocated, so the
-saving is real, and the fp32 path is untouched when the flag is off.
-
-Quantization is lossy (symmetric absmax), but the perturbation sits far below the argmax margin:
-verified (`test_lm_bindings.py` §7) that a trained LM's **greedy decoding is identical** with int8
-KV, at 512 → 160 KV bytes/position/layer (3.20×). Composes with §2.1 — the hybrid stack
-concentrates KV into the few attention layers, and this shrinks those.
-
-**int4 KV — DONE.** `set_int4_kv_cache(true)` (C-ABI `vgre_lm_set_int4_kv_cache`, Python
-`LanguageModel.set_int4_kv_cache()`) stores the KV as 4-bit packed (2 codes/byte) with the same
-per-(position, head) absmax scale — 96 vs 160 (int8) vs 512 (fp) bytes/pos/layer at D=64/H=4
-(**5.3× vs fp, 1.67× over int8**). It takes precedence over int8 when both are set and requires
-even D/Dh (byte-aligned heads). Coarser than int8, so — unlike int8 — it is a memory/quality
-tradeoff, **not** guaranteed greedy-identical; verified (`test_lm_bindings.py` §8) that greedy
-output stays ≥0.75 agreement with fp (1.00 on the test model, whose argmax margins exceed the
-4-bit perturbation).
-
-**Left:** wiring the same scheme into `KVCacheManager`'s paged pools for the serving path.
-
-### 2.3 Multi-token prediction (MTP) heads — **DONE**
-`vgre.nn.MTPHeads(dim, vocab, n_predict=K)` — K linear heads on a shared trunk, head j predicting
-j tokens ahead; `mtp_loss(head_logits, targets)` sums the per-head cross-entropy (each head's
-supervised range shrinks by j at the tail); `mtp_draft_fn(mtp_model, K)` uses the heads as the
-model's **own draft** for speculative decoding — K draft tokens from ONE trunk forward, no second
-model, no extra KV memory. Verified (`test_nn.py::test_mtp`): trained with the summed loss all
-three heads predict their j-ahead token at 100% accuracy, and MTP-drafted speculative decoding is
-lossless vs greedy at **4.0 tokens/forward** — compounding directly with T3.
-
-### 2.4 Continuous batching / serving loop — **DONE**
-`KVCacheManager` now owns a paged KV pool and `ContinuousBatchScheduler` admits queued requests,
-prefills prompts, advances each running request one token per scheduler step, retires finished
-requests immediately, and reclaims their KV blocks for new arrivals. Requests submitted mid-flight
-join the next scheduler step; the batch cap and KV capacity are both enforced.
-
-Verified (`test_kv_cache.cpp`): four requests, including one added mid-run, drain under a
-`maxBatch=2` cap, never exceed the batch limit, and return the KV pool to its initial free-block
-count after retirement. This is the serving lifecycle layer over the paged KV cache; model-specific
-logit sampling can plug in where the test currently appends synthetic K/V rows.
-
-### 2.5 Structured sparsity (2:4 / block) + sparse training path — **DONE**
-`vgre.nn.StructuredSparseLinear(in_features, out_features, n=2, m=4)` adds a fixed N:M pruning mask
-over the contraction dimension of Linear's `[in,out]` weights, physically zeros pruned entries,
-applies `W * mask` in the autograd forward path, and exposes compact per-group bit metadata via
-`metadata()` for sparse inference kernels. Helper APIs `structured_nm_mask()` and
-`structured_nm_metadata()` are available for checkpoint conversion and inspection.
-
-Verified (`test_nn.py::test_structured_sparse_linear`): every 2:4 group keeps exactly two weights,
-metadata bit counts match the mask, forward output equals the dense masked reference exactly,
-pruned weights receive zero gradient, and a 50%-sparse MLP trains to convergence. The older
-core `block_sparse`/N:M math remains available for low-level sparse kernels; the Python training
-path stays lightweight and dependency-free.
-
-### 2.6 Quantization-aware distillation — **DONE**
-The autograd engine now has a native fused `softmax_cross_entropy_soft(logits, soft_targets)` op,
-exported through the C ABI and Python. `vgre.nn.distillation_loss()` implements
-`T^2 * CE(softmax(student/T), softmax(teacher/T))`, with optional hard-label CE blending, and
-`distill_step()` performs one optimizer step from a callable teacher or precomputed teacher logits.
-Teacher probabilities are materialized as constants, so gradients update only the student.
-
-Verified (`test_autograd.cpp::soft_sce`, `test_nn.py::test_distillation`): soft-target CE gradients
-match central finite differences in C++; the Python distillation gradient matches the analytic
-`T * (student_prob - teacher_prob) / batch` formula; and a ternary `BitLinear` student learns a
-fixed teacher distribution with 0.88 teacher-argmax agreement.
+| Item | What is already built | Blocker |
+|------|-----------------------|---------|
+| **T1** GGUF `I2_S` / TL1 / TL2 ternary tensor loader | absmean ternary codec + multiplication-free GEMM + `BitLinear` QAT | a real **BitNet-b1.58** checkpoint (gated download) to verify end-to-end |
+| **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | identical code path to the verified **GPT-2 (124M)** run (matches Hugging Face) | a **license-gated, multi-GB download** |
 
 ---
 
-## 3. Externally-blocked tracks (need hardware, an account, an auditor, or content)
+## 3. Hardware / account / auditor gated (cannot be built in-tree)
 
 The in-tree primitives already exist where applicable; only the externally-gated piece remains.
 
@@ -269,28 +77,29 @@ The in-tree primitives already exist where applicable; only the externally-gated
 |---|-------|-------------|---------|
 | 3.1 | GPU security framework | SEV-SNP/TDX enclaves, HSM, FIPS-140 cert | confidential-computing **hardware** + external **auditor** |
 | 3.2 | Cryptography | homomorphic / threshold crypto, Intel QAT offload | research-grade scope / crypto-accelerator **hardware** |
-| 3.3 | Windows deployment | DirectML backend, AD/Kerberos, Windows containers | Windows-specific **APIs/SDKs** (engine already builds+tests on windows-2022) |
-| 3.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (the CPU path is CI-green on macOS — full `ctest` suite passes on `macos-14`) |
-| 3.5 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path runs JAX/TF/PyTorch) |
+| 3.3 | Windows deployment | DirectML backend, AD/Kerberos, Windows containers | Windows-specific **APIs/SDKs** (the engine already builds + tests green on windows-2022) |
+| 3.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (the CPU path is CI-green — full `ctest` passes on `macos-14`) |
+| 3.5 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (the StableHLO path already runs JAX/TF/PyTorch) |
 | 3.6 | Model serving | TensorRT-LLM / vLLM *compatibility layers* | those external **runtimes** / a live **fleet** |
-| 3.7 | Multi-cloud | apply to live AWS/Azure/GCP | cloud **accounts + credentials** (Terraform module is built) |
-| 3.8 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; ROCm library shims | those **SDKs / hardware** (AMD HIP core runtime is done) |
+| 3.7 | Multi-cloud | apply to live AWS/Azure/GCP | cloud **accounts + credentials** (the Terraform module is built) |
+| 3.8 | Multi-vendor | Intel oneAPI (SYCL/DPC++), Apple Metal; ROCm library shims | those **SDKs / hardware** (the AMD HIP core runtime is done) |
 | 3.9 | Edge / CDN | physical edge nodes, CDN providers | external **infrastructure** (latency-aware routing is built) |
-| 3.10 | Post-Blackwell (Rubin) | Rubin/HBM4 emulation | **unreleased** hardware, no public ISA |
+| 3.10 | Post-Blackwell (Rubin) | Rubin / HBM4 emulation | **unreleased** hardware, no public ISA |
 
 ---
 
-## 4. Physical large-model runs (external only)
+## 4. Physical multi-node run (external only)
 
-The in-tree engineering is complete and verified over real loopback sockets **and across real OS
-processes** (multi-step data-parallel with zero cross-step drift; cross-process tensor
-parallelism; cross-process expert-parallel MoE). Only two things remain, both outside the code:
+The transport, collectives, tensor/pipeline executor, and GSPMD auto-partitioner are all built and
+verified across real OS processes (multi-step data-parallel with zero cross-step drift;
+cross-process tensor + expert-parallel MoE). What remains is outside the code:
 
 | Remaining | Why it isn't in-tree |
 |-----------|----------------------|
-| **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | Transport, collectives, the tensor/pipeline executor, and the GSPMD auto-partitioner are all built and verified across real OS processes; a true cross-machine run needs **actual networked machines**. |
-| **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | Identical code path to the demonstrated GPT-2 run — it just needs a **license-gated, multi-GB download**. |
+| **Physical multi-node run** (Llama-3-70B tensor-parallel across N machines; 175B/405B pipeline) | needs **actual networked machines** — everything below the wire is built and verified across real OS processes |
 
-T1–T6 make these runs materially cheaper on commodity CPUs: ternary + MXFP4 + QLoRA shrink the
-memory, MoE shrinks the active compute, speculative decoding shrinks the latency, and the SSM
-path removes the KV cache entirely — which is the whole point.
+---
+
+*Delivered capabilities (the LLVM-optional build, the native x86-64 JIT, the full cooperative
+surface, the Tier-2 SSA backend, the T1–T6 ML tracks, and the §2 serving/quantization frontier)
+are recorded in the cross-referenced documents above and are intentionally not repeated here.*
