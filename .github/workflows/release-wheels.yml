@@ -64,10 +64,12 @@ jobs:
         if: matrix.os == 'macos-14'
         shell: bash
         run: |
-          brew install cmake ninja || true
+          brew install cmake ninja sqlite lapack || true
           python -m pip install --upgrade build wheel setuptools numpy
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+            -DVGRE_WARNINGS_AS_ERRORS=OFF \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"
           cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
 
@@ -76,7 +78,8 @@ jobs:
         if: matrix.os == 'windows-2022'
         shell: bash
         run: |
-          choco install ninja sqlite -y --no-progress
+          choco install llvm ninja sqlite -y --no-progress   # llvm provides clang-cl
+          export PATH="/c/Program Files/LLVM/bin:$PATH"
           python -m pip install --upgrade build wheel setuptools numpy
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
