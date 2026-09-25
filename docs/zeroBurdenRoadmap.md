@@ -1,6 +1,6 @@
 # VGRE Zero-Burden Roadmap — a self-contained, lightweight engine (0 → 100%)
 
-**Date:** 2026-09-06 (progress updated 2026-09-22) · **Status:** master plan for
+**Date:** 2026-09-06 (progress updated 2026-09-25) · **Status:** master plan for
 the next major version — **Phases A, B, C and the threading half of D are done**:
 `-DVGRE_ENABLE_JIT=OFF` builds and runs with **no LLVM**, `-DVGRE_ENABLE_OPENMP=OFF`
 builds green on the in-tree thread pool alone, and the from-scratch CUDA-C
@@ -188,105 +188,36 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
 
 **Phase D — Peak backend (optional) + threading.**
 8. In-tree thread pool becomes the only threading requirement (OpenMP optional). ✅ DONE
-9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). ✅ FEATURE-COMPLETE for the scalar + shared-memory + warp subset (native x86-64; AArch64 opt-in; portable evaluator elsewhere), wired as `VGRE_EXEC_BACKEND=ssa` (tier 3). Remaining items are perf/hardware-gated (see the end of this entry).
-   - **Increment 1 ✅ DONE**: VGRE-IR (typed SSA: basic blocks + br/condbr/ret) +
-     AST→SSA lowering for the scalar elementwise subset (`if`-guarded bodies,
-     ternary→select) + a well-formedness verifier + a reference evaluator. Held
-     bit-exact against the Tier-1 compiled backend by `test_ssa_ir.cpp`
-     (`src/compiler/frontend/ssa_ir.cpp`). This is the foundation the passes and
-     the emitter build on.
-   - **Increment 2 ✅ DONE**: full structured control flow — `if`/`if-else`, `for`,
-     `while`, inc/dec — with on-demand **SSA phi insertion** (Braun et al.: per-block
-     current definitions, incomplete phis in unsealed loop headers). Loop-carried
-     values and if/else merges lower to real phi nodes; the evaluator resolves them
-     by arrival edge. Held bit-exact vs the compiled tier by `test_ssa_ir.cpp`
-     (for-sum / while / if-else / nested loop+conditional).
-   - **Increment 2b ✅ DONE**: the rest of structured control flow — `do-while`,
-     `break`, `continue` — via a loop-context stack + latch/exit blocks (phi
-     construction handles the extra edges). Diffed vs the Tier-0 interpreter (the
-     compiled tier lacks these), bit-exact.
-   - **Increment 3 ✅ DONE**: the optimizer passes — **constant folding**, **local
-     value numbering** (safe in-block GVN/CSE), **dead-code elimination**, and
-     **loop-invariant code motion** (dominator sets by iterative dataflow → natural
-     loops via back-edges → hoist pure invariants to the preheader). Pure IR→IR,
-     run in `SsaProgram::compile`. `test_ssa_ir.cpp` checks each stays bit-exact vs
-     the reference tiers AND shrinks/hoists (fold 32→22, cse-dce 28→23, licm hoists).
-   - **Increment 4 ✅ DONE**: **native x86-64 machine-code emission**. A slot-per-value
-     emitter lowers the SSA to real machine code (mmap W^X): hot ops (int/float
-     arithmetic, compares, load/store, branches, phi edge-copies, const/param/tid,
-     select) inlined; the tricky ones (float↔int saturating casts, integer div/mod,
-     float compares, math intrinsics) delegated to bit-exact C-ABI helpers. Control
-     flow is block-structured with phi destruction, so ifs and loops both compile.
-     `SsaProgram::launch()` runs the emitted code (`usedNative()` reports it), matching
-     the compiled tier bit-for-bit (`test_ssa_ir.cpp`, native probe). x86-64/Linux;
-     other hosts keep running the portable evaluator, so Tier-2 works everywhere.
-   - **Increment 5 ✅ DONE**: register allocation. (a) A **redundant-load-elimination
-     peephole** keeps each op's result live in rax/xmm0 and skips reloading it as the
-     next op's first operand. (b) **Global linear-scan register allocation** (Poletto &
-     Sarkar): integer/pointer values get a callee-saved register **r12–r15** for their
-     whole live range **across blocks and loop iterations** — computed from a full
-     backward liveness dataflow + conservative live intervals — so e.g. a pointer param
-     stays in a register through a loop instead of being reloaded each iteration.
-     Callee-saved ⇒ safe across the emitter's helper calls (no spill-around-call). The
-     emitter reaches every value through the same register-or-slot accessor, so the
-     allocator alone drives it. Verified bit-exact across the whole `test_ssa_ir` suite
-     (nested loops, break/continue, do-while, if/else, optimizer, LICM), native running.
-   - **Increment 5b–5e ✅ DONE**: full **register allocation** — global linear-scan for
-     int/pointer values into callee-saved **r12–r15** across blocks/loops, **loop-carried
-     phis** included (the widened live interval bridges the back-edge: `start` lowered for
-     live-in blocks as well as `end` raised for live-out), and **float/XMM** allocation into
-     caller-saved **xmm2–xmm7** for values whose interval spans no helper call. Verified
-     bit-exact across the suite, native running.
-   - **Increment 6 ✅ DONE**: **wired into the runtime as tier 3** — `VGRE_EXEC_BACKEND=ssa`
-     tries `SsaProgram::compile` first in **both** dispatch ladders (no-LLVM
-     `RuntimeEngine` and the JIT-build side dispatch), falling through native→compiled→
-     interpreter on any out-of-subset construct. Portable: subset kernels land on tier 3 on
-     every host. `test_ssa_backend.cpp` proves it end-to-end through the public C API.
-   - **Increment 7–8 ✅ DONE**: **cross-block GVN** (dominator-scoped value numbering that
-     subsumes the local one), `switch` (C fall-through), and the extended math intrinsics
-     (`exp2`/`log2`/`rsqrt`/`erf`/`pow`/fused `fma`).
-   - **Increment 9–11 ✅ DONE**: an **AArch64 native emitter** (`Arm64Asm`, sharing the
-     linear-scan allocator; encodings llvm-mc-verified via `SsaArm64Enc`; opt-in
-     `VGRE_SSA_ARM_NATIVE` until real-HW validation, evaluator otherwise); `__device__`
-     helper **inlining** (alpha-renamed monomorphic); and per-thread **local scratch arrays**.
-   - **Increment 12–16 ✅ DONE**: **shared memory + `__syncthreads`** — a cooperative
-     per-block round-robin evaluator on every host, plus **native ucontext-fiber** execution
-     on x86-64 and AArch64 (`__syncthreads` = `call vgre_ssa_barrier` → swapcontext to a
-     per-block scheduler). This is the foundation for tiled GEMM / attention on Tier-2.
-   - **Increment 17–18 ✅ DONE**: the **full warp intrinsic surface** —
-     `__shfl_{sync,up,down,xor}_sync`, `__ballot_sync`/`__any_sync`/`__all_sync`,
-     `__reduce_{add,min,max,and,or,xor}_sync`, `__match_any_sync`/`__match_all_sync`,
-     `__syncwarp`, and `__activemask` — via a cross-lane publish→resolve rendezvous,
-     mirroring the interpreter/compiled tiers bit-for-bit (incl. `__activemask`'s
-     sequential-live-lane behavior). `__match_all_sync`'s `&pred` out-param is written for
-     `&localInt` and `&global[i]`. Diffed bit-exact vs the interpreter in `test_ssa_ir.cpp`.
-   - **Increment 19–20 ✅ DONE**: **native x86-64 machine-code for the warp intrinsics.**
-     `__shfl_*` / vote / reduce / match now emit `call vgre_ssa_warp` (SysV-marshalled
-     args), which parks the ucontext fiber and yields to the block scheduler; the scheduler
-     resolves the whole warp (same math as the evaluator) and resumes each lane with its
-     result — so warp kernels run as real machine code on x86-64/Linux, not the evaluator.
-     The fiber scheduler gained a **block + per-warp selective-release** model (a fiber
-     parks with a `wait` reason; a warp releases once all its live lanes have arrived). The
-     shared-memory `__syncthreads` path rides the same scheduler unchanged. `__activemask`
-     is native too (no rendezvous — `call vgre_ssa_activemask` reads the launch geometry
-     from the `ThreadCtx` and returns the closed-form sequential-live-lane mask), so **every
-     x86-64 warp intrinsic is native, zero bails**. AArch64 keeps the evaluator (native is
-     opt-in there). Verified: `test_ssa_ir` asserts `usedNative()` for a
-     `__shfl_down_sync`+`__ballot_sync`+`__activemask` kernel and stays bit-exact; the
-     shared-memory native path is unregressed. (Also added `u2f` coverage proving native
-     unsigned-int→float uses the correct unsigned conversion.)
-   - **Remaining (hardware-gated / breadth, not correctness):** flipping
-     `VGRE_SSA_ARM_NATIVE` on by default once validated on real ARM hardware (encodings are
-     already llvm-mc-verified; execution is CI-checked on macos-arm64); native AArch64
-     codegen for the warp ops (x86-64 is fully native; ARM uses the evaluator); and
-     the usual tiered fallbacks for out-of-subset constructs (multi-dim arrays, struct
-     params, dynamic `extern __shared__`) that match the compiled tier's boundaries. The
-     Tier-2 backend is otherwise **feature-complete for the scalar + shared-memory + warp
-     subset, native on x86-64/Linux**.
+9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). ✅ FEATURE-COMPLETE for the scalar + shared-memory + warp subset (native x86-64; AArch64 opt-in; portable evaluator elsewhere), wired as `VGRE_EXEC_BACKEND=ssa` (tier 3).
+   - **Delivered (increments 1–20)**, held bit-exact vs the interpreter/compiled tiers by
+     `test_ssa_ir.cpp` / `test_ssa_backend.cpp`: VGRE-IR + Braun-phi lowering + verifier +
+     evaluator; full control flow (`if`/`for`/`while`/`do-while`/`break`/`continue`/`switch`);
+     optimizer (const-fold, cross-block/dominator-scoped GVN, LICM, DCE); linear-scan
+     register allocation (GPR **r12–r15** + XMM **xmm2–xmm7**, loop-carried phis); native
+     **x86-64** emitter + opt-in **AArch64** (`Arm64Asm`, encodings llvm-mc-verified);
+     `__device__` inlining, per-thread local arrays, extended math; and **native x86-64
+     machine code for shared memory + the full warp-intrinsic surface** (`__shfl_*`, vote,
+     `__reduce_*_sync`, `__match_{any,all}_sync`, `__syncwarp`, `__activemask`) via
+     `vgre_ssa_barrier`/`vgre_ssa_warp`/`vgre_ssa_activemask` on ucontext fibers with a
+     block + per-warp selective-release scheduler. (Full increment log: git history and the
+     `tier2_ssa_backend` project memory.)
+   - **Remaining (hardware-gated / breadth, not correctness):** flip `VGRE_SSA_ARM_NATIVE`
+     on by default after validating native AArch64 execution on real ARM hardware; native
+     AArch64 codegen for the warp/shared cooperative ops (x86-64 is fully native, ARM uses
+     the evaluator); and the tiered fallbacks for out-of-subset constructs (multi-dim
+     arrays, struct params, dynamic `extern __shared__`).
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries
-    with baked stencils so end users compile nothing. Refresh the docs site.
+    with baked stencils so end users compile nothing. Refresh the docs site. ✅ (v0.1.0
+    ships self-contained LLVM-free wheels for Linux/macOS/Windows; PyPI publish + an
+    x86-64 macOS wheel are the remaining polish — see `missingFeatures.md`.)
+
+**Phase F — Closing the performance gap to a real GPU (the next frontier).**
+
+See **§7** below. In one line: remove the *emulation tax* so kernels hit the CPU's own
+roofline, use the CPU's tensor units + reduced precision to raise that roofline, and use
+algorithmic levers to cut the *work* — so a commodity CPU finishes a job sized for a GPU.
 
 ---
 
@@ -315,3 +246,112 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
   single-pass allocation, JIT-grade, simple to implement.
 - **TinyCC** — a whole C compiler with its own assembler/linker as evidence a
   self-contained front-to-back toolchain is feasible in a small codebase.
+
+---
+
+## 7. Closing the performance gap to a real GPU
+
+VGRE runs on CPUs, so it cannot match a datacenter GPU's raw silicon. But the gap has
+**two separable parts**, and only one of them is physics.
+
+### 7.1 The gap, measured honestly
+
+| | Datacenter GPU (A100) | AVX-512 server CPU (32c) | Desktop (AVX2, 8c) |
+|---|---|---|---|
+| fp32 peak | ~19.5 TFLOP/s | ~2–4 TFLOP/s | ~0.5–1 TFLOP/s |
+| bf16/int8 "tensor" peak | ~312 TFLOP/s (bf16), ~624 TOPS (int8) | ~8 TFLOP/s (AMX bf16), ~32 TOPS (VNNI int8) | (no tensor unit) |
+| memory bandwidth | ~2 TB/s (HBM2e) | ~300–400 GB/s (8-ch DDR5) | ~50–100 GB/s (2-ch DDR5) |
+
+1. **The hardware ceiling — unavoidable.** Even a *perfectly tuned* CPU kernel is
+   ~5–40× below a GPU on bandwidth and ~10–100× on raw fp32. **This cannot be "fixed."**
+2. **The emulation tax — removable.** On top of the ceiling, an emulator adds per-thread
+   scalar dispatch, PTX interpretation, no SIMD-across-threads, and poor cache use — another
+   ~10–1000×. **This is exactly what VGRE attacks.** Closing it makes VGRE run at the CPU's
+   own roofline; then reduced precision + algorithmic levers make the *workload* fit that
+   roofline.
+
+**Strategy:** (A) remove the emulation tax → hit the CPU roofline; (B) use the CPU's best
+units + reduced precision → raise the ML roofline; (C) cut the *work* algorithmically → a
+smaller machine still finishes. The realistic target is **not** "as fast as an A100" — it is
+"as fast as this CPU can possibly be for this workload, and small enough to fit."
+
+### 7.2 A — Remove the emulation tax (hit the CPU roofline)
+
+1. **SIMT → SIMD warp execution — the #1 lever (~8–16×).** A CUDA warp is 32 threads
+   running the same instruction on different data — that is *literally* a SIMD vector. VGRE
+   today mostly runs threads **scalar, one at a time**; executing a warp as **AVX-512
+   (16 fp32 lanes) / AVX2 (8 lanes)** processes 8–16 threads per instruction. Needs
+   warp-vectorized codegen: per-lane predicate masks for divergence, `vgather`/`vscatter`
+   for non-contiguous access, and warp shuffle/vote as vector permutes/movemask. Designed in
+   the Tier-0 note, **not built — the single highest-value perf item.**
+2. **Native codegen for the whole hot path.** Interpretation is ~1000× off; the native
+   x86-64 JIT + SSA backend already remove that for their subset (~18–118× over the compiled
+   tier). Extend native coverage to 64-bit-heavy and the cooperative ops on **all** arches
+   (native AArch64 warp/shared) so nothing hot falls to the evaluator.
+3. **Cache-blocking + fusion (raise arithmetic intensity).** Most ML kernels are
+   *memory-bound* on a CPU. Tile to L1/L2, **fuse** elementwise→GEMM→activation→norm so
+   intermediates never reach DRAM, use non-temporal/streaming stores for write-only data,
+   and software-prefetch. The kernel-fusion engine + flash-attention do the big ones; make
+   fusion the default for elementwise chains.
+4. **Thread-pool & NUMA efficiency.** Keep every core saturated with low dispatch overhead
+   (persistent workers + CTA-range partitioning are done); add **first-touch NUMA placement
+   + affinity** so bandwidth scales with sockets, and avoid oversubscription.
+
+### 7.3 B — Raise the CPU's ML roofline (tensor units + reduced precision)
+
+5. **CPU tensor units — Intel AMX / AVX-512-VNNI (~4–16× on matmul).** AMX does bf16/int8
+   *tile* matmul at ~8× the AVX-512 fp32 rate; VNNI does int8 4-element dot-products at ~4×.
+   Route GEMM/attention through **AMX (bf16)** and **VNNI (int8)** — the AMX path already
+   exists in `vector_engine_amx`; make it the default bf16/int8 matmul and add an AMX
+   micro-kernel to the in-tree GEMM. (ARM equivalents: SVE/SME, i8mm/bf16 dot.)
+6. **Reduced precision everywhere — the CPU's biggest lever.** Lower precision cuts *both*
+   compute and bandwidth, the two things the CPU is short on: int8 GEMV is ~4× fp32,
+   **ternary/BitNet is multiplication-free** (add/sub only), MXFP4/int4 quarter the bytes.
+   VGRE has all of these (T1/T5/T6) — the win is making them the **default serving path** and
+   adding **AVX2 unpack kernels** (MXFP4/int4/ternary decode) so dequant isn't the bottleneck.
+7. **KV-cache & activation quantization.** At long context the KV cache, not the weights,
+   dominates bandwidth; int4 KV is 5× smaller (done for generation — wire into the paged
+   serving path).
+
+### 7.4 C — Cut the work (algorithmic — fit the model to the machine)
+
+8. **Sparsity:** MoE activates only *k* experts (active compute ∝ routed tokens, not
+   tokens×experts); 2:4 structured sparsity halves the matmul. *(done — push utilization.)*
+9. **Linear-time sequence models:** Mamba/SSM removes O(T²) attention **and** the growing KV
+   cache — a decisive CPU win at long context. *(done.)*
+10. **Fewer forward passes:** speculative + multi-token decoding emit *k* tokens per forward
+    (~4× decode throughput at identical output). *(done.)*
+11. **Flash-attention:** O(T) memory instead of O(T²) — the difference between fitting long
+    context in cache and thrashing DRAM. *(done.)*
+
+### 7.5 What "closing the gap" means, and how we measure it
+
+Target the **CPU's roofline, not the GPU's**: a tuned VGRE kernel should sit within ~1.5–2×
+of hand-optimized OpenBLAS/oneDNN on the same CPU (the in-tree GEMM already does), and the
+*whole model* should run at the CPU's peak for its precision. Against a GPU the residual gap
+is then just the silicon ratio — which the algorithmic levers (quantization + sparsity + SSM
++ speculative decode) shrink by **reducing the work**, so a commodity CPU finishes a
+GPU-sized job. That is the mission: make *the computer you already own* enough.
+
+**Perf backlog (next release), each gated by a benchmark against the roofline:**
+- [ ] **Warp-SIMD codegen** — execute 8/16 threads per AVX2/AVX-512 vector (the #1 lever).
+- [ ] **AMX bf16 + VNNI int8 GEMM micro-kernels** as the default bf16/int8 matmul.
+- [ ] **AVX2 unpack kernels** for MXFP4 / int4 / ternary so dequant isn't the bottleneck.
+- [ ] **Fusion by default** for elementwise→GEMM→activation→norm chains (cut DRAM passes).
+- [ ] **NUMA-aware allocation + affinity** so bandwidth scales across sockets.
+- [ ] **Autotuned tile sizes** per CPU (cache-size-driven), like the GEMM autotuner.
+- [ ] A **roofline / bandwidth benchmark** (`bench_*`) reporting achieved-vs-peak FLOP/s and
+      GB/s per kernel, so every optimization is measured against the hardware ceiling.
+
+### 7.6 Research basis (performance)
+- **Roofline model**, Williams, Waterman & Patterson (CACM 2009) — the achieved-vs-peak
+  framework that separates compute- from memory-bound and defines the target.
+- **Anatomy of High-Performance Matrix Multiplication (BLIS)**, Goto & van de Geijn / Van
+  Zee & van de Geijn — the register-blocked, cache-packed micro-kernel VGRE-GEMM follows.
+- **Intel AMX / AVX-512-VNNI** ISA references — CPU tile/dot tensor units for bf16/int8.
+- **BitNet b1.58 / ternary LLMs** (Ma et al., 2024) — multiplication-free inference, the
+  strongest CPU lever (2.4–6.2× x86 speedup, up to ~82% less energy in the literature).
+- **FlashAttention** (Dao et al., 2022) and **Mamba/S6** (Gu & Dao, 2023) — reduce the
+  *work* (O(T) memory; no KV cache) rather than the per-op cost.
+- **Speculative decoding** (Leviathan et al.; Chen et al., 2023) — fewer target forwards at
+  identical output distribution.

@@ -1,6 +1,6 @@
 # Supported CUDA-C subset (the from-scratch front-end)
 
-**Updated:** 2026-09-22
+**Updated:** 2026-09-25
 
 VGRE's own CUDA-C front-end (`src/compiler/frontend/`: lexer → parser → PTX
 codegen) compiles kernels with **no Clang/LLVM**. This is the compiler used when
@@ -35,6 +35,15 @@ backend.
 > `vgre_ssa_warp` on ucontext fibers, with a block + per-warp selective-release scheduler);
 > other hosts run the portable per-block evaluator. Held bit-exact vs the interpreter by
 > `test_ssa_ir.cpp`. So the warp rows below run on **all** tiers.
+>
+> **Performance (how these kernels get closer to a GPU).** The tiers above remove the
+> *interpretation* overhead (native machine code is ~18–118× over the compiled tier and
+> ~1800–5700× over the interpreter). The next lever is **SIMT → SIMD warp execution**: a
+> CUDA warp is 32 threads running one instruction on different data — i.e. a SIMD vector — so
+> executing a warp as AVX-512 (16 lanes) / AVX2 (8 lanes) processes 8–16 threads per
+> instruction (~8–16×) instead of scalar-per-thread. That, plus the CPU tensor units
+> (AMX/VNNI) for matmul and reduced-precision/algorithmic levers, is the plan to close the
+> CPU↔GPU gap — see [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) **§7**.
 
 It targets the practical subset of CUDA-C that real compute kernels use;
 anything outside it returns a **located error** (never wrong code) — enriched with
