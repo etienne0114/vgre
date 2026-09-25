@@ -134,7 +134,7 @@ VGREResult RuntimeEngine::launchBackendKernel(const std::shared_ptr<BackendKerne
     if (bk->ssa) {
         fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
         fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
-        return bk->ssa->launch(g, b, args, bk->numArgs)
+        return bk->ssa->launch(g, b, args, bk->numArgs, sharedMem)
                    ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
     }
     if (bk->native) {

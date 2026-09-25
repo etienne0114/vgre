@@ -150,6 +150,7 @@ struct Fn {
     std::vector<std::vector<int>> preds;   // per-block predecessor block ids
     std::vector<std::pair<Type, int>> localArrays;    // per-thread scratch arrays: (element type, count)
     std::vector<std::pair<Type, int>> sharedArrays;   // block-shared arrays (__shared__): (element type, count)
+    int externSharedId = -1;    // arrId of the one `extern __shared__` array (count filled from the launch's dynamic bytes), or -1
     int entry = 0;
     bool isTerminator(int id) const {
         Op o = vals[id].op; return o == Op::Br || o == Op::CondBr || o == Op::Ret;
@@ -648,10 +649,18 @@ struct Lowerer {
         switch (s.kind) {
             case Stmt::VarDecl: {
                 if (s.type.isStruct()) { fail("SSA: local structs unsupported on this tier"); return; }
-                if (s.isShared) {   // __shared__ array (block scope, 1-D, static size)
-                    if (s.isExternShared) { fail("SSA: dynamic extern __shared__ unsupported on this tier"); return; }
-                    if (s.arraySize <= 0) { fail("SSA: scalar __shared__ unsupported on this tier"); return; }
+                if (s.isShared) {   // __shared__ array (block scope)
                     if (!mpfx.empty()) { fail("SSA: __shared__ inside an inlined __device__ function unsupported"); return; }
+                    if (s.isExternShared) {   // `extern __shared__ T s[];` — size from the launch's dynamic bytes
+                        if (fn.externSharedId >= 0) { fail("SSA: multiple extern __shared__ arrays unsupported on this tier"); return; }
+                        int arrId = (int)fn.sharedArrays.size();
+                        fn.sharedArrays.push_back({s.type, 0});   // element count filled at launch (dynSharedBytes / elemBytes)
+                        fn.externSharedId = arrId;
+                        sharedArr[s.name] = {arrId, s.type};
+                        arrDims[mangle(s.name)] = s.arrayDims;    // usually 1-D (T s[])
+                        return;
+                    }
+                    if (s.arraySize <= 0) { fail("SSA: scalar __shared__ unsupported on this tier"); return; }
                     int arrId = (int)fn.sharedArrays.size();
                     fn.sharedArrays.push_back({s.type, s.arraySize});
                     sharedArr[s.name] = {arrId, s.type};
@@ -1721,7 +1730,11 @@ struct X64Asm {
         // __shared__ arrays live in the block-shared buffer (ctx.shared), 8-byte aligned.
         sharedOff.assign(fn.sharedArrays.size(), 0);
         int so = 0;
-        for (size_t i = 0; i < fn.sharedArrays.size(); ++i) { sharedOff[i] = so; so += ((fn.sharedArrays[i].second * fn.sharedArrays[i].first.elemBytes() + 7) / 8) * 8; }
+        for (size_t i = 0; i < fn.sharedArrays.size(); ++i) {   // static arrays first, packed 8-aligned
+            if ((int)i == fn.externSharedId) continue;
+            sharedOff[i] = so; so += ((fn.sharedArrays[i].second * fn.sharedArrays[i].first.elemBytes() + 7) / 8) * 8;
+        }
+        if (fn.externSharedId >= 0) sharedOff[fn.externSharedId] = so;   // `extern __shared__` begins after the static area
         const int need = (nvals + maxTemps + arrElems) * 8;
         frame = ((need + 15) / 16) * 16 + 8;         // keep rsp 16-aligned at calls
         b(0x55); b(0x48); b(0x89); b(0xE5); b(0x53);  // push rbp; mov rbp,rsp; push rbx
@@ -2094,7 +2107,11 @@ struct Arm64Asm {
         // __shared__ arrays live in the block-shared buffer (ctx.shared), 8-byte aligned.
         sharedOff.assign(fn.sharedArrays.size(), 0);
         int so = 0;
-        for (size_t i = 0; i < fn.sharedArrays.size(); ++i) { sharedOff[i] = so; so += ((fn.sharedArrays[i].second * fn.sharedArrays[i].first.elemBytes() + 7) / 8) * 8; }
+        for (size_t i = 0; i < fn.sharedArrays.size(); ++i) {   // static arrays first, packed 8-aligned
+            if ((int)i == fn.externSharedId) continue;
+            sharedOff[i] = so; so += ((fn.sharedArrays[i].second * fn.sharedArrays[i].first.elemBytes() + 7) / 8) * 8;
+        }
+        if (fn.externSharedId >= 0) sharedOff[fn.externSharedId] = so;   // `extern __shared__` begins after the static area
         frame = (((nvals + maxTemps + arrElems) * 8 + 15) / 16) * 16;
         if (frame > 32760) return false;   // beyond the scaled slot-offset imm range — fall back to the evaluator
         prologue();
@@ -2345,7 +2362,8 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
     return prog;
 }
 
-bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArgs) {
+bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArgs,
+                        size_t dynSharedBytes) {
     const Fn& fn = p_->fn;
     if (numArgs < (int)fn.ptypes.size()) return false;
     const uint32_t bx = block.x, by = block.y, bz = block.z;
@@ -2365,7 +2383,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
             // (or to completion), then loops — so all threads reach barrier N before any
             // crosses it. Barriers `call vgre_ssa_barrier`, which swapcontexts back here.
             const uint32_t nT = bx * by * bz;
-            const size_t shBytes = ssaSharedBytes(fn);
+            const size_t shBytes = ssaSharedBytes(fn) + dynSharedBytes;   // static + dynamic extern __shared__
             // Resolve one warp's rendezvous: compute every parked lane's result from the
             // published operands (identical math to the evaluator + compiled tier). `base`
             // is the warp's first lane; only live lanes parked at a warp op participate.
@@ -2598,8 +2616,14 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
     for (uint32_t gy = 0; gy < grid.y; ++gy)
     for (uint32_t gx = 0; gx < grid.x; ++gx) {
         std::vector<std::vector<SVal>> shared(fn.sharedArrays.size());   // one instance per block
-        for (size_t si = 0; si < fn.sharedArrays.size(); ++si)
-            shared[si].assign(fn.sharedArrays[si].second, coerce(SI(0), fn.sharedArrays[si].first));
+        for (size_t si = 0; si < fn.sharedArrays.size(); ++si) {
+            size_t count = (size_t)fn.sharedArrays[si].second;
+            if ((int)si == fn.externSharedId) {   // dynamic extern __shared__: size from the launch bytes
+                const int eb = fn.sharedArrays[si].first.elemBytes();
+                count = eb > 0 ? dynSharedBytes / (size_t)eb : 0;
+            }
+            shared[si].assign(count, coerce(SI(0), fn.sharedArrays[si].first));
+        }
         std::vector<TState> th(nT);
         for (uint32_t lin = 0; lin < nT; ++lin) {
             TState& t = th[lin];

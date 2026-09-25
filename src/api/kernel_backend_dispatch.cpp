@@ -171,7 +171,7 @@ int tryLaunchBackendKernel(uint64_t kid, const uint32_t grid[3], const uint32_t 
     if (sp) {
         fe::Extent g{nz(grid[0]), nz(grid[1]), nz(grid[2])};
         fe::Extent b{nz(block[0]), nz(block[1]), nz(block[2])};
-        return sp->launch(g, b, args, nargs) ? 0 : 1;
+        return sp->launch(g, b, args, nargs, shared_mem) ? 0 : 1;
     }
     if (nk) {
         fe::Extent g{nz(grid[0]), nz(grid[1]), nz(grid[2])};

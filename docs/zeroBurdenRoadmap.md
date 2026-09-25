@@ -204,9 +204,10 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
    - **Remaining (hardware-gated / breadth, not correctness):** flip `VGRE_SSA_ARM_NATIVE`
      on by default after validating native AArch64 execution on real ARM hardware; native
      AArch64 codegen for the warp/shared cooperative ops (x86-64 is fully native, ARM uses
-     the evaluator); and the tiered fallbacks for out-of-subset constructs (struct params,
-     dynamic `extern __shared__`). *(Multi-dimensional arrays are now supported on the SSA
-     tier — N-D row-major indexing on local and `__shared__` arrays.)*
+     the evaluator); and the tiered fallback for out-of-subset constructs (struct params).
+     *(Multi-dimensional arrays — N-D row-major on local and `__shared__` arrays — and
+     dynamic `extern __shared__` — launch-sized shared buffers — are now supported on the
+     SSA tier.)*
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries

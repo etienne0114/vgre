@@ -184,6 +184,31 @@ int main() {
     // 2-D __shared__ array + __syncthreads: each thread writes s[t/8][t%8], barrier, then
     // every thread sums the whole 4×8 tile (cross-thread reads through 2-D shared memory).
     checkVsInterp("mdarr-shared", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int t=threadIdx.x; int i=blockIdx.x*blockDim.x+t; __shared__ float s[4][8]; s[t/8][t%8]=(i<n)?x[i*m]:0.0f; __syncthreads(); float acc=0.0f; for(int r=0;r<4;r++) for(int c=0;c<8;c++) acc+=s[r][c]; if(i<n) y[i]=acc+s[t/8][t%8]; })", 96, 4);
+    // Dynamic `extern __shared__` — size comes from the launch's dynamic-shared bytes (not the
+    // source). Each thread stages x[i] into the launch-sized buffer, barrier, sums the block.
+    {
+        const char* src = R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ extern __shared__ float s[]; int t=threadIdx.x; int i=blockIdx.x*blockDim.x+t; s[t]=(i<n)?x[i*m]:0.0f; __syncthreads(); float acc=0.0f; for(int q=0;q<blockDim.x;q++) acc+=s[q]; if(i<n) y[i]=acc; })";
+        std::string err;
+        auto sp = SsaProgram::compile(src, "k", err);
+        auto cg = compileToPtx(src, "k");
+        auto ib = be::makeBackend("interpreter");
+        auto ik = (sp && cg.ok) ? ib->preparePtx(cg.ptx, "k") : nullptr;
+        if (!sp) { std::printf("FAIL: extern-shmem SSA: %s\n", err.c_str()); ++g_fail; }
+        else if (!ik) { std::printf("FAIL: extern-shmem interpreter prepare\n"); ++g_fail; }
+        else {
+            const int NN = 96, M = 8, BD = 32;
+            const size_t dynBytes = (size_t)BD * sizeof(float);   // launch-sized shared buffer
+            std::vector<float> xv(NN * M); for (int i = 0; i < NN * M; ++i) xv[i] = (i % 17) * 0.5f - 4.0f;
+            std::vector<float> yi(NN, -1.f), ys(NN, -2.f);
+            float* xp = xv.data(); int n = NN, m = M;
+            { float* yp = yi.data(); void* a[] = {&xp, &yp, &n, &m}; be::LaunchConfig lc; lc.gridDim[0] = (NN + BD - 1) / BD; lc.blockDim[0] = BD; lc.sharedBytes = dynBytes; ib->launch(*ik, lc, a, 4); }
+            { float* yp = ys.data(); void* a[] = {&xp, &yp, &n, &m}; Extent g{(uint32_t)((NN + BD - 1) / BD), 1, 1}, b{(uint32_t)BD, 1, 1}; sp->launch(g, b, a, 4, dynBytes); }
+            int bad = 0;
+            for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yi[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v) ++bad; }
+            if (bad) { std::printf("FAIL: extern-shmem SSA vs interpreter: %d/%d\n", bad, NN); ++g_fail; }
+            else std::printf("  extern-shmem: SSA (blocks=%d) == interpreter (%d elems, %zu dyn bytes)\n", sp->numBlocks(), NN, dynBytes);
+        }
+    }
     // switch inside a loop with `continue` (forwarded to the loop) and a break (to the switch).
     checkVsInterp("sw-loop",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ switch(k%3){ case 0: continue; case 1: acc+=x[i*m+k]; break; default: acc-=x[i*m+k]; } acc+=0.5f; } y[i]=acc; } })", 96, 16);
 

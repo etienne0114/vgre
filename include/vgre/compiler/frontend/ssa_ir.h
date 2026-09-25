@@ -47,7 +47,8 @@ public:
 
     // Reference-evaluate the SSA over a CUDA-style launch, one thread at a time
     // (the correctness oracle for the IR + lowering until native emission lands).
-    bool launch(Extent grid, Extent block, void* const* args, int numArgs);
+    bool launch(Extent grid, Extent block, void* const* args, int numArgs,
+                size_t dynSharedBytes = 0);
 
     // True if the last compile produced native machine code (x86-64/Linux) that
     // launch() will run; false means launch() uses the portable evaluator.

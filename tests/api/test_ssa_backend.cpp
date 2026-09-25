@@ -92,6 +92,20 @@ extern "C" __global__ void warpb(const float* x, float* y, int n) {
 }
 )";
 
+// Dynamic `extern __shared__` — the shared buffer size comes from the launch's
+// sharedMem argument (threaded through the dispatch to SsaProgram::launch). Copies
+// x[i] through the launch-sized shared buffer to y[i].
+static const char* kDynSmem = R"(
+extern "C" __global__ void dynsmem(const float* x, float* y, int n) {
+    extern __shared__ float s[];
+    int t = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + t;
+    s[t] = (i < n) ? x[i] : 0.0f;
+    __syncthreads();
+    if (i < n) { y[i] = s[t]; }
+}
+)";
+
 int main() {
     setenv("VGRE_EXEC_BACKEND", "ssa", 1);
     CHECK(vgre_init() == VGRE_SUCCESS, "vgre_init");
@@ -205,6 +219,33 @@ int main() {
         int wt = tierOf("warpb", wid);
         if (wt >= 0) CHECK(wt == 3, "warp shuffle kernel runs on the Tier-2 SSA backend (tier 3)");
         std::printf("  warpb : bad=%d/%d  tier=%d (expected 3 = SSA; warp intrinsics native on x86-64/Linux, else evaluator)\n", bad, NB, wt);
+        vgre_free(dx); vgre_free(dy);
+    }
+
+    // ── dynamic extern __shared__ on the SSA tier (launch-sized shared buffer) ────
+    {
+        std::vector<float> hx(N), hy(N);
+        for (int i = 0; i < N; ++i) hx[i] = i * 0.5f - 9.0f;
+        void *dx = nullptr, *dy = nullptr;
+        CHECK(vgre_malloc(&dx, bytes) == VGRE_SUCCESS, "malloc dsx");
+        CHECK(vgre_malloc(&dy, bytes) == VGRE_SUCCESS, "malloc dsy");
+        CHECK(vgre_memcpy(dx, hx.data(), bytes, VGRE_MEMCPY_HOST_TO_DEVICE) == VGRE_SUCCESS, "H2D dsx");
+        uint64_t did = 0;
+        CHECK(vgre_register_kernel("dynsmem", kDynSmem, &did) == VGRE_SUCCESS, "register dynsmem");
+        int n = N;
+        void* args[] = {&dx, &dy, &n};
+        const uint32_t blk = 64;
+        uint32_t grid[3] = {(uint32_t)((N + blk - 1) / blk), 1, 1}, block[3] = {blk, 1, 1};
+        const size_t dynBytes = (size_t)blk * sizeof(float);   // launch-sized dynamic shared
+        CHECK(vgre_launch_kernel(did, grid, block, args, 3, dynBytes, 0) == VGRE_SUCCESS, "launch dynsmem");
+        CHECK(vgre_synchronize() == VGRE_SUCCESS, "synchronize");
+        CHECK(vgre_memcpy(hy.data(), dy, bytes, VGRE_MEMCPY_DEVICE_TO_HOST) == VGRE_SUCCESS, "D2H dsy");
+        int bad = 0;
+        for (int i = 0; i < N; ++i) { uint32_t u, v; std::memcpy(&u, &hy[i], 4); std::memcpy(&v, &hx[i], 4); if (u != v) ++bad; }
+        CHECK(bad == 0, "dynsmem copies x->y through launch-sized extern __shared__ bit-exactly");
+        int dt = tierOf("dynsmem", did);
+        if (dt >= 0) CHECK(dt == 3, "dynsmem (extern __shared__) runs on the Tier-2 SSA backend (tier 3)");
+        std::printf("  dynsmem: bad=%d/%d  tier=%d (expected 3 = SSA; extern __shared__, %zu dyn bytes)\n", bad, N, dt, dynBytes);
         vgre_free(dx); vgre_free(dy);
     }
 
