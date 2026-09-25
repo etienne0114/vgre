@@ -53,6 +53,37 @@ int main() {
     }
     check("Ā=0 reduces to memoryless C·B̄x", ok0);
 
+    // ── Mamba-3 MIMO (matrix state): parallel == sequential, P>1 ─────────────
+    {
+        const int P = 5;
+        std::vector<float> Bm(L * N), xm(L * P), Cm(L * N);
+        for (auto& v : Bm) v = nd(rng);
+        for (auto& v : xm) v = nd(rng);
+        for (auto& v : Cm) v = nd(rng);
+        std::vector<float> yms(L * P, 0.0f), ymp(L * P, 0.0f);
+        selective_scan_mimo_seq(yms.data(), Abar.data(), Bm.data(), xm.data(), Cm.data(), L, N, P);
+        selective_scan_mimo_parallel(ymp.data(), Abar.data(), Bm.data(), xm.data(), Cm.data(), L, N, P);
+        double me = 0.0;
+        for (int i = 0; i < L * P; ++i) me = std::max(me, (double)std::fabs(yms[i] - ymp[i]));
+        printf("  [info] MIMO parallel vs sequential max err = %.2e\n", me);
+        check("MIMO parallel scan == sequential recurrence (P=5)", me < 1e-4);
+        bool nz = false;
+        for (int i = 0; i < L * P; ++i) if (std::fabs(yms[i]) > 1e-6) nz = true;
+        check("MIMO output is non-trivial (not all zero)", nz);
+
+        // P=1 with B̄x_t[n] = B_t[n]·x_t[0] must match the SISO scan exactly.
+        std::vector<float> x1(L, 0.0f), Bx1(L * N), y1siso(L, 0.0f), y1mimo(L, 0.0f);
+        for (int t = 0; t < L; ++t) x1[t] = nd(rng);
+        for (int t = 0; t < L; ++t)
+            for (int n = 0; n < N; ++n) Bx1[t * N + n] = Bm[t * N + n] * x1[t];
+        selective_scan_seq(y1siso.data(), Abar.data(), Bx1.data(), Cm.data(), L, N);
+        selective_scan_mimo_seq(y1mimo.data(), Abar.data(), Bm.data(), x1.data(), Cm.data(), L, N, 1);
+        double me1 = 0.0;
+        for (int t = 0; t < L; ++t) me1 = std::max(me1, (double)std::fabs(y1siso[t] - y1mimo[t]));
+        printf("  [info] MIMO(P=1) vs SISO max err = %.2e\n", me1);
+        check("MIMO with P=1 reduces to the SISO selective scan", me1 < 1e-5);
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

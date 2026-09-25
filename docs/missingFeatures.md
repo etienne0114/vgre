@@ -59,7 +59,7 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 | Track | Left | Nature |
 |-------|------|--------|
 | **T3** Speculative decoding | early-exit self-speculative drafting | throughput optimization (greedy + sampler-exact linear speculative decode, **SpecInfer/Medusa-style tree verification** — accept the longest valid root→leaf path, distribution-exact — KV rollback, prompt-lookup drafter already land) |
-| **T4** State-space models | **Mamba-3 MIMO** (matrix-matrix) state update; a Mamba safetensors/GGUF loader | breadth / richer parameterization (single-state selective scan + depthwise conv1d already done) |
+| **T4** State-space models | a Mamba safetensors/GGUF loader | breadth (single-state selective scan, depthwise conv1d, **and the Mamba-3 MIMO matrix-state scan** — `H∈R^{N×P}` outer-product update, parallel==sequential, P=1≡SISO — already done) |
 
 ---
 
