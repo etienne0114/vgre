@@ -26,6 +26,7 @@ NAV = [
     ("Getting Started", [
         ("index.html", "Introduction"),
         ("quickstart.html", "Quick Start"),
+        ("downloads.html", "Downloads"),
         ("installation.html", "Installation"),
     ]),
     ("Guides", [
@@ -113,34 +114,85 @@ def page_index():
            "Run unmodified CUDA on any CPU — no GPU required. Plus a full local-AI "
            "stack: train, fine-tune with LoRA, retrieve with an in-tree vector "
            "index, and generate — all offline, all dependency-free."),
-        badges([("Linux verified", True), ("macOS build-verified", True),
-                ("CUDA ~95%", False), ("PTX ~95%", False), ("Zero external vendor lock-in", True)]),
-        p("VGRE intercepts CUDA and OpenCL API calls and executes kernels on the CPU "
-          "using an LLVM ORC JIT, OpenMP + AVX2/AVX-512 SIMD, OS-level unified memory, "
-          "and an authenticated TCP cluster transport. The same engine ships an "
-          "in-tree machine-learning stack so you can go from CUDA experiments to real "
-          "model training and RAG without a second toolchain."),
+        badges([("Linux CI-green", True), ("macOS CI-green", True), ("Windows CI-green", True),
+                ("LLVM-free build", True), ("CUDA ~95%", False), ("Zero vendor lock-in", True)]),
+        p("VGRE intercepts CUDA and OpenCL API calls and executes kernels on the CPU. "
+          "It <strong>does not need LLVM to run kernels</strong>: a from-scratch CUDA-C "
+          "front-end (own lexer/parser → AST) feeds a four-tier CPU backend — a PTX "
+          "interpreter, a compiled-closure tier with a cooperative fiber executor "
+          "(<code>__shared__</code> / <code>__syncthreads</code> / the full warp-intrinsic "
+          "surface), a hand-emitted native x86-64 JIT, and an optional own SSA optimizing "
+          "backend — every tier held bit-exact against the others. An optional LLVM ORC "
+          "JIT is the high-performance path when LLVM is present. The same engine ships an "
+          "in-tree machine-learning stack so you go from CUDA experiments to real model "
+          "training and RAG without a second toolchain."),
         cards([
-            ("🚀", "Quick Start", "Install and run your first CUDA program on CPU in five minutes.", "quickstart.html"),
+            ("🚀", "Quick Start", "Install the wheel and run your first CUDA program on CPU in minutes.", "quickstart.html"),
+            ("⬇️", "Downloads", "Prebuilt, self-contained wheels for Linux, macOS and Windows.", "downloads.html"),
             ("🧠", "Local AI", "LoRA fine-tuning, HNSW vector search, and the in-tree language model.", "local-ai.html"),
             ("🔗", "Clusters", "Scale across machines over WAN with encrypted, authenticated channels.", "cluster.html"),
             ("🐞", "PTX Debugging", "Step through PTX kernels with a stock gdb — CUDA-GDB-style, no GPU.", "debugging.html"),
-            ("📊", "Dashboard", "Real-time telemetry, kernel explorer, cluster topology, memory analysis.", "dashboard.html"),
             ("📚", "API Reference", "Python, C ABI, CUDA-runtime shim, and dashboard telemetry APIs.", "api.html"),
         ]),
         h2("Why VGRE"),
         ul([
             "<strong>No GPU needed</strong> — learn CUDA, run CI, and develop on any x86-64 or ARM64 machine.",
+            "<strong>No toolchain needed</strong> — the LLVM-free build runs the full suite (374 tests) with only a C++17 compiler; the prebuilt wheel needs just Python + NumPy.",
             "<strong>One stack, both jobs</strong> — GPU emulation and a real ML training/inference/RAG stack in the same runtime.",
-            "<strong>Built from scratch</strong> — the JIT, tokenizer, vector index, collectives, and crypto are in-tree, not third-party wrappers, so there is no vendor lock-in and no per-seat dependency cost.",
+            "<strong>Built from scratch</strong> — the CUDA-C front-end, four execution tiers, JIT, tokenizer, vector index, collectives, and crypto are all in-tree, not third-party wrappers — no vendor lock-in, no per-seat dependency cost.",
             "<strong>Private by default</strong> — the entire embed → index → retrieve → generate → fine-tune loop runs offline; your data never leaves the machine.",
         ]),
-        callout(p("VGRE is <strong>Linux-verified</strong> (full <code>ctest</code> green). "
-                  "<strong>macOS</strong> is build-verified on Apple Silicon — native engine, "
-                  "JIT, and integration tests pass locally with auto-detected Homebrew "
-                  "<code>llvm@18</code>. <strong>Windows</strong> is code-complete but not yet "
-                  "CI-verified. Hardware-only gaps (Metal MPS, NVIDIA PMU) are in "
-                  '<a href="faq.html">FAQ</a> / <code>missingFeatures.md</code>.'), "warn"),
+        callout(p("<strong>All three platforms pass the full <code>ctest</code> suite in CI</strong> — "
+                  "394 tests with LLVM and 374 in the LLVM-free build on Linux x86-64 (the required "
+                  "job), and the whole suite runs green on macOS (Apple Silicon) and Windows "
+                  "(clang-cl). Hardware-only gaps (physical GPU PMU counters, Metal MPS, GPUDirect "
+                  "RDMA) are listed in the <a href=\"faq.html\">FAQ &amp; Troubleshooting</a>."), "tip"),
+    ])
+
+
+REL = "https://github.com/etienne0114/vgre/releases"
+DL = REL + "/download/v0.1.0"
+
+
+def page_downloads():
+    return "".join([
+        h1("Downloads", "Prebuilt, self-contained wheels — no compiler, no CUDA, no GPU."),
+        p("Every <a href=\"" + REL + "\">GitHub Release</a> ships a <strong>self-contained, "
+          "LLVM-free</strong> wheel per platform. Each bundles the native engine, so you need "
+          "only <strong>Python 3.8+ and NumPy</strong>. The wheels are built and smoke-tested "
+          "(import + train a language model) on Linux, macOS and Windows runners in CI."),
+        h2("Latest release — v0.1.0"),
+        table(["Platform", "Wheel", "Install"], [
+            ["Linux x86-64",
+             '<a href="' + DL + '/vgre-0.1.0-py3-none-linux_x86_64.whl">vgre-0.1.0-…-linux_x86_64.whl</a>',
+             "<code>pip install vgre-0.1.0-py3-none-linux_x86_64.whl</code>"],
+            ["macOS (Apple Silicon)",
+             '<a href="' + DL + '/vgre-0.1.0-py3-none-macosx_10_13_universal2.whl">vgre-0.1.0-…-macosx_universal2.whl</a>',
+             "<code>pip install vgre-0.1.0-py3-none-macosx_10_13_universal2.whl</code>"],
+            ["Windows x86-64",
+             '<a href="' + DL + '/vgre-0.1.0-py3-none-win_amd64.whl">vgre-0.1.0-…-win_amd64.whl</a>',
+             "<code>pip install vgre-0.1.0-py3-none-win_amd64.whl</code>"],
+        ]),
+        callout(p("Install straight from the release URL without downloading first:"), "tip"),
+        code("pip install " + DL + "/vgre-0.1.0-py3-none-linux_x86_64.whl\n"
+             "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
+        h2("Verify it works"),
+        p("The bundled native library runs CUDA-C kernels and trains/serves the in-tree "
+          "transformer LM on CPU:"),
+        code("import vgre\n"
+             "tok = vgre.Tokenizer().train(open('corpus.txt').read(), num_merges=1024)\n"
+             "lm  = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=6, d_model=256, n_head=8)\n"
+             "# lm.train_step(...) then lm.generate(...) — CPU only, no GPU/LLVM/BLAS.",
+             "python"),
+        h2("Container image (GHCR)"),
+        p("A multi-arch (amd64/arm64) LLVM-free image is published on a tagged release:"),
+        code("docker run --rm ghcr.io/etienne0114/vgre:0.1.0 --version"),
+        h2("Build from source"),
+        p("Prefer to build your own? See the <a href=\"installation.html\">Installation</a> guide "
+          "— including the zero-burden LLVM-free build and <code>bindings/python/build_wheel.sh</code> "
+          "to produce a wheel for your exact platform."),
+        callout(p("The macOS wheel is built on Apple Silicon (arm64). Intel-Mac (x86-64) users "
+                  "should build from source until an x86-64 macOS wheel is added to the release."), "warn"),
     ])
 
 
@@ -407,15 +459,27 @@ def page_env_vars():
         ["<code>VGRE_L1_CACHE_KB</code>", "<code>32</code>", "Per-block L1 cache (16 | 32 | 64 | 128)."],
         ["<code>VGRE_L2_CACHE_MB</code>", "<code>6</code>", "Per-device L2 cache (2 | 6 | 20 | 40)."],
     ])
+    backend = table(["Variable", "Default", "Description"], [
+        ["<code>VGRE_EXEC_BACKEND</code>", "auto",
+         "Select the execution tier: <code>interp</code> (PTX interpreter), <code>cp</code> "
+         "(compiled-fiber), or <code>ssa</code> (the Tier-2 SSA optimizing backend). Unset = "
+         "fastest tier that accepts the kernel."],
+        ["<code>VGRE_DISABLE_NATIVE</code>", "<code>0</code>",
+         "Set to <code>1</code> to skip the native x86-64 JIT and use the compiled tier."],
+        ["<code>VGRE_SSA_ARM_NATIVE</code>", "<code>0</code>",
+         "Opt in to native AArch64 codegen for the SSA backend (else the portable evaluator)."],
+        ["<code>VGRE_IPC_MODE</code>", "<code>OFF</code>",
+         "MPS-style IPC multiplexing (<code>ON</code> to share one runtime across processes)."],
+    ])
     return "".join([
         h1("Environment Variables",
            "Written to <code>~/.vgre/env</code> by the installer and loaded automatically."),
         h2("Core"), core,
+        h2("Execution backend"), backend,
         h2("Cluster / networking"), cluster,
         h2("GPU cache model"), cache,
         callout(p("On Windows these are set in User scope by <code>vgre_sync.bat</code> / "
-                  "<code>vgre_env.ps1</code>. The full list lives in "
-                  "<code>docs/USER_GUIDE.md §5</code>."), ""),
+                  "<code>vgre_env.ps1</code>. Unset variables fall back to the defaults above."), ""),
     ])
 
 
@@ -442,12 +506,21 @@ def page_api():
              "int n = vgre_bpe_encode(t, \"hi\", ids, 256);",
              "cpp"),
         h2("CUDA runtime shim (libvgre_cudart)"),
-        p("Drop-in <code>libcudart</code> replacement. Preload it (Linux "
-          "<code>LD_PRELOAD</code>, macOS <code>DYLD_INSERT_LIBRARIES</code>) to route "
-          "an existing CUDA binary's <code>cuda*</code> calls into VGRE."),
+        p("Drop-in <code>libcudart</code> replacement covering ~95% of the common CUDA "
+          "Runtime + Driver API (memory, streams, events, graphs, textures, cooperative "
+          "launch) plus the cuBLAS / cuDNN / cuFFT / cuRAND / cuSOLVER / cuSPARSE / NCCL "
+          "shims. Preload it (Linux <code>LD_PRELOAD</code>, macOS "
+          "<code>DYLD_INSERT_LIBRARIES</code>) to route an existing CUDA binary's "
+          "<code>cuda*</code> calls into VGRE — no source changes."),
         h2("Dashboard telemetry"),
-        p("The dashboard polls a JSON telemetry schema (utilization, kernels, cluster "
-          "nodes, memory, logs). Full field list in <code>docs/api_reference.md §3–4</code>."),
+        p("The dashboard polls a JSON telemetry schema; the top-level groups are:"),
+        table(["Group", "Fields"], [
+            ["<code>utilization</code>", "sm / memory / pcie percentages, sampled over time"],
+            ["<code>kernels</code>", "name, grid/block dims, launch count, total &amp; average time, tier"],
+            ["<code>memory</code>", "allocations, pools, free/used bytes, bandwidth &amp; est. GPU speedup"],
+            ["<code>cluster</code>", "per-node id, OS/arch/hostname, in-flight &amp; cumulative kernels, secure-channel state"],
+            ["<code>logs</code>", "the last N log messages at the active <code>VGRE_LOG_LEVEL</code>"],
+        ]),
     ])
 
 
@@ -475,20 +548,34 @@ def page_architecture():
         h1("Architecture", "How the pieces fit together."),
         h2("Layers"),
         ol([
-            "<strong>Interception</strong> — CUDA/OpenCL API shims capture calls at load time.",
-            "<strong>Compilation</strong> — Clang AST → LLVM IR → ORC JIT native code, with a persistent disk+memory cache.",
-            "<strong>Execution</strong> — OpenMP thread pool + AVX2/AVX-512 SIMD; block/warp scheduling and shared-memory emulation.",
+            "<strong>Interception</strong> — CUDA/OpenCL API shims capture calls at load time (a drop-in <code>libcudart</code> preload, or the C ABI / Python bindings).",
+            "<strong>Front-end</strong> — a from-scratch CUDA-C lexer/parser lowers kernels to an AST (no Clang required); an optional Clang/LLVM path is used when LLVM dev libs are present.",
+            "<strong>Execution (four CPU tiers, fastest-first, bit-exact)</strong> — see the table below.",
             "<strong>Memory</strong> — UVM via an OS page-fault handler; stream-ordered pools; LZ4-compressed cluster transfers.",
             "<strong>Distribution</strong> — authenticated, encrypted TCP transport; NCCL-style + software-RDMA collectives; tensor/pipeline parallelism and a GSPMD auto-partitioner.",
-            "<strong>ML stack</strong> — autograd, BLAS GEMM, tokenizer, samplers, LoRA, HNSW, checkpoint loaders (safetensors / GGUF).",
+            "<strong>ML stack</strong> — autograd, SIMD BLAS GEMM, tokenizer, samplers, LoRA, HNSW, checkpoint loaders (safetensors / GGUF).",
         ]),
+        h2("The four execution tiers"),
+        p("A parsed kernel runs on the fastest tier that accepts it; anything outside a "
+          "tier's subset falls through to the next. All tiers are held bit-exact against "
+          "one another by differential fuzzing."),
+        table(["Tier", "What it is", "Notes"], [
+            ["0 — PTX interpreter", "Interprets PTX directly", "The guaranteed fallback; always available, no toolchain."],
+            ["1 — Compiled closures + fibers", "AST → bound C++ closures with a cooperative stackful-fiber executor",
+             "Runs the whole cooperative surface: <code>__shared__</code>, <code>__syncthreads</code>, warp shuffle/vote/reduce/match, <code>__syncwarp</code>, <code>__activemask</code>."],
+            ["1b — Native x86-64 JIT", "Hand-emitted machine code (no LLVM)", "~18–118× the compiled tier; differential-fuzzed bit-exact; Linux/x86-64."],
+            ["2 — Own SSA backend", "VGRE-IR → const-fold/GVN/LICM/DCE → linear-scan regalloc → x86-64 (+ opt-in AArch64)",
+             "<code>VGRE_EXEC_BACKEND=ssa</code>. Feature-complete for the scalar + shared-memory + warp subset, native on x86-64."],
+        ]),
+        p("An optional <strong>LLVM ORC JIT</strong> (Clang AST → LLVM IR → native, persistent "
+          "disk+memory cache) is the high-performance path when LLVM is present; the engine "
+          "needs none of it to run kernels."),
         h2("Design principles"),
         ul([
             "Real implementations only — no stubs, mocks, or placeholder math in shipped paths.",
-            "From-scratch primitives (JIT, tokenizer, vector index, crypto, collectives) to avoid vendor lock-in.",
-            "Warnings-as-errors, and a 300-test suite gating every change on Linux.",
+            "From-scratch primitives (CUDA-C front-end, four execution tiers, tokenizer, vector index, crypto, collectives) to avoid vendor lock-in.",
+            "Warnings-as-errors, and a full test suite gating every change: <strong>394 tests with LLVM, 374 in the LLVM-free build</strong>, green on Linux / macOS / Windows in CI.",
         ]),
-        p("Full detail in <code>docs/ARCHITECTURE.md</code>."),
     ])
 
 
@@ -532,6 +619,7 @@ def page_faq():
 PAGES = {
     "index.html": page_index,
     "quickstart.html": page_quickstart,
+    "downloads.html": page_downloads,
     "installation.html": page_installation,
     "running-cuda.html": page_running_cuda,
     "cluster.html": page_cluster,

@@ -97,7 +97,31 @@ a:hover { text-decoration: underline; }
   overflow-y: auto;
   padding: 28px 16px 40px 24px;
   border-right: 1px solid var(--border);
+  /* Scrollbar hidden until the sidebar is hovered/focused (Firefox). */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color .2s ease;
 }
+.sidebar:hover, .sidebar:focus-within {
+  scrollbar-color: var(--border) transparent;
+}
+/* WebKit (Chrome/Safari/Edge): thin, transparent track+thumb by default; the
+   thumb fades in only when the user hovers the sidebar. */
+.sidebar::-webkit-scrollbar { width: 10px; }
+.sidebar::-webkit-scrollbar-track { background: transparent; }
+.sidebar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  transition: background-color .2s ease;
+}
+.sidebar:hover::-webkit-scrollbar-thumb,
+.sidebar:focus-within::-webkit-scrollbar-thumb {
+  background: var(--border);
+  background-clip: content-box;
+}
+.sidebar:hover::-webkit-scrollbar-thumb:hover { background: var(--text-dim); background-clip: content-box; }
 .nav-group { margin-bottom: 26px; }
 .nav-group-title {
   font-size: 11px; font-weight: 700; letter-spacing: 2px;
@@ -197,7 +221,13 @@ td code { white-space: nowrap; }
   position: sticky; top: var(--header-h); align-self: start;
   height: calc(100vh - var(--header-h)); overflow-y: auto;
   padding: 40px 20px; font-size: 13px;
+  scrollbar-width: thin; scrollbar-color: transparent transparent;
 }
+.toc:hover, .toc:focus-within { scrollbar-color: var(--border) transparent; }
+.toc::-webkit-scrollbar { width: 10px; }
+.toc::-webkit-scrollbar-track { background: transparent; }
+.toc::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; border: 3px solid transparent; background-clip: content-box; transition: background-color .2s ease; }
+.toc:hover::-webkit-scrollbar-thumb, .toc:focus-within::-webkit-scrollbar-thumb { background: var(--border); background-clip: content-box; }
 .toc-title { font-size: 11px; letter-spacing: 1.5px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 12px; }
 .toc a { display: block; color: var(--text-muted); padding: 4px 0 4px 12px; border-left: 1px solid var(--border); }
 .toc a:hover, .toc a.active { color: var(--neon); border-color: var(--neon); text-decoration: none; }
