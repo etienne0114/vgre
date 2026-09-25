@@ -144,6 +144,92 @@ int main() {
         check("KV pool fully reclaimed after all retire", pool.freeBlocks() == total0);
     }
 
+    // ── Quantized KV-cache (int8 / int4) on the paged pools ──────────────────
+    // The serving path stores K/V as symmetric-absmax int8 or packed int4 with a
+    // per-head scale, cutting KV footprint ~3.8×/~7× while staying close to fp32.
+    {
+        const int nb = 16, bsz = 4, nh = 2, hd = 64, M = 10;   // hd=64: the real long-context regime where the scale amortizes
+        KVCacheManager f32(nb, bsz, nh, hd, KVDType::F32);
+        KVCacheManager i8(nb, bsz, nh, hd, KVDType::I8);
+        KVCacheManager i4(nb, bsz, nh, hd, KVDType::I4);
+        check("int8 dtype selected", i8.dtype() == KVDType::I8);
+        check("int4 dtype selected (even headDim)", i4.dtype() == KVDType::I4);
+
+        // Same random K/V into all three; keep contiguous fp32 copies for the ref.
+        std::mt19937 rng2(11);
+        std::normal_distribution<float> nd2(0, 1);
+        std::vector<float> Kr[2], Vr[2];
+        for (int t = 0; t < M; ++t) {
+            std::vector<float> kAll(nh * hd), vAll(nh * hd);
+            for (int h = 0; h < nh; ++h)
+                for (int i = 0; i < hd; ++i) {
+                    float kk = nd2(rng2), vv = nd2(rng2);
+                    kAll[h * hd + i] = kk; vAll[h * hd + i] = vv;
+                    Kr[h].push_back(kk);  Vr[h].push_back(vv);
+                }
+            f32.appendToken(1, kAll.data(), vAll.data());
+            i8.appendToken(1, kAll.data(), vAll.data());
+            i4.appendToken(1, kAll.data(), vAll.data());
+        }
+
+        // Round-trip: readKey/readVal in int8 mode should recover K/V within the
+        // int8 step (scale = amax/127 ⇒ |err| ≤ scale/2 ≤ amax/254 per element).
+        double rtErr = 0.0;
+        for (int t = 0; t < M; ++t) {
+            const int logical = t / bsz, slot = t % bsz;
+            const int pb = i8.blockTable(1)[logical];
+            std::vector<float> kk(hd), vv(hd);
+            for (int h = 0; h < nh; ++h) {
+                i8.readKey(pb, slot, h, kk.data());
+                i8.readVal(pb, slot, h, vv.data());
+                for (int i = 0; i < hd; ++i) {
+                    rtErr = std::fmax(rtErr, std::fabs(kk[i] - Kr[h][t * hd + i]));
+                    rtErr = std::fmax(rtErr, std::fabs(vv[i] - Vr[h][t * hd + i]));
+                }
+            }
+        }
+        printf("  [info] int8 KV round-trip max err = %.3e\n", rtErr);
+        check("int8 round-trip within the quant step (<0.05)", rtErr < 0.05);
+
+        // Paged attention: int8/int4 stay close to the fp32 reference.
+        const float sc = 1.0f / std::sqrt((float)hd);
+        double e8 = 0.0, e4 = 0.0;
+        for (int h = 0; h < nh; ++h) {
+            std::vector<float> q(hd); for (auto &x : q) x = nd2(rng2);
+            std::vector<float> o8(hd), o4(hd), ref;
+            refAttention(q.data(), Kr[h], Vr[h], M, hd, sc, -1, ref);
+            pagedAttention(q.data(), h, 1, i8, sc, o8.data(), -1);
+            pagedAttention(q.data(), h, 1, i4, sc, o4.data(), -1);
+            for (int i = 0; i < hd; ++i) {
+                e8 = std::fmax(e8, std::fabs(o8[i] - ref[i]));
+                e4 = std::fmax(e4, std::fabs(o4[i] - ref[i]));
+            }
+        }
+        printf("  [info] paged attention err vs fp32: int8=%.3e  int4=%.3e\n", e8, e4);
+        check("int8 paged attention ~ fp32 (<0.05)", e8 < 0.05);
+        check("int4 paged attention ~ fp32 (<0.30)", e4 < 0.30);
+
+        // Memory: int8 ≈ 1/3.8, int4 ≈ 1/7 of fp32 bytes/token (+ per-head scale).
+        const size_t bF = f32.bytesPerToken(), b8 = i8.bytesPerToken(), b4 = i4.bytesPerToken();
+        printf("  [info] bytes/token: fp32=%zu int8=%zu int4=%zu\n", bF, b8, b4);
+        check("int8 uses < 1/3 of fp32 KV bytes", b8 * 3 < bF);
+        check("int4 uses < 1/5 of fp32 KV bytes", b4 * 5 < bF);
+
+        // int4 with an odd headDim can't byte-align heads → downgrades to int8.
+        KVCacheManager odd(4, 4, 1, 3, KVDType::I4);
+        check("int4 + odd headDim downgrades to int8", odd.dtype() == KVDType::I8);
+
+        // The continuous-batching scheduler runs unchanged over a quantized pool.
+        KVCacheManager qpool(8, 4, 1, 4, KVDType::I8);
+        const int q0 = qpool.freeBlocks();
+        ContinuousBatchScheduler qsched(qpool, 2);
+        qsched.addRequest(1, 3, 2); qsched.addRequest(2, 2, 3); qsched.addRequest(3, 4, 1);
+        int qsteps = 0;
+        while (!qsched.allDone() && qsteps < 1000) { qsched.step(); ++qsteps; }
+        check("scheduler drains over an int8 pool", qsched.allDone() && qsched.finishedCount() == 3);
+        check("int8 pool fully reclaimed", qpool.freeBlocks() == q0);
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

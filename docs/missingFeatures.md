@@ -44,20 +44,21 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 - **Texture / surface**: vector fetches (`float4` etc.), layered / cubemap / mipmap sampling, and
   `tex2DLod` (scalar `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` already run on both tiers).
 - **Recursion** in `__device__` helpers (currently rejected; templates + inlining are done).
-- **On the SSA tier specifically**: struct kernel params (these run on the
-  interpreter/compiled tiers; the SSA tier defers to them today). *(Multi-dimensional
-  arrays — `float As[H][W]` — and dynamic `extern __shared__` — launch-sized shared
-  buffers — are now supported on the SSA tier.)*
+- *(The SSA tier now runs the full scalar CUDA-C subset: multi-dimensional arrays
+  — `float As[H][W]` —, dynamic `extern __shared__` — launch-sized shared buffers —,
+  and by-value struct kernel params are all supported, bit-exact vs the other tiers.)*
 
 ### 1.4 Serving / KV cache
-- Wire the **int8 / int4 KV-cache quantization** into `KVCacheManager`'s paged pools so the
-  continuous-batching serving path gets the same 3–5× KV-memory reduction the generation path
-  already has (the codecs and the paged scheduler both exist; only the serving wiring is left).
+- *(Done — `KVCacheManager` now stores K/V as symmetric-absmax **int8 or packed int4** with a
+  per-head scale (`KVDType::{F32,I8,I4}`), sharing the exact codec (`vgre/core/kv_quant.h`) with
+  the generation path. `pagedAttention` dequantizes on read; the continuous-batching scheduler
+  runs unchanged over a quantized pool. Measured **3.8× (int8) / 7.1× (int4)** KV-memory reduction
+  at headDim=64, bit-close to fp32 — `test_kv_cache.cpp`.)*
 
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |
 |-------|------|--------|
-| **T3** Speculative decoding | tree verification; early-exit self-speculative drafting | throughput optimization (greedy + sampler-exact speculative decode, KV rollback, prompt-lookup drafter already land) |
+| **T3** Speculative decoding | early-exit self-speculative drafting | throughput optimization (greedy + sampler-exact linear speculative decode, **SpecInfer/Medusa-style tree verification** — accept the longest valid root→leaf path, distribution-exact — KV rollback, prompt-lookup drafter already land) |
 | **T4** State-space models | **Mamba-3 MIMO** (matrix-matrix) state update; a Mamba safetensors/GGUF loader | breadth / richer parameterization (single-state selective scan + depthwise conv1d already done) |
 
 ---

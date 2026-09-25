@@ -74,6 +74,59 @@ int main() {
         check("a perfect draft (q==p) accepts all K and emits the bonus token", allFull);
     }
 
+    // ── Tree speculative verification (SpecInfer / Medusa-style) ─────────────
+    // A branching draft tree: root → 3 children, child 0 → 2 grandchildren.
+    // The defining guarantee is unchanged — the first emitted token is distributed
+    // exactly as the target at the root — while the tree accepts a longer path on
+    // average than a linear chain of the same depth.
+    {
+        const int M = 6;                       // nodes: 0=root, 1/2/3=children, 4/5=child-0's kids
+        const int parent[M] = {-1, 0, 0, 0, 1, 1};
+        // Random target + draft distribution per node (different from each other).
+        std::vector<float> pT(M * V), qD(M * V);
+        for (int i = 0; i < M; ++i) {
+            std::vector<float> pr(V), qr(V);
+            for (auto& x : pr) x = nd(rng);           softmax(pr);
+            for (auto& x : qr) x = nd(rng) * 1.3f + 0.2f; softmax(qr);
+            for (int v = 0; v < V; ++v) { pT[i * V + v] = pr[v]; qD[i * V + v] = qr[v]; }
+        }
+
+        // Distribution equivalence: resample the tree's tokens from the draft each
+        // trial (as a real draft would propose), verify, histogram the first token.
+        const int Nt = 400000;
+        std::vector<long> th(V, 0);
+        std::vector<int> tok(M, -1), to(M + 2);
+        long treeAccepted = 0;
+        for (int s = 0; s < Nt; ++s) {
+            for (int i = 1; i < M; ++i)   // sample each node's token from its parent's draft row
+                tok[i] = sample_categorical(&qD[parent[i] * V], V, rng);
+            int n = tree_speculative_decode(to.data(), parent, tok.data(), pT.data(), qD.data(), M, V, rng);
+            th[to[0]]++;
+            treeAccepted += n;
+        }
+        double ttv = 0.0;
+        for (int v = 0; v < V; ++v) ttv += std::fabs((double)th[v] / Nt - pT[v]);
+        ttv *= 0.5;
+        printf("  [info] tree first-token TV distance from target root = %.4f\n", ttv);
+        check("tree verify: first token distributed as the target root p", ttv < 0.01);
+        printf("  [info] tree mean tokens/step = %.3f\n", (double)treeAccepted / Nt);
+        check("tree verify emits >1 token on average", (double)treeAccepted / Nt > 1.0);
+
+        // Perfect draft (q==p at every node): the first child of each node is always
+        // accepted (ratio 1), so it descends root→node1→node4 (a leaf) and emits a
+        // bonus — exactly 3 tokens every time.
+        {
+            std::vector<float> qp = pT;               // draft == target everywhere
+            bool always3 = true;
+            for (int s = 0; s < 4000; ++s) {
+                for (int i = 1; i < M; ++i) tok[i] = sample_categorical(&qp[parent[i] * V], V, rng);
+                int n = tree_speculative_decode(to.data(), parent, tok.data(), pT.data(), qp.data(), M, V, rng);
+                if (n != 3) always3 = false;
+            }
+            check("tree verify: a perfect draft descends the full path (3 tokens)", always3);
+        }
+    }
+
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;
 }

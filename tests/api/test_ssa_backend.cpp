@@ -92,6 +92,16 @@ extern "C" __global__ void warpb(const float* x, float* y, int n) {
 }
 )";
 
+// By-value struct kernel param — `p.field` reads the field from the param bytes at its
+// natural-alignment offset (same ABI as the interpreter/compiled tiers). y[i] = p.a*x[i]+p.b-p.c.
+static const char* kStructParam = R"(
+struct Coef { float a; int b; float c; };
+extern "C" __global__ void coefk(Coef p, const float* x, float* y, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) { y[i] = p.a * x[i] + (float)p.b - p.c; }
+}
+)";
+
 // Dynamic `extern __shared__` — the shared buffer size comes from the launch's
 // sharedMem argument (threaded through the dispatch to SsaProgram::launch). Copies
 // x[i] through the launch-sized shared buffer to y[i].
@@ -246,6 +256,36 @@ int main() {
         int dt = tierOf("dynsmem", did);
         if (dt >= 0) CHECK(dt == 3, "dynsmem (extern __shared__) runs on the Tier-2 SSA backend (tier 3)");
         std::printf("  dynsmem: bad=%d/%d  tier=%d (expected 3 = SSA; extern __shared__, %zu dyn bytes)\n", bad, N, dt, dynBytes);
+        vgre_free(dx); vgre_free(dy);
+    }
+
+    // ── by-value struct kernel param on the SSA tier ─────────────────────────────
+    {
+        struct Coef { float a; int b; float c; } cf = {1.5f, 7, 0.25f};   // offsets 0,4,8
+        std::vector<float> hx(N), hy(N);
+        for (int i = 0; i < N; ++i) hx[i] = i * 0.25f - 5.0f;
+        void *dx = nullptr, *dy = nullptr;
+        CHECK(vgre_malloc(&dx, bytes) == VGRE_SUCCESS, "malloc csx");
+        CHECK(vgre_malloc(&dy, bytes) == VGRE_SUCCESS, "malloc csy");
+        CHECK(vgre_memcpy(dx, hx.data(), bytes, VGRE_MEMCPY_HOST_TO_DEVICE) == VGRE_SUCCESS, "H2D csx");
+        uint64_t cid = 0;
+        CHECK(vgre_register_kernel("coefk", kStructParam, &cid) == VGRE_SUCCESS, "register coefk");
+        int n = N;
+        void* args[] = {&cf, &dx, &dy, &n};
+        const uint32_t blk = 64;
+        uint32_t grid[3] = {(uint32_t)((N + blk - 1) / blk), 1, 1}, block[3] = {blk, 1, 1};
+        CHECK(vgre_launch_kernel(cid, grid, block, args, 4, 0, 0) == VGRE_SUCCESS, "launch coefk");
+        CHECK(vgre_synchronize() == VGRE_SUCCESS, "synchronize");
+        CHECK(vgre_memcpy(hy.data(), dy, bytes, VGRE_MEMCPY_DEVICE_TO_HOST) == VGRE_SUCCESS, "D2H csy");
+        int bad = 0;
+        for (int i = 0; i < N; ++i) {
+            float ref = cf.a * hx[i] + (float)cf.b - cf.c;
+            uint32_t u, v; std::memcpy(&u, &hy[i], 4); std::memcpy(&v, &ref, 4); if (u != v) ++bad;
+        }
+        CHECK(bad == 0, "coefk reads struct-param fields bit-exactly");
+        int ct = tierOf("coefk", cid);
+        if (ct >= 0) CHECK(ct == 3, "coefk (by-value struct param) runs on the Tier-2 SSA backend (tier 3)");
+        std::printf("  coefk : bad=%d/%d  tier=%d (expected 3 = SSA; by-value struct param)\n", bad, N, ct);
         vgre_free(dx); vgre_free(dy);
     }
 

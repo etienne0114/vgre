@@ -202,12 +202,13 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      block + per-warp selective-release scheduler. (Full increment log: git history and the
      `tier2_ssa_backend` project memory.)
    - **Remaining (hardware-gated / breadth, not correctness):** flip `VGRE_SSA_ARM_NATIVE`
-     on by default after validating native AArch64 execution on real ARM hardware; native
+     on by default after validating native AArch64 execution on real ARM hardware; and native
      AArch64 codegen for the warp/shared cooperative ops (x86-64 is fully native, ARM uses
-     the evaluator); and the tiered fallback for out-of-subset constructs (struct params).
-     *(Multi-dimensional arrays — N-D row-major on local and `__shared__` arrays — and
-     dynamic `extern __shared__` — launch-sized shared buffers — are now supported on the
-     SSA tier.)*
+     the evaluator).
+     *(The SSA tier now runs the full scalar CUDA-C subset — multi-dimensional arrays
+     (N-D row-major on local and `__shared__` arrays), dynamic `extern __shared__`
+     (launch-sized shared buffers), and by-value struct kernel params — all bit-exact vs
+     the interpreter/compiled tiers.)*
 
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries

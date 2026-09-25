@@ -122,7 +122,7 @@ static Type promoteT(const Type& a, const Type& b) {
 
 // ── The IR ──────────────────────────────────────────────────────────────────────
 enum class Op {
-    ConstI, ConstF, Param, Tid, Ctaid, Ntid, Nctaid,  // leaves
+    ConstI, ConstF, Param, ParamMember, Tid, Ctaid, Ntid, Nctaid,  // leaves (ParamMember = a by-value struct param's field, read from its bytes at a fixed offset)
     Phi, Bin, Un, Cmp, Sel, Cast, Load, CallMath, LoadL, LoadS,   // value-producing (LoadL/LoadS = local/shared-array read)
     WarpShfl, WarpVote, WarpReduce, WarpMatch,        // value-producing, warp-cooperative (__shfl_*_sync / __ballot|any|all_sync / __reduce_*_sync / __match_any_sync)
     WarpActive,                                       // value-producing, per-thread (__activemask — mask of the warp's in-range lanes)
@@ -134,7 +134,7 @@ struct Inst {
     std::vector<int> a;         // operand value-ids (for Phi: one per predecessor)
     std::vector<int> phiPred;   // Phi: predecessor block for each operand in `a`
     int64_t ci = 0; double cf = 0;
-    int dim = 0, paramIdx = 0;
+    int dim = 0, paramIdx = 0;   // ParamMember: paramIdx = the struct param's index, dim = the field's byte offset
     std::string s;              // operator spelling / math fn name
     int elemBytes = 0;          // Load / Store element size
     int bbT = -1, bbF = -1;     // Br target / CondBr true,false
@@ -182,6 +182,8 @@ struct Lowerer {
     std::unordered_map<std::string, std::pair<int, Type>> localArr;    // mangled name -> (localArrays id, element type)
     std::unordered_map<std::string, std::pair<int, Type>> sharedArr;   // name -> (sharedArrays id, element type) — block scope
     std::unordered_map<std::string, std::vector<int>> arrDims;         // (mangled) array name -> per-dimension sizes (row-major); empty ⇒ 1-D
+    std::unordered_map<std::string, int> structParamIdx;               // (mangled) by-value struct-param name -> its kernel parameter index
+    const Module* mod = nullptr;   // module struct table (member offsets), for by-value struct params; compile-time only
     int inlineUid = 0, inlineDepth = 0;
     struct InlineCtx { int exitB; std::string retVar; Type rt; };
     std::vector<InlineCtx> inlineCtx;
@@ -274,6 +276,17 @@ struct Lowerer {
                 return promoteT(typeOf(*e.args[0]), typeOf(*e.args[1]));
             }
             case Expr::Ternary: return promoteT(typeOf(*e.args[1]), typeOf(*e.args[2]));
+            case Expr::Member: {   // a by-value struct param's field carries the member's declared type; builtins (threadIdx.x…) are int
+                if (!e.args.empty() && e.args[0]->kind == Expr::Ident) {
+                    auto vt = vtype.find(mangle(e.args[0]->str));
+                    if (vt != vtype.end() && vt->second.isStruct()) {
+                        const StructDef* def = mod ? mod->findStruct(vt->second.structName) : nullptr;
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (m) return m->type;
+                    }
+                }
+                return scalar(Type::Int);
+            }
             case Expr::Assign:  return typeOf(*e.args[0]);
             case Expr::Call: {
                 const std::string& fnn = e.str;
@@ -343,6 +356,22 @@ struct Lowerer {
                 if (member(e, "blockIdx", dim))  { Inst in; in.op = Op::Ctaid; in.ty = scalar(Type::Int); in.dim = dim; return emit(std::move(in)); }
                 if (member(e, "blockDim", dim))  { Inst in; in.op = Op::Ntid;  in.ty = scalar(Type::Int); in.dim = dim; return emit(std::move(in)); }
                 if (member(e, "gridDim", dim))   { Inst in; in.op = Op::Nctaid;in.ty = scalar(Type::Int); in.dim = dim; return emit(std::move(in)); }
+                // `p.field` on a by-value struct kernel param → read the field from the param's
+                // bytes at its (natural-alignment) offset — same layout the interpreter/compiled
+                // tiers see via `ld.param [name+offset]` / member slots, so all three agree.
+                if (e.args[0]->kind == Expr::Ident) {
+                    const std::string nm = mangle(e.args[0]->str);
+                    auto pit = structParamIdx.find(nm);
+                    if (pit != structParamIdx.end()) {
+                        auto vt = vtype.find(nm);
+                        const StructDef* def = (mod && vt != vtype.end()) ? mod->findStruct(vt->second.structName) : nullptr;
+                        const StructMember* m = def ? def->find(e.str) : nullptr;
+                        if (!m) { fail("SSA: no member '." + e.str + "' in struct param '" + e.args[0]->str + "'"); return 0; }
+                        Inst in; in.op = Op::ParamMember; in.ty = m->type;
+                        in.paramIdx = pit->second; in.dim = m->offset; in.elemBytes = m->type.elemBytes();
+                        return emit(std::move(in));
+                    }
+                }
                 fail("SSA: unsupported member access"); return 0;
             }
             case Expr::Index: {   // p[idx] global load, or a[i]/a[i0][i1]… local/shared-array read
@@ -840,7 +869,13 @@ struct Lowerer {
         for (size_t i = 0; i < k.params.size(); ++i) {
             const Param& p = k.params[i];
             fn.ptypes.push_back(p.type);
-            if (p.type.isStruct()) { fail("SSA: struct params unsupported on this tier"); return false; }
+            if (p.type.isStruct()) {
+                // By-value struct param: no SSA value (it isn't a scalar) — member reads emit
+                // ParamMember, keyed by this parameter index. Requires the struct table.
+                if (!mod || !mod->findStruct(p.type.structName)) { fail("SSA: unknown struct type '" + p.type.structName + "' for param"); return false; }
+                if (!p.name.empty()) { vtype[p.name] = p.type; structParamIdx[p.name] = (int)i; }
+                continue;
+            }
             Inst in; in.op = Op::Param; in.ty = p.type; in.paramIdx = (int)i;
             int v = emit(std::move(in));
             if (!p.name.empty()) { vtype[p.name] = p.type; writeVar(p.name, cur, v); }
@@ -1566,6 +1601,7 @@ struct X64Asm {
             case Op::Param: { b(0x48); b(0x8B); b(0x03);                          // mov rax,[rbx]  (pvals)
                               b(0x48); b(0x8B); b(0x80); d32((uint32_t)(in.paramIdx * 8));   // mov rax,[rax+p*8]
                               if (in.ty.isFloating()) stFloatBits(id); else stG(0, id); return; }
+            case Op::ParamMember: bad(); return;   // by-value struct-param fields run on the cooperative evaluator
             case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: {
                 int base = in.op == Op::Tid ? 0 : in.op == Op::Ctaid ? 3 : in.op == Op::Ntid ? 6 : 9;
                 b(0x8B); b(0x83); d32((uint32_t)(8 + (base + in.dim) * 4));       // mov eax,[rbx+off] (zero-extends)
@@ -1960,6 +1996,7 @@ struct Arm64Asm {
             case Op::ConstF: { double d = coerce(SF(in.cf), in.ty).d; uint64_t bits; std::memcpy(&bits, &d, 8); movImm(0, bits); stFloatBits(id); return; }
             case Op::Param: { ldrX(9, 19); ldrXofs(0, 9, (int)(in.paramIdx * 8));      // x9=pvals; x0=pvals[i]
                               if (in.ty.isFloating()) stFloatBits(id); else stG(0, id); return; }
+            case Op::ParamMember: bad(); return;   // by-value struct-param fields run on the cooperative evaluator
             case Op::Tid: case Op::Ctaid: case Op::Ntid: case Op::Nctaid: {
                 int base = in.op == Op::Tid ? 0 : in.op == Op::Ctaid ? 3 : in.op == Op::Ntid ? 6 : 9;
                 ldrWofs(0, 19, 8 + (base + in.dim) * 4); stG(0, id); return;           // w load zero-extends
@@ -2296,6 +2333,7 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
         if (kp->isGlobal && (name.empty() || kp->name == name)) { target = kp.get(); break; }
     if (!target) { err = "SSA: kernel '" + name + "' not found"; return nullptr; }
     Lowerer lo(*target);
+    lo.mod = pr.module.get();               // struct table (member offsets) for by-value struct params
     for (auto& kp : pr.module->kernels)     // __device__ helpers available for inlining
         if (kp->isDevice && !kp->isGlobal) lo.deviceFns[kp->name] = kp.get();
     if (!lo.run()) { err = lo.err; return nullptr; }
@@ -2372,6 +2410,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
         // Pre-decode each parameter into a uniform 8-byte value (shared by all threads).
         std::vector<int64_t> pvals(fn.ptypes.size(), 0);
         for (size_t i = 0; i < fn.ptypes.size(); ++i) {
+            if (fn.ptypes[i].isStruct()) { pvals[i] = reinterpret_cast<int64_t>(args[i]); continue; }   // struct param: base ptr (fields via ParamMember, evaluator-only)
             SVal pv = memLoad(reinterpret_cast<int64_t>(args[i]), fn.ptypes[i]);
             if (fn.ptypes[i].isFloating()) { double d = pv.d; std::memcpy(&pvals[i], &d, 8); }
             else pvals[i] = pv.i;
@@ -2554,6 +2593,7 @@ bool SsaProgram::launch(Extent grid, Extent block, void* const* args, int numArg
                     case Op::ConstI: v[id] = coerce(SI(in.ci), in.ty); break;
                     case Op::ConstF: v[id] = coerce(SF(in.cf), in.ty); break;
                     case Op::Param: v[id] = memLoad(reinterpret_cast<int64_t>(args[in.paramIdx]), fn.ptypes[in.paramIdx]); break;
+                    case Op::ParamMember: v[id] = memLoad(reinterpret_cast<int64_t>(args[in.paramIdx]) + in.dim, in.ty); break;   // struct-param field at byte offset dim
                     case Op::Tid:    v[id] = SI(tid[in.dim]); break;
                     case Op::Ctaid:  v[id] = SI(ctaid[in.dim]); break;
                     case Op::Ntid:   v[id] = SI(ntid[in.dim]); break;

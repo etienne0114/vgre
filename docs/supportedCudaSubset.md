@@ -29,8 +29,9 @@ backend.
 > regalloc → x86-64 native, opt-in AArch64, portable evaluator elsewhere) is
 > feature-complete for the scalar + shared-memory + warp subset — full control flow
 > (incl. `switch`), `__device__` inlining, local **and multi-dimensional** arrays
-> (`float As[H][W]`, N-D row-major), `__shared__`/`__syncthreads` (static **and dynamic
-> `extern __shared__`**, launch-sized),
+> (`float As[H][W]`, N-D row-major), **by-value struct kernel params** (`p.field` read
+> from the param bytes at natural-alignment offsets), `__shared__`/`__syncthreads`
+> (static **and dynamic `extern __shared__`**, launch-sized),
 > and the **full warp-intrinsic surface** (`__shfl_*`, vote, `__reduce_*_sync`, match,
 > `__syncwarp`, `__activemask`). On **x86-64/Linux** the whole subset — including shared
 > memory and every warp intrinsic — emits **native machine code** (`vgre_ssa_barrier`/

@@ -5,6 +5,7 @@
 #include "vgre/xla/half.h"
 #include "vgre/common/cpu_features.h"
 #include "vgre/xla/thread_pool.h"
+#include "vgre/core/kv_quant.h"   // shared symmetric-absmax KV codec (also used by the paged serving cache)
 
 #include <algorithm>
 #include <cmath>
@@ -331,42 +332,11 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             Kc[l].resize((size_t)cfg_.max_seq * KVD); Vc[l].resize((size_t)cfg_.max_seq * KVD);
         }
     }
-    // Quantize one head-slice [Dh] to int8 with an absmax scale (symmetric).
-    auto quant_head = [](const float* src, int8_t* dst, float& sc, int n) {
-        float amax = 0.0f;
-        for (int i = 0; i < n; ++i) amax = std::max(amax, std::fabs(src[i]));
-        sc = (amax > 0.0f) ? (amax / 127.0f) : 0.0f;
-        const float inv = (sc > 0.0f) ? 1.0f / sc : 0.0f;
-        for (int i = 0; i < n; ++i) {
-            float r = std::nearbyint(src[i] * inv);
-            dst[i] = (int8_t)std::min(127.0f, std::max(-127.0f, r));
-        }
-    };
-    // Quantize a head-slice [Dh] to symmetric 4-bit, packing 2 codes/byte into
-    // `packed` (the position's D/2-byte row) starting at global channel `off`.
-    // Codes ∈ [-7,7] stored as nibble code+8 ∈ [1,15]. Even off keeps heads
-    // byte-aligned so packing one head never disturbs another.
-    auto quant_head4 = [](const float* src, uint8_t* packed, float& sc, int off, int n) {
-        float amax = 0.0f;
-        for (int i = 0; i < n; ++i) amax = std::max(amax, std::fabs(src[i]));
-        sc = (amax > 0.0f) ? (amax / 7.0f) : 0.0f;
-        const float inv = (sc > 0.0f) ? 1.0f / sc : 0.0f;
-        for (int i = 0; i < n; ++i) {
-            int c = (int)std::nearbyint(src[i] * inv);
-            c = std::min(7, std::max(-7, c));
-            const uint8_t nib = (uint8_t)(c + 8);
-            const int gch = off + i;
-            uint8_t& byte = packed[gch >> 1];
-            if (gch & 1) byte = (uint8_t)((byte & 0x0F) | (nib << 4));
-            else         byte = (uint8_t)((byte & 0xF0) | nib);
-        }
-    };
-    // Dequantize one cached int4 K/V value: channel `gch` (global) at packed row.
-    auto deq4 = [](const uint8_t* packedRow, int gch, float sc) -> float {
-        const uint8_t byte = packedRow[gch >> 1];
-        const int nib = (gch & 1) ? (byte >> 4) : (byte & 0x0F);
-        return (float)(nib - 8) * sc;
-    };
+    // Symmetric absmax KV codec — the shared, bit-for-bit implementation in
+    // vgre/core/kv_quant.h (the paged serving cache uses the same functions).
+    auto quant_head  = [](const float* src, int8_t* dst, float& sc, int n) { core::kvQuantInt8(src, dst, sc, n); };
+    auto quant_head4 = [](const float* src, uint8_t* packed, float& sc, int off, int n) { core::kvQuantInt4(src, packed, sc, off, n); };
+    auto deq4        = [](const uint8_t* packedRow, int gch, float sc) -> float { return core::kvDequantInt4(packedRow, gch, sc); };
 
     // RoPE inverse frequencies (constant across the whole run) + cos/sin scratch,
     // so the token loop never recomputes pow, and cos/sin are computed once per

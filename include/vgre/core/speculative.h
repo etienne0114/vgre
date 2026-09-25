@@ -65,6 +65,66 @@ inline int speculative_decode(int* out, const float* p, const float* q,
     return n;
 }
 
+// ── Tree-based speculative verification (SpecInfer / Medusa-style) ────────────
+// The draft proposes a TREE of candidate continuations instead of a single chain:
+// a node may branch into several candidate next tokens. The target verifies the
+// whole tree in one batched forward (a tree attention mask gives every node its own
+// next-token distribution), and we accept the longest root→leaf PATH that survives
+// the multi-candidate rejection rule. The accepted tokens are distributed EXACTLY
+// as sequential sampling from the target (Miao et al. 2023), while a wider tree
+// raises the expected acceptance length over a linear chain of the same depth.
+//
+//   parent[i], token[i] : tree topology; node 0 is the root (parent[0]=token[0]=-1).
+//                         A node's children are the entries whose parent == it, in
+//                         array order. token[i] is node i's candidate token, which
+//                         the draft sampled from qDraft[parent[i]].
+//   pTarget [M·V]       : target next-token distribution AT each node (path root→node).
+//   qDraft  [M·V]       : draft next-token distribution at each node (its children
+//                         were sampled from this row).
+// Writes the accepted path tokens to out[] and returns the count (>= 1). The first
+// output token is distributed exactly as pTarget[root].
+//
+// Multi-candidate rule at a node with target dist p and draft dist q: try each child
+// token x in turn, accepting with prob min(1, p_res[x]/q[x]); on rejection update the
+// residual p_res ← norm(max(0, p_res − q)) and try the next child; if all are rejected
+// emit a token from the final residual and stop. On acceptance, descend into that
+// child and repeat; an accepted leaf emits a bonus token from its target dist.
+inline int tree_speculative_decode(int* out, const int* parent, const int* token,
+                                   const float* pTarget, const float* qDraft,
+                                   int M, int V, std::mt19937& rng) {
+    std::uniform_real_distribution<float> u(0.0f, 1.0f);
+    std::vector<float> pres(V);
+    int cur = 0, n = 0;
+    for (;;) {
+        const float* p0 = pTarget + static_cast<size_t>(cur) * V;
+        const float* q  = qDraft  + static_cast<size_t>(cur) * V;
+        for (int v = 0; v < V; ++v) pres[v] = p0[v];   // residual target dist at `cur`
+        int accepted = -1;
+        for (int c = 0; c < M; ++c) {
+            if (parent[c] != cur) continue;            // only children of `cur`, in order
+            const int x = token[c];
+            const float a = std::min(1.0f, pres[x] / (q[x] + 1e-30f));
+            if (u(rng) < a) { accepted = c; break; }   // accept this child
+            float z = 0.0f;                            // reject → residual update
+            for (int v = 0; v < V; ++v) { pres[v] = std::max(0.0f, pres[v] - q[v]); z += pres[v]; }
+            if (z > 0.0f) for (int v = 0; v < V; ++v) pres[v] /= z;
+            else          for (int v = 0; v < V; ++v) pres[v] = p0[v];   // degenerate guard
+        }
+        if (accepted < 0) {                            // no child survived → residual token, stop
+            out[n++] = sample_categorical(pres.data(), V, rng);
+            return n;
+        }
+        out[n++] = token[accepted];
+        cur = accepted;
+        bool hasChild = false;
+        for (int c = 0; c < M; ++c) if (parent[c] == cur) { hasChild = true; break; }
+        if (!hasChild) {                               // accepted a leaf → bonus token
+            out[n++] = sample_categorical(pTarget + static_cast<size_t>(cur) * V, V, rng);
+            return n;
+        }
+    }
+}
+
 } // namespace serving
 } // namespace vgre
 

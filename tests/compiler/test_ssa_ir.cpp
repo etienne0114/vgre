@@ -209,6 +209,33 @@ int main() {
             else std::printf("  extern-shmem: SSA (blocks=%d) == interpreter (%d elems, %zu dyn bytes)\n", sp->numBlocks(), NN, dynBytes);
         }
     }
+    // By-value struct kernel param (Track Z ABI): `p.field` reads the field from the
+    // param's bytes at its natural-alignment offset — the same layout the interpreter
+    // sees via `ld.param [name+offset]`. Mixed float/int members; SSA vs interpreter.
+    {
+        struct Coef { float a; int b; float c; } cf = {1.5f, 7, 0.25f};   // offsets 0,4,8; size 12
+        const char* src = R"(struct Coef { float a; int b; float c; };
+extern "C" __global__ void k(Coef p, const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n) y[i] = p.a * x[i] + (float)p.b - p.c; })";
+        std::string err;
+        auto sp = SsaProgram::compile(src, "k", err);
+        auto cg = compileToPtx(src, "k");
+        auto ib = be::makeBackend("interpreter");
+        auto ik = (sp && cg.ok) ? ib->preparePtx(cg.ptx, "k") : nullptr;
+        if (!sp) { std::printf("FAIL: struct-param SSA compile: %s\n", err.c_str()); ++g_fail; }
+        else if (!ik) { std::printf("FAIL: struct-param interpreter prepare\n"); ++g_fail; }
+        else {
+            const int NN = 96, BD = 32;
+            std::vector<float> xv(NN); for (int i = 0; i < NN; ++i) xv[i] = (i % 13) * 0.5f - 3.0f;
+            std::vector<float> yi(NN, -1.f), ys(NN, -2.f);
+            float* xp = xv.data(); int n = NN;
+            { float* yp = yi.data(); void* a[] = {&cf, &xp, &yp, &n}; be::LaunchConfig lc; lc.gridDim[0] = (NN + BD - 1) / BD; lc.blockDim[0] = BD; ib->launch(*ik, lc, a, 4); }
+            { float* yp = ys.data(); void* a[] = {&cf, &xp, &yp, &n}; Extent g{(uint32_t)((NN + BD - 1) / BD), 1, 1}, b{(uint32_t)BD, 1, 1}; sp->launch(g, b, a, 4); }
+            int bad = 0;
+            for (int i = 0; i < NN; ++i) { uint32_t u, v; std::memcpy(&u, &yi[i], 4); std::memcpy(&v, &ys[i], 4); if (u != v) ++bad; }
+            if (bad) { std::printf("FAIL: struct-param SSA vs interpreter: %d/%d\n", bad, NN); ++g_fail; }
+            else std::printf("  struct-param: SSA == interpreter (%d elems)\n", NN);
+        }
+    }
     // switch inside a loop with `continue` (forwarded to the loop) and a break (to the switch).
     checkVsInterp("sw-loop",  R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int k=0;k<m;k++){ switch(k%3){ case 0: continue; case 1: acc+=x[i*m+k]; break; default: acc-=x[i*m+k]; } acc+=0.5f; } y[i]=acc; } })", 96, 16);
 
