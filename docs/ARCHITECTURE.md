@@ -725,8 +725,8 @@ VGRE_MESH_PEERS=ip:port,...           # Mesh topology
 ## Future Enhancements
 
 - [x] INT8 quantization-aware training
-- [ ] Flash Attention integration
-- [ ] Fused transformer kernels
+- [x] Flash Attention integration (`tests/compiler/test_cuda_flash_attention.cpp`, `tests/integration/test_flash_attention.cpp` — online-softmax, no N² score matrix)
+- [x] Fused transformer kernels (kernel-fusion engine `src/compiler/kernel_fusion_engine.cpp`, `tests/integration/test_kernel_fusion.cpp`)
 - [x] OpenTelemetry/Prometheus metrics export
 - [x] Kubernetes operator for cluster orchestration (`src/deployment/vgre_operator/`, `src/deployment/k8s_device_plugin/`)
 - [x] WebSocket transport for WAN clusters

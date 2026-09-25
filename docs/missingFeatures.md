@@ -270,7 +270,7 @@ The in-tree primitives already exist where applicable; only the externally-gated
 | 3.1 | GPU security framework | SEV-SNP/TDX enclaves, HSM, FIPS-140 cert | confidential-computing **hardware** + external **auditor** |
 | 3.2 | Cryptography | homomorphic / threshold crypto, Intel QAT offload | research-grade scope / crypto-accelerator **hardware** |
 | 3.3 | Windows deployment | DirectML backend, AD/Kerberos, Windows containers | Windows-specific **APIs/SDKs** (engine already builds+tests on windows-2022) |
-| 3.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (CPU JIT path is build-verified on macOS) |
+| 3.4 | macOS / Apple Silicon | Metal Performance Shaders backend | **Apple Silicon + Metal** hardware (the CPU path is CI-green on macOS — full `ctest` suite passes on `macos-14`) |
 | 3.5 | ML frameworks | device-level `jax.jit(backend='vgre')` PJRT plugin | upstream `pjrt_c_api.h` + MLIR C++ libs **not in the wheels** (StableHLO path runs JAX/TF/PyTorch) |
 | 3.6 | Model serving | TensorRT-LLM / vLLM *compatibility layers* | those external **runtimes** / a live **fleet** |
 | 3.7 | Multi-cloud | apply to live AWS/Azure/GCP | cloud **accounts + credentials** (Terraform module is built) |

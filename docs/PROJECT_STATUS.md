@@ -83,14 +83,15 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 exploration, differential fuzzing of the CUDA-C front-end against both execution
 tiers, ThreadSanitizer race analysis, and static-destruction verification.
 
-### 1.2 macOS (ARM64 / Intel) — build-verified
+### 1.2 macOS (Apple Silicon) — CI-green
 
-**Built and exercised locally (July 2026).** The native engine (`libvgre`,
-`libvgre_cudart`, examples, integration tests) compiles with Homebrew
-`llvm@18` auto-selected by CMake. JIT kernel compilation discovers Clang at
-runtime (`VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`).
-Integration/JIT ctests pass; the full serial `ctest` suite (`-j1`) is the
-remaining bring-up gate before claiming macOS CI-green.
+**The full `ctest` suite runs green in CI on `macos-14` (Apple Silicon).** The native
+engine (`libvgre`, `libvgre_cudart`, examples, integration tests) compiles with
+Homebrew `llvm@18` auto-selected by CMake; JIT kernel compilation discovers Clang at
+runtime (`VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`). A prebuilt
+macOS-arm64 wheel ships with each release. (The CI job is `continue-on-error` in the
+workflow — informational — pending promotion to required, but it exercises and passes
+the whole suite on every push.)
 
 **macOS-specific real implementations** (not stubs): UVM via `SIGSEGV`/`SIGBUS`,
 Keychain via `SecItemAdd`/`SecItemCopyMatching`, thermal via IOKit SMC,
@@ -152,7 +153,8 @@ For the comprehensive, definitive list of boundary conditions (such as physical 
 The following components are fully implemented, verified via regression tests, and stable for production deployment:
 
 ### 3.1 Kernel Compilation & Execution
-- **LLVM JIT Compiler**: Dynamically JITs PTX to native assembly via Clang and LLVM ORC JIT, optimized with `-O3 -march=native`.
+- **From-scratch CUDA-C front-end + four-tier CPU backend (no LLVM required)**: an in-tree lexer/parser lowers kernels to an AST, then to the fastest of four bit-exact tiers — a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional own SSA optimizing backend (`VGRE_EXEC_BACKEND=interp|cp|ssa`). This is the default in the LLVM-free build (374 tests green).
+- **LLVM JIT Compiler (optional, high-performance path)**: when LLVM dev libs are present, dynamically JITs PTX to native assembly via Clang and LLVM ORC JIT, optimized with `-O3 -march=native`.
 - **Persistent Disk Caching**: Stores JIT compilations in `~/.vgre/cache/` using an LRU cache with AST collision eviction and integrity check.
 - **Block Worker Pool**: Emulates GPU grid execution using a pre-warmed thread pool (1024-2048 threads) and sense-reversing barrier objects for `__syncthreads()`.
 - **CUDA Dynamic Parallelism**: Fully supports recursive child kernel launches from JIT kernels.

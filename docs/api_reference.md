@@ -22,7 +22,7 @@ The core manager for initiating devices and profiling code execution.
 
 Represents an executable logic unit dynamically compiled via the JIT engine.
 
-- **`__init__(name: str, function: Callable, source: str = "")`** — Creates a kernel representation. The `source` argument is parsed by `ClangKernelParser` and JIT-compiled to native code during `Runtime.launch()`.
+- **`__init__(name: str, function: Callable, source: str = "")`** — Creates a kernel representation. The `source` argument is parsed by the in-tree from-scratch CUDA-C front-end (or Clang when the LLVM JIT is enabled) and executed on the fastest accepting CPU tier during `Runtime.launch()`.
 - **Factory Functions**: `vector_add_kernel()`, `vector_mul_kernel()`, `vector_scale_kernel()`
 
 ### `vgre.VirtualDevice`
@@ -85,7 +85,7 @@ int vgre_device_disable_peer_access(int peer_device);
 ```c
 int vgre_register_kernel(const char *name, const char *source,
                           uint64_t *out_kernel_id);
-    // Submits source to Clang+LLVM JIT pipeline; returns KernelId
+    // Compiles source via the from-scratch front-end (or the Clang/LLVM JIT when enabled); returns KernelId
 
 int vgre_launch_kernel(uint64_t kernel_id,
                         const uint32_t grid_dim[3],
@@ -240,7 +240,7 @@ int vgre_set_block_threads(int enabled);
     // This updates the internal engine state.
 
 const char* vgre_get_version(void);
-    // Returns version string "0.1.2".
+    // Returns the runtime version string (e.g. "0.1.0").
 ```
 
 ---
@@ -251,7 +251,7 @@ The VGRE Dashboard uses an isolate-based background thread to poll the C API eve
 
 | Field | Source | Meaning |
 |-------|--------|---------|
-| `gflops` | AdaptiveExecutionEngine | Ground-truth GFLOPS from LLVM-calibrated instruction counts |
+| `gflops` | AdaptiveExecutionEngine | Ground-truth GFLOPS from calibrated instruction counts |
 | `memoryBandwidthGbps` | MemoryManager | Measured h2d/d2h/d2d transfer bandwidth |
 | `pageFaultRate` | UVM Handler | SIGSEGV-triggered page migrations per second |
 | `uvmMap` | MemoryManager | bitset represented as `uint8_t[1024]` residency map |
@@ -281,7 +281,7 @@ VGRE provides a minimal OpenCL 1.2 compatible facade for applications using `lib
 - **`clEnqueueWriteBuffer`** / **`clEnqueueReadBuffer`**: H2D and D2H memcpy.
 
 ### Kernel Dispatch
-- **`clEnqueueNDRangeKernel`**: Translates OpenCL C source to VGRE KernelIR and dispatches via the LLVM JIT engine.
+- **`clEnqueueNDRangeKernel`**: Translates OpenCL C source to VGRE KernelIR and dispatches via the VGRE JIT engine.
 
 ### Events & Profiling
 - **`clWaitForEvents`**, **`clGetEventProfilingInfo`**: Wraps VGRE event timing.

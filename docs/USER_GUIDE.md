@@ -24,11 +24,25 @@ VGRE lets you run unmodified CUDA applications on any x86-64 or ARM64 CPU by int
 
 ## 1. Quick Start
 
+### Fastest: install the prebuilt wheel (no toolchain)
+
+Every [GitHub Release](https://github.com/etienne0114/vgre/releases) ships a
+self-contained, **LLVM-free** wheel per platform (Linux / macOS / Windows) that
+bundles the native engine — you need only Python 3.8+ and NumPy:
+
+```bash
+pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or the macOS / Windows wheel
+python -c "import vgre; print('native:', vgre.NATIVE_AVAILABLE)"
+```
+
+The wheel runs CUDA-C kernels and trains/serves the in-tree language model on CPU.
+Build from source (below) when you also want the dashboard or the cluster tools.
+
 ### Automated Deployment (Linux / macOS)
 
 ```bash
-git clone https://github.com/vgre-org/vgre-runtime.git
-cd vgre-runtime
+git clone https://github.com/etienne0114/vgre.git
+cd vgre
 bash install_local.sh
 ```
 
@@ -50,8 +64,8 @@ vgre-start --test       # local master + worker self-test
 ### Automated Deployment (Windows)
 
 ```powershell
-git clone https://github.com/vgre-org/vgre-runtime.git
-cd vgre-runtime
+git clone https://github.com/etienne0114/vgre.git
+cd vgre
 .\scripts\vgre_sync.bat
 ```
 
@@ -166,6 +180,8 @@ first: `rm -f build/CMakeCache.txt`.
 | Flag | Default | Effect |
 |------|---------|--------|
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimized build |
+| `-DVGRE_ENABLE_JIT=OFF` | ON | **Zero-burden build** — drop the LLVM/Clang dependency; kernels run on the from-scratch four-tier CPU backend. Full suite still passes (374 tests). |
+| `-DVGRE_ENABLE_OPENMP=OFF` | ON | Drop OpenMP; the in-tree work-stealing thread pool parallelises CTAs instead. |
 | `-DVGRE_ENABLE_NATIVE_SIMD` | **auto** (ON if CPU supports it) | Enable `-march=native` (max SIMD, not portable) |
 | `-DVGRE_ENABLE_RDMA` | **auto** (ON if `libibverbs-dev` found) | RDMA/RoCE zero-copy transport |
 | `-DVGRE_ENABLE_TPM2` | **auto** (ON if `libtss2-dev` found) | TPM 2.0 hardware token storage |

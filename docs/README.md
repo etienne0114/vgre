@@ -6,7 +6,7 @@ Welcome to the VGRE (Virtual GPU Runtime Engine) technical documentation suite. 
 
 ## 🗺️ Unified Documentation Index
 
-To keep VGRE technical documentation highly accurate, clear, and non-overlapping, we maintain **seven canonical reference manuals**:
+To keep VGRE technical documentation highly accurate, clear, and non-overlapping, we maintain **eight canonical reference manuals** (plus the browsable [docs site](site/index.html)):
 
 ```mermaid
 graph TD
@@ -16,6 +16,8 @@ graph TD
     A --> E["api_reference.md\n(Shim Function Mappings)"]
     A --> F["missingFeatures.md\n(Hardware Boundary Conditions)"]
     A --> G["implementationPlan.md\n(Roadmap & Phase Tracker)"]
+    A --> H["zeroBurdenRoadmap.md\n(LLVM-free 4-tier stack)"]
+    A --> I["supportedCudaSubset.md\n(CUDA-C subset per tier)"]
 
     style A fill:#4a90d9,color:#fff
     style B fill:#f39c12,color:#fff
@@ -24,6 +26,8 @@ graph TD
     style E fill:#f39c12,color:#fff
     style F fill:#27ae60,color:#fff
     style G fill:#8e44ad,color:#fff
+    style H fill:#16a085,color:#fff
+    style I fill:#16a085,color:#fff
 ```
 
 ### 1. 📈 [PROJECT_STATUS.md](PROJECT_STATUS.md)
@@ -75,6 +79,14 @@ graph TD
     *   Per-phase completion tables (Phase 7 → 131/131 baseline; Phase 8 → 131/131 post-math-hardening; Phases 9–10 heuristic elimination).
     *   Detailed engineering specifications for future tracks (SASS ISA emulation, CUPTI hardware passthrough, K8s orchestration, cuDNN v9 graph fusion).
 *   **Read When**: You are planning new feature contributions or tracking which development phases have been completed.
+
+### 7. ⚙️ [zeroBurdenRoadmap.md](zeroBurdenRoadmap.md)
+*   **Purpose**: The from-scratch, **LLVM-free** execution stack — the own CUDA-C front-end and the four CPU tiers (PTX interpreter, compiled-fiber, native x86-64 JIT, and the Tier-2 SSA optimizing backend) — and what remains.
+*   **Read When**: You want to understand how VGRE runs kernels without LLVM, or work on the execution tiers.
+
+### 8. 🧩 [supportedCudaSubset.md](supportedCudaSubset.md)
+*   **Purpose**: The exact CUDA-C subset the from-scratch tiers accept, feature by feature, with the tier(s) that run each and the differential-fuzzing that keeps them bit-exact.
+*   **Read When**: You need to know precisely which CUDA-C constructs compile and execute on the LLVM-free path.
 
 ---
 
