@@ -15,21 +15,26 @@
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+# Zero-burden build: only a C++17 compiler + CMake/Ninja — no LLVM/Clang dev libs,
+# no OpenMP. The engine runs kernels through its from-scratch four-tier CPU backend
+# (PTX interpreter / compiled-fiber / native x86-64 JIT / SSA), so the image needs
+# no LLVM at build or run time (which also fixes the Ubuntu llvm-dev LLVMExports
+# CMake breakage and shrinks the image).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake ninja-build git ca-certificates \
-        clang llvm-dev libclang-dev libomp-dev \
-        libsqlite3-dev liblapack-dev libssl-dev pkg-config \
+        cmake ninja-build git ca-certificates clang-18 \
+        libsqlite3-dev liblapack-dev libkeyutils-dev libssl-dev zlib1g-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY . .
 
-# Build the runtime + worker (Release, no tests/dashboard in the image build).
+# Build the runtime + worker (Release, LLVM-free, no tests/dashboard in the image).
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/vgre \
-        -DVGRE_BUILD_TESTS=OFF \
-        -DVGRE_BUILD_DASHBOARD=OFF \
+        -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+        -DVGRE_BUILD_TESTS=OFF -DVGRE_BUILD_DASHBOARD=OFF \
+        -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
     && cmake --build build --parallel \
     && cmake --install build
 
@@ -37,10 +42,10 @@ RUN cmake -S . -B build -G Ninja \
 FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
-# Runtime-only deps: clang/llvm runtime for the JIT (the engine forks clang++ at
-# launch), OpenMP, BLAS/LAPACK, SQLite.
+# Runtime-only deps: BLAS/LAPACK + SQLite for the optional feature paths. No LLVM,
+# no Clang, no OpenMP — the LLVM-free engine forks nothing at launch.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        clang llvm libomp5 liblapack3 libsqlite3-0 ca-certificates \
+        liblapack3 libsqlite3-0 libkeyutils1 zlib1g ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --uid 10001 vgre
 
@@ -56,7 +61,7 @@ LABEL org.opencontainers.image.title="vgre" \
       org.opencontainers.image.description="Virtual GPU Runtime Engine — CUDA-on-CPU" \
       org.opencontainers.image.version="${VGRE_VERSION}" \
       org.opencontainers.image.revision="${VGRE_REVISION}" \
-      org.opencontainers.image.source="https://github.com/etienne0114/virtual-gpu-runtime"
+      org.opencontainers.image.source="https://github.com/etienne0114/vgre"
 
 USER vgre
 WORKDIR /home/vgre
