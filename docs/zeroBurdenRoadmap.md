@@ -268,14 +268,17 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
      The fiber scheduler gained a **block + per-warp selective-release** model (a fiber
      parks with a `wait` reason; a warp releases once all its live lanes have arrived). The
      shared-memory `__syncthreads` path rides the same scheduler unchanged. `__activemask`
-     stays on the evaluator (its per-thread sequential-done mask needs no rendezvous), and
-     AArch64 keeps the evaluator (native is opt-in there). Verified: `test_ssa_ir` asserts
-     `usedNative()` for a `__shfl_down_sync`+`__ballot_sync` warp reduction and stays
-     bit-exact; the shared-memory native path is unregressed.
+     is native too (no rendezvous — `call vgre_ssa_activemask` reads the launch geometry
+     from the `ThreadCtx` and returns the closed-form sequential-live-lane mask), so **every
+     x86-64 warp intrinsic is native, zero bails**. AArch64 keeps the evaluator (native is
+     opt-in there). Verified: `test_ssa_ir` asserts `usedNative()` for a
+     `__shfl_down_sync`+`__ballot_sync`+`__activemask` kernel and stays bit-exact; the
+     shared-memory native path is unregressed. (Also added `u2f` coverage proving native
+     unsigned-int→float uses the correct unsigned conversion.)
    - **Remaining (hardware-gated / breadth, not correctness):** flipping
      `VGRE_SSA_ARM_NATIVE` on by default once validated on real ARM hardware (encodings are
      already llvm-mc-verified; execution is CI-checked on macos-arm64); native AArch64
-     codegen for the warp/`__activemask` ops (x86-64 is native; ARM uses the evaluator); and
+     codegen for the warp ops (x86-64 is fully native; ARM uses the evaluator); and
      the usual tiered fallbacks for out-of-subset constructs (multi-dim arrays, struct
      params, dynamic `extern __shared__`) that match the compiled tier's boundaries. The
      Tier-2 backend is otherwise **feature-complete for the scalar + shared-memory + warp

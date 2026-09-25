@@ -11,8 +11,8 @@
 // per-block evaluator), the full warp-intrinsic surface — `__shfl[_up|_down|_xor]_sync`,
 // `__ballot_sync`/`__any_sync`/`__all_sync`, `__reduce_{add,min,max,and,or,xor}_sync`,
 // `__match_any_sync`/`__match_all_sync`, `__syncwarp`, `__activemask` — (native x86-64
-// machine code via `vgre_ssa_warp` on ucontext fibers; portable evaluator elsewhere;
-// `__activemask` stays on the evaluator), casts, unary + binary math intrinsics, calls to `__device__`
+// machine code: rendezvous ops via `vgre_ssa_warp` on ucontext fibers, `__activemask` via
+// `vgre_ssa_activemask`; portable evaluator elsewhere), casts, unary + binary math intrinsics, calls to `__device__`
 // helper functions (inlined, alpha-renamed, non-recursive), and FULL control flow —
 // `if`/`if-else`, `for`, `while`, `do-while`, `break`, `continue`, and `switch`
 // (C fall-through) — with proper SSA phi insertion (Braun et al.). compile() also runs

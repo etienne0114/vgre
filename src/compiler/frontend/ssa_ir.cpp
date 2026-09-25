@@ -1197,6 +1197,7 @@ static void computeRegAlloc(const Fn& fn, int nvals,
     auto emitsCall = [&](const Inst& in) {
         if (in.op == Op::CallMath || in.op == Op::Barrier) return true;   // Barrier = call vgre_ssa_barrier (clobbers caller-saved XMM)
         if (in.op == Op::WarpShfl || in.op == Op::WarpVote || in.op == Op::WarpReduce || in.op == Op::WarpMatch) return true;   // call vgre_ssa_warp
+        if (in.op == Op::WarpActive) return true;   // call vgre_ssa_activemask
         if (in.op == Op::Cmp) return fn.vals[in.a[0]].ty.isFloating() || fn.vals[in.a[1]].ty.isFloating();
         if (in.op == Op::Cast) return !in.ty.isFloating() && !in.ty.isPointer() && fn.vals[in.a[0]].ty.isFloating();
         if (in.op == Op::Bin)  return (in.s == "/" || in.s == "%") && !in.ty.isFloating();
@@ -1324,6 +1325,20 @@ extern "C" uint64_t vgre_ssa_warp(int wdesc, uint64_t a0, uint64_t a1, uint64_t 
     f->wdesc = wdesc; f->wa0 = a0; f->wa1 = a1; f->wa2 = a2; f->wait = 2;
     swapcontext(&f->ctx, f->sched);
     return f->wres;
+}
+// __activemask(): the warp's in-range lane mask, reproducing the interpreter/compiled
+// tiers' sequential-live-lane behavior (lower lanes have already retired) as the
+// closed form `fullWarpMask & ~((1<<lane)-1)`. Per-thread — no rendezvous — so it just
+// reads the launch geometry from the ThreadCtx (passed in rbx by the emitter); works in
+// both the fiber and the direct per-thread native paths. Matches the evaluator exactly.
+extern "C" uint64_t vgre_ssa_activemask(const ThreadCtx* c) {
+    const uint32_t* idx = c->idx;   // [0..2]=tid, [3..5]=ctaid, [6..8]=ntid(blockDim)
+    const uint32_t lin  = idx[0] + idx[1] * idx[6] + idx[2] * idx[6] * idx[7];
+    const uint32_t nT   = idx[6] * idx[7] * idx[8];
+    const uint32_t wbase = (lin / 32u) * 32u, lane = lin & 31u;
+    uint32_t cnt = nT - wbase; if (cnt > 32u) cnt = 32u;
+    const uint32_t full = (cnt >= 32u) ? 0xFFFFFFFFu : ((1u << cnt) - 1u);
+    return full & ~((1u << lane) - 1u);
 }
 #endif  // VGRE_SSA_X64 || VGRE_SSA_ARM64
 
@@ -1598,7 +1613,8 @@ struct X64Asm {
                 stG(0, id);                          // integer result
                 return;
             }
-            case Op::WarpActive: bad(); return;   // per-thread sequential-done mask — kept on the evaluator
+            case Op::WarpActive:   // __activemask(): pass the ThreadCtx (rbx) → helper → rax
+                movReg(7, 3); call((uint64_t)&vgre_ssa_activemask); stG(0, id); return;
             case Op::LoadS: {   // rax = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldRbxOfs(0, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); imulRR(1, 2); addRR(0, 1);
                 movImm(1, (uint64_t)sharedOff[in.arrId]); addRR(0, 1);

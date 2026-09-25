@@ -165,6 +165,9 @@ int main() {
     checkVsInterp("do-while", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; int k=0; do { acc += x[i*m+k]; k++; } while(k<m); y[i]=acc; } })", 96, 16);
     // Nested loop with a break in the inner body (back-edge live intervals + break edges).
     checkVsInterp("nest-brk", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float acc=0.0f; for(int a=0;a<m;a++){ for(int b=0;b<m;b++){ float v=x[i*m+b]; if(v<0.0f) break; acc+=v; } acc+=1.0f; } y[i]=acc; } })", 96, 16);
+    // unsigned int → float with the high bit set: must use UNSIGNED conversion
+    // (native cvtsi2sd is signed → 0x80000000+ would go negative). Bit-exact vs interp.
+    checkVsInterp("u2f", R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ unsigned u=(unsigned)(i*m)+2147483640u; y[i]=(float)u; } })", 96, 4);
     // switch: multiple cases, break, C fall-through (case 2 → case 3), and default.
     checkVsInterp("switch",   R"(extern "C" __global__ void k(const float* x, float* y, int n, int m){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n){ float v=x[i*m]; float r=0.0f; switch(i%4){ case 0: r=v; break; case 1: r=v*2.0f; break; case 2: r=v*3.0f; case 3: r=r+1.0f; break; default: r=-v; } y[i]=r; } })", 96, 16);
     // __shared__ + __syncthreads: each thread loads x[i] into a block-shared array, then
@@ -225,11 +228,11 @@ int main() {
     // scheduler's per-warp resolve) on x86-64/Linux — not just the evaluator fallback.
     {
         std::string err;
-        auto sp = SsaProgram::compile("extern \"C\" __global__ void k(const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i]:0.0f; for(int o=16;o>0;o>>=1) v+=__shfl_down_sync(0xffffffff, v, o); unsigned b=__ballot_sync(0xffffffff, v>0.0f); if(i<n) y[i]=v+(float)(b&1); }", "k", err);
+        auto sp = SsaProgram::compile("extern \"C\" __global__ void k(const float* x, float* y, int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; float v=(i<n)?x[i]:0.0f; for(int o=16;o>0;o>>=1) v+=__shfl_down_sync(0xffffffff, v, o); unsigned b=__ballot_sync(0xffffffff, v>0.0f); unsigned am=__activemask(); if(i<n) y[i]=v+(float)(b&1)+(float)(am&1); }", "k", err);
         if (!sp) { std::printf("FAIL: warp native probe compile: %s\n", err.c_str()); ++g_fail; }
 #if defined(__x86_64__) && defined(__linux__) && !defined(VGRE_SSA_NO_NATIVE)
-        else if (!sp->usedNative()) { std::printf("FAIL: warp intrinsics expected native x86-64 code (shfl+ballot)\n"); ++g_fail; }
-        else std::printf("  warp-native: __shfl_down_sync + __ballot_sync emit native machine code\n");
+        else if (!sp->usedNative()) { std::printf("FAIL: warp intrinsics expected native x86-64 code (shfl+ballot+activemask)\n"); ++g_fail; }
+        else std::printf("  warp-native: __shfl_down_sync + __ballot_sync + __activemask emit native machine code\n");
 #else
         else std::printf("  warp-native: not x86-64/Linux — warp intrinsics run on the evaluator\n");
 #endif
