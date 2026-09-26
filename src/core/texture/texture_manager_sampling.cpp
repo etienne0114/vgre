@@ -587,16 +587,13 @@ float TextureManager::tex2DLayered(TextureId id, float x, float y, int layer) co
   return sampleLayer2D(tex, sx, sy, layer);
 }
 
-// Cubemap: the direction (x,y,z)'s major axis picks a face (layers 0..5:
-// +X,-X,+Y,-Y,+Z,-Z), the other two components give the face-local [0,1] coords
-// (standard OpenGL/D3D cube mapping). Sampled as that layer at pixel coords.
-float TextureManager::texCubemap(TextureId id, float x, float y, float z) const {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  auto it = textures_.find(id);
-  if (it == textures_.end()) return 0.0f;
-  const auto &tex = it->second;
+// The direction (x,y,z)'s major axis picks a cube face (0..5: +X,-X,+Y,-Y,+Z,-Z);
+// the other two components give the face-local [0,1] coords (standard OpenGL/D3D cube
+// mapping). Returns false for a zero direction. Shared by cubemap + cubemap-array.
+namespace {
+bool cubeFaceCoords(float x, float y, float z, int &face, float &s, float &t) {
   const float ax = std::fabs(x), ay = std::fabs(y), az = std::fabs(z);
-  int face; float uc, vc, ma;
+  float uc, vc, ma;
   if (ax >= ay && ax >= az) {                 // major axis X
     ma = ax; if (x >= 0.0f) { face = 0; uc = -z; vc = -y; } else { face = 1; uc = z;  vc = -y; }
   } else if (ay >= az) {                       // major axis Y
@@ -604,10 +601,69 @@ float TextureManager::texCubemap(TextureId id, float x, float y, float z) const 
   } else {                                      // major axis Z
     ma = az; if (z >= 0.0f) { face = 4; uc = x;  vc = -y; } else { face = 5; uc = -x; vc = -y; }
   }
-  if (ma == 0.0f) return tex.desc.borderColor;
-  const float s = 0.5f * (uc / ma + 1.0f);     // face-local [0,1]
-  const float t = 0.5f * (vc / ma + 1.0f);
+  if (ma == 0.0f) return false;
+  s = 0.5f * (uc / ma + 1.0f);
+  t = 0.5f * (vc / ma + 1.0f);
+  return true;
+}
+}  // namespace
+
+// Cubemap: faces stored as layers 0..5, sampled at the face-local coords.
+float TextureManager::texCubemap(TextureId id, float x, float y, float z) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  int face; float s, t;
+  if (!cubeFaceCoords(x, y, z, face, s, t)) return tex.desc.borderColor;
   return sampleLayer2D(tex, s * static_cast<float>(tex.width), t * static_cast<float>(tex.height), face);
+}
+
+// Cubemap array: cube `arrayLayer`'s face lives at layer arrayLayer*6 + face.
+float TextureManager::texCubemapLayered(TextureId id, float x, float y, float z, int arrayLayer) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  int face; float s, t;
+  if (!cubeFaceCoords(x, y, z, face, s, t)) return tex.desc.borderColor;
+  return sampleLayer2D(tex, s * static_cast<float>(tex.width), t * static_cast<float>(tex.height),
+                       arrayLayer * 6 + face);
+}
+
+// Layered + explicit LOD: trilinear across the two nearest mip levels of `layer`.
+// Non-mipmapped layered textures clamp to the base level (correct CUDA behavior).
+float TextureManager::tex2DLayeredLod(TextureId id, float x, float y, int layer, float lod) const {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = textures_.find(id);
+  if (it == textures_.end()) return 0.0f;
+  const auto &tex = it->second;
+  const int W = static_cast<int>(tex.width), H = static_cast<int>(tex.height);
+  const float nx = tex.desc.normalizedCoords ? x : x / static_cast<float>(W);   // → [0,1]
+  const float ny = tex.desc.normalizedCoords ? y : y / static_cast<float>(H);
+  auto strIt = mipmapLayerStride_.find(id);
+  auto offIt = mipmapLevelOffsets_.find(id);
+  auto arrIt = ownedArrays_.find(id);
+  if (strIt == mipmapLayerStride_.end() || offIt == mipmapLevelOffsets_.end() ||
+      arrIt == ownedArrays_.end() || tex.mips <= 1) {                            // base level only
+    return sampleLayer2D(tex, nx * static_cast<float>(W), ny * static_cast<float>(H), layer);
+  }
+  const int nL = static_cast<int>(tex.mips);
+  const float clod = std::max(0.0f, std::min(lod, static_cast<float>(nL - 1)));
+  const int l0 = static_cast<int>(std::floor(clod)), l1 = std::min(l0 + 1, nL - 1);
+  const float blend = clod - static_cast<float>(l0);
+  int lay = layer; if (lay < 0) lay = 0; else if (lay >= static_cast<int>(tex.layers)) lay = static_cast<int>(tex.layers) - 1;
+  const size_t stride = strIt->second;
+  const std::vector<size_t> &offs = offIt->second;
+  auto sampleLvl = [&](int L) -> float {
+    TextureObject v = tex;                              // inherit desc / dtype / addressing
+    v.data = arrIt->second.data();
+    v.offsetInBytes = static_cast<size_t>(lay) * stride + offs[L];
+    v.width = std::max(1, W >> L); v.height = std::max(1, H >> L);
+    v.layers = 1; v.depth = 1; v.mips = 1;
+    return sampleLayer2D(v, nx * static_cast<float>(v.width), ny * static_cast<float>(v.height), 0);
+  };
+  return sampleLvl(l0) * (1.0f - blend) + sampleLvl(l1) * blend;
 }
 
 float TextureManager::tex1DLayered(TextureId id, float x, int layer) const {

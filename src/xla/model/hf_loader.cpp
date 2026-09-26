@@ -75,6 +75,7 @@ struct LlamaNames {
     std::string embed, norm, lmhead, prefix;
     std::string attn_norm, q, k, v, o, ffn_norm, gate, up, down;
     std::string qb, kb, vb;   // optional Q/K/V bias suffixes (Qwen2)
+    std::string attn_sub, ffn_sub;  // optional SubLN suffixes (BitNet); empty = none
 };
 
 // Reader is SafeTensors or GGUF — both expose info(name)->shape and load(name, Literal&).
@@ -164,6 +165,14 @@ bool loadLlamaCore(GPT& model, Reader& rd, const LlamaNames& nm, bool ropePermut
                    loadBias(src(l, nm.kb), vp(l, "bk"), KVH, ropePermute);
                    loadBias(src(l, nm.vb), vp(l, "bv"), KVH, false); }
         }
+        // BitNet SubLN gains (1-D, no transpose) — loaded iff the model was built
+        // with sub_norm and the checkpoint carries them (both must agree).
+        if (c.sub_norm) {
+            const bool hasSub = rd.info(src(l, nm.attn_sub)) != nullptr;
+            if (!hasSub) { VGRE_LOG_ERROR("llama_loader", "sub_norm set but checkpoint has no " + src(l, nm.attn_sub)); ok = false; }
+            else { put(vp(l, "attn_sub_g"), loadMat(src(l, nm.attn_sub), R, C));
+                   put(vp(l, "ffn_sub_g"),  loadMat(src(l, nm.ffn_sub),  R, C)); }
+        }
         { auto w = loadMat(src(l, nm.gate), R, C); if (ok) put(vp(l, "Wgate"), transpose(w, R, C)); }
         { auto w = loadMat(src(l, nm.up),   R, C); if (ok) put(vp(l, "Wup"),   transpose(w, R, C)); }
         { auto w = loadMat(src(l, nm.down), R, C); if (ok) put(vp(l, "Wdown"), transpose(w, R, C)); }
@@ -195,6 +204,25 @@ bool load_gguf_llama(GPT& model, const std::string& path) {
         "attn_norm.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight",
         "attn_output.weight", "ffn_norm.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
         "attn_q.bias", "attn_k.bias", "attn_v.bias"};
+    return loadLlamaCore(model, *g, nm, /*ropePermute=*/false);
+}
+
+bool load_gguf_bitnet(GPT& model, const std::string& path) {
+    if (!model.config().sub_norm) {
+        VGRE_LOG_ERROR("bitnet_loader", "model Config must have sub_norm=true for BitNet");
+        return false;
+    }
+    auto g = GGUF::open(path);
+    if (!g) { VGRE_LOG_ERROR("bitnet_loader", "cannot open " + path); return false; }
+    // Same GGUF names as llama.cpp (RoPE permute already baked in → ropePermute=false),
+    // plus BitNet's two per-block SubLN gains. The ternary linears are I2_S (ggml
+    // type 36), dequantized to f32 by the GGUF reader.
+    LlamaNames nm{
+        "token_embd.weight", "output_norm.weight", "output.weight", "blk.",
+        "attn_norm.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight",
+        "attn_output.weight", "ffn_norm.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+        "attn_q.bias", "attn_k.bias", "attn_v.bias",
+        "attn_sub_norm.weight", "ffn_sub_norm.weight"};
     return loadLlamaCore(model, *g, nm, /*ropePermute=*/false);
 }
 

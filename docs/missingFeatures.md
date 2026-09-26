@@ -24,28 +24,40 @@ Net-new or breadth work we can do without external hardware. (Items marked *corr
 already run on some tier and are bit-exact — what's left is a native path, a loader, or breadth.)
 
 ### 1.1 Packaging & distribution
-- **macOS Intel (x86-64) wheel** — the v0.1.0 macOS wheel bundles an **arm64-only** dylib, so Intel
-  Macs must build from source. Add an x86-64 build (or a true universal2 fat dylib) to the
-  release-wheels matrix.
-- **PyPI publish** — wheels currently live on the GitHub Release only. Add a trusted-publisher
-  workflow so `pip install vgre` resolves from PyPI directly.
-- **Docker image** — the multi-arch build (arm64 via QEMU) is slow. Ship the **amd64** image fast,
-  and build arm64 on a native ARM runner instead of emulation.
+- **PyPI publish** — the trusted-publisher **workflow is now in place** (`release-wheels.yml` → the
+  opt-in `pypi` job, `pypa/gh-action-pypi-publish` via OIDC, gated behind `publish_pypi=true` so it
+  never breaks the auto-tag release). The only thing left is the **one-time PyPI-side setup** — create
+  the `vgre` project and add a trusted publisher for this repo/workflow/`pypi` environment — which is
+  an **account action** on pypi.org, not in-tree code.
+- *(Done — the release-wheels matrix now builds a **macOS Intel (x86-64) wheel** on the `macos-13`
+  runner alongside the arm64 one, `build_wheel.sh` tags each by the host platform. The Docker
+  release now builds **amd64 and arm64 each on its own native runner** in parallel — no QEMU
+  emulation — then merges them into one multi-arch manifest. Both are validated by CI on the
+  next release tag.)*
 
 ### 1.2 SSA / native codegen (Tier-2)
-- **Native AArch64 codegen for the cooperative ops** — shared-memory/`__syncthreads` and the warp
-  intrinsics emit native machine code on x86-64 but fall to the portable evaluator on ARM. Emit them
-  natively on AArch64 (the `Arm64Asm` encoders and the ucontext-fiber scheduler already exist).
-- **Flip `VGRE_SSA_ARM_NATIVE` on by default** — after validating native AArch64 *execution* on real
-  Apple-Silicon / ARM hardware (the encodings are already llvm-mc-verified and execution is
-  CI-checked on `macos-arm64`).
+- *(Done — native AArch64 codegen now covers the **full cooperative surface**: shared-memory /
+  `__syncthreads` (already native) **and the warp intrinsics** (`__shfl_*`/vote/`__reduce_*`/match/
+  `__activemask`) now emit AArch64 machine code — `bl vgre_ssa_warp`/`vgre_ssa_activemask` per
+  AAPCS64, mirroring the x86-64 path and reusing the same portable helpers + ucontext-fiber
+  scheduler. It composes only encoders already verified by `arm64EncSelfTest` against llvm-mc.)*
+- **Flip `VGRE_SSA_ARM_NATIVE` on by default** — the only remaining step: validate native AArch64
+  *execution* on real Apple-Silicon / ARM hardware (encodings are llvm-mc-verified; execution is
+  CI-checked on `macos-arm64` with the flag). This gate is inherently **hardware-dependent**.
 
 ### 1.3 Front-end breadth (from-scratch tiers)
-- **Texture / surface**: `tex2DLayeredLod` / cubemap-array variants (scalar `tex1D/2D/3D`,
-  `tex1Dfetch`, `surf2Dread/write`, vector fetches `texND<float4>`/`float2`, `tex2DLod`,
-  layered `tex1DLayered`/`tex2DLayered`, and **cubemap `texCubemap`** already run on both tiers,
-  bit-exact vs the shared `TextureManager`).
-- **Recursion** in `__device__` helpers (currently rejected; templates + inlining are done).
+- *(Done — the full texture/surface surface runs on both from-scratch tiers, bit-exact vs the
+  shared `TextureManager`: scalar `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write`, vector fetches
+  `texND<float4>`/`float2`, `tex2DLod`, layered `tex1DLayered`/`tex2DLayered`, cubemap `texCubemap`,
+  cubemap-array `texCubemapLayered`, and **`tex2DLayeredLod`** — trilinear across the mip levels of
+  a mipmapped **layered array** (`createMipmappedLayeredArray`); the LOD genuinely selects levels.)*
+- **Recursion** in `__device__` helpers now runs on the **Tier-1 compiled** backend (a
+  recursive helper is compiled once into a shared body over a fixed slot frame that is
+  saved/restored around each call, so the native stack carries the nested invocations —
+  direct + mutual recursion). The interpreter/SSA tiers still inline and reject it, so a
+  recursive kernel is dispatched to the compiled tier. **Mutual recursion** works too —
+  function prototypes / forward declarations (`ret name(params);`) now parse, so
+  `isEven`↔`isOdd` runs end-to-end.
 - *(The SSA tier now runs the full scalar CUDA-C subset: multi-dimensional arrays
   — `float As[H][W]` —, dynamic `extern __shared__` — launch-sized shared buffers —,
   and by-value struct kernel params are all supported, bit-exact vs the other tiers.)*
@@ -60,8 +72,8 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |
 |-------|------|--------|
-| **T3** Speculative decoding | early-exit self-speculative drafting | throughput optimization (greedy + sampler-exact linear speculative decode, **SpecInfer/Medusa-style tree verification** — accept the longest valid root→leaf path, distribution-exact — KV rollback, prompt-lookup drafter already land) |
-| **T4** State-space models | a Mamba safetensors/GGUF loader | breadth (single-state selective scan, depthwise conv1d, **and the Mamba-3 MIMO matrix-state scan** — `H∈R^{N×P}` outer-product update, parallel==sequential, P=1≡SISO — already done) |
+| **T3** Speculative decoding | — (complete) | throughput optimization — all delivered: greedy + sampler-exact linear speculative decode, SpecInfer/Medusa-style tree verification (distribution-exact), KV rollback, prompt-lookup drafter, **and early-exit self-speculative decoding** (draft with the first E layers, verify with the full model via the batched path — lossless, output == greedy; `SampleConfig::early_exit_draft`) |
+| **T4** State-space models | — (complete) | single-state selective scan, depthwise conv1d, the Mamba-3 MIMO matrix-state scan, a full Mamba-1 model + safetensors loader (`mamba.h`/`mamba_loader.cpp`), **and a verified end-to-end run of a real checkpoint** — `tools/mamba_run` loads the open **`state-spaces/mamba-130m-hf`** (130M params, 24 layers) and its logits match an independent NumPy Mamba-1 forward at **cosine sim 1.0** (identical argmax, 10/10 top-10, max abs diff 2e-4) |
 
 ---
 
@@ -69,8 +81,12 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 
 | Item | What is already built | Blocker |
 |------|-----------------------|---------|
-| **T1** GGUF `I2_S` / TL1 / TL2 ternary tensor loader | absmean ternary codec + multiplication-free GEMM + `BitLinear` QAT | a real **BitNet-b1.58** checkpoint (gated download) to verify end-to-end |
+| **T1** GGUF `I2_S` ternary loader **+ BitNet SubLN transformer** | **DONE (loader + model)** — (a) `I2_S` (ggml type 36) dequantizes in the GGUF loader (`quant.h::dequant_i2_s` + `gguf.cpp`): 2-bit MSB-packed `(c0<<6)|(c1<<4)|(c2<<2)|c3`, codes→{-1,0,+1}, trailing f32 scale = 1/mean\|w\| ⇒ `w=(code-1)/scale` (microsoft/BitNet reference doc; validated by `test_i2s_quant` + bit-identical to a reference dequant on the real `bitnet-b1.58-2B` tensor bytes). (b) The **BitNet-b1.58 SubLN transformer** is wired into the runtime: `Config::sub_norm` adds the two per-block RMSNorm sub-layers (`attn_sub_norm` on the attention output before `o_proj`, `ffn_sub_norm` on the SwiGLU intermediate before `down_proj`) across all three forward paths (autograd `forward`, KV-cached decode, batched prefill), and `load_gguf_bitnet` loads the `bitnet-b1.58` GGUF (GQA 20/5 + RoPE-500000 + tied head + I2_S linears). `test_bitnet_subln` checks the forward is **bit-exact (max\|Δ\|≈1e-7) vs an independent reference** and that decode==prefill; `tools/bitnet_run` runs the real 1.2 GB checkpoint end-to-end. TL1/TL2 are the T-MAC LUT variants (separate). | — (in-tree code complete) |
 | **Frontier-scale checkpoints** (Llama-3-8B/70B/405B, GPT-3) | identical code path to the verified **GPT-2 (124M)** run (matches Hugging Face) | a **license-gated, multi-GB download** |
+
+*(Mamba is no longer here — the loader + forward were run end-to-end on the real
+open `mamba-130m-hf` checkpoint and match a reference at cosine sim 1.0; see the T4 row.
+BitNet/frontier remain because their checkpoints are license-**gated**, not merely large.)*
 
 ---
 

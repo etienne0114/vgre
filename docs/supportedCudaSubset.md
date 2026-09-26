@@ -252,15 +252,18 @@ softmax-attention reference to ~5e-8 (float rounding). The canonical transformer
 workload runs on the from-scratch front-end.
 
 ## Not yet supported (returns an error, falls back to JIT when available)
-- recursion (function templates **are** supported — see the helper-functions row)
-- texture/surface types beyond the scalar-`float` path — vector fetches (`float4`
-  etc.), layered/cubemap/mipmap sampling, and `tex2DLod` on the from-scratch tiers
-  (scalar `tex1D/2D/3D`, `tex1Dfetch`, `surf2Dread/write` **are** supported — see
-  the texture row)
-- `__shfl` predicate/return variants beyond the four `__shfl_*_sync` forms, and
-  `__ballot`-style vote **without** an explicit membership mask (the `_sync`
-  forms — `__ballot_sync`/`__any_sync`/`__all_sync` — and 64-bit `__shfl_*_sync`
-  of `double`/`long` **are** supported)
+- **nested template arguments** `foo<bar<int>>` and templated `__global__` launch
+  entries (function templates on `__device__` helpers, incl. deduced/explicit/non-type/
+  chained/pointer, **are** supported — see the helper-functions row)
+- legacy warp intrinsics **without** an explicit membership mask (`__shfl`/`__ballot`
+  vs the `_sync` forms) — the whole `_sync` surface is supported (`__shfl_*_sync`,
+  `__ballot_sync`/`__any_sync`/`__all_sync`, `__reduce_*_sync`, `__match_*_sync`,
+  `__activemask`, incl. 64-bit `__shfl_*_sync` of `double`/`long`)
+
+*(No longer here — now supported on the from-scratch tiers: **recursion** in `__device__`
+helpers incl. **mutual recursion** via function prototypes/forward declarations (Tier-1
+compiled); the full **texture/surface** surface — vector fetches `texND<float4>`,
+`tex2DLod`, layered/cubemap/cubemap-array/layered-LOD sampling; and PTX `mul.hi.64`.)*
 
 Grow this set test-first: add a kernel test under `tests/compiler/`, implement it
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier

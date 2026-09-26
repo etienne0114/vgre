@@ -1677,9 +1677,15 @@ struct Codegen {
         } else if (fn == "tex1DLayered" && e.args.size() == 3) {
             Val x = fc(*e.args[1]); Val layer = ic(*e.args[2]); if (failed) return {};
             emit("vgretex1dlayered.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + layer.reg + ";");
+        } else if (fn == "tex2DLayeredLod" && e.args.size() == 5) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val layer = ic(*e.args[3]); Val lod = fc(*e.args[4]); if (failed) return {};
+            emit("vgretex2dlayeredlod.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + layer.reg + ", " + lod.reg + ";");
         } else if (fn == "texCubemap" && e.args.size() == 4) {
             Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val z = fc(*e.args[3]); if (failed) return {};
             emit("vgretexcubemap.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + z.reg + ";");
+        } else if (fn == "texCubemapLayered" && e.args.size() == 5) {
+            Val x = fc(*e.args[1]); Val y = fc(*e.args[2]); Val z = fc(*e.args[3]); Val ly = ic(*e.args[4]); if (failed) return {};
+            emit("vgretexcubemaplayered.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ", " + z.reg + ", " + ly.reg + ";");
         } else if (fn == "surf2Dread" && e.args.size() == 3) {
             Val x = ic(*e.args[1]); Val y = ic(*e.args[2]); if (failed) return {};
             emit("vgresurf2dread.f32 " + d + ", " + h.reg + ", " + x.reg + ", " + y.reg + ";");
@@ -1901,7 +1907,8 @@ struct Codegen {
         if (fn == "__match_any_sync" || fn == "__match_all_sync") return emitMatch(e);
         if (fn == "tex1D" || fn == "tex2D" || fn == "tex3D" || fn == "tex1Dfetch" ||
             fn == "tex2DLod" || fn == "tex1DLayered" || fn == "tex2DLayered" ||
-            fn == "texCubemap" || fn == "surf2Dread" || fn == "surf2Dwrite") return emitTex(e);
+            fn == "tex2DLayeredLod" || fn == "texCubemap" || fn == "texCubemapLayered" ||
+            fn == "surf2Dread" || fn == "surf2Dwrite") return emitTex(e);
         if (deviceFns_) {
             auto it = deviceFns_->find(fn);
             if (it != deviceFns_->end()) return emitInlineDeviceCall(*it->second, e);

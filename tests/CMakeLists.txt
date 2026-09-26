@@ -1082,6 +1082,16 @@ target_link_libraries(test_cuda_device_fn PRIVATE vgre Threads::Threads)
 add_test(NAME CudaDeviceFn COMMAND test_cuda_device_fn)
 set_tests_properties(CudaDeviceFn PROPERTIES TIMEOUT 30)
 
+add_executable(test_cuda_recursion compiler/test_cuda_recursion.cpp)
+target_link_libraries(test_cuda_recursion PRIVATE vgre Threads::Threads)
+add_test(NAME CudaRecursion COMMAND test_cuda_recursion)
+set_tests_properties(CudaRecursion PROPERTIES TIMEOUT 30)
+
+add_executable(test_ptx_mul64hi compiler/test_ptx_mul64hi.cpp)
+target_link_libraries(test_ptx_mul64hi PRIVATE vgre Threads::Threads)
+add_test(NAME PtxMul64Hi COMMAND test_ptx_mul64hi)
+set_tests_properties(PtxMul64Hi PROPERTIES TIMEOUT 30)
+
 # Track Z: by-value struct kernel parameters (interpreter tier).
 add_executable(test_cuda_struct compiler/test_cuda_struct.cpp)
 target_link_libraries(test_cuda_struct PRIVATE vgre Threads::Threads)
@@ -1882,6 +1892,23 @@ add_executable(test_ssm_scan core/test_ssm_scan.cpp)
 target_link_libraries(test_ssm_scan PRIVATE vgre)
 add_test(NAME SSMSelectiveScan COMMAND test_ssm_scan)
 set_tests_properties(SSMSelectiveScan PROPERTIES TIMEOUT 30)
+
+add_executable(test_mamba xla/test_mamba.cpp)
+target_link_libraries(test_mamba PRIVATE vgre)
+add_test(NAME MambaModel COMMAND test_mamba)
+set_tests_properties(MambaModel PROPERTIES TIMEOUT 30)
+
+add_executable(test_i2s_quant xla/test_i2s_quant.cpp)
+target_link_libraries(test_i2s_quant PRIVATE vgre)
+add_test(NAME BitNetI2S COMMAND test_i2s_quant)
+set_tests_properties(BitNetI2S PROPERTIES TIMEOUT 30)
+
+# BitNet-b1.58 SubLN transformer forward (attn_sub_norm/ffn_sub_norm) vs an
+# independent reference + decode/prefill consistency.
+add_executable(test_bitnet_subln xla/test_bitnet_subln.cpp)
+target_link_libraries(test_bitnet_subln PRIVATE vgre Threads::Threads)
+add_test(NAME BitNetSubLN COMMAND test_bitnet_subln)
+set_tests_properties(BitNetSubLN PROPERTIES TIMEOUT 60)
 
 # Phase 3, P3-11: structured attention masks (sliding-window/sink/ALiBi).
 add_executable(test_attention_masks core/test_attention_masks.cpp)

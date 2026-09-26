@@ -30,6 +30,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -537,6 +539,9 @@ public:
     // Populated by Compiler (friend-like via public setters kept minimal).
     std::vector<ParamInfo> params_;
     std::vector<StmtFn> body_;
+    // Recursive __device__ bodies, owned for the kernel's lifetime (call closures
+    // hold raw pointers into these — keeping them here avoids a shared_ptr self-cycle).
+    std::vector<std::shared_ptr<StmtFn>> recBodies_;
     size_t numSlots_ = 0;
     size_t sharedSlots_ = 0;   // block-wide __shared__ Cell count
     bool coop_ = false;        // uses __shared__/__syncthreads → fiber scheduler
@@ -580,6 +585,21 @@ struct Compiler {
     struct RetCtx { size_t retSlot; Type retType; };
     std::vector<RetCtx> retCtx;
     std::unordered_map<std::string, int> inlining;
+
+    // Recursion: a `__device__` function that can transitively reach itself is NOT
+    // inlined (that would loop forever at compile time). It is compiled once into a
+    // shared body callable over a fixed slot frame; each call saves that frame, runs
+    // the body, then restores it — so the native C++ stack carries the nested frames.
+    struct RecFn {
+        std::shared_ptr<StmtFn> body;     // filled after the body compiles (forward ref for self-calls)
+        std::vector<size_t> pslots;       // parameter slots
+        std::vector<Type> ptypes;
+        size_t frameLo = 0, frameHi = 0;  // the callee's slot range [lo,hi) to save/restore
+        size_t retSlot = 0;
+        Type rt;
+    };
+    std::unordered_map<std::string, std::shared_ptr<RecFn>> recFns_;
+    std::set<std::string> recursiveFns_;   // fns on a call cycle (computed once)
 
     // Struct layouts (member offsets/types) come from the parsed module.
     const Module* mod = nullptr;
@@ -923,7 +943,8 @@ struct Compiler {
                 // Texture/surface fetches return a float sample (VGRE's scalar path).
                 if (fn == "tex1D" || fn == "tex2D" || fn == "tex3D" || fn == "tex1Dfetch" ||
                     fn == "tex2DLod" || fn == "tex1DLayered" || fn == "tex2DLayered" ||
-                    fn == "texCubemap" || fn == "surf2Dread")
+                    fn == "tex2DLayeredLod" || fn == "texCubemap" || fn == "texCubemapLayered" ||
+                    fn == "surf2Dread")
                     return scalar(Type::Float);
                 // Math intrinsic: the `f`-suffixed spelling returns float, else double.
                 return scalar(!fn.empty() && fn.back() == 'f' ? Type::Float : Type::Double);
@@ -1386,6 +1407,112 @@ struct Compiler {
         };
     }
 
+    // Collect the names of __device__ helpers called (transitively at this level)
+    // anywhere in an expression / statement subtree.
+    void collectCalleesExpr(const Expr* e, std::set<std::string>& out) {
+        if (!e) return;
+        if (e->kind == Expr::Call && deviceFns.count(e->str)) out.insert(e->str);
+        for (auto& a : e->args) collectCalleesExpr(a.get(), out);
+    }
+    void collectCalleesStmt(const Stmt* s, std::set<std::string>& out) {
+        if (!s) return;
+        collectCalleesExpr(s->expr.get(), out);        // VarDecl init / ExprStmt / Return / If&While cond / Switch value
+        collectCalleesExpr(s->forCond.get(), out);
+        collectCalleesExpr(s->forIncr.get(), out);
+        if (s->forInit) collectCalleesStmt(s->forInit.get(), out);
+        for (auto& st : s->body) collectCalleesStmt(st.get(), out);
+        for (auto& st : s->elseBody) collectCalleesStmt(st.get(), out);
+    }
+
+    // Mark every __device__ fn that can transitively reach itself (direct or mutual
+    // recursion). Those are compiled as call frames instead of inlined.
+    void computeRecursiveFns() {
+        std::unordered_map<std::string, std::set<std::string>> adj;
+        for (auto& kv : deviceFns) {
+            std::set<std::string> callees;
+            for (auto& s : kv.second->body) collectCalleesStmt(s.get(), callees);
+            adj[kv.first] = std::move(callees);
+        }
+        for (auto& kv : adj) {
+            std::set<std::string> seen;
+            std::vector<std::string> stack(kv.second.begin(), kv.second.end());
+            while (!stack.empty()) {
+                std::string n = stack.back(); stack.pop_back();
+                if (n == kv.first) { recursiveFns_.insert(kv.first); break; }
+                if (!seen.insert(n).second) continue;
+                auto it = adj.find(n);
+                if (it != adj.end()) for (auto& c : it->second) stack.push_back(c);
+            }
+        }
+    }
+
+    // Compile a recursive __device__ fn ONCE into a shared body over a fixed slot
+    // frame. Inserted into recFns_ before its body compiles, so self-calls resolve to
+    // the same (forward-referenced) body pointer.
+    std::shared_ptr<RecFn> compileRecursiveDeviceFn(const Kernel& fn) {
+        auto found = recFns_.find(fn.name);
+        if (found != recFns_.end()) return found->second;      // forward reference
+        auto rf = std::make_shared<RecFn>();
+        rf->body = std::make_shared<StmtFn>();
+        rf->rt = fn.returnType;
+        recFns_[fn.name] = rf;                                  // register before compiling the body
+
+        auto savedSlot = std::move(slot);     slot.clear();
+        auto savedVtype = std::move(vtype);   vtype.clear();
+        auto savedArrays = std::move(arrays); arrays.clear();
+        auto savedStructs = std::move(structVars); structVars.clear();
+
+        rf->frameLo = nextSlot;
+        for (auto& p : fn.params) { rf->pslots.push_back(declare(p.name, p.type)); rf->ptypes.push_back(p.type); }
+        for (auto& s : fn.body) { scan(*s); if (failed) break; }
+        rf->retSlot = nextSlot++;
+        rf->frameHi = nextSlot;
+        StmtFn body;
+        if (!failed) {
+            retCtx.push_back({rf->retSlot, rf->rt});
+            body = compileBody(fn.body);
+            retCtx.pop_back();
+        }
+        slot = std::move(savedSlot);
+        vtype = std::move(savedVtype);
+        arrays = std::move(savedArrays);
+        structVars = std::move(savedStructs);
+        if (!failed) *rf->body = std::move(body);
+        return rf;
+    }
+
+    // A call to a recursive __device__ fn: save the callee frame, bind args, run the
+    // shared body, read the return slot, restore the frame. Nested (recursive) calls
+    // nest naturally on the native C++ stack via `saved`.
+    ExprFn recursiveDeviceCall(const Kernel& fn, const Expr& call) {
+        if (call.args.size() != fn.params.size()) { fail("wrong argument count for '" + fn.name + "'"); return {}; }
+        std::vector<ExprFn> args;
+        for (auto& a : call.args) { args.push_back(compileExpr(*a)); if (failed) return {}; }
+        auto rf = compileRecursiveDeviceFn(fn);
+        if (failed) return {};
+        const bool isVoid = (rf->rt.base == Type::Void);
+        const Cell zero = rf->rt.isFloating() ? Cell::F(0.0) : Cell::I(0);
+        auto pslots = rf->pslots; auto ptypes = rf->ptypes;
+        const size_t frameLo = rf->frameLo, frameHi = rf->frameHi, retSlot = rf->retSlot;
+        // Non-owning pointer to the (heap-stable) body — the CompiledKernel owns the
+        // RecFn bodies (impl->recBodies_), so capturing the shared_ptr here would make
+        // the body reference itself through self-calls (a cycle → leak).
+        StmtFn* bodyRaw = rf->body.get();
+        return [args, pslots, ptypes, frameLo, frameHi, retSlot, isVoid, zero, bodyRaw](TS& ts) -> Cell {
+            std::vector<Cell> av; av.reserve(args.size());
+            for (auto& a : args) av.push_back(a(ts));                                  // eval args in the current frame
+            std::vector<Cell> saved(ts.regs.begin() + frameLo, ts.regs.begin() + frameHi);   // save callee frame
+            for (size_t i = 0; i < pslots.size(); ++i) ts.regs[pslots[i]] = coerce(av[i], ptypes[i]);
+            ts.regs[retSlot] = zero;
+            const bool savedRet = ts.returned; ts.returned = false;
+            if (bodyRaw && *bodyRaw) (*bodyRaw)(ts);
+            ts.returned = savedRet;
+            Cell r = isVoid ? Cell::I(0) : ts.regs[retSlot];
+            std::copy(saved.begin(), saved.end(), ts.regs.begin() + frameLo);          // restore
+            return r;
+        };
+    }
+
     // Inline a call to a __device__ helper: bind arg closures to fresh param slots,
     // compile the body in a fresh name scope (disjoint slot range) with a return
     // context, then run it with ts.returned save/restored so the callee's `return`
@@ -1573,10 +1700,20 @@ struct Compiler {
                 ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn ly = compileExpr(*e.args[2]); if (failed) return {};
                 return [h, x, ly](TS& ts) -> Cell { return Cell::F(TM::instance().tex1DLayered((uint64_t)h(ts).asI(), (float)x(ts).asF(), (int)ly(ts).asI())); };
             }
+            if (fn == "tex2DLayeredLod" && e.args.size() == 5) {  // layered + explicit-LOD fetch
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn y = compileExpr(*e.args[2]);
+                ExprFn ly = compileExpr(*e.args[3]); ExprFn lod = compileExpr(*e.args[4]); if (failed) return {};
+                return [h, x, y, ly, lod](TS& ts) -> Cell { return Cell::F(TM::instance().tex2DLayeredLod((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (int)ly(ts).asI(), (float)lod(ts).asF())); };
+            }
             if (fn == "texCubemap" && e.args.size() == 4) {    // cubemap direction fetch
                 ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]);
                 ExprFn y = compileExpr(*e.args[2]); ExprFn z = compileExpr(*e.args[3]); if (failed) return {};
                 return [h, x, y, z](TS& ts) -> Cell { return Cell::F(TM::instance().texCubemap((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (float)z(ts).asF())); };
+            }
+            if (fn == "texCubemapLayered" && e.args.size() == 5) {  // cubemap-array fetch
+                ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]);
+                ExprFn y = compileExpr(*e.args[2]); ExprFn z = compileExpr(*e.args[3]); ExprFn ly = compileExpr(*e.args[4]); if (failed) return {};
+                return [h, x, y, z, ly](TS& ts) -> Cell { return Cell::F(TM::instance().texCubemapLayered((uint64_t)h(ts).asI(), (float)x(ts).asF(), (float)y(ts).asF(), (float)z(ts).asF(), (int)ly(ts).asI())); };
             }
             if (fn == "surf2Dread" && e.args.size() == 3) {   // T v = surf2Dread<T>(surf, x, y)
                 ExprFn h = compileExpr(*e.args[0]); ExprFn x = compileExpr(*e.args[1]); ExprFn y = compileExpr(*e.args[2]); if (failed) return {};
@@ -1598,7 +1735,9 @@ struct Compiler {
         if (fn == "atomicXor"  && e.args.size() == 2) return compileAtomic(e, "xor");
         if (fn == "atomicCAS"  && e.args.size() == 3) return compileAtomic(e, "cas");
         auto dfit = deviceFns.find(fn);
-        if (dfit != deviceFns.end()) return inlineDeviceCall(*dfit->second, e);   // user __device__ helper
+        if (dfit != deviceFns.end())                                             // user __device__ helper
+            return recursiveFns_.count(fn) ? recursiveDeviceCall(*dfit->second, e)   // recursive → call frame
+                                           : inlineDeviceCall(*dfit->second, e);     // else inline
         if (e.args.size() == 1) {
             ExprFn a = compileExpr(*e.args[0]); if (failed) return {};
             // Intrinsics compute in double; narrowResult rounds the f32 spellings
@@ -1846,6 +1985,7 @@ static std::unique_ptr<CompiledKernel> finishCompile(Compiler& c, const Kernel& 
     impl->numSlots_ = c.nextSlot;
     impl->sharedSlots_ = c.sharedNext;
     impl->coop_ = (c.sharedNext > 0 || c.hasBarrier);   // runs on the fiber executor (every host)
+    for (auto& kv : c.recFns_) impl->recBodies_.push_back(kv.second->body);   // own recursive bodies
     return impl;
 }
 
@@ -1874,6 +2014,7 @@ std::unique_ptr<CompiledKernel> CompiledKernel::compileSource(const std::string&
     c.mod = pr.module.get();              // struct layouts for p->field
     for (auto& kp : pr.module->kernels)   // __device__ helpers this kernel may call
         if (kp->isDeviceCallable() && kp.get() != target) c.deviceFns[kp->name] = kp.get();
+    c.computeRecursiveFns();              // fns on a call cycle are compiled as frames, not inlined
     return finishCompile(c, *target, err);
 }
 

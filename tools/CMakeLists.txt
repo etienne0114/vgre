@@ -16,6 +16,17 @@ target_link_libraries(gpt2_infer PRIVATE vgre)
 add_executable(gpt2_tokenize gpt2_tokenize.cpp)
 target_link_libraries(gpt2_tokenize PRIVATE vgre)
 
+# mamba_run: end-to-end forward of a real Mamba checkpoint (state-spaces/mamba
+# safetensors) via vgre::mamba::load_mamba_safetensors + mamba_forward_logits.
+# Verified against an independent reference on mamba-130m-hf (cosine sim 1.0).
+add_executable(mamba_run mamba_run.cpp)
+target_link_libraries(mamba_run PRIVATE vgre)
+
+# bitnet_run: end-to-end forward of a real BitNet-b1.58 GGUF checkpoint
+# (microsoft/bitnet-b1.58-2B-4T, I2_S) via load_gguf_bitnet + the SubLN transformer.
+add_executable(bitnet_run bitnet_run.cpp)
+target_link_libraries(bitnet_run PRIVATE vgre Threads::Threads)
+
 # quant_dequant: dequant raw ggml block bytes (stdin) → f32 (stdout), for
 # cross-checking the K-quant kernels vs gguf.quants.dequantize.
 add_executable(quant_dequant quant_dequant.cpp)

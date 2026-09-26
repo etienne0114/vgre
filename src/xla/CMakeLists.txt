@@ -12,6 +12,7 @@ add_library(vgre_xla OBJECT
     model/transformer.cpp
     model/checkpoint.cpp
     model/hf_loader.cpp
+    mamba_loader.cpp
     model_c_api.cpp
     autograd_c_api.cpp
     safetensors.cpp

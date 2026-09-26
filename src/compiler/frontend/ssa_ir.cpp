@@ -2101,8 +2101,32 @@ struct Arm64Asm {
                 storeToBase(in.ty, 2); return;
             }
             case Op::Barrier: call((uint64_t)&vgre_ssa_barrier); return;   // __syncthreads → yield the fiber to the block scheduler
-            case Op::WarpShfl: case Op::WarpVote: case Op::WarpReduce:
-            case Op::WarpMatch: case Op::WarpActive: bad(); return;       // warp intrinsics run on the cooperative evaluator
+            // Warp intrinsics: marshal args per AAPCS64 (x0=wdesc, x1=a0, x2=a1, x3=a2)
+            // and `bl vgre_ssa_warp`, which yields to the block scheduler's per-warp
+            // resolve and returns the 64-bit result in x0 — mirrors the x86-64 path,
+            // reusing the same portable helpers + fiber scheduler. Values live across
+            // the call are in slots (Warp* is in emitsCall), so reg-alloc stays correct.
+            case Op::WarpShfl: {
+                int wdesc = 0 | (in.dim << 3);
+                if (in.a.size() > 2) ldG(3, in.a[2]); else movImm(3, 32);   // x3 = width
+                ldG(2, in.a[1]);                                            // x2 = laneArg
+                if (in.ty.isFloating()) { ldX(0, in.a[0]); fmovXD(1, 0); }  // x1 = var bits
+                else ldG(1, in.a[0]);
+                movImm(0, (uint64_t)(uint32_t)wdesc); call((uint64_t)&vgre_ssa_warp);
+                if (in.ty.isFloating()) { fmovDX(0, 0); stX(0, id); } else stG(0, id);
+                return;
+            }
+            case Op::WarpVote: case Op::WarpReduce: case Op::WarpMatch: {
+                int cls = in.op == Op::WarpVote ? 1 : in.op == Op::WarpReduce ? 2 : 3;
+                int wdesc = cls | (in.dim << 3) | (in.op == Op::WarpReduce && in.ci ? (1 << 7) : 0);
+                ldG(2, in.a[0]);                     // x2 = membermask (a[0])
+                ldG(1, in.a[1]);                     // x1 = predicate / value (a[1])
+                movImm(0, (uint64_t)(uint32_t)wdesc); call((uint64_t)&vgre_ssa_warp);
+                stG(0, id);                          // integer result
+                return;
+            }
+            case Op::WarpActive:                     // __activemask(): pass ThreadCtx (x19) → helper → x0
+                movRR(0, 19); call((uint64_t)&vgre_ssa_activemask); stG(0, id); return;
             case Op::LoadS: {   // x0 = ctx.shared + sharedOff[arrId] + idx*elemBytes
                 ldrXofs(0, 19, (int)offsetof(ThreadCtx, shared)); ldG(1, in.a[0]); movImm(2, (uint64_t)in.elemBytes); mul3(1, 1, 2);
                 movImm(2, (uint64_t)sharedOff[in.arrId]); add3(1, 1, 2); add3(0, 0, 1);

@@ -74,6 +74,10 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
         L.Wgate = initParam({D, F}, s_ff, rng, params_);
         L.Wup   = initParam({D, F}, s_ff, rng, params_);
         L.Wdown = initParam({F, D}, s_proj, rng, params_);
+        if (cfg_.sub_norm) {                // BitNet SubLN gains (ones = identity)
+            L.attn_sub_g = initOnes(D, params_);
+            L.ffn_sub_g  = initOnes(F, params_);
+        }
     }
     final_g_ = initOnes(D, params_);
     // Weight tying: reuse the token embedding [V,D] as the output projection
@@ -104,11 +108,14 @@ Var GPT::forward(const std::vector<int>& ids) {
         Var v = repeat_kv(pv, KVH, H);
         Var a = cfg_.flash_attention ? flash_attention(q, k, v, H, /*causal=*/true)
                                      : attention(q, k, v, H, /*causal=*/true);
+        if (L.attn_sub_g) a = rms_norm(a, L.attn_sub_g, cfg_.norm_eps);  // BitNet SubLN
         x = add(x, dropout(matmul(a, L.Wo), cfg_.dropout));     // residual (+dropout)
 
         // Pre-norm SwiGLU MLP: (silu(x·Wgate) ⊙ (x·Wup)) · Wdown.
         Var h2 = rms_norm(x, L.ln2_g, cfg_.norm_eps);
-        Var ff = matmul(mul(silu(matmul(h2, L.Wgate)), matmul(h2, L.Wup)), L.Wdown);
+        Var inter = mul(silu(matmul(h2, L.Wgate)), matmul(h2, L.Wup));
+        if (L.ffn_sub_g) inter = rms_norm(inter, L.ffn_sub_g, cfg_.norm_eps);  // BitNet SubLN
+        Var ff = matmul(inter, L.Wdown);
         x = add(x, dropout(ff, cfg_.dropout));                  // residual (+dropout)
     }
     Var xn = rms_norm(x, final_g_, cfg_.norm_eps);
@@ -415,7 +422,13 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     };
 
     // Decode one token at absolute position `pos`; writes next-token logits.
-    auto decode = [&](int token, int pos) {
+    // `maxLayers` < L runs only the first `maxLayers` transformer blocks and reads
+    // out early-exit logits (final RMSNorm + head on that block's hidden state) —
+    // used as the DRAFT distribution for early-exit self-speculative decoding. It
+    // still writes those layers' KV at `pos` (deterministic; overwritten by the full
+    // verify), so drafting stays consistent with the persistent cache.
+    auto decode = [&](int token, int pos, int maxLayers = -1) {
+        const int Lm = (maxLayers < 0 || maxLayers > L) ? L : maxLayers;
         if (int8) {
             const int8_t* row = &tok_emb_q8_.w[(int64_t)token * D];
             const float s = tok_emb_q8_.scale[token];
@@ -426,7 +439,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         } else {
             std::memcpy(x.data(), &tok_emb_->data[(int64_t)token * D], sizeof(float) * D);
         }
-        for (int l = 0; l < L; ++l) {
+        for (int l = 0; l < Lm; ++l) {
             const Layer& Ly = layers_[l];
             rmsNormVec(x.data(), Ly.ln1_g->data.data(), h.data(), D, cfg_.norm_eps);
             mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D);
@@ -503,12 +516,16 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     }
                 }
             }
+            if (Ly.attn_sub_g)                                           // BitNet SubLN (in place)
+                rmsNormVec(attnOut.data(), Ly.attn_sub_g->data.data(), attnOut.data(), D, cfg_.norm_eps);
             mv(attnOut.data(), Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, proj.data(), D, D);
             for (int i = 0; i < D; ++i) x[i] += proj[i];                  // residual
             rmsNormVec(x.data(), Ly.ln2_g->data.data(), h2.data(), D, cfg_.norm_eps);
             mv(h2.data(), Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, gate.data(), D, F);
             mv(h2.data(), Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   up.data(),   D, F);
             for (int i = 0; i < F; ++i) gate[i] = siluf(gate[i]) * up[i]; // SwiGLU
+            if (Ly.ffn_sub_g)                                            // BitNet SubLN (in place)
+                rmsNormVec(gate.data(), Ly.ffn_sub_g->data.data(), gate.data(), F, cfg_.norm_eps);
             mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, ff.data(), F, D);
             for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
         }
@@ -592,6 +609,9 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                     }
                 }
             }
+            if (Ly.attn_sub_g)                                              // BitNet SubLN (per row, in place)
+                for (int p = 0; p < P; ++p)
+                    rmsNormVec(&Ao[(size_t)p * D], Ly.attn_sub_g->data.data(), &Ao[(size_t)p * D], D, cfg_.norm_eps);
             mvB(Ao.data(), P, Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, Pj.data(), D, D);
             for (int i = 0; i < P * D; ++i) Xb[i] += Pj[i];  // residual
             for (int p = 0; p < P; ++p)
@@ -599,6 +619,9 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             mvB(Hn.data(), P, Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, Gt.data(),  D, F);
             mvB(Hn.data(), P, Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   Up2.data(), D, F);
             for (int i = 0; i < P * F; ++i) Gt[i] = siluf(Gt[i]) * Up2[i];   // SwiGLU
+            if (Ly.ffn_sub_g)                                               // BitNet SubLN (per row, in place)
+                for (int p = 0; p < P; ++p)
+                    rmsNormVec(&Gt[(size_t)p * F], Ly.ffn_sub_g->data.data(), &Gt[(size_t)p * F], F, cfg_.norm_eps);
             mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, Fb.data(), F, D);
             for (int i = 0; i < P * D; ++i) Xb[i] += Fb[i];  // residual
         }
@@ -658,15 +681,30 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             decode(cur, pos++); ++produced;                  // updates `logits` to predict the new `pos`
             if (produced >= n_new || pos >= cfg_.max_seq) break;
 
-            // Draft the likely continuation by looking it up in the sequence.
-            const int room = std::min(specDraftK, cfg_.max_seq - pos);
-            std::vector<int> drafts = draftLookup(prompt, room);
-            if (drafts.empty()) continue;                    // no match → next iteration
-
-            // The dist predicting position `pos` (before the verify pass clobbers
-            // the `logits` member via emitLogits) — the acceptance test for the
-            // first draft.
+            // The dist predicting position `pos` (before ANY drafter/verify clobbers
+            // the `logits` member) — the acceptance test for the first draft.
             std::vector<float> pred0(logits);
+
+            // Draft the likely continuation.
+            const int room = std::min(specDraftK, cfg_.max_seq - pos);
+            std::vector<int> drafts;
+            if (sc.early_exit_draft > 0 && sc.early_exit_draft < L) {
+                // Early-exit self-speculative: autoregress `room` tokens through only
+                // the first E layers (cheap), reading out early-exit logits. Each
+                // `decode(...,E)` clobbers `logits` (hence pred0 saved above) and
+                // writes transient early-layer KV that the full verify overwrites.
+                const int E = sc.early_exit_draft;
+                int tk = cur, dp = pos - 1;
+                for (int i = 0; i < room; ++i) {
+                    decode(tk, dp, E);
+                    tk = argmaxV(logits.data(), V);
+                    drafts.push_back(tk);
+                    ++dp;
+                }
+            } else {
+                drafts = draftLookup(prompt, room);          // prompt-lookup drafter
+            }
+            if (drafts.empty()) continue;                    // no draft → next iteration
 
             // One batched forward verifies all drafts at positions pos..pos+Kd-1.
             const int Kd = (int)drafts.size();
@@ -804,10 +842,12 @@ std::vector<std::pair<std::string, Var>> GPT::named_parameters() {
         if (L.bq) { out.emplace_back(pre + "bq", L.bq);
                     out.emplace_back(pre + "bk", L.bk);
                     out.emplace_back(pre + "bv", L.bv); }
+        if (L.attn_sub_g) out.emplace_back(pre + "attn_sub_g", L.attn_sub_g);
         out.emplace_back(pre + "ln2_g", L.ln2_g);
         out.emplace_back(pre + "Wgate", L.Wgate);
         out.emplace_back(pre + "Wup",   L.Wup);
         out.emplace_back(pre + "Wdown", L.Wdown);
+        if (L.ffn_sub_g) out.emplace_back(pre + "ffn_sub_g", L.ffn_sub_g);
     }
     out.emplace_back("final_g", final_g_);
     if (lm_head_) out.emplace_back("lm_head", lm_head_);   // absent when tied

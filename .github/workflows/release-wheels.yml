@@ -20,6 +20,10 @@ on:
         description: "Create a GitHub Release from the built wheels"
         type: boolean
         default: false
+      publish_pypi:
+        description: "Also publish the wheels to PyPI (needs the PyPI project + trusted publisher configured)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write        # create the Release / upload assets
@@ -33,6 +37,7 @@ jobs:
         include:
           - { os: ubuntu-24.04, name: linux-x86_64 }
           - { os: macos-14,     name: macos-arm64  }
+          - { os: macos-13,     name: macos-x86_64 }   # Intel Macs (macos-13 runners are x86_64)
           - { os: windows-2022, name: windows-x86_64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -59,9 +64,9 @@ jobs:
           cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
 
-      # ── macOS: Apple clang, LLVM-free ──
+      # ── macOS: Apple clang, LLVM-free (arm64 on macos-14, x86_64 on macos-13) ──
       - name: Build native + wheel (macOS, LLVM-free)
-        if: matrix.os == 'macos-14'
+        if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
           brew install cmake ninja sqlite lapack || true
@@ -135,3 +140,26 @@ jobs:
             Wheels are built with `VGRE_ENABLE_JIT=OFF` (no LLVM runtime dependency);
             the bundled native library runs CUDA-C kernels and the in-tree transformer LM
             on CPU. See the README for the full CUDA-emulation API.
+
+  # ── PyPI (trusted publishing — no API token) ─────────────────────────────────
+  # Opt-in: run the workflow manually with publish_pypi=true. Requires a one-time
+  # PyPI-side setup — create the `vgre` project and add a trusted publisher pointing
+  # at this repo + workflow + the `pypi` environment (docs.pypi.org/trusted-publishers).
+  # Kept off the auto-tag path so releases never fail before that setup exists.
+  pypi:
+    name: publish-pypi
+    needs: build
+    if: inputs.publish_pypi
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write        # OIDC token for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

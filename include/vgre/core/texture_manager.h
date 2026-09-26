@@ -178,6 +178,10 @@ public:
   // components give the face-local coords. Bilinear within the face.
   float texCubemap(TextureId id, float x, float y, float z) const;
 
+  // Cubemap-array fetch: cube `arrayLayer`'s face is stored as layer arrayLayer*6+face
+  // (so an A-cube array is A*6 layers). Same direction→face mapping as texCubemap.
+  float texCubemapLayered(TextureId id, float x, float y, float z, int arrayLayer) const;
+
   // ── 3D Texture creation (explicit depth) ─────────────────────────────────
   VGREResult createTexture3D(TextureId &outId, const void *data,
                              size_t width, size_t height, size_t depth,
@@ -226,6 +230,19 @@ public:
   void *getMipmapLevelData(TextureId id, unsigned int level);
   const void *getMipmapLevelData(TextureId id, unsigned int level) const;
 
+  // ── Mipmapped LAYERED array (cudaArrayLayered | cudaArrayMipmapped) ──────
+  // `layers` layers, each a full `mipLevels` mip chain (layer-major: layer L is a
+  // contiguous chain, level offsets shared across layers). Fill a (layer,level)
+  // face via getMipmappedLayeredLevelData, then sample with tex2DLayeredLod.
+  VGREResult createMipmappedLayeredArray(TextureId &outId, size_t width, size_t height,
+                                         size_t elementSize, unsigned int mipLevels,
+                                         unsigned int layers, const TextureDescriptor &desc);
+  void *getMipmappedLayeredLevelData(TextureId id, unsigned int layer, unsigned int level);
+
+  // Sample layer `layer` at explicit LOD `lod` (trilinear across the two nearest mip
+  // levels of that layer). Non-mipmapped textures clamp to the base level.
+  float tex2DLayeredLod(TextureId id, float x, float y, int layer, float lod) const;
+
   // ── Singleton ────────────────────────────────────────────────────────────
   static TextureManager &instance();
 
@@ -239,6 +256,8 @@ private:
   std::unordered_map<TextureId, std::vector<uint8_t>> ownedArrays_;
   // Per-texture mip-level byte offsets within ownedArrays_ (index 0 = base).
   std::unordered_map<TextureId, std::vector<size_t>> mipmapLevelOffsets_;
+  // Per-texture byte stride between layers of a mipmapped LAYERED array.
+  std::unordered_map<TextureId, size_t> mipmapLayerStride_;
   mutable std::recursive_mutex mutex_;
   TextureId nextTextureId_ = 1;
   SurfaceId nextSurfaceId_ = 1;

@@ -85,6 +85,7 @@ int64_t typeStorageBytes(int ggml_type, int64_t n) {
         case 1: return n * 2;                       // F16
         case 2: case 3: case 8: case 12: case 14:   // Q4_0/Q4_1/Q8_0/Q4_K/Q6_K
             return quantStorageBytes(ggml_type, n);
+        case 36: return i2sTensorBytes(n);          // I2_S (BitNet ternary): packed 2-bit + f32 scale
         default: return -1;                         // unsupported / unknown size
     }
 }
@@ -256,6 +257,9 @@ bool GGUF::load(const std::string& name, Literal& out, bool keepNative) const {
             return true;
         case 2: case 3: case 8: case 12: case 14:  // Q4_0/Q4_1/Q8_0/Q4_K/Q6_K
             return dequantBlock(gt, src, n, out.data.data());
+        case 36:  // I2_S (BitNet ternary): whole-tensor 2-bit packed + trailing f32 scale
+            dequant_i2_s_tensor(src, n, out.data.data());
+            return true;
         default:
             return false;  // unsupported ggml type
     }

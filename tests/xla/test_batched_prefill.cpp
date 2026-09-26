@@ -79,7 +79,22 @@ int main() {
     for (int k : {2, 6}) CHECK(specEqualsGreedy(gpt, k, "int8"), "int8: speculative == greedy (lossless)");
     gpt.set_int8_inference(false);
 
+    // ── Early-exit self-speculative decoding is lossless too ─────────────────
+    // Draft with the first E<L layers, verify with the full model. The emitted
+    // tokens must equal plain greedy regardless of draft acceptance rate.
+    {
+        using vgre::xla::model::GPT;
+        std::vector<int> greedy = gpt.generate_cached(prompt, nNew);
+        for (int E : {1, 2}) {
+            GPT::SampleConfig sc; sc.early_exit_draft = E;   // E of cfg.n_layer=3 draft layers
+            std::vector<int> ee = gpt.generate_cached(prompt, nNew, sc, /*specDraftK=*/4);
+            bool ok = ee.size() == greedy.size();
+            for (size_t i = 0; ok && i < ee.size(); ++i) if (ee[i] != greedy[i]) ok = false;
+            CHECK(ok, "early-exit self-speculative == greedy (lossless)");
+        }
+    }
+
     if (g_fail == 0)
-        std::printf("PASS: batched prefill bit-identical + speculative decode lossless (fp32/bf16/int8)\n");
+        std::printf("PASS: batched prefill bit-identical + speculative (lookup + early-exit) lossless\n");
     return g_fail ? 1 : 0;
 }

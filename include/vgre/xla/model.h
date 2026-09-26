@@ -36,6 +36,9 @@ struct Config {
     bool  tie_embeddings = false; // share the token embedding as the output projection
     bool  flash_attention = false; // O(T)-memory online-softmax attention in training forward
     bool  attn_bias = false;      // add a learned bias to Q/K/V projections (e.g. Qwen2)
+    bool  sub_norm  = false;      // BitNet-b1.58 SubLN: an extra RMSNorm on the attention
+                                  // output (before o_proj) and on the SwiGLU intermediate
+                                  // (before down_proj). Off = plain Llama block.
 
     int ff() const { return d_ff > 0 ? d_ff : 4 * d_model; }
     int head_dim() const { return d_model / n_head; }
@@ -57,6 +60,10 @@ public:
         float    top_p = 1.0f;         // 1 → disabled; else nucleus (cumulative-prob) cutoff
         float    repetition_penalty = 1.0f;  // 1 → disabled; >1 penalizes already-seen tokens
         uint32_t seed = 0;
+        int      early_exit_draft = 0; // >0 (and < n_layer, greedy): early-exit
+                                       // self-speculative decoding — draft with the
+                                       // first `early_exit_draft` layers, verify with
+                                       // the full model (lossless). Needs specDraftK>0.
     };
 
     // Fast autoregressive generation with a per-layer K/V cache: O(T) work per
@@ -146,6 +153,9 @@ private:
     struct Layer {
         Var ln1_g, Wq, Wk, Wv, Wo, ln2_g, Wgate, Wup, Wdown;
         Var bq, bk, bv;   // optional Q/K/V projection biases (null unless attn_bias)
+        Var attn_sub_g, ffn_sub_g;  // BitNet SubLN gains (null unless cfg.sub_norm):
+                                    // attn_sub_g[D] on the attention output before Wo,
+                                    // ffn_sub_g[F] on the SwiGLU intermediate before Wdown
         // bf16 (uint16) caches of the big matmul weights, built on demand.
         std::vector<uint16_t> Wq_bf16, Wk_bf16, Wv_bf16, Wo_bf16,
                               Wgate_bf16, Wup_bf16, Wdown_bf16;
@@ -196,6 +206,13 @@ bool load_llama_safetensors(GPT& model, const std::string& path);
 // f32 by the reader). GGUF already bakes in the RoPE permute, so q/k load without
 // it; the transpose and GQA replication still apply.
 bool load_gguf_llama(GPT& model, const std::string& path);
+
+// BitNet-b1.58 from a llama.cpp GGUF checkpoint (arch `bitnet-b1.58`; the ternary
+// linears are ggml type 36 = I2_S, dequantized to f32 by the reader). Identical to
+// load_gguf_llama plus the two SubLN gains per block (`attn_sub_norm`/`ffn_sub_norm`);
+// the model's Config must have sub_norm=true (and tie_embeddings=true — BitNet ties
+// the head). Returns false on any missing tensor or shape mismatch.
+bool load_gguf_bitnet(GPT& model, const std::string& path);
 
 // ── Data pipeline ────────────────────────────────────────────────────────────
 // A flat token stream that yields random (input, target) windows for training;

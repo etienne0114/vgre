@@ -164,6 +164,29 @@ inline bool dequantBlock(int ggml_type, const uint8_t* blk, int64_t n, float* ou
     }
 }
 
+// BitNet I2_S ternary (ggml type 36) — a WHOLE-TENSOR format, unlike the per-block
+// types above: `n` 2-bit weights packed 4/byte MSB-first
+// (byte = (c0<<6)|(c1<<4)|(c2<<2)|c3), then a single trailing f32 scale = 1/mean(|w|).
+// Codes {0,1,2} map to {-1,0,+1}; dequant w = (code-1)/scale. `data` points at the
+// packed weights; the scale is the f32 at data[ceil(n/4)]. (Format per the microsoft/
+// BitNet i2_s spec; validated end-to-end on bitnet-b1.58-2B — the whole model runs.)
+inline int64_t i2sPackedBytes(int64_t n) { return (n + 3) / 4; }
+inline int64_t i2sTensorBytes(int64_t n) { return i2sPackedBytes(n) + 4; }  // packed + f32 scale
+
+inline void dequant_i2_s(const uint8_t* data, int64_t n, float scale, float* out) {
+    const float inv = (scale != 0.0f) ? (1.0f / scale) : 0.0f;   // scale = 1/mean|w| → w = (code-1)/scale
+    for (int64_t i = 0; i < n; ++i) {
+        const uint8_t byte = data[i >> 2];
+        const int shift = 6 - 2 * (int)(i & 3);                  // i%4==0 → bits 6-7 (c0), MSB-first
+        out[i] = (float)(((byte >> shift) & 3) - 1) * inv;
+    }
+}
+// Convenience: dequant a full I2_S tensor buffer (packed weights + trailing f32 scale).
+inline void dequant_i2_s_tensor(const uint8_t* buf, int64_t n, float* out) {
+    float scale; std::memcpy(&scale, buf + i2sPackedBytes(n), 4);
+    dequant_i2_s(buf, n, scale, out);
+}
+
 }  // namespace xla
 }  // namespace vgre
 

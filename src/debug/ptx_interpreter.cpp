@@ -5,6 +5,7 @@
 #include "vgre/common/atomic_rmw.h"
 #include "vgre/core/texture_manager.h"   // shared sampler for vgretex*/vgresurf* ops
 #include "vgre/xla/half.h"   // f16<->f32 codec (header-only, dependency-free)
+#include "vgre/compiler/cpu_cuda_intrinsics.h"   // __mul64hi/__umul64hi (64-bit high multiply)
 
 #include <algorithm>
 #include <atomic>
@@ -1147,8 +1148,11 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
             if (mnem == "add") r = a + b;
             else if (mnem == "sub") r = a - b;
             else if (mnem == "mul") {
-                if (has("hi") && size > 4) throw std::runtime_error("PTX: mul.hi.64 unsupported");
-                r = has("hi") ? ((a * b) >> (size * 8)) : a * b;
+                if (has("hi"))
+                    r = (size > 4) ? (isS ? vgre_cuda::__mul64hi(a, b)                             // high 64 of a 64×64 product
+                                          : (int64_t)vgre_cuda::__umul64hi((uint64_t)a, (uint64_t)b))
+                                   : ((a * b) >> (size * 8));                            // ≤32-bit: product fits in int64
+                else r = a * b;
             }
             else if (mnem == "div") { if (!b) throw std::runtime_error("PTX: div by zero"); r = a / b; }
             else if (mnem == "rem") { if (!b) throw std::runtime_error("PTX: rem by zero"); r = a % b; }
@@ -1167,10 +1171,12 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
             int64_t r = ival(1) * ival(2) + (int64_t)evalOperand(t, tid, A(3), 8);
             t.regs[A(0)].u = (uint64_t)r;
         } else {
-            if (has("hi") && size > 4)
-                throw std::runtime_error("PTX: mad.hi.64 unsupported");
-            int64_t r = has("hi") ? ((ival(1) * ival(2)) >> (size * 8))
-                                  : ival(1) * ival(2);
+            int64_t r;
+            if (has("hi"))
+                r = (size > 4) ? (isS ? vgre_cuda::__mul64hi(ival(1), ival(2))
+                                      : (int64_t)vgre_cuda::__umul64hi((uint64_t)ival(1), (uint64_t)ival(2)))
+                               : ((ival(1) * ival(2)) >> (size * 8));
+            else r = ival(1) * ival(2);
             setReg(A(0), (uint64_t)(r + ival(3)));
         }
     } else if (mnem == "neg") {
@@ -1311,23 +1317,34 @@ bool PtxInterpreter::execOne(Thread& t, int tid) {
         else { float v = 0.0f; TM.surf2Dread(handle, v, (int)evalOperand(t, tid, A(2), 4), (int)evalOperand(t, tid, A(3), 4)); res = v; }
         setReg(A(0), fromF32(res));
     } else if (mnem == "vgretex1dlayered" || mnem == "vgretex2dlayered" ||
-               mnem == "vgretexcubemap") {
+               mnem == "vgretexcubemap" || mnem == "vgretexcubemaplayered" ||
+               mnem == "vgretex2dlayeredlod") {
         // Layered (array) fetch: dest, handle(u64), coords…, layer index.
         // Cubemap fetch: dest, handle(u64), direction x,y,z.
         auto& TM = ::vgre::core::TextureManager::instance();
         const uint64_t handle = evalOperand(t, tid, A(1), 8);
         float res = 0.0f;
-        if (mnem == "vgretex1dlayered")
+        if (mnem == "vgretex2dlayeredlod")
+            res = TM.tex2DLayeredLod(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                                     asF32(evalOperand(t, tid, A(3), 4)),
+                                     (int)evalOperand(t, tid, A(4), 4),
+                                     asF32(evalOperand(t, tid, A(5), 4)));
+        else if (mnem == "vgretex1dlayered")
             res = TM.tex1DLayered(handle, asF32(evalOperand(t, tid, A(2), 4)),
                                   (int)evalOperand(t, tid, A(3), 4));
         else if (mnem == "vgretex2dlayered")
             res = TM.tex2DLayered(handle, asF32(evalOperand(t, tid, A(2), 4)),
                                   asF32(evalOperand(t, tid, A(3), 4)),
                                   (int)evalOperand(t, tid, A(4), 4));
-        else
+        else if (mnem == "vgretexcubemap")
             res = TM.texCubemap(handle, asF32(evalOperand(t, tid, A(2), 4)),
                                 asF32(evalOperand(t, tid, A(3), 4)),
                                 asF32(evalOperand(t, tid, A(4), 4)));
+        else  // vgretexcubemaplayered
+            res = TM.texCubemapLayered(handle, asF32(evalOperand(t, tid, A(2), 4)),
+                                       asF32(evalOperand(t, tid, A(3), 4)),
+                                       asF32(evalOperand(t, tid, A(4), 4)),
+                                       (int)evalOperand(t, tid, A(5), 4));
         setReg(A(0), fromF32(res));
     } else if (mnem == "vgretex1dchan" || mnem == "vgretex2dchan" ||
                mnem == "vgretex3dchan" || mnem == "vgretex2dlod") {

@@ -15,6 +15,7 @@
 #include "vgre/compiler/frontend/compiled_kernel.h"
 #include "vgre/core/texture_manager.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -246,6 +247,98 @@ extern "C" __global__ void k(cudaTextureObject_t tex, float* out, int w, int h) 
                 }
                 if (badRef || badInterp) { std::printf("FAIL: texCubemap vs-ref=%d vs-interp=%d\n", badRef, badInterp); ++g_fail; }
                 else std::printf("  texCubemap (compiled) == interpreter == TextureManager (6 faces)\n");
+            }
+        }
+    }
+
+    // ── texCubemapLayered: cubemap-array fetch (A cubes × 6 faces as layers) ────
+    {
+        const int A = 2, F = A * 6;            // 2 cubes = 12 faces stored as layers
+        std::vector<float> cube(N * F);
+        for (int f = 0; f < F; ++f)
+            for (int i = 0; i < N; ++i) cube[f * N + i] = (float)(f * 3 + i) - 15.0f;
+        vgre::core::TextureId tca = 0;
+        if (TextureManager::instance().createTexture(tca, cube.data(), W, H, sizeof(float), desc, F) != vgre::VGREResult::SUCCESS) {
+            std::printf("FAIL: createTexture(cubemap-array)\n"); ++g_fail;
+        } else {
+            const char* kCA = R"(
+extern "C" __global__ void k(cudaTextureObject_t tex, float* out, int w, int h) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < w * h) {
+        float dx = (float)(i % 3 - 1);
+        float dy = (float)((i / 3) % 3 - 1);
+        float dz = (float)((i / 9) % 3 - 1) + 0.001f;
+        int arr = (i & 1);                     // pick one of the 2 cubes
+        out[i] = texCubemapLayered(tex, dx, dy, dz, arr);
+    }
+})";
+            auto ak = fe::CompiledKernel::compileSource(kCA, "k", err);
+            auto ag = fe::compileToPtx(kCA, "k");
+            auto aik = ag.ok ? interp->preparePtx(ag.ptx, "k") : nullptr;
+            if (!ak || !aik) { std::printf("FAIL: texCubemapLayered compile\n"); ++g_fail; }
+            else {
+                std::vector<float> oc(N, -9.f), oi(N, -8.f), ref(N);
+                for (int i = 0; i < N; ++i) {
+                    float dx = (float)(i % 3 - 1), dy = (float)((i / 3) % 3 - 1), dz = (float)((i / 9) % 3 - 1) + 0.001f;
+                    ref[i] = TextureManager::instance().texCubemapLayered(tca, dx, dy, dz, i & 1);
+                }
+                unsigned long long h = tca; int w = W, ht = H;
+                { float* op = oc.data(); void* a[] = {&h, &op, &w, &ht}; fe::Extent g{1,1,1}, b{(uint32_t)N,1,1}; ak->launch(g, b, a, 4); }
+                { float* op = oi.data(); void* a[] = {&h, &op, &w, &ht}; be::LaunchConfig lc; lc.gridDim[0]=1; lc.blockDim[0]=N; interp->launch(*aik, lc, a, 4); }
+                int badRef = 0, badInterp = 0;
+                for (int i = 0; i < N; ++i) { if (oc[i] != ref[i]) ++badRef; uint32_t a, c; std::memcpy(&a, &oc[i], 4); std::memcpy(&c, &oi[i], 4); if (a != c) ++badInterp; }
+                if (badRef || badInterp) { std::printf("FAIL: texCubemapLayered vs-ref=%d vs-interp=%d\n", badRef, badInterp); ++g_fail; }
+                else std::printf("  texCubemapLayered (compiled) == interpreter == TextureManager (%d cubes)\n", A);
+            }
+        }
+    }
+
+    // ── tex2DLayeredLod: layered + explicit-LOD (trilinear across mip levels) ───
+    {
+        const int MW = 4, MH = 4, MIPS = 2, LAYERS = 2;   // level0 4x4, level1 2x2
+        vgre::core::TextureId tm = 0;
+        if (TextureManager::instance().createMipmappedLayeredArray(tm, MW, MH, sizeof(float), MIPS, LAYERS, desc) != vgre::VGREResult::SUCCESS) {
+            std::printf("FAIL: createMipmappedLayeredArray\n"); ++g_fail;
+        } else {
+            // Fill each (layer, level) with a distinct constant so LOD selection is visible.
+            for (int l = 0; l < LAYERS; ++l) {
+                float* base0 = (float*)TextureManager::instance().getMipmappedLayeredLevelData(tm, l, 0);
+                float* base1 = (float*)TextureManager::instance().getMipmappedLayeredLevelData(tm, l, 1);
+                for (int i = 0; i < MW * MH; ++i) base0[i] = 10.0f * l + 1.0f;    // level 0 value
+                for (int i = 0; i < (MW/2) * (MH/2); ++i) base1[i] = 10.0f * l + 5.0f;  // level 1 value
+            }
+            // Sanity: LOD selection actually changes the result (else the arg is inert).
+            float atL0 = TextureManager::instance().tex2DLayeredLod(tm, 1.5f, 1.5f, 1, 0.0f);
+            float atL1 = TextureManager::instance().tex2DLayeredLod(tm, 1.5f, 1.5f, 1, 1.0f);
+            if (!(std::fabs(atL0 - atL1) > 1e-4f)) { std::printf("FAIL: tex2DLayeredLod lod is inert (%.3f vs %.3f)\n", atL0, atL1); ++g_fail; }
+            else std::printf("  tex2DLayeredLod: lod 0 vs 1 selects different mip levels (%.1f vs %.1f)\n", atL0, atL1);
+
+            const char* kML = R"(
+extern "C" __global__ void k(cudaTextureObject_t tex, float* out, int w, int h) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < w * h) {
+        int x = i % w; int y = i / w; int layer = i & 1;
+        float lod = (float)(i % 3) * 0.5f;     // 0, 0.5, 1.0 cycling
+        out[i] = tex2DLayeredLod(tex, (float)x + 0.5f, (float)y + 0.5f, layer, lod);
+    }
+})";
+            auto mk = fe::CompiledKernel::compileSource(kML, "k", err);
+            auto mg = fe::compileToPtx(kML, "k");
+            auto mik = mg.ok ? interp->preparePtx(mg.ptx, "k") : nullptr;
+            if (!mk || !mik) { std::printf("FAIL: tex2DLayeredLod compile\n"); ++g_fail; }
+            else {
+                std::vector<float> oc(N, -9.f), oi(N, -8.f), ref(N);
+                for (int i = 0; i < N; ++i) {
+                    int x = i % W, y = i / W, layer = i & 1; float lod = (float)(i % 3) * 0.5f;
+                    ref[i] = TextureManager::instance().tex2DLayeredLod(tm, (float)x + 0.5f, (float)y + 0.5f, layer, lod);
+                }
+                unsigned long long h = tm; int w = W, ht = H;
+                { float* op = oc.data(); void* a[] = {&h, &op, &w, &ht}; fe::Extent g{1,1,1}, b{(uint32_t)N,1,1}; mk->launch(g, b, a, 4); }
+                { float* op = oi.data(); void* a[] = {&h, &op, &w, &ht}; be::LaunchConfig lc; lc.gridDim[0]=1; lc.blockDim[0]=N; interp->launch(*mik, lc, a, 4); }
+                int badRef = 0, badInterp = 0;
+                for (int i = 0; i < N; ++i) { if (oc[i] != ref[i]) ++badRef; uint32_t a, c; std::memcpy(&a, &oc[i], 4); std::memcpy(&c, &oi[i], 4); if (a != c) ++badInterp; }
+                if (badRef || badInterp) { std::printf("FAIL: tex2DLayeredLod vs-ref=%d vs-interp=%d\n", badRef, badInterp); ++g_fail; }
+                else std::printf("  tex2DLayeredLod (compiled) == interpreter == TextureManager (%d layers, %d mips)\n", LAYERS, MIPS);
             }
         }
     }

@@ -312,6 +312,60 @@ const void *TextureManager::getMipmapLevelData(TextureId id, unsigned int level)
     return arrIt->second.data() + offIt->second[level];
 }
 
+VGREResult TextureManager::createMipmappedLayeredArray(TextureId &outId,
+                                                       size_t width, size_t height,
+                                                       size_t elementSize,
+                                                       unsigned int mipLevels,
+                                                       unsigned int layers,
+                                                       const TextureDescriptor &desc) {
+    if (width == 0 || elementSize == 0 || layers == 0) return VGREResult::ERR_INVALID_VALUE;
+    size_t h = (height == 0) ? 1 : height;
+    if (mipLevels == 0) {
+        size_t maxDim = std::max(width, h);
+        mipLevels = 1;
+        while ((maxDim >> mipLevels) > 0) ++mipLevels;
+    }
+    // Per-layer mip chain: level offsets are shared across layers; layers are stacked.
+    std::vector<size_t> offsets; offsets.reserve(mipLevels);
+    size_t layerBytes = 0, lw = width, lh = h;
+    for (unsigned int m = 0; m < mipLevels; ++m) {
+        offsets.push_back(layerBytes);
+        layerBytes += lw * lh * elementSize;
+        lw = std::max<size_t>(1, lw >> 1);
+        lh = std::max<size_t>(1, lh >> 1);
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    TextureObject tex;
+    tex.id = nextTextureId_++;
+    tex.offsetInBytes = 0;
+    tex.width = width; tex.height = h; tex.depth = 1;
+    tex.elementSize = elementSize;
+    tex.mips = mipLevels;
+    tex.layers = layers;
+    tex.desc = desc;
+    ownedArrays_[tex.id] = std::vector<uint8_t>(layerBytes * layers, 0);
+    tex.data = ownedArrays_[tex.id].data();
+    mipmapLevelOffsets_[tex.id] = std::move(offsets);
+    mipmapLayerStride_[tex.id] = layerBytes;
+    textures_[tex.id] = tex;
+    outId = tex.id;
+    return VGREResult::SUCCESS;
+}
+
+void *TextureManager::getMipmappedLayeredLevelData(TextureId id, unsigned int layer,
+                                                   unsigned int level) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto arrIt = ownedArrays_.find(id);
+    auto offIt = mipmapLevelOffsets_.find(id);
+    auto strIt = mipmapLayerStride_.find(id);
+    auto texIt = textures_.find(id);
+    if (arrIt == ownedArrays_.end() || offIt == mipmapLevelOffsets_.end() ||
+        strIt == mipmapLayerStride_.end() || texIt == textures_.end()) return nullptr;
+    if (level >= offIt->second.size() || layer >= texIt->second.layers) return nullptr;
+    return arrIt->second.data() + (size_t)layer * strIt->second + offIt->second[level];
+}
+
 
 } // namespace core
 } // namespace vgre

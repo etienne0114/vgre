@@ -112,6 +112,7 @@ struct Parser {
     // (so `foo<int>(x)` is a template call, not the comparison chain `foo < int > (x)`).
     const std::vector<TemplateParam>* curTParams_ = nullptr;
     std::set<std::string> templateNames_;
+    bool sawPrototype_ = false;   // parseKernel consumed a `ret name(params);` forward declaration
 
     // Is `n` a type-parameter of the template currently being parsed?
     bool isCurTypeParam(const std::string& n) const {
@@ -865,6 +866,10 @@ struct Parser {
         }
         expect(TokenKind::RParen, "')'");
         if (failed) return nullptr;
+        // Function prototype / forward declaration: `ret name(params);` with no body.
+        // The name is now known (so a later mutually-recursive definition can call it —
+        // e.g. isEven↔isOdd); the prototype itself carries no code and is skipped.
+        if (accept(TokenKind::Semicolon)) { sawPrototype_ = true; return nullptr; }
         // Body block.
         StmtPtr block = parseBlockStmt();
         if (!block) return nullptr;
@@ -910,7 +915,7 @@ struct Parser {
             if (accept(TokenKind::Semicolon)) continue;
             if (at(TokenKind::KwStruct)) { if (!parseStructDef()) return nullptr; continue; }
             auto k = parseKernel();
-            if (!k) return nullptr;
+            if (!k) { if (sawPrototype_ && !failed) { sawPrototype_ = false; continue; } return nullptr; }
             m->kernels.push_back(std::move(k));
         }
         return failed ? nullptr : std::move(m);
