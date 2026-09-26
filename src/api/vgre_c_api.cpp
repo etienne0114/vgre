@@ -21,6 +21,7 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
 #include "vgre/core/virtual_gpu_device.h"
+#include "../core/math/mixed_precision.h"  // FP16/BF16/FP8 codecs + converters
 
 #include <algorithm>
 #include <chrono>
@@ -611,6 +612,112 @@ int vgre_free_async(void *ptr, uint64_t pool, uint64_t stream) {
       vgre::core::RuntimeEngine::instance().getMemoryManager().freeToPool(
           static_cast<vgre::core::PoolHandle>(pool), ptr);
   return to_status(r);
+}
+
+// ── Mixed-precision math ───────────────────────────────────────────────────
+// Backed by vgre::math (mixed_precision). Reachable from host code, emulated
+// device kernels, and cluster workers; each op picks the widest ISA the running
+// CPU has (AVX-512 via CPUID) with a scalar fallback, so it is correct anywhere.
+
+int vgre_convert_precision(const void *src, void *dst, size_t n,
+                           int src_type, int dst_type) {
+  using namespace vgre::math;
+  if (!src || !dst) return VGRE_ERROR_INVALID_VALUE;
+  if (n == 0) return VGRE_SUCCESS;
+
+  if (src_type == VGRE_PREC_F32) {  // F32 → reduced precision
+    const float *s = static_cast<const float *>(src);
+    switch (dst_type) {
+      case VGRE_PREC_F16:  float_to_fp16(s, static_cast<FP16 *>(dst), n); return VGRE_SUCCESS;
+      case VGRE_PREC_BF16: float_to_bf16(s, static_cast<BF16 *>(dst), n); return VGRE_SUCCESS;
+      case VGRE_PREC_FP8_E4M3: {
+        uint8_t *d = static_cast<uint8_t *>(dst);
+        for (size_t i = 0; i < n; ++i) d[i] = FP8::from_float(s[i], FP8Format::E4M3).bits;
+        return VGRE_SUCCESS;
+      }
+      case VGRE_PREC_FP8_E5M2: {
+        uint8_t *d = static_cast<uint8_t *>(dst);
+        for (size_t i = 0; i < n; ++i) d[i] = FP8::from_float(s[i], FP8Format::E5M2).bits;
+        return VGRE_SUCCESS;
+      }
+      default: return VGRE_ERROR_NOT_SUPPORTED;
+    }
+  }
+  if (dst_type == VGRE_PREC_F32) {  // reduced precision → F32
+    float *d = static_cast<float *>(dst);
+    switch (src_type) {
+      case VGRE_PREC_F16:  fp16_to_float(static_cast<const FP16 *>(src), d, n); return VGRE_SUCCESS;
+      case VGRE_PREC_BF16: bf16_to_float(static_cast<const BF16 *>(src), d, n); return VGRE_SUCCESS;
+      case VGRE_PREC_FP8_E4M3: {
+        const uint8_t *s = static_cast<const uint8_t *>(src);
+        for (size_t i = 0; i < n; ++i) d[i] = FP8(s[i], FP8Format::E4M3).to_float();
+        return VGRE_SUCCESS;
+      }
+      case VGRE_PREC_FP8_E5M2: {
+        const uint8_t *s = static_cast<const uint8_t *>(src);
+        for (size_t i = 0; i < n; ++i) d[i] = FP8(s[i], FP8Format::E5M2).to_float();
+        return VGRE_SUCCESS;
+      }
+      default: return VGRE_ERROR_NOT_SUPPORTED;
+    }
+  }
+  return VGRE_ERROR_NOT_SUPPORTED;  // exactly one side must be F32
+}
+
+int vgre_quantize_affine(const float *src, void *dst, size_t n,
+                         float scale, float zero_point, int dst_type) {
+  using namespace vgre::math;
+  if (!src || !dst) return VGRE_ERROR_INVALID_VALUE;
+  QuantizationParams<float> p(scale, zero_point);
+  if (dst_type == VGRE_PREC_INT8)  { quantize<float, int8_t>(src, static_cast<int8_t *>(dst), n, p);  return VGRE_SUCCESS; }
+  if (dst_type == VGRE_PREC_UINT8) { quantize<float, uint8_t>(src, static_cast<uint8_t *>(dst), n, p); return VGRE_SUCCESS; }
+  return VGRE_ERROR_NOT_SUPPORTED;
+}
+
+int vgre_dequantize_affine(const void *src, float *dst, size_t n,
+                           float scale, float zero_point, int src_type) {
+  if (!src || !dst) return VGRE_ERROR_INVALID_VALUE;
+  if (src_type == VGRE_PREC_INT8) {
+    const int8_t *s = static_cast<const int8_t *>(src);
+    for (size_t i = 0; i < n; ++i) dst[i] = (static_cast<float>(s[i]) - zero_point) * scale;
+    return VGRE_SUCCESS;
+  }
+  if (src_type == VGRE_PREC_UINT8) {
+    const uint8_t *s = static_cast<const uint8_t *>(src);
+    for (size_t i = 0; i < n; ++i) dst[i] = (static_cast<float>(s[i]) - zero_point) * scale;
+    return VGRE_SUCCESS;
+  }
+  return VGRE_ERROR_NOT_SUPPORTED;
+}
+
+int vgre_mixed_precision_gemm(const void *A, const void *B, float *C,
+                              size_t m, size_t n, size_t k, int in_type) {
+  using namespace vgre::math;
+  if (!A || !B || !C) return VGRE_ERROR_INVALID_VALUE;
+  // C[m×k] = A[m×n] · B[n×k], row-major, FP32 accumulation.
+  switch (in_type) {
+    case VGRE_PREC_F16:
+      mixedPrecisionMatmul<FP16, float, float>(
+          static_cast<const FP16 *>(A), static_cast<const FP16 *>(B), C, m, n, k, n, k, k);
+      return VGRE_SUCCESS;
+    case VGRE_PREC_BF16:
+      mixedPrecisionMatmul<BF16, float, float>(
+          static_cast<const BF16 *>(A), static_cast<const BF16 *>(B), C, m, n, k, n, k, k);
+      return VGRE_SUCCESS;
+    case VGRE_PREC_FP8_E4M3:
+    case VGRE_PREC_FP8_E5M2: {
+      // FP8 storage is one byte/elem; wrap into FP8 objects (which carry format).
+      const FP8Format fmt = (in_type == VGRE_PREC_FP8_E4M3) ? FP8Format::E4M3 : FP8Format::E5M2;
+      const uint8_t *a = static_cast<const uint8_t *>(A);
+      const uint8_t *b = static_cast<const uint8_t *>(B);
+      std::vector<FP8> Af(m * n), Bf(n * k);
+      for (size_t i = 0; i < m * n; ++i) Af[i] = FP8(a[i], fmt);
+      for (size_t i = 0; i < n * k; ++i) Bf[i] = FP8(b[i], fmt);
+      mixedPrecisionMatmul<FP8, float, float>(Af.data(), Bf.data(), C, m, n, k, n, k, k);
+      return VGRE_SUCCESS;
+    }
+    default: return VGRE_ERROR_NOT_SUPPORTED;
+  }
 }
 
 // ── Version Info ───────────────────────────────────────────────────────────

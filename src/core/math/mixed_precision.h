@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <cstring>
+// Must be at file scope (transitively includes <cstring>): never inside a namespace.
+#include "vgre/common/simd_dispatch.h"
 
 namespace vgre {
 namespace math {
@@ -56,13 +58,24 @@ struct FP8 {
     float to_float() const;
 };
 
-// Vectorized conversion functions for AVX-512
-#ifdef __AVX512F__
+// Vectorized conversion kernels (AVX-512). Compiled on x86 GCC/Clang via a
+// per-function target attribute and selected at runtime by CPUID; on other
+// targets they are absent and the batch converters below use the scalar path.
+#if defined(VGRE_SIMD_X86)
 void fp16_to_float_avx512(const FP16* src, float* dst, size_t n);
 void float_to_fp16_avx512(const float* src, FP16* dst, size_t n);
 void bf16_to_float_avx512(const BF16* src, float* dst, size_t n);
 void float_to_bf16_avx512(const float* src, BF16* dst, size_t n);
 #endif
+
+// Portable batch precision converters. These are the public entry points: they
+// run the AVX-512 kernel where the CPU supports it (CPUID) and the scalar codec
+// otherwise, so one binary is correct and fast on any machine. Used by the host
+// (CPU) path, the emulated tensor-core path, and the C API (cluster nodes).
+void fp16_to_float(const FP16* src, float* dst, size_t n);
+void float_to_fp16(const float* src, FP16* dst, size_t n);
+void bf16_to_float(const BF16* src, float* dst, size_t n);
+void float_to_bf16(const float* src, BF16* dst, size_t n);
 
 // Matrix multiplication with mixed precision
 template<typename InputType, typename AccumType, typename OutputType>

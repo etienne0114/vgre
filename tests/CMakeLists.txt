@@ -314,6 +314,14 @@ target_include_directories(test_fp8_minifloat PRIVATE ${PROJECT_SOURCE_DIR}/src/
 add_test(NAME FP8Minifloat COMMAND test_fp8_minifloat)
 set_tests_properties(FP8Minifloat PROPERTIES TIMEOUT 30)
 
+# Mixed-precision module + its C API: converters, matmul, quantize, INT4, and
+# the vgre_* mixed-precision C entry points (host/device/cluster surface).
+add_executable(test_mixed_precision core/test_mixed_precision.cpp)
+target_link_libraries(test_mixed_precision PRIVATE vgre)
+target_include_directories(test_mixed_precision PRIVATE ${PROJECT_SOURCE_DIR}/src/core/math)
+add_test(NAME MixedPrecision COMMAND test_mixed_precision)
+set_tests_properties(MixedPrecision PROPERTIES TIMEOUT 30)
+
 # QUEUE-60: Blelloch (1990) parallel prefix scan
 add_executable(test_prefix_scan core/test_prefix_scan.cpp)
 target_link_libraries(test_prefix_scan PRIVATE vgre)

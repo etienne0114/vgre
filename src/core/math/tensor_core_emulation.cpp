@@ -3,6 +3,7 @@
 
 #include "tensor_core_emulation.h"
 #include "vgre/runtime/vector_engine.h"  // VectorEngine::matMulInt8 / matMulBF16
+#include "mixed_precision.h"             // FP16 codec + runtime-dispatched converters
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -100,6 +101,20 @@ void tensorCoreMatmul(const InputType* A, const InputType* B, OutputType* C,
             static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
         for (size_t i = 0; i < m * n; ++i)
             C[i] = static_cast<OutputType>(tmp[i]);
+    } else if (config.precision == TensorPrecision::FP16) {
+        // FP16 → FP32: the inputs are IEEE half-precision (reinterpreted from the
+        // caller's buffer, mirroring the BF16 path). Widen with the mixed-precision
+        // codec — hardware vcvtph2ps where the CPU has AVX-512, scalar otherwise —
+        // then accumulate in FP32. Previously FP16 fell through to the FP32 branch,
+        // which reinterpreted the half-precision bytes as float (wrong result).
+        const FP16* Ah = reinterpret_cast<const FP16*>(A);
+        const FP16* Bh = reinterpret_cast<const FP16*>(B);
+        std::vector<float> Af(m * k), Bf(k * n), Cf(m * n, 0.f);
+        fp16_to_float(Ah, Af.data(), m * k);
+        fp16_to_float(Bh, Bf.data(), k * n);
+        simdMatmul(Af.data(), Bf.data(), Cf.data(), m, n, k, k, n, n);
+        for (size_t i = 0; i < m * n; ++i)
+            C[i] = static_cast<OutputType>(Cf[i]);
     } else {
         // FP32 / FP64: use AVX2/AVX-512 SIMD matmul
         simdMatmul(reinterpret_cast<const AccumType*>(A),

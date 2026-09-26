@@ -211,6 +211,72 @@ float FP8::to_float() const {
     return result;
 }
 
+// ── Vectorized batch precision conversion ───────────────────────────────────
+// AVX-512 kernels (compiled unconditionally on x86 GCC/Clang; selected at
+// runtime by the batch converters below). FP16 uses the hardware half<->single
+// conversion (vcvtph2ps / vcvtps2ph, both AVX-512F); BF16 is a bit-shift.
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX512 void fp16_to_float_avx512(const FP16* src, float* dst, size_t n) {
+    size_t i = 0, e = n & ~size_t(15);
+    for (; i < e; i += 16)
+        _mm512_storeu_ps(dst + i, _mm512_cvtph_ps(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i))));
+    for (; i < n; ++i) dst[i] = src[i].to_float();
+}
+VGRE_TARGET_AVX512 void float_to_fp16_avx512(const float* src, FP16* dst, size_t n) {
+    size_t i = 0, e = n & ~size_t(15);
+    for (; i < e; i += 16)
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+            _mm512_cvtps_ph(_mm512_loadu_ps(src + i),
+                            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+    for (; i < n; ++i) dst[i] = FP16::from_float(src[i]);
+}
+VGRE_TARGET_AVX512 void bf16_to_float_avx512(const BF16* src, float* dst, size_t n) {
+    size_t i = 0, e = n & ~size_t(15);
+    for (; i < e; i += 16) {
+        __m512i w = _mm512_slli_epi32(_mm512_cvtepu16_epi32(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i))), 16);
+        _mm512_storeu_ps(dst + i, _mm512_castsi512_ps(w));
+    }
+    for (; i < n; ++i) dst[i] = src[i].to_float();
+}
+VGRE_TARGET_AVX512 void float_to_bf16_avx512(const float* src, BF16* dst, size_t n) {
+    size_t i = 0, e = n & ~size_t(15);
+    for (; i < e; i += 16) {
+        __m512i f = _mm512_castps_si512(_mm512_loadu_ps(src + i));
+        // Truncate to the high 16 bits (matches BF16::from_float).
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+                            _mm512_cvtepi32_epi16(_mm512_srli_epi32(f, 16)));
+    }
+    for (; i < n; ++i) dst[i] = BF16::from_float(src[i]);
+}
+#endif
+
+void fp16_to_float(const FP16* src, float* dst, size_t n) {
+#if defined(VGRE_SIMD_X86)
+    if (vgre::simd::have_avx512()) { fp16_to_float_avx512(src, dst, n); return; }
+#endif
+    for (size_t i = 0; i < n; ++i) dst[i] = src[i].to_float();
+}
+void float_to_fp16(const float* src, FP16* dst, size_t n) {
+#if defined(VGRE_SIMD_X86)
+    if (vgre::simd::have_avx512()) { float_to_fp16_avx512(src, dst, n); return; }
+#endif
+    for (size_t i = 0; i < n; ++i) dst[i] = FP16::from_float(src[i]);
+}
+void bf16_to_float(const BF16* src, float* dst, size_t n) {
+#if defined(VGRE_SIMD_X86)
+    if (vgre::simd::have_avx512()) { bf16_to_float_avx512(src, dst, n); return; }
+#endif
+    for (size_t i = 0; i < n; ++i) dst[i] = src[i].to_float();
+}
+void float_to_bf16(const float* src, BF16* dst, size_t n) {
+#if defined(VGRE_SIMD_X86)
+    if (vgre::simd::have_avx512()) { float_to_bf16_avx512(src, dst, n); return; }
+#endif
+    for (size_t i = 0; i < n; ++i) dst[i] = BF16::from_float(src[i]);
+}
+
 // Mixed precision matrix multiplication — tiled "i,j,k" loop order.
 // Row-major layout: A[i][j] and B[j][k] are both accessed in cache-friendly
 // (row-sequential) order. 32×32 tiles keep three sub-blocks ≤ 12 KiB in L1.

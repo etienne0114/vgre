@@ -438,6 +438,49 @@ VGRE_EXPORT int vgre_cluster_all_reduce(void* ptr, size_t count, int datatype);
  */
 VGRE_EXPORT int vgre_cluster_world_size(void);
 
+/* ── Mixed-precision math ──────────────────────────────────────────────────
+ * Portable FP16/BF16/FP8 conversion, affine quantization and reduced-precision
+ * GEMM, backed by vgre::math. Each op runs the widest ISA the RUNNING CPU has
+ * (AVX-512 via CPUID) and a scalar fallback otherwise, so the same call is
+ * correct on any node — usable from host (CPU) code, emulated device kernels,
+ * and cluster workers sharing resources. Data types (vgre_precision_t):        */
+typedef enum {
+    VGRE_PREC_F32      = 0,  /* IEEE binary32                                   */
+    VGRE_PREC_F16      = 1,  /* IEEE binary16 (half)                            */
+    VGRE_PREC_BF16     = 2,  /* bfloat16                                        */
+    VGRE_PREC_FP8_E4M3 = 3,  /* 8-bit float, 4-exp/3-mant (training)            */
+    VGRE_PREC_FP8_E5M2 = 4,  /* 8-bit float, 5-exp/2-mant (inference)           */
+    VGRE_PREC_INT8     = 5,  /* signed 8-bit integer                            */
+    VGRE_PREC_UINT8    = 6   /* unsigned 8-bit integer                          */
+} vgre_precision_t;
+
+/**
+ * @brief Convert n elements between F32 and a reduced float precision.
+ *        Exactly one of src_type/dst_type must be VGRE_PREC_F32; the other is
+ *        F16/BF16/FP8_E4M3/FP8_E5M2. Returns VGRE_ERROR_* on unsupported pairs.
+ */
+VGRE_EXPORT int vgre_convert_precision(const void *src, void *dst, size_t n,
+                                       int src_type, int dst_type);
+
+/**
+ * @brief Affine-quantize F32 → INT8/UINT8: dst = round(src/scale + zero_point).
+ */
+VGRE_EXPORT int vgre_quantize_affine(const float *src, void *dst, size_t n,
+                                     float scale, float zero_point, int dst_type);
+
+/**
+ * @brief Affine-dequantize INT8/UINT8 → F32: dst = (src - zero_point) * scale.
+ */
+VGRE_EXPORT int vgre_dequantize_affine(const void *src, float *dst, size_t n,
+                                       float scale, float zero_point, int src_type);
+
+/**
+ * @brief Row-major reduced-precision GEMM C[m×k] = A[m×n] · B[n×k], FP32 accum.
+ *        in_type is F16/BF16/FP8_E4M3/FP8_E5M2 (A and B share it); C is F32.
+ */
+VGRE_EXPORT int vgre_mixed_precision_gemm(const void *A, const void *B, float *C,
+                                          size_t m, size_t n, size_t k, int in_type);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

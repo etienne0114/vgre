@@ -57,3 +57,7 @@ EXPORTS
     vgre_pool_alloc
     vgre_pool_free
     vgre_pool_destroy
+    vgre_convert_precision
+    vgre_quantize_affine
+    vgre_dequantize_affine
+    vgre_mixed_precision_gemm
