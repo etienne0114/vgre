@@ -49,18 +49,32 @@ GEMM depends on shape: at a small GEMM (M=16, N=K=256) ternary is **~5.1× faste
 (the dense kernel's packing overhead dominates), but at a large GEMM (M=32,
 N=K=2560) it is **~0.42×** — *slower* — because the dense path is a cache-blocked
 BLIS-style kernel (~24 GFLOP/s) while the ternary kernel is memory-bound on the
-K×N int8 codes. **Delivered (▶):** M-blocking — computing the ternary add/sub masks
-once per `k` and streaming the codes once per **panel of 8 rows** instead of per
-row — lifted the large-shape ternary kernel ~40% (0.26× → 0.42×) and the small
-shape to 5.1×, staying bit-exact. **Next (◇):** N-tiling to keep the accumulator
-panel L1-resident across the `k`-loop (the remaining traffic that lets the mul-free
-kernel actually beat dense fp32 at scale), then a pack-4-codes/byte format
-(4× less weight bandwidth) and an AVX-512 VNNI activation path.
+K×N int8 codes. **Delivered (▶):** two-level (M×N) cache blocking, bit-exact throughout —
+M-blocking (compute the masks once per `k`, stream the codes once per **panel of 8
+rows**) lifted the large-shape kernel ~40% (0.26× → 0.42×) and the small shape to
+5.1×; adding N-tiling (an `mb×512` accumulator kept L1-resident across the `k`-loop)
+moved it only marginally further (0.44×).
 
-**Business.** Run 2–8B-parameter LLMs on a commodity laptop/server with no GPU —
-the cheapest possible private, on-prem inference. The honest status: the *memory*
-win (4× smaller weights) is real today; the *compute* win at scale needs the
-N-tiling above. This is still the single biggest "transform into a product" lever.
+**The key measured insight.** That N-tiling barely helped is the finding: the
+kernel is **ALU-bound, not memory-bound**, because **"mul-free" is not a compute win
+on a CPU with FMA**. A dense fp32 GEMM does multiply+add in ONE `vfma` per element;
+the ternary path replaces that single FMA with compare+compare+and+and+add+sub
+(~6 ops) to avoid a multiply the FMA unit already did for free. So on CPU the
+ternary/low-bit advantage is **memory, not arithmetic**: 4× smaller weights today
+(int8 codes vs fp32), and the real lever is **packing 4 codes/byte (2-bit) → 16×
+smaller weights**, which wins in the *memory-bound* regime that matters for LLM
+inference — large models whose weights do not fit in cache, at low batch, where
+weight bandwidth dominates. **Next (◇):** the 2-bit packed format + a kernel that
+unpacks in-register, benchmarked at the memory-bound shapes (large K·N, small M)
+where it should beat fp32; an AVX-512 VNNI int8-activation path on hardware that
+has it.
+
+**Business.** The honest, measured value proposition: ternary/low-bit on CPU lets
+you **fit a much bigger model in the same RAM and move less weight bandwidth** —
+so a 2–8B model *runs at all* on a commodity box with no GPU — rather than
+"faster dense compute." That is still the single biggest "transform into a
+product" lever (private on-prem inference), but the pitch is *capacity and cost*,
+not raw FLOP/s — a distinction the benchmark made concrete rather than assumed.
 
 ## 2. Operator fusion + a graph scheduler  ◇
 

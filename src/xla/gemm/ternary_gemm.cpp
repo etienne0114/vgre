@@ -111,40 +111,50 @@ void gemm_row_avx2(int64_t N, int64_t K, const float* a,
 // per row — so a large GEMM (memory-bound on the int8 codes) gets ~MB× less code
 // traffic and mask work. Per (row,col) the K-accumulation order is unchanged, so the
 // result is bit-identical to gemm_row_avx2 / the scalar path.
-constexpr int kTernMB = 8;   // rows per panel
+constexpr int kTernMB = 8;    // rows per panel
+constexpr int kTernNT = 512;  // column tile: mb*NT*4 = 16 KB stays L1-resident
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((target("avx2")))
 #endif
 void gemm_panel_avx2(int64_t N, int64_t K, int mb, const float* Apanel,
                      const int8_t* codes, const float* colScale, float* Cpanel) {
-    std::vector<float> acc((size_t)mb * N, 0.0f);
-    for (int64_t k = 0; k < K; ++k) {
-        const int8_t* crow = codes + k * N;
-        __m256 va[kTernMB];
-        for (int r = 0; r < mb; ++r) va[r] = _mm256_set1_ps(Apanel[(size_t)r * K + k]);
-        int64_t n = 0;
-        for (; n + 8 <= N; n += 8) {
-            __m128i c8 = _mm_loadl_epi64((const __m128i*)(crow + n));
-            __m256 cf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c8));
-            __m256 zero = _mm256_setzero_ps();
-            __m256 posMask = _mm256_cmp_ps(cf, zero, _CMP_GT_OQ);   // shared across rows
-            __m256 negMask = _mm256_cmp_ps(cf, zero, _CMP_LT_OQ);
-            for (int r = 0; r < mb; ++r) {
-                float* ar = &acc[(size_t)r * N + n];
-                __m256 v = _mm256_loadu_ps(ar);
-                v = _mm256_add_ps(v, _mm256_and_ps(va[r], posMask));
-                v = _mm256_sub_ps(v, _mm256_and_ps(va[r], negMask));
-                _mm256_storeu_ps(ar, v);
+    // Two-level blocking: an outer N-tile keeps the mb×NT accumulator L1-resident
+    // across the whole k-loop (so it is written to C only once, not streamed every
+    // k), and within a tile the ternary masks are shared across the mb rows. This is
+    // what turns the mul-free kernel from memory-bound into compute-bound at scale.
+    std::vector<float> acc((size_t)mb * kTernNT);
+    for (int64_t n0 = 0; n0 < N; n0 += kTernNT) {
+        const int nt = (int)std::min<int64_t>(kTernNT, N - n0);
+        std::fill(acc.begin(), acc.begin() + (size_t)mb * nt, 0.0f);
+        for (int64_t k = 0; k < K; ++k) {
+            const int8_t* crow = codes + k * N + n0;
+            __m256 va[kTernMB];
+            for (int r = 0; r < mb; ++r) va[r] = _mm256_set1_ps(Apanel[(size_t)r * K + k]);
+            int nn = 0;
+            for (; nn + 8 <= nt; nn += 8) {
+                __m128i c8 = _mm_loadl_epi64((const __m128i*)(crow + nn));
+                __m256 cf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c8));
+                __m256 zero = _mm256_setzero_ps();
+                __m256 posMask = _mm256_cmp_ps(cf, zero, _CMP_GT_OQ);   // shared across rows
+                __m256 negMask = _mm256_cmp_ps(cf, zero, _CMP_LT_OQ);
+                for (int r = 0; r < mb; ++r) {
+                    float* ar = &acc[(size_t)r * nt + nn];
+                    __m256 v = _mm256_loadu_ps(ar);
+                    v = _mm256_add_ps(v, _mm256_and_ps(va[r], posMask));
+                    v = _mm256_sub_ps(v, _mm256_and_ps(va[r], negMask));
+                    _mm256_storeu_ps(ar, v);
+                }
+            }
+            for (; nn < nt; ++nn) {   // tail column
+                const int8_t cc = crow[nn];
+                if (cc > 0)      for (int r = 0; r < mb; ++r) acc[(size_t)r * nt + nn] += Apanel[(size_t)r * K + k];
+                else if (cc < 0) for (int r = 0; r < mb; ++r) acc[(size_t)r * nt + nn] -= Apanel[(size_t)r * K + k];
             }
         }
-        for (; n < N; ++n) {   // tail column
-            const int8_t cc = crow[n];
-            if (cc > 0)      for (int r = 0; r < mb; ++r) acc[(size_t)r * N + n] += Apanel[(size_t)r * K + k];
-            else if (cc < 0) for (int r = 0; r < mb; ++r) acc[(size_t)r * N + n] -= Apanel[(size_t)r * K + k];
-        }
+        for (int r = 0; r < mb; ++r)
+            for (int nn = 0; nn < nt; ++nn)
+                Cpanel[(size_t)r * N + n0 + nn] = acc[(size_t)r * nt + nn] * colScale[n0 + nn];
     }
-    for (int r = 0; r < mb; ++r)
-        for (int64_t n = 0; n < N; ++n) Cpanel[(size_t)r * N + n] = acc[(size_t)r * N + n] * colScale[n];
 }
 
 bool cpu_has_avx2() { return vgre::cpu::supports("avx2"); }
