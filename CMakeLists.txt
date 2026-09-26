@@ -202,7 +202,8 @@ endif()
 
 # Windows ABI / macro hygiene
 if(WIN32)
-    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS
+                            _WINSOCK_DEPRECATED_NO_WARNINGS)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
     # VS 2022's MSVC STL (<yvals_core.h>) hard-errors (STL1000) unless the
     # compiler is Clang 19+, but VGRE pins clang/LLVM 18 (its ORC JIT API changed
@@ -220,7 +221,17 @@ endif()
 # §4  Compiler warning/optimisation helper  (target-scoped, no globals)
 # ──────────────────────────────────────────────────────────────────────────────
 function(vgre_set_compiler_warnings target_name visibility)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+        # clang-cl (Clang with the MSVC driver, i.e. the Windows CI compiler). It
+        # maps the GCC-style `-Wall` to `-Weverything`, which floods the build with
+        # ~34k purely-pedantic warnings (unsafe-buffer-usage, old-style-cast,
+        # sign-conversion, …) that are not bugs. Use the MSVC-style level for a sane,
+        # curated warning set — the same one the real MSVC path below uses.
+        set(_flags /W3 /O2 /EHsc /utf-8)
+        if(VGRE_WARNINGS_AS_ERRORS)
+            list(APPEND _flags /WX)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set(_flags -Wall -Wextra -Wpedantic -O2)
         if(VGRE_WARNINGS_AS_ERRORS)
             list(APPEND _flags -Werror)

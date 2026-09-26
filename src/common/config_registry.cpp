@@ -45,7 +45,7 @@ ConfigRegistry::ConfigRegistry() {
     registerString("VGRE_LOG_LEVEL", "INFO", "Logger verbosity (DEBUG/INFO/WARN/ERROR).");
 }
 
-void ConfigRegistry::registerInt(const std::string &name, long lo, long hi, long def,
+void ConfigRegistry::registerInt(const std::string &name, long long lo, long long hi, long long def,
                                  const std::string &desc) {
     specs_.push_back(Spec{name, desc, std::to_string(def), Kind::Int, lo, hi, {}, false});
 }
@@ -89,7 +89,7 @@ int ConfigRegistry::validateAndLog() {
         bool ok = true;
         if (s->kind == Kind::Int) {
             try {
-                long v = std::stol(value);
+                long long v = std::stoll(value);
                 if (v < s->lo || v > s->hi) ok = false;
             } catch (...) { ok = false; }
             if (!ok) {

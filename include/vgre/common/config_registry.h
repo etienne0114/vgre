@@ -23,7 +23,9 @@ public:
     static ConfigRegistry &instance();
 
     // Register the known knobs. `secret` masks the value in logs.
-    void registerInt(const std::string &name, long lo, long hi, long def,
+    // 64-bit range: on Windows `long` is 32-bit, which truncates large bounds
+    // (e.g. VGRE_SHM_RESULT_OFFSET's 2^40) — use `long long` so every platform agrees.
+    void registerInt(const std::string &name, long long lo, long long hi, long long def,
                      const std::string &desc);
     void registerEnum(const std::string &name, std::vector<std::string> values,
                       const std::string &def, const std::string &desc);
@@ -42,7 +44,7 @@ private:
     struct Spec {
         std::string name, desc, def;
         Kind kind;
-        long lo = 0, hi = 0;
+        long long lo = 0, hi = 0;
         std::vector<std::string> values;  // for Enum
         bool secret = false;
     };
