@@ -153,7 +153,7 @@ Executable Function Pointer (registered in kernelAddressMap_)
 > - **Tier 3 — own SSA backend (`VGRE_EXEC_BACKEND=ssa`, feature-complete for its subset):**
 >   VGRE-IR → classic passes (const-fold, cross-block GVN, LICM, DCE) → linear-scan
 >   register allocation (GPR + XMM, loop-carried phis) → machine-code emitter (MIR/QBE-class,
->   x86-64 native; AArch64 opt-in; portable evaluator elsewhere), for peak throughput on hot
+>   x86-64 native; AArch64 native (default); portable evaluator elsewhere), for peak throughput on hot
 >   kernels. Covers full control flow (incl. `switch`), `__device__` inlining, local arrays,
 >   `__shared__`/`__syncthreads` (native ucontext fibers on x86-64/AArch64), and the full
 >   warp-intrinsic surface (`__shfl_*`, vote, reduce, match, `__syncwarp`, `__activemask` —

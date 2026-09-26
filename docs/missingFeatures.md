@@ -11,8 +11,8 @@ Everything already delivered is documented elsewhere (do not duplicate it here):
 - **Capabilities, test metrics, platform/CI status**: [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
 - **ML tracks (T1–T6)** — build steps + success criteria: [`implementationPlan.md`](implementationPlan.md)
 
-**Current baseline (2026-09-25):** the full `ctest` suite is green on all three platforms in CI —
-**394/394 with LLVM, 374/374 in the LLVM-free build** on Linux x86-64, and the whole suite passes
+**Current baseline (2026-09-26):** the full `ctest` suite is green on all three platforms in CI —
+**399/399 with LLVM, 379/379 in the LLVM-free build** on Linux x86-64, and the whole suite passes
 on macOS (Apple Silicon) and Windows (clang-cl). Released **v0.1.0** ships self-contained,
 LLVM-free wheels for Linux, macOS (arm64) and Windows.
 
@@ -24,11 +24,11 @@ Net-new or breadth work we can do without external hardware. (Items marked *corr
 already run on some tier and are bit-exact — what's left is a native path, a loader, or breadth.)
 
 ### 1.1 Packaging & distribution
-- **PyPI publish** — the trusted-publisher **workflow is now in place** (`release-wheels.yml` → the
-  opt-in `pypi` job, `pypa/gh-action-pypi-publish` via OIDC, gated behind `publish_pypi=true` so it
-  never breaks the auto-tag release). The only thing left is the **one-time PyPI-side setup** — create
-  the `vgre` project and add a trusted publisher for this repo/workflow/`pypi` environment — which is
-  an **account action** on pypi.org, not in-tree code.
+- *(Done — PyPI trusted publishing is configured. The workflow (`release-wheels.yml` → the opt-in
+  `pypi` job, `pypa/gh-action-pypi-publish` via OIDC, gated behind `publish_pypi=true`) is paired with
+  a PyPI pending publisher for `vgre` / `etienne0114` / `vgre` / `release-wheels.yml` / `pypi` and a
+  GitHub `pypi` environment restricted to `v*` tags. No API token is stored (OIDC). Publishing is a
+  manual **Release wheels** run with `publish_pypi=true`; the first upload creates the `vgre` project.)*
 - *(Done — the release-wheels matrix now builds a **macOS Intel (x86-64) wheel** on the `macos-13`
   runner alongside the arm64 one, `build_wheel.sh` tags each by the host platform. The Docker
   release now builds **amd64 and arm64 each on its own native runner** in parallel — no QEMU

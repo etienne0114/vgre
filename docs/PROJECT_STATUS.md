@@ -1,7 +1,7 @@
 # VGRE Project Status & Gap Analysis
 
 **Last Updated**: 2026-09-20 (front-end/backend differential-fuzzing hardening; test counts reconciled)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (**394 tests** with LLVM, **374** in the LLVM-free build, 100% green under full `-j`) on x86-64 Linux — the required CI job  
+**Build Status (Linux)**: ✅ full `ctest` suite passing (**399 tests** with LLVM, **379** in the LLVM-free build, 100% green under full `-j`) on x86-64 Linux — the required CI job  
 **Build Status (Linux, LLVM-free)**: ✅ **CI-guarded zero-burden path** — a dedicated `linux-x86_64-llvm-free` job builds with `VGRE_ENABLE_JIT=OFF` + `VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**, running the **358-test** JIT-free subset (the ~20 JIT-only tests are gated out in CMake). Proves the lightweight, no-toolchain build stays green on every push  
 **Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64). Latest fix: the process-exit `recursive_mutex` abort (an `atexit` handler locking the `RuntimeEngine` singleton after its destruction — EINVAL on macOS libc++) resolved by a leaked, never-destroyed singleton  
 **Build Status (Windows)**: ✅ **CI-green** — builds and runs the full `ctest` suite on `windows-2022` (LLVM-18 tarball cached, clang-cl), confirmed on run 35325255176 (2026-09-18, Test step = success). The bring-up fixes: AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output. Still `continue-on-error` in the workflow (may be promoted to required after a few more consecutive green runs)  
@@ -17,7 +17,7 @@
 > **LLVM is now optional (delivered):** kernel execution no longer requires LLVM —
 > a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter,
 > compiled-fiber tier, native x86-64 JIT, and an optional SSA optimizing backend),
-> and the full suite passes LLVM-free (374 tests, `VGRE_ENABLE_JIT=OFF`). See
+> and the full suite passes LLVM-free (379 tests, `VGRE_ENABLE_JIT=OFF`). See
 > [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) for the plan and what remains.
 
 > **2026-07-03 macOS bring-up** (in-tree, not yet full CI-green):
@@ -78,8 +78,8 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ### 1.1 Linux (x86-64) — canonical
 
-**Verified on Linux (x86-64).** The full `ctest` suite (394 tests with LLVM,
-374 in the LLVM-free build) passes on Linux, exercised with property-based
+**Verified on Linux (x86-64).** The full `ctest` suite (399 tests with LLVM,
+379 in the LLVM-free build) passes on Linux, exercised with property-based
 exploration, differential fuzzing of the CUDA-C front-end against both execution
 tiers, ThreadSanitizer race analysis, and static-destruction verification.
 
@@ -138,7 +138,7 @@ locals, gather/scatter, bounded-loop reductions, flattened + true-2-D GEMM, and 
 full math surface incl. transcendentals) at ~18–118× the compiled tier, held
 bit-exact by the `CudaNative` fuzzers. The *optional* Tier-2 SSA backend
 (`VGRE_EXEC_BACKEND=ssa`, tier 3) is now feature-complete for the scalar +
-shared-memory + warp subset (native x86-64, opt-in AArch64, portable evaluator
+shared-memory + warp subset (native x86-64, AArch64 (native by default), portable evaluator
 elsewhere; held bit-exact by `test_ssa_ir.cpp`/`test_ssa_backend.cpp`); its remaining
 items are perf/hardware-gated (native codegen for the cooperative warp ops; ARM native
 default flip). Remaining zero-burden work is tracked in
@@ -153,7 +153,7 @@ For the comprehensive, definitive list of boundary conditions (such as physical 
 The following components are fully implemented, verified via regression tests, and stable for production deployment:
 
 ### 3.1 Kernel Compilation & Execution
-- **From-scratch CUDA-C front-end + four-tier CPU backend (no LLVM required)**: an in-tree lexer/parser lowers kernels to an AST, then to the fastest of four bit-exact tiers — a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional own SSA optimizing backend (`VGRE_EXEC_BACKEND=interp|cp|ssa`). This is the default in the LLVM-free build (374 tests green).
+- **From-scratch CUDA-C front-end + four-tier CPU backend (no LLVM required)**: an in-tree lexer/parser lowers kernels to an AST, then to the fastest of four bit-exact tiers — a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional own SSA optimizing backend (`VGRE_EXEC_BACKEND=interp|cp|ssa`). This is the default in the LLVM-free build (379 tests green).
 - **LLVM JIT Compiler (optional, high-performance path)**: when LLVM dev libs are present, dynamically JITs PTX to native assembly via Clang and LLVM ORC JIT, optimized with `-O3 -march=native`.
 - **Persistent Disk Caching**: Stores JIT compilations in `~/.vgre/cache/` using an LRU cache with AST collision eviction and integrity check.
 - **Block Worker Pool**: Emulates GPU grid execution using a pre-warmed thread pool (1024-2048 threads) and sense-reversing barrier objects for `__syncthreads()`.

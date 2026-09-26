@@ -63,7 +63,7 @@ the gap to a GPU (full analysis: [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) 
 
 ## Cross-cutting rules
 
-- Everything behind feature flags; `VGRE_MINIMAL` stays buildable; the full `ctest` suite never regresses (currently 394 with LLVM / 374 LLVM-free, 100% green).
+- Everything behind feature flags; `VGRE_MINIMAL` stays buildable; the full `ctest` suite never regresses (currently 399 with LLVM / 379 LLVM-free, 100% green).
 - Each phase gated by correctness tests **and** a benchmark before the next begins.
 - No new external dependency may enter the default build — that is the whole point.
 

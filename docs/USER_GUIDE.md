@@ -180,7 +180,7 @@ first: `rm -f build/CMakeCache.txt`.
 | Flag | Default | Effect |
 |------|---------|--------|
 | `-DCMAKE_BUILD_TYPE=Release` | Release | Optimized build |
-| `-DVGRE_ENABLE_JIT=OFF` | ON | **Zero-burden build** — drop the LLVM/Clang dependency; kernels run on the from-scratch four-tier CPU backend. Full suite still passes (374 tests). |
+| `-DVGRE_ENABLE_JIT=OFF` | ON | **Zero-burden build** — drop the LLVM/Clang dependency; kernels run on the from-scratch four-tier CPU backend. Full suite still passes (379 tests). |
 | `-DVGRE_ENABLE_OPENMP=OFF` | ON | Drop OpenMP; the in-tree work-stealing thread pool parallelises CTAs instead. |
 | `-DVGRE_ENABLE_NATIVE_SIMD` | **auto** (ON if CPU supports it) | Enable `-march=native` (max SIMD, not portable) |
 | `-DVGRE_ENABLE_RDMA` | **auto** (ON if `libibverbs-dev` found) | RDMA/RoCE zero-copy transport |

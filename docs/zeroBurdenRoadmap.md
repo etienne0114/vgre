@@ -14,7 +14,7 @@ incl. transcendentals via libm calls), is differential-fuzzed bit-exact against 
 Tier-1 compiled backend, and measures **~18–118× faster** than it (saxpy, `NativePerf`).
 Anything outside the subset falls back to the compiled tier, then the interpreter.
 **What's left:** the *optional* Tier-2 SSA backend is now feature-complete for the
-scalar + shared-memory + warp subset (native x86-64, opt-in AArch64, portable
+scalar + shared-memory + warp subset (native x86-64, AArch64 (native by default), portable
 evaluator elsewhere) and wired as `VGRE_EXEC_BACKEND=ssa`; the whole subset — including
 shared memory and every warp intrinsic — now emits **native x86-64 machine code**. Its
 remaining items are hardware-gated only (flipping ARM native on after real-HW
@@ -54,7 +54,7 @@ too). Everything else already degrades gracefully or is off by default. The
 *speed* work is now largely done too: the native x86-64 JIT (Tier 1b) is the
 default and runs ~18–118× faster than the portable compiled tier. The *optional*
 Tier-2 SSA backend is now feature-complete for the scalar + shared-memory + warp
-subset — native on x86-64 (shared memory and warp intrinsics included), opt-in AArch64,
+subset — native on x86-64 (shared memory and warp intrinsics included), AArch64 (native by default),
 portable evaluator elsewhere — wired as `VGRE_EXEC_BACKEND=ssa`, tier 3; only
 hardware-gated items remain (flipping ARM native on after real-HW validation).
 
@@ -122,7 +122,7 @@ universal tier first, faster tiers added without breaking correctness:
   arrays, `__shared__`/`__syncthreads`, and the full warp-intrinsic surface); the
   cooperative shared/warp ops run on a per-block evaluator everywhere and as **native
   ucontext-fiber machine code on x86-64** (`vgre_ssa_barrier`/`vgre_ssa_warp` + a block +
-  per-warp selective-release scheduler), AArch64 shared/barrier native (opt-in). Wired as
+  per-warp selective-release scheduler), AArch64 shared/barrier + warp native (on by default). Wired as
   `VGRE_EXEC_BACKEND=ssa`. Optional, for peak throughput on hot kernels.
 
 Backend chosen at runtime (`VGRE_EXEC_BACKEND=interp|cp|ssa`), Tier 0 as the
@@ -188,13 +188,13 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
 
 **Phase D — Peak backend (optional) + threading.**
 8. In-tree thread pool becomes the only threading requirement (OpenMP optional). ✅ DONE
-9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). ✅ FEATURE-COMPLETE for the scalar + shared-memory + warp subset (native x86-64; AArch64 opt-in; portable evaluator elsewhere), wired as `VGRE_EXEC_BACKEND=ssa` (tier 3).
+9. Tier 2 SSA backend for hot kernels (linear-scan regalloc + native emitter). ✅ FEATURE-COMPLETE for the scalar + shared-memory + warp subset (native x86-64; AArch64 native (default); portable evaluator elsewhere), wired as `VGRE_EXEC_BACKEND=ssa` (tier 3).
    - **Delivered (increments 1–20)**, held bit-exact vs the interpreter/compiled tiers by
      `test_ssa_ir.cpp` / `test_ssa_backend.cpp`: VGRE-IR + Braun-phi lowering + verifier +
      evaluator; full control flow (`if`/`for`/`while`/`do-while`/`break`/`continue`/`switch`);
      optimizer (const-fold, cross-block/dominator-scoped GVN, LICM, DCE); linear-scan
      register allocation (GPR **r12–r15** + XMM **xmm2–xmm7**, loop-carried phis); native
-     **x86-64** emitter + opt-in **AArch64** (`Arm64Asm`, encodings llvm-mc-verified);
+     **x86-64** emitter + **AArch64** (on by default) (`Arm64Asm`, encodings llvm-mc-verified);
      `__device__` inlining, per-thread local arrays, extended math; and **native x86-64
      machine code for shared memory + the full warp-intrinsic surface** (`__shfl_*`, vote,
      `__reduce_*_sync`, `__match_{any,all}_sync`, `__syncwarp`, `__activemask`) via

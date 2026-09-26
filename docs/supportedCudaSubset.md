@@ -26,7 +26,7 @@ backend.
 >
 > **Optional Tier-2 SSA backend (`VGRE_EXEC_BACKEND=ssa`).** A from-scratch SSA
 > optimizing backend (`ssa_ir.cpp`, VGRE-IR → const-fold/GVN/LICM/DCE → linear-scan
-> regalloc → x86-64 native, opt-in AArch64, portable evaluator elsewhere) is
+> regalloc → x86-64 native, AArch64 (native by default), portable evaluator elsewhere) is
 > feature-complete for the scalar + shared-memory + warp subset — full control flow
 > (incl. `switch`), `__device__` inlining, local **and multi-dimensional** arrays
 > (`float As[H][W]`, N-D row-major), **by-value struct kernel params** (`p.field` read
@@ -273,9 +273,9 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **394 / 394 pass** under full `-j` load — full LLVM JIT + from-scratch backends (interpreter / compiled-fiber / native x86-64 JIT / **Tier-2 SSA**). (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention.) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **374 / 374 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel + SSA tiers still parallelise CTAs via the in-tree thread pool). The whole from-scratch stack — interpreter, compiled-fiber, native x86-64 JIT, and the Tier-2 SSA backend (incl. native shared-memory + warp intrinsics) — is exercised here. |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **374 / 374 pass, 0 crashes/aborts** |
+| `-DVGRE_ENABLE_JIT=ON` (default) | **399 / 399 pass** under full `-j` load — full LLVM JIT + from-scratch backends (interpreter / compiled-fiber / native x86-64 JIT / **Tier-2 SSA**). (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention.) |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **379 / 379 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel + SSA tiers still parallelise CTAs via the in-tree thread pool). The whole from-scratch stack — interpreter, compiled-fiber, native x86-64 JIT, and the Tier-2 SSA backend (incl. native shared-memory + warp intrinsics) — is exercised here. |
+| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **379 / 379 pass, 0 crashes/aborts** |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +
