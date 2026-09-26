@@ -230,9 +230,9 @@ jobs:
         # encodings). VGRE_SSA_ARM_NATIVE=1 turns on native emission; the SsaIr
         # differential test then runs the generated code on this Apple-Silicon
         # runner and diffs it bit-for-bit against the portable evaluator, and
-        # SsaBackend routes real C-ABI kernel launches through it. Green here is
-        # the gate for flipping VGRE_SSA_ARM_NATIVE on by default
-        # (docs/missingFeatures.md §1.2).
+        # SsaBackend routes real C-ABI kernel launches through it. Native is now ON
+        # by default (docs/missingFeatures.md §1.2) so the plain Test step above
+        # already exercises it; this step pins it explicitly as a standing guard.
         env:
           VGRE_LOG_LEVEL: ERROR
           VGRE_SSA_ARM_NATIVE: "1"

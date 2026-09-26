@@ -52,10 +52,11 @@
 
 // AArch64 native emitter (Apple Silicon + ARM Linux). Its ENCODINGS are unit-tested
 // locally against llvm-mc (test_ssa_arm64_enc); EXECUTION is validated on real ARM
-// (the macos-arm64 CI job's SsaIr differential test). Because that execution path
-// cannot be exercised on an x86-64 dev host, native activation is OPT-IN via
-// VGRE_SSA_ARM_NATIVE=1 (see SsaProgram::compile) — off by default so a latent codegen
-// bug can never regress the runtime; the portable evaluator runs the SSA otherwise.
+// (the macos-arm64 CI job's SsaIr differential test). That execution path cannot be
+// exercised on an x86-64 dev host, but it is now validated on real Apple-Silicon CI —
+// so native activation is ON BY DEFAULT (see SsaProgram::compile); set
+// VGRE_SSA_ARM_NATIVE=0 to force the portable evaluator. On any unsupported op the
+// builder bails and the (identical) evaluator runs the SSA anyway.
 #if defined(__aarch64__) && !defined(VGRE_SSA_NO_NATIVE)
 #include <sys/mman.h>
 #include <cstdlib>
@@ -2387,10 +2388,18 @@ std::unique_ptr<SsaProgram> SsaProgram::compile(const std::string& source, const
     }
 #endif
 #if VGRE_SSA_ARM64
-    // AArch64 native emission is OPT-IN (VGRE_SSA_ARM_NATIVE=1) until validated on real
-    // ARM hardware — see the guard comment up top. Same best-effort contract: on any
-    // unsupported op build() bails and launch() uses the (identical) evaluator.
-    if (std::getenv("VGRE_SSA_ARM_NATIVE")) {
+    // AArch64 native emission is ON BY DEFAULT — the emitted machine code is executed
+    // on real Apple-Silicon CI (macos-arm64 runs the SsaIr differential + SsaBackend
+    // with native codegen, bit-for-bit vs the portable evaluator). Set
+    // VGRE_SSA_ARM_NATIVE=0 (or n/f) to force the evaluator (escape hatch). Same
+    // best-effort contract: on any unsupported op build() bails and launch() uses the
+    // (identical) evaluator.
+    const char* armEnv = std::getenv("VGRE_SSA_ARM_NATIVE");
+    const bool armNative = (!armEnv || !*armEnv)
+                               ? true   // default ON (HW-validated)
+                               : !(armEnv[0] == '0' || armEnv[0] == 'n' || armEnv[0] == 'N' ||
+                                   armEnv[0] == 'f' || armEnv[0] == 'F');
+    if (armNative) {
         Arm64Asm asmb(prog->p_->fn);
         if (asmb.build() && !asmb.c.empty()) {
             size_t sz = ((asmb.c.size() + 4095) / 4096) * 4096;

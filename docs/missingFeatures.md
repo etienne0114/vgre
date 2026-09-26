@@ -41,9 +41,11 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   `__activemask`) now emit AArch64 machine code — `bl vgre_ssa_warp`/`vgre_ssa_activemask` per
   AAPCS64, mirroring the x86-64 path and reusing the same portable helpers + ucontext-fiber
   scheduler. It composes only encoders already verified by `arm64EncSelfTest` against llvm-mc.)*
-- **Flip `VGRE_SSA_ARM_NATIVE` on by default** — the only remaining step: validate native AArch64
-  *execution* on real Apple-Silicon / ARM hardware (encodings are llvm-mc-verified; execution is
-  CI-checked on `macos-arm64` with the flag). This gate is inherently **hardware-dependent**.
+- *(Done — `VGRE_SSA_ARM_NATIVE` is now **ON by default**. Native AArch64 *execution* is validated on
+  real Apple Silicon: the `macos-arm64` CI job runs the `SsaIr` differential test + `SsaBackend`
+  with native codegen and diffs the emitted machine code bit-for-bit against the portable evaluator
+  (step "SSA AArch64 native execution (real Apple Silicon)"). Set `VGRE_SSA_ARM_NATIVE=0` to force
+  the evaluator (escape hatch); on any unsupported op the builder bails to the identical evaluator.)*
 
 ### 1.3 Front-end breadth (from-scratch tiers)
 - *(Done — the full texture/surface surface runs on both from-scratch tiers, bit-exact vs the
