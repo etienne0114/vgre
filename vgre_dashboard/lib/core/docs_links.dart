@@ -5,11 +5,11 @@ import 'package:url_launcher/url_launcher.dart';
 /// docs website (docs/site/, served at the base URL below); clicking it opens
 /// the user's default browser.
 class DocsLinks {
-  /// Public docs base. Override at build time with
-  /// `--dart-define=VGRE_DOCS_URL=https://your-host/docs`.
+  /// Public docs base — the live VGRE documentation site. Override at build time
+  /// with `--dart-define=VGRE_DOCS_URL=https://etienne0114.github.io/vgre`.
   static const String base = String.fromEnvironment(
     'VGRE_DOCS_URL',
-    defaultValue: 'https://vgre.dev/docs',
+    defaultValue: 'https://vgre.vercel.app',
   );
 
   static String page(String file) => '$base/$file';
@@ -21,7 +21,7 @@ class DocsLinks {
   static String get localAi => page('local-ai.html');
   static String get cluster => page('cluster.html');
   static String get debugging => page('debugging.html');
-  static String get github => 'https://github.com/vgre-org/vgre-runtime';
+  static String get github => 'https://github.com/etienne0114/vgre';
 
   /// Opens [url] in an external browser. Returns false if no handler exists
   /// (surfaced to the caller so the UI can show a fallback).
