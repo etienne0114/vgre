@@ -61,3 +61,7 @@ EXPORTS
     vgre_quantize_affine
     vgre_dequantize_affine
     vgre_mixed_precision_gemm
+    vgre_tensor_core_caps
+    vgre_tensor_core_gemm_int8
+    vgre_block_sparse_spmv
+    vgre_cache_oblivious_matmul

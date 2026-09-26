@@ -481,6 +481,42 @@ VGRE_EXPORT int vgre_dequantize_affine(const void *src, float *dst, size_t n,
 VGRE_EXPORT int vgre_mixed_precision_gemm(const void *A, const void *B, float *C,
                                           size_t m, size_t n, size_t k, int in_type);
 
+/* ── Tensor-core / sparse / cache-oblivious compute ────────────────────────
+ * The accelerated vgre::math kernels, reachable from host (CPU) code, emulated
+ * device kernels and cluster workers; each selects the best ISA at runtime.   */
+
+/**
+ * @brief Report this CPU's tensor-core acceleration (each out is 1 or 0):
+ *        AVX-512-VNNI, AVX-512-BF16, and OS-enabled Intel AMX (CPUID).
+ */
+VGRE_EXPORT int vgre_tensor_core_caps(int *has_avx512vnni,
+                                      int *has_avx512bf16, int *has_amx);
+
+/**
+ * @brief Accelerated INT8 GEMM: C[m×n] = A[m×k] · B[k×n], INT32 accumulation.
+ *        Uses AVX-VNNI (Alder Lake+) or AMX (Sapphire Rapids+) at runtime,
+ *        falling back to AVX2/scalar — one call, correct and fast on any node.
+ */
+VGRE_EXPORT int vgre_tensor_core_gemm_int8(const int8_t *A, const int8_t *B,
+                                           int32_t *C, size_t m, size_t n, size_t k);
+
+/**
+ * @brief Block-sparse SpMV: y = A · x. A is CSR (values / col_indices /
+ *        row_offsets) of shape num_rows × num_cols, converted to block-sparse
+ *        with the given block_size; x has num_cols, y has num_rows.
+ */
+VGRE_EXPORT int vgre_block_sparse_spmv(const float *values, const int32_t *col_indices,
+                                       const int32_t *row_offsets, int32_t num_rows,
+                                       int32_t num_cols, int32_t block_size,
+                                       const float *x, float *y);
+
+/**
+ * @brief Cache-oblivious dense GEMM: C[m×p] = A[m×n] · B[n×p], row-major FP32.
+ *        Recursive divide-and-conquer that adapts to any cache hierarchy.
+ */
+VGRE_EXPORT int vgre_cache_oblivious_matmul(const float *A, const float *B, float *C,
+                                            size_t m, size_t n, size_t p);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

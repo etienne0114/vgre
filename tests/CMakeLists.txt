@@ -322,6 +322,13 @@ target_include_directories(test_mixed_precision PRIVATE ${PROJECT_SOURCE_DIR}/sr
 add_test(NAME MixedPrecision COMMAND test_mixed_precision)
 set_tests_properties(MixedPrecision PROPERTIES TIMEOUT 30)
 
+# Newly C-API-wired vgre::math kernels: INT8 tensor-core GEMM, block-sparse
+# SpMV, cache-oblivious dense GEMM (public C API surface, no internal headers).
+add_executable(test_math_kernels_capi core/test_math_kernels_capi.cpp)
+target_link_libraries(test_math_kernels_capi PRIVATE vgre)
+add_test(NAME MathKernelsCApi COMMAND test_math_kernels_capi)
+set_tests_properties(MathKernelsCApi PROPERTIES TIMEOUT 30)
+
 # QUEUE-60: Blelloch (1990) parallel prefix scan
 add_executable(test_prefix_scan core/test_prefix_scan.cpp)
 target_link_libraries(test_prefix_scan PRIVATE vgre)

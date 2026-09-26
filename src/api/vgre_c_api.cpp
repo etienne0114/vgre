@@ -21,7 +21,10 @@
 #include "vgre/core/runtime_engine.h"
 #include "vgre/core/scheduler.h"
 #include "vgre/core/virtual_gpu_device.h"
-#include "../core/math/mixed_precision.h"  // FP16/BF16/FP8 codecs + converters
+#include "../core/math/mixed_precision.h"      // FP16/BF16/FP8 codecs + converters
+#include "../core/math/tensor_core_emulation.h" // accelerated INT8 tensor-core GEMM
+#include "../core/math/block_sparse.h"          // CSR -> block-sparse SpMV
+#include "../core/math/cache_oblivious.h"       // cache-oblivious dense GEMM
 
 #include <algorithm>
 #include <chrono>
@@ -718,6 +721,49 @@ int vgre_mixed_precision_gemm(const void *A, const void *B, float *C,
     }
     default: return VGRE_ERROR_NOT_SUPPORTED;
   }
+}
+
+// ── Tensor-core / sparse / cache-oblivious compute ─────────────────────────
+
+int vgre_tensor_core_caps(int *has_avx512vnni, int *has_avx512bf16, int *has_amx) {
+  if (has_avx512vnni) *has_avx512vnni = vgre::math::hasAVX512VNNI() ? 1 : 0;
+  if (has_avx512bf16) *has_avx512bf16 = vgre::math::hasAVX512BF16() ? 1 : 0;
+  if (has_amx)        *has_amx        = vgre::math::hasAMX() ? 1 : 0;
+  return VGRE_SUCCESS;
+}
+
+int vgre_tensor_core_gemm_int8(const int8_t *A, const int8_t *B, int32_t *C,
+                               size_t m, size_t n, size_t k) {
+  if (!A || !B || !C) return VGRE_ERROR_INVALID_VALUE;
+  if (m == 0 || n == 0 || k == 0) return VGRE_SUCCESS;
+  // C[m×n] = A[m×k]·B[k×n]; the INT8 path routes to VectorEngine (AVX-VNNI/AMX).
+  vgre::math::TensorCoreConfig cfg(vgre::math::TensorOp::GEMM,
+                                   vgre::math::TensorPrecision::INT8, m, n, k);
+  vgre::math::tensorCoreMatmul<int8_t, int32_t, int32_t>(A, B, C, cfg);
+  return VGRE_SUCCESS;
+}
+
+int vgre_block_sparse_spmv(const float *values, const int32_t *col_indices,
+                           const int32_t *row_offsets, int32_t num_rows,
+                           int32_t num_cols, int32_t block_size,
+                           const float *x, float *y) {
+  if (!values || !col_indices || !row_offsets || !x || !y)
+    return VGRE_ERROR_INVALID_VALUE;
+  if (num_rows <= 0 || num_cols <= 0 || block_size <= 0) return VGRE_ERROR_INVALID_VALUE;
+  vgre::math::BlockSparseMatrix<float, int32_t> bsm;  // RAII: frees on scope exit
+  vgre::math::csrToBlockSparse<float, int32_t>(values, col_indices, row_offsets,
+                                               num_rows, num_cols, block_size, bsm);
+  vgre::math::blockSparseMV<float, int32_t>(bsm, x, y);
+  return VGRE_SUCCESS;
+}
+
+int vgre_cache_oblivious_matmul(const float *A, const float *B, float *C,
+                                size_t m, size_t n, size_t p) {
+  if (!A || !B || !C) return VGRE_ERROR_INVALID_VALUE;
+  if (m == 0 || n == 0 || p == 0) return VGRE_SUCCESS;
+  // C[m×p] = A[m×n]·B[n×p], contiguous row-major (leading dims = row lengths).
+  vgre::math::cacheObliviousMatmul<float>(A, B, C, m, n, p, n, p, p);
+  return VGRE_SUCCESS;
 }
 
 // ── Version Info ───────────────────────────────────────────────────────────
