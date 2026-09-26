@@ -229,6 +229,7 @@ See [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) and
 - [`docs/missingFeatures.md`](docs/missingFeatures.md) — Definitive registry of permanent hardware-level architectural limitations (boundary conditions)
 - [`docs/implementationPlan.md`](docs/implementationPlan.md) — Forward-looking roadmap tracking advanced future expansions (SASS, RDMA, etc.)
 - [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) — The in-tree ML stack (GEMM, autograd, VGRE-LM, wheel): the from-scratch CPU train-and-serve programme
+- [`docs/performanceResearch.md`](docs/performanceResearch.md) — Algorithmic directions to make CPU execution fast enough to be a product (low-bit/mul-free GEMM, fusion, cache-blocked attention, sparsity, autotuning, CPU scale-out), each mapped to a real problem and business use
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — System architecture and execution pipeline
 - **[Documentation site](https://vgre.vercel.app/)** — the full operator's guide (install, run CUDA, clusters, CLI, env vars, troubleshooting); source under [`docs/site/`](docs/site/), also on [GitHub Pages](https://etienne0114.github.io/vgre/)
 - [`docs/api_reference.md`](docs/api_reference.md) — API reference for C/Python bindings

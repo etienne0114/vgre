@@ -63,6 +63,16 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 - *(The SSA tier now runs the full scalar CUDA-C subset: multi-dimensional arrays
   — `float As[H][W]` —, dynamic `extern __shared__` — launch-sized shared buffers —,
   and by-value struct kernel params are all supported, bit-exact vs the other tiers.)*
+- *(Done — the **legacy (pre-CUDA-9) warp intrinsics without a mask** now run on all
+  three tiers: `__shfl`/`__shfl_up`/`__shfl_down`/`__shfl_xor`/`__ballot`/`__any`/`__all`.
+  The parser desugars each to its `_sync` form with an implicit full-warp mask
+  (0xffffffff), exactly as CUDA does on sm_70+, so the backends only ever see the
+  already-supported `_sync` ops — one shared change, no per-tier codegen. `test_cuda_warp_legacy`.)*
+- **Only remaining CUDA-C language gap** — **nested template arguments** `foo<bar<int>>`
+  and templated `__global__` launch entries. Function templates on `__device__` helpers
+  (deduced / explicit / non-type / chained / pointer) already work; what's left is the
+  parser handling nested `<…>` in a template-id and template instantiation of a launch
+  entry point. This is the last item in `supportedCudaSubset.md`'s "Not yet supported" list.
 
 ### 1.4 Serving / KV cache
 - *(Done — `KVCacheManager` now stores K/V as symmetric-absmax **int8 or packed int4** with a

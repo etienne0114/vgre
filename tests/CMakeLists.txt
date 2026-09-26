@@ -1122,6 +1122,13 @@ target_link_libraries(test_cuda_warp_shuffle PRIVATE vgre Threads::Threads)
 add_test(NAME CudaWarpShuffle COMMAND test_cuda_warp_shuffle)
 set_tests_properties(CudaWarpShuffle PROPERTIES TIMEOUT 30)
 
+# Legacy (pre-CUDA-9) warp intrinsics without a mask (__shfl*/__ballot/__any/__all),
+# desugared to the _sync forms by the parser.
+add_executable(test_cuda_warp_legacy compiler/test_cuda_warp_legacy.cpp)
+target_link_libraries(test_cuda_warp_legacy PRIVATE vgre Threads::Threads)
+add_test(NAME CudaWarpLegacy COMMAND test_cuda_warp_legacy)
+set_tests_properties(CudaWarpLegacy PROPERTIES TIMEOUT 30)
+
 # Track Z / Stage 3.2: 64-bit warp shuffle (double / long) — split into two .b32
 # shuffles + recombine. Frontend-only (interpreter), so it runs in the LLVM-free
 # build too.

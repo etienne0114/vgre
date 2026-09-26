@@ -162,6 +162,27 @@ struct Parser {
         e->kind = k; e->line = cur().line; e->col = cur().col; return e;
     }
 
+    // Desugar the legacy (pre-CUDA-9) warp intrinsics — the forms WITHOUT an
+    // explicit membership mask — into the fully-supported `_sync` forms with an
+    // implicit full-warp mask (0xffffffff), exactly as CUDA itself does on sm_70+.
+    // e.g. __shfl_down(v, d)  ->  __shfl_down_sync(0xffffffff, v, d)
+    //      __ballot(p)        ->  __ballot_sync(0xffffffff, p)
+    // Done here in the shared parser so all three backends (interpreter, compiled
+    // tier, SSA) get the legacy surface for free — they only ever see `_sync`.
+    void desugarLegacyWarp(Expr& call) {
+        static const char* kLegacy[] = {
+            "__shfl", "__shfl_up", "__shfl_down", "__shfl_xor",
+            "__ballot", "__any", "__all",
+        };
+        bool isLegacy = false;
+        for (const char* n : kLegacy) if (call.str == n) { isLegacy = true; break; }
+        if (!isLegacy) return;
+        auto mask = mkExpr(Expr::IntLit);
+        mask->ival = 0xFFFFFFFF;          // full-warp membership mask (all lanes)
+        call.args.insert(call.args.begin(), std::move(mask));
+        call.str += "_sync";
+    }
+
     // ── Types ─────────────────────────────────────────────────────────────────
     // CUDA built-in vector types (float4, int2, uchar3, …) are just structs with
     // components x/y/z/w. Map `name` → (component type, lane count); false if not one.
@@ -507,6 +528,7 @@ struct Parser {
                     }
                 }
                 expect(TokenKind::RParen, "')'");
+                desugarLegacyWarp(*node);
                 e = std::move(node);
             } else if (at(TokenKind::Inc) || at(TokenKind::Dec)) {   // postfix x++ / x--
                 auto node = mkExpr(Expr::Unary);
