@@ -266,7 +266,7 @@ _check_and_install_deps
 #   3. VGRE_TCP_AUTH_TOKEN env var (raw token — visible in process list, avoid in production)
 #   4. None — dashboard falls back to hardware secure storage (TPM/Keyring)
 #
-# For full cluster env var reference, see the docs site (Environment Variables): https://etienne0114.github.io/vgre/env-vars.html
+# For full cluster env var reference, see the docs site (Environment Variables): https://vgre.vercel.app/env-vars.html
 DEFAULT_TOKEN_FILE="$HOME/.vgre/token"
 if [[ -z "$VGRE_TCP_AUTH_TOKEN_FILE" && -f "$DEFAULT_TOKEN_FILE" ]]; then
     export VGRE_TCP_AUTH_TOKEN_FILE="$DEFAULT_TOKEN_FILE"
