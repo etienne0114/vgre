@@ -160,9 +160,10 @@ pip install https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.
 python -c "import vgre; print('native:', vgre.NATIVE_AVAILABLE)"
 ```
 
-The wheels target an **AVX2 baseline** (portable to essentially every x86-64 CPU
-since ~2015). On an older CPU without AVX2, build from source with
-`-DVGRE_SIMD_BASELINE=sse4`.
+The wheels are compiled at the **universal x86-64 baseline**, so they load on any
+x86-64 CPU; the hot kernels (GEMM, ternary) then **detect the CPU at runtime**
+(CPUID) and use AVX2 / AVX-512 automatically where available — no fixed ISA is
+required, so the same wheel is portable to a low-end laptop and fast on a server.
 
 **Build from source:**
 

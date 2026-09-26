@@ -221,10 +221,10 @@ def page_downloads():
              "pip install numpy\n"
              "pip install " + DL + "/vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n"
              "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
-        callout(p("The wheels target an <strong>AVX2</strong> baseline — portable to essentially "
-                  "every x86-64 CPU since ~2015. If import fails with <code>Illegal instruction</code> "
-                  "on a very old CPU without AVX2, build from source with "
-                  "<code>-DVGRE_SIMD_BASELINE=sse4</code>."), "warn"),
+        callout(p("The wheels are compiled at the <strong>universal x86-64 baseline</strong>, so "
+                  "they load on any x86-64 CPU; the hot kernels then <strong>detect the CPU at "
+                  "runtime</strong> and use AVX2 / AVX-512 automatically where present — one wheel, "
+                  "portable to a low-end laptop and fast on a server, no fixed ISA required."), "tip"),
         h2("Verify it works"),
         p("The bundled native library runs CUDA-C kernels and trains/serves the in-tree "
           "transformer LM on CPU:"),

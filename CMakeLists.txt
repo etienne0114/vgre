@@ -76,13 +76,17 @@ option(VGRE_BUILD_SLURM_GRES  "Build the SLURM GRES vGPU plugin"        ON)
 # ── Feature toggles ───────────────────────────────────────────────────────────
 option(VGRE_ENABLE_NATIVE_SIMD
     "Enable host-specific SIMD flags (AVX2/AVX-512). OFF = portable binaries."  ON)
-# Cap the SIMD baseline for DISTRIBUTABLE binaries so they don't require an ISA the
-# target CPU may lack. The default "native" uses the build machine's ISA (fine for a
-# local build). A wheel built on an AVX-512 CI runner with "native" would SIGILL on a
-# consumer CPU (e.g. Alder Lake, which has AVX2 but no AVX-512) — so wheels build with
-# "avx2" (portable to virtually every x86-64 CPU since ~2015). Values: native|avx2|sse4|off.
+# Cap the GLOBAL SIMD baseline for DISTRIBUTABLE binaries so the compiler cannot bake
+# an ISA the target CPU may lack into every translation unit. The default "native" uses
+# the build machine's ISA (fine for a local build). A wheel built on an AVX-512 CI runner
+# with "native" SIGILLs on a consumer CPU (e.g. Alder Lake: AVX2 but no AVX-512) — so
+# wheels build with "off": the library compiles at the universal x86-64 baseline (loads on
+# ANY CPU) and the hot kernels (GEMM, ternary) still pick AVX2/AVX-512 at RUNTIME via CPUID
+# (vgre::cpu::supports). Values: native|avx2|sse4|off.
 set(VGRE_SIMD_BASELINE "native" CACHE STRING
-    "Max SIMD ISA to compile for: native (build host) | avx2 | sse4 | off. Use avx2 for portable wheels.")
+    "Max GLOBAL SIMD ISA: native (build host) | avx2 | sse4 | off. Distributable wheels use 'off' — the "
+    "library then compiles at the universal x86-64 baseline (loads on any CPU) while the hot kernels "
+    "still select AVX2/AVX-512 at RUNTIME via CPUID, so it is portable AND fast per-CPU.")
 # Windows: LAPACK does not ship by default — require explicit opt-in once the
 # user has installed Intel oneAPI MKL or vcpkg OpenBLAS (-DVGRE_USE_LAPACK=ON).
 # Linux/macOS: default ON because liblapack-dev / Accelerate are readily available.

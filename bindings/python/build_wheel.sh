@@ -31,12 +31,14 @@ esac
 
 echo "==> Ensuring native libraries are built in $BUILD_DIR"
 if [[ ! -e "$BUILD_DIR/$PRIMARY" ]]; then
-    # VGRE_SIMD_BASELINE=avx2: a distributed wheel must NOT bake in the build
-    # machine's ISA (a "native" build on an AVX-512 CI runner SIGILLs on consumer
-    # CPUs that lack AVX-512). avx2 is portable to virtually every x86-64 CPU since
-    # ~2015. Override with VGRE_SIMD_BASELINE=... in the environment if needed.
+    # VGRE_SIMD_BASELINE=off: a distributed wheel must NOT bake in the build
+    # machine's ISA (a "native"/avx2 build on an AVX-512 runner SIGILLs on CPUs that
+    # lack that ISA). "off" compiles the library at the universal x86-64 baseline so
+    # it LOADS on any CPU; the hot kernels (GEMM, ternary) still select AVX2/AVX-512
+    # at RUNTIME via CPUID (vgre::cpu::supports), so it stays fast where the CPU can.
+    # Override with VGRE_SIMD_BASELINE=... in the environment if needed.
     cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
-          -DVGRE_SIMD_BASELINE="${VGRE_SIMD_BASELINE:-avx2}"
+          -DVGRE_SIMD_BASELINE="${VGRE_SIMD_BASELINE:-off}"
     cmake --build "$BUILD_DIR" --target vgre vgre_cudart -j"$JOBS"
 fi
 
