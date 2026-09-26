@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -69,6 +70,14 @@ int main(int argc, char** argv) {
     std::printf("top-5 next-token ids:");
     for (int i = 0; i < 5; ++i) std::printf(" %d(%.2f)", idx[(size_t)i], lg[(size_t)idx[(size_t)i]]);
     std::printf("\n");
+
+    // Optional: run the decode on the 2-bit packed ternary path (the mul-free
+    // kernel measured ~2.27× faster than dense fp32 at M=1 — docs/performanceResearch.md).
+    // Enable with VGRE_BITNET_TERNARY=1; the logits above stay fp32.
+    if (std::getenv("VGRE_BITNET_TERNARY")) {
+        std::printf("ternary (2-bit packed) decode enabled — quantizing weights...\n");
+        gpt.set_ternary_inference(true);
+    }
 
     // Greedy generation (KV-cached). Printed as ids; decode with the GGUF tokenizer.
     std::vector<int> gen = gpt.generate_cached(prompt, nNew);
