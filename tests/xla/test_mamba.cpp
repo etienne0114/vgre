@@ -11,7 +11,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 #include <random>
 #include <string>
 #include <vector>
@@ -165,7 +167,12 @@ int main() {
             ts.push_back({p + "mixer.D", {DI}, w.D});
             ts.push_back({p + "mixer.out_proj.weight", {D, DI}, w.out_proj});
         }
-        const std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp") + "/vgre_mamba_test.safetensors";
+        // Portable temp path: std::filesystem::temp_directory_path() honors the OS
+        // (TMPDIR on POSIX, TEMP/TMP on Windows) — hardcoding /tmp fails on Windows.
+        std::error_code tmpEc;
+        std::filesystem::path tmpDir = std::filesystem::temp_directory_path(tmpEc);
+        if (tmpEc) tmpDir = std::filesystem::current_path();   // last-resort fallback
+        const std::string path = (tmpDir / "vgre_mamba_test.safetensors").string();
         check("write synthetic safetensors", writeSafetensors(path, ts));
 
         MambaModel loaded; std::string err;
