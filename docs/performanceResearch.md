@@ -80,10 +80,12 @@ the seven per-layer matmul weights to 2-bit packed ternary, and `generate_cached
 runs `gemm_packed` for both the per-token decode (`mv`, M=1) and the batched
 prefill (`mvB`, M=P) — so real VGRE-LM/BitNet generation now uses the mul-free
 packed path (`test_ternary_inference`: batched-prefill==sequential-decode,
-deterministic, output differs from fp32, clean mode toggle). The embedding/output
-head stay fp32 for now. **Next (◇):** ternarize the tied head too (D×V is a large
-GEMM at BitNet scale); an AVX-512 VNNI int8-activation path on hardware that has it;
-a shape heuristic that keeps large-M prefill on dense fp32.
+deterministic, output differs from fp32, clean mode toggle). The **output head** — the single largest GEMM (D×V) — is ternarized too, both the
+untied `lm_head` and the tied `tok_embᵀ` (a separate packed [D,V] copy so `tok_emb`
+stays fp32 for the embedding gather), covering the BitNet case; `test_ternary_inference`
+checks both. The embedding gather itself stays fp32. **Next (◇):** an AVX-512 VNNI
+int8-activation path on hardware that has it; a shape heuristic that keeps large-M
+prefill on dense fp32 (ternary loses there).
 
 **Business.** This is the measured, defensible pitch: on a commodity CPU with no
 GPU, 2-bit ternary makes a 2–8B model **fit in a fraction of the RAM (16× smaller

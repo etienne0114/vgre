@@ -407,7 +407,11 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         if (cfg_.tie_embeddings) {
             // Tied head: logits[v] = Σ_d h[d]·tok_emb[v,d], using the same
             // quantized embedding table as the gather.
-            if (int8) {
+            if (tern) {
+                ternary::gemm_packed(1, V, D, h.data(),
+                                     tok_emb_head_tern_.packed.data(),
+                                     tok_emb_head_tern_.scale.data(), logits.data());
+            } else if (int8) {
                 for (int v = 0; v < V; ++v) {
                     const int8_t* row = &tok_emb_q8_.w[(size_t)v * D];
                     float acc = 0.0f;
@@ -424,7 +428,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                                           tok_emb_->data.data(), logits.data());
             }
         } else {
-            mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V);
+            mv(h.data(), lm_head_->data.data(), lm_head_bf16_.data(), &lm_head_q8_, logits.data(), D, V, &lm_head_tern_);
         }
     };
 
@@ -824,14 +828,31 @@ void GPT::set_ternary_inference(bool on) {
         quant(L.Wgate->data, D, F, L.Wgate_tern);  quant(L.Wup->data, D, F, L.Wup_tern);
         quant(L.Wdown->data, F, D, L.Wdown_tern);
     }
+    // Output head — the single largest GEMM at model scale. Untied: lm_head [D,V].
+    // Tied: ternarize tok_embᵀ into a SEPARATE [D,V] cache so tok_emb itself stays
+    // fp32 for the embedding gather.
+    const int V = cfg_.vocab;
+    if (lm_head_) {
+        quant(lm_head_->data, D, V, lm_head_tern_);
+    } else if ((int64_t)tok_emb_head_tern_.packed.size() != ternary::packedBytes(D, V)) {
+        std::vector<float> wt((size_t)D * V);            // tok_emb [V,D] → [D,V]
+        for (int vv = 0; vv < V; ++vv)
+            for (int d = 0; d < D; ++d)
+                wt[(size_t)d * V + vv] = tok_emb_->data[(size_t)vv * D + d];
+        quant(wt, D, V, tok_emb_head_tern_);
+    }
 }
 
 void GPT::drop_fp32_weights() {
-    if (!bf16_inference_ && !int8_inference_)
-        throw std::runtime_error("drop_fp32_weights: enable bf16/int8 inference first");
+    if (!bf16_inference_ && !int8_inference_ && !ternary_inference_)
+        throw std::runtime_error("drop_fp32_weights: enable bf16/int8/ternary inference first");
     auto freeData = [](Var& v) { if (v) { std::vector<float>().swap(v->data); std::vector<float>().swap(v->grad); } };
-    freeData(tok_emb_);
-    freeData(lm_head_);   // null when tied — freeData no-ops
+    // Ternary mode has no quantized embedding table, so the decode gather still
+    // reads tok_emb_ fp32 — keep it (bf16/int8 have tok_emb_bf16_/tok_emb_q8_).
+    // The tied ternary head uses a separate packed copy (tok_emb_head_tern_), so
+    // keeping tok_emb_ costs nothing extra there.
+    if (!ternary_inference_) freeData(tok_emb_);
+    freeData(lm_head_);   // null when tied; ternary untied head is in lm_head_tern_
     for (auto& L : layers_) {
         freeData(L.Wq); freeData(L.Wk); freeData(L.Wv); freeData(L.Wo);
         freeData(L.Wgate); freeData(L.Wup); freeData(L.Wdown);

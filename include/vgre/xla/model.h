@@ -196,6 +196,9 @@ private:
     // both the embedding gather (dequant a row) and, when tied, the output head
     // (per-vocab output scale). lm_head (untied) is quantized per output channel.
     Q8                    tok_emb_q8_, lm_head_q8_;
+    // Ternary output-head caches. Untied: lm_head [D,V]. Tied: tok_embᵀ [D,V]
+    // (a separate packed copy so tok_emb stays fp32 for the embedding gather).
+    TernW                 lm_head_tern_, tok_emb_head_tern_;
 };
 
 // Autoregressive generation. temperature<=0 → greedy argmax; otherwise sample

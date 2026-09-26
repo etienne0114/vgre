@@ -30,11 +30,15 @@ static int g_fail = 0;
         }                                                                  \
     } while (0)
 
-int main() {
+// Runs the full ternary-inference check for a given head style (untied lm_head or
+// tied tok_embᵀ — the latter is the BitNet case).
+static void run(bool tied) {
     Config cfg;
     cfg.vocab = 48; cfg.n_layer = 2; cfg.d_model = 32; cfg.n_head = 4;
     cfg.n_kv_head = 2; cfg.d_ff = 64; cfg.max_seq = 32;
+    cfg.tie_embeddings = tied;
     GPT gpt(cfg, /*seed=*/7);
+    const char* tag = tied ? "tied" : "untied";
 
     std::vector<int> prompt(9);
     for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = (int)((i * 7 + 3) % cfg.vocab);
@@ -71,8 +75,25 @@ int main() {
     std::vector<int> genF2 = gpt.generate_cached(prompt, nNew);
     CHECK(genF2 == genF, "disabling ternary restores the fp32 output");
 
+    // Dropping the fp32 weights in ternary mode leaves a ternary-only resident
+    // model (the 16× memory win) and generation is unchanged (decode uses packed).
+    {
+        GPT g2(cfg, /*seed=*/7);
+        g2.set_ternary_inference(true);
+        std::vector<int> before = g2.generate_cached(prompt, nNew);
+        g2.drop_fp32_weights();
+        CHECK(g2.fp32_dropped(), "fp32 weights reported dropped");
+        std::vector<int> after = g2.generate_cached(prompt, nNew);
+        CHECK(after == before, "ternary generation unchanged after drop_fp32_weights");
+    }
+    std::printf("  [%s head] checks done\n", tag);
+}
+
+int main() {
+    run(/*tied=*/false);   // untied lm_head [D,V]
+    run(/*tied=*/true);    // tied tok_embᵀ [D,V] — the BitNet case
     if (g_fail == 0)
-        std::printf("PASS: ternary (2-bit packed) inference — decode==prefill, deterministic, applied\n");
+        std::printf("PASS: ternary (2-bit packed) inference — untied + tied head, decode==prefill, deterministic\n");
     else std::printf("FAILED: %d\n", g_fail);
     return g_fail ? 1 : 0;
 }
