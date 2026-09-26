@@ -223,6 +223,21 @@ jobs:
           VGRE_LOG_LEVEL: ERROR
         run: ctest --output-on-failure -j 1 --timeout 300 --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
 
+      - name: SSA AArch64 native execution (real Apple Silicon)
+        working-directory: build
+        # The one thing only real ARM hardware can verify: EXECUTE the AArch64
+        # machine code the SSA backend emits (not just the llvm-mc-checked
+        # encodings). VGRE_SSA_ARM_NATIVE=1 turns on native emission; the SsaIr
+        # differential test then runs the generated code on this Apple-Silicon
+        # runner and diffs it bit-for-bit against the portable evaluator, and
+        # SsaBackend routes real C-ABI kernel launches through it. Green here is
+        # the gate for flipping VGRE_SSA_ARM_NATIVE on by default
+        # (docs/missingFeatures.md §1.2).
+        env:
+          VGRE_LOG_LEVEL: ERROR
+          VGRE_SSA_ARM_NATIVE: "1"
+        run: ctest --output-on-failure -j 1 --timeout 300 --repeat until-pass:2 -R 'SsaIr|SsaBackend|SsaArm64Enc'
+
   # ── Windows: bring-up (informational until green) ────────────────────────
   windows:
     name: windows-x86_64
