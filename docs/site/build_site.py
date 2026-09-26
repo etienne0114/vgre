@@ -214,10 +214,17 @@ def page_downloads():
         p('<a href="' + DL + '/vgre-0.1.0-py3-none-win_amd64.whl">⬇ Download vgre-0.1.0-py3-none-win_amd64.whl</a>'),
         code("pip install vgre-0.1.0-py3-none-win_amd64.whl"),
         h2("Install straight from the release URL"),
-        p("No manual download — <code>pip</code> fetches the wheel for you (swap the filename "
-          "for your platform):"),
-        code("pip install " + DL + "/vgre-0.1.0-py3-none-linux_x86_64.whl\n"
+        p("No manual download — <code>pip</code> fetches the wheel for you. Install into a "
+          "<strong>virtual environment</strong>: modern Debian/Ubuntu block <code>pip</code> into "
+          "the system Python (PEP 668 &ldquo;externally-managed&rdquo;)."),
+        code("python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
+             "pip install numpy\n"
+             "pip install " + DL + "/vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n"
              "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
+        callout(p("The wheels target an <strong>AVX2</strong> baseline — portable to essentially "
+                  "every x86-64 CPU since ~2015. If import fails with <code>Illegal instruction</code> "
+                  "on a very old CPU without AVX2, build from source with "
+                  "<code>-DVGRE_SIMD_BASELINE=sse4</code>."), "warn"),
         h2("Verify it works"),
         p("The bundled native library runs CUDA-C kernels and trains/serves the in-tree "
           "transformer LM on CPU:"),
@@ -245,7 +252,10 @@ def page_quickstart():
         p("Each GitHub Release ships a self-contained, <strong>LLVM-free</strong> wheel per "
           "platform (Linux / macOS / Windows). It bundles the native engine, so you need "
           "nothing but Python 3.8+ and NumPy — no compiler, no CUDA, no GPU:"),
-        code("# Grab the wheel for your platform from the latest release, then:\n"
+        code("# Use a virtual environment (modern Debian/Ubuntu block pip into the\n"
+             "# system Python — PEP 668 'externally-managed'):\n"
+             "python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
+             "pip install numpy\n"
              "pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n\n"
              "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
         callout(p("Releases: <a href=\"https://github.com/etienne0114/vgre/releases\">"

@@ -150,12 +150,19 @@ See `docs/missingFeatures.md` for the complete exhaustive list.
 **Fastest — install a prebuilt, self-contained wheel (no toolchain):** each
 [GitHub Release](https://github.com/etienne0114/vgre/releases) ships an **LLVM-free**
 wheel per platform (Linux / macOS / Windows) that bundles the native engine, so you
-need only Python 3.8+ and NumPy:
+need only Python 3.8+ and NumPy. Install into a **virtual environment** — modern
+Debian/Ubuntu block `pip` into the system Python (PEP 668 "externally-managed"):
 
 ```bash
-pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or the macOS / Windows wheel
+python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate   # avoids PEP 668
+pip install numpy
+pip install https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl   # or macOS / Windows
 python -c "import vgre; print('native:', vgre.NATIVE_AVAILABLE)"
 ```
+
+The wheels target an **AVX2 baseline** (portable to essentially every x86-64 CPU
+since ~2015). On an older CPU without AVX2, build from source with
+`-DVGRE_SIMD_BASELINE=sse4`.
 
 **Build from source:**
 
