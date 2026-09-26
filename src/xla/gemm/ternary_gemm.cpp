@@ -157,6 +157,56 @@ void gemm_panel_avx2(int64_t N, int64_t K, int mb, const float* Apanel,
     }
 }
 
+// Same two-level-blocked kernel, but the weights arrive 2-bit PACKED (4/byte). The
+// 8 codes for a column octet are unpacked in-register: broadcast the two packed
+// bytes across lanes, variable-shift by [6,4,2,0,6,4,2,0], mask &3, subtract 1 →
+// {-1,0,+1} — then the same shared-mask add/sub as the int8 kernel. N tiles are
+// 4-aligned (kTernNT % 4 == 0), so each octet reads exactly two adjacent bytes.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2")))
+#endif
+void gemm_packed_panel_avx2(int64_t N, int64_t K, int mb, const float* Apanel,
+                            const uint8_t* packed, const float* colScale, float* Cpanel) {
+    const int64_t rb = (N + 3) / 4;
+    const __m256i shifts = _mm256_setr_epi32(6, 4, 2, 0, 6, 4, 2, 0);
+    const __m256i three = _mm256_set1_epi32(3), one = _mm256_set1_epi32(1);
+    std::vector<float> acc((size_t)mb * kTernNT);
+    for (int64_t n0 = 0; n0 < N; n0 += kTernNT) {
+        const int nt = (int)std::min<int64_t>(kTernNT, N - n0);
+        std::fill(acc.begin(), acc.begin() + (size_t)mb * nt, 0.0f);
+        for (int64_t k = 0; k < K; ++k) {
+            const uint8_t* prow = packed + k * rb + (n0 >> 2);
+            __m256 va[kTernMB];
+            for (int r = 0; r < mb; ++r) va[r] = _mm256_set1_ps(Apanel[(size_t)r * K + k]);
+            int nn = 0;
+            for (; nn + 8 <= nt; nn += 8) {
+                const uint8_t b0 = prow[nn >> 2], b1 = prow[(nn >> 2) + 1];
+                __m256i bytes = _mm256_setr_epi32(b0, b0, b0, b0, b1, b1, b1, b1);
+                __m256i val = _mm256_sub_epi32(_mm256_and_si256(_mm256_srlv_epi32(bytes, shifts), three), one);
+                __m256 cf = _mm256_cvtepi32_ps(val);
+                __m256 zero = _mm256_setzero_ps();
+                __m256 posMask = _mm256_cmp_ps(cf, zero, _CMP_GT_OQ);
+                __m256 negMask = _mm256_cmp_ps(cf, zero, _CMP_LT_OQ);
+                for (int r = 0; r < mb; ++r) {
+                    float* ar = &acc[(size_t)r * nt + nn];
+                    __m256 v = _mm256_loadu_ps(ar);
+                    v = _mm256_add_ps(v, _mm256_and_ps(va[r], posMask));
+                    v = _mm256_sub_ps(v, _mm256_and_ps(va[r], negMask));
+                    _mm256_storeu_ps(ar, v);
+                }
+            }
+            for (; nn < nt; ++nn) {   // tail column
+                const int code = (prow[nn >> 2] >> (6 - 2 * (nn & 3))) & 3;
+                if (code == 2)      for (int r = 0; r < mb; ++r) acc[(size_t)r * nt + nn] += Apanel[(size_t)r * K + k];
+                else if (code == 0) for (int r = 0; r < mb; ++r) acc[(size_t)r * nt + nn] -= Apanel[(size_t)r * K + k];
+            }
+        }
+        for (int r = 0; r < mb; ++r)
+            for (int nn = 0; nn < nt; ++nn)
+                Cpanel[(size_t)r * N + n0 + nn] = acc[(size_t)r * nt + nn] * colScale[n0 + nn];
+    }
+}
+
 bool cpu_has_avx2() { return vgre::cpu::supports("avx2"); }
 #endif  // VGRE_TERNARY_AVX2
 
@@ -185,6 +235,55 @@ const char* isa() {
 #else
     return "scalar";
 #endif
+}
+
+int64_t packedBytes(int64_t K, int64_t N) { return K * ((N + 3) / 4); }
+
+void pack2bit(int64_t K, int64_t N, const int8_t* codes, uint8_t* packed) {
+    const int64_t rb = (N + 3) / 4;
+    for (int64_t k = 0; k < K; ++k) {
+        const int8_t* crow = codes + k * N;
+        uint8_t* prow = packed + k * rb;
+        for (int64_t g = 0; g < rb; ++g) {
+            uint8_t b = 0;
+            for (int j = 0; j < 4; ++j) {
+                const int64_t n = g * 4 + j;
+                const int code = (n < N) ? (int)crow[n] + 1 : 1;   // pad tail with 0-value
+                b |= (uint8_t)((code & 3) << (6 - 2 * j));          // MSB-first
+            }
+            prow[g] = b;
+        }
+    }
+}
+
+void gemm_packed(int64_t M, int64_t N, int64_t K,
+                 const float* A, const uint8_t* packed, const float* colScale,
+                 float* C) {
+#if defined(VGRE_TERNARY_AVX2)
+    if (cpu_has_avx2()) {
+        for (int64_t m0 = 0; m0 < M; m0 += kTernMB) {
+            const int mb = (int)std::min<int64_t>(kTernMB, M - m0);
+            gemm_packed_panel_avx2(N, K, mb, A + m0 * K, packed, colScale, C + m0 * N);
+        }
+        return;
+    }
+#endif
+    const int64_t rb = (N + 3) / 4;   // scalar fallback
+    for (int64_t m = 0; m < M; ++m) {
+        const float* a = A + m * K;
+        float* c = C + m * N;
+        std::vector<float> acc((size_t)N, 0.0f);
+        for (int64_t k = 0; k < K; ++k) {
+            const uint8_t* prow = packed + k * rb;
+            const float av = a[k];
+            for (int64_t n = 0; n < N; ++n) {
+                const int code = (prow[n >> 2] >> (6 - 2 * (n & 3))) & 3;
+                if (code == 2) acc[n] += av;
+                else if (code == 0) acc[n] -= av;
+            }
+        }
+        for (int64_t n = 0; n < N; ++n) c[n] = acc[n] * colScale[n];
+    }
 }
 
 }  // namespace ternary

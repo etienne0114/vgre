@@ -42,6 +42,25 @@ void gemm(int64_t M, int64_t N, int64_t K,
 // Which micro-kernel ISA the runtime selected: "avx2" or "scalar". Tests only.
 const char* isa();
 
+// ── 2-bit packed path (16× smaller weights than fp32) ────────────────────────
+// The int8 codes carry one weight per byte; packing them 4-per-byte (2 bits each,
+// MSB-first: byte = (c0<<6)|(c1<<4)|(c2<<2)|c3, code = value+1 ∈ {0,1,2}) shrinks
+// the weight footprint to K·⌈N/4⌉ bytes. That matters in the MEMORY-BOUND regime —
+// LLM decode (M≈1), where weight bandwidth dominates — which is exactly where a
+// mul-free CPU kernel can beat dense fp32 (see docs/performanceResearch.md).
+
+// Bytes needed to hold a K×N ternary matrix packed 4 columns/byte.
+int64_t packedBytes(int64_t K, int64_t N);
+
+// Pack K×N int8 codes {-1,0,+1} into the 2-bit format above.
+void pack2bit(int64_t K, int64_t N, const int8_t* codes, uint8_t* packed);
+
+// C[M,N] = A[M,K] · ternary(W)[K,N], reading the 2-bit packed weights directly
+// (unpacked in-register). Bit-identical to gemm() on the same codes.
+void gemm_packed(int64_t M, int64_t N, int64_t K,
+                 const float* A, const uint8_t* packed, const float* colScale,
+                 float* C);
+
 }  // namespace ternary
 }  // namespace xla
 }  // namespace vgre

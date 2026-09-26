@@ -60,21 +60,30 @@ kernel is **ALU-bound, not memory-bound**, because **"mul-free" is not a compute
 on a CPU with FMA**. A dense fp32 GEMM does multiply+add in ONE `vfma` per element;
 the ternary path replaces that single FMA with compare+compare+and+and+add+sub
 (~6 ops) to avoid a multiply the FMA unit already did for free. So on CPU the
-ternary/low-bit advantage is **memory, not arithmetic**: 4× smaller weights today
-(int8 codes vs fp32), and the real lever is **packing 4 codes/byte (2-bit) → 16×
-smaller weights**, which wins in the *memory-bound* regime that matters for LLM
-inference — large models whose weights do not fit in cache, at low batch, where
-weight bandwidth dominates. **Next (◇):** the 2-bit packed format + a kernel that
-unpacks in-register, benchmarked at the memory-bound shapes (large K·N, small M)
-where it should beat fp32; an AVX-512 VNNI int8-activation path on hardware that
-has it.
+ternary/low-bit advantage is **memory, not arithmetic**: fewer weight bytes to move.
 
-**Business.** The honest, measured value proposition: ternary/low-bit on CPU lets
-you **fit a much bigger model in the same RAM and move less weight bandwidth** —
-so a 2–8B model *runs at all* on a commodity box with no GPU — rather than
-"faster dense compute." That is still the single biggest "transform into a
-product" lever (private on-prem inference), but the pitch is *capacity and cost*,
-not raw FLOP/s — a distinction the benchmark made concrete rather than assumed.
+**Delivered + measured: the 2-bit packed kernel wins where it matters (decode).**
+`ternary::gemm_packed` (`pack2bit` → 4 codes/byte, unpacked in-register with a
+variable-shift, bit-exact to the int8 path) shrinks the weights **16×** (a 2560×2560
+layer: 26 MB fp32 → 1.6 MB). Benchmarked on this AVX2 box:
+
+| Regime | weights read | 2-bit ternary | dense fp32 | result |
+|--------|--------------|---------------|-----------|--------|
+| **Decode, M=1** (4096×4096) | 4.2 MB vs 67 MB | **3.48 GFLOP-eq/s** | 1.53 GFLOP/s | **2.27× faster** ✅ |
+| Batch, M=32 (2560×2560) | 1.6 MB vs 26 MB | 9.1 GFLOP-eq/s | 29 GFLOP/s | 0.31× (fp32 wins) |
+
+Autoregressive **decode is M=1** — the dominant cost of LLM serving — and there the
+memory-bound 2-bit kernel beats optimized dense fp32 **2.27×** while using 16× less
+weight memory. Batch/prefill (large M) is compute-bound, so route those to fp32/int8.
+**Next (◇):** an AVX-512 VNNI int8-activation path on hardware that has it; wire the
+packed kernel into the decode path of the VGRE-LM/BitNet serving loop behind a
+shape heuristic (M small → packed, M large → dense).
+
+**Business.** This is the measured, defensible pitch: on a commodity CPU with no
+GPU, 2-bit ternary makes a 2–8B model **fit in a fraction of the RAM (16× smaller
+weights) AND decode ~2× faster than dense fp32** — private, on-prem LLM inference
+that runs on hardware people already own. That is the single biggest "transform
+into a product" lever, and the benchmark now backs it with numbers, not hope.
 
 ## 2. Operator fusion + a graph scheduler  ◇
 

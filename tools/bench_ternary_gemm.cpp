@@ -62,9 +62,21 @@ int main(int argc, char** argv) {
             maxRel = std::max(maxRel, ad / (std::fabs((double)ref) + 1e-6));
         }
     }
-    const bool ok = maxRel < 1e-4;   // AVX2 per-column K-order == scalar → ~exact
+    bool ok = maxRel < 1e-4;   // AVX2 per-column K-order == scalar → ~exact
     std::printf("correctness (vs fp32 same-arithmetic ref): max|abs|=%.3e  max|rel|=%.3e  -> %s\n",
                 maxAbs, maxRel, ok ? "PASS" : "FAIL");
+
+    // 2-bit packed weights (16× smaller than fp32): must be BIT-IDENTICAL to the
+    // int8 ternary path (same values, same K-order).
+    std::vector<uint8_t> packed((size_t)vgre::xla::ternary::packedBytes(K, N));
+    vgre::xla::ternary::pack2bit(K, N, codes.data(), packed.data());
+    std::vector<float> Cpk((size_t)M * N, 0.0f);
+    vgre::xla::ternary::gemm_packed(M, N, K, A.data(), packed.data(), colScale.data(), Cpk.data());
+    double pkDiff = 0;
+    for (size_t i = 0; i < Cpk.size(); ++i) pkDiff = std::max(pkDiff, std::fabs((double)Cpk[i] - (double)Cter[i]));
+    const bool pkOk = pkDiff == 0.0;
+    std::printf("packed (2-bit) vs int8 ternary: max|abs|=%.3e -> %s\n", pkDiff, pkOk ? "BIT-EXACT" : "FAIL");
+    ok = ok && pkOk;
 
     // ── 2. Timing: mul-free ternary vs dense fp32 (same shape) ───────────────────
     auto bench = [&](auto&& fn) {
@@ -77,17 +89,23 @@ int main(int argc, char** argv) {
     const double tTer = bench([&] {
         vgre::xla::ternary::gemm(M, N, K, A.data(), codes.data(), colScale.data(), Cter.data());
     });
+    const double tPk = bench([&] {
+        vgre::xla::ternary::gemm_packed(M, N, K, A.data(), packed.data(), colScale.data(), Cpk.data());
+    });
     const double tF32 = bench([&] {
         vgre::xla::intree::gemm_f32_threaded(false, false, M, N, K, A.data(), Wdq.data(), Cf32.data());
     });
     const double flop = 2.0 * (double)M * N * K;   // MACs ×2
-    std::printf("shape M=%lld N=%lld K=%lld  iters=%d\n", (long long)M, (long long)N, (long long)K, iters);
-    std::printf("  ternary (mul-free, %s): %.3f ms  = %.2f GFLOP-eq/s\n",
+    std::printf("shape M=%lld N=%lld K=%lld  iters=%d   (weights: fp32 %.1f MB | int8 %.1f MB | 2-bit %.1f MB)\n",
+                (long long)M, (long long)N, (long long)K, iters,
+                (double)K * N * 4 / 1e6, (double)K * N / 1e6, (double)vgre::xla::ternary::packedBytes(K, N) / 1e6);
+    std::printf("  ternary int8  (mul-free, %s): %.3f ms  = %.2f GFLOP-eq/s\n",
                 vgre::xla::ternary::isa(), tTer * 1e3, flop / tTer / 1e9);
-    std::printf("  dense   fp32     (%s): %.3f ms  = %.2f GFLOP/s\n",
+    std::printf("  ternary 2-bit (mul-free, %s): %.3f ms  = %.2f GFLOP-eq/s   (%.2fx vs fp32)\n",
+                vgre::xla::ternary::isa(), tPk * 1e3, flop / tPk / 1e9, tF32 / tPk);
+    std::printf("  dense   fp32           (%s): %.3f ms  = %.2f GFLOP/s\n",
                 vgre::xla::intree::gemm_f32_isa(), tF32 * 1e3, flop / tF32 / 1e9);
-    std::printf("  ternary speedup vs fp32: %.2fx   (ternary weights are 4x smaller too)\n",
-                tF32 / tTer);
+    std::printf("  best ternary speedup vs fp32: %.2fx\n", tF32 / std::min(tTer, tPk));
 
     if (!ok) { std::printf("FAILED: ternary GEMM correctness\n"); return 1; }
     std::printf("PASS: ternary GEMM correct; timing above is the CPU mul-free evidence\n");
