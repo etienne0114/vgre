@@ -68,11 +68,13 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   The parser desugars each to its `_sync` form with an implicit full-warp mask
   (0xffffffff), exactly as CUDA does on sm_70+, so the backends only ever see the
   already-supported `_sync` ops — one shared change, no per-tier codegen. `test_cuda_warp_legacy`.)*
-- **Only remaining CUDA-C language gap** — **nested template arguments** `foo<bar<int>>`
-  and templated `__global__` launch entries. Function templates on `__device__` helpers
-  (deduced / explicit / non-type / chained / pointer) already work; what's left is the
-  parser handling nested `<…>` in a template-id and template instantiation of a launch
-  entry point. This is the last item in `supportedCudaSubset.md`'s "Not yet supported" list.
+- *(The CUDA-C **language** subset is now at its practical ceiling for VGRE's model.
+  The last "not yet supported" item — **nested template arguments** `foo<bar<int>>` —
+  requires **class templates**, which the from-scratch front-end does not implement by
+  design (it targets **function** templates on `__device__` helpers). Kernels needing
+  nested class templates (CUB / Cooperative Groups / Thrust) use VGRE's fallback headers
+  or the LLVM/Clang path. So the remaining "CUDA coverage" gap is the **hardware-bound
+  runtime-API** functions below in §3, not the kernel language.)*
 
 ### 1.4 Serving / KV cache
 - *(Done — `KVCacheManager` now stores K/V as symmetric-absmax **int8 or packed int4** with a

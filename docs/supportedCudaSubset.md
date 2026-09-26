@@ -251,10 +251,18 @@ running-max/running-sum rescale (no N² score matrix), and `expf`/`fmaxf` — wi
 softmax-attention reference to ~5e-8 (float rounding). The canonical transformer
 workload runs on the from-scratch front-end.
 
-## Not yet supported (returns an error, falls back to JIT when available)
-- **nested template arguments** `foo<bar<int>>` and templated `__global__` launch
-  entries (function templates on `__device__` helpers, incl. deduced/explicit/non-type/
-  chained/pointer, **are** supported — see the helper-functions row)
+## Out of scope for the function-template model (falls back to JIT when available)
+- **nested template arguments** `foo<bar<int>>` — a type argument that is itself a
+  template-id (`bar<int>`) requires **class templates**, which the from-scratch
+  front-end does not implement: it targets **function** templates on `__device__`
+  helpers (deduced / explicit / non-type / chained / pointer — all supported, see the
+  helper-functions row), the common CUDA kernel pattern. Kernels that lean on nested
+  *class* templates (CUB / Cooperative Groups / Thrust) use VGRE's fallback headers
+  (`cub_fallback.h`, `cooperative_groups.h`) or the LLVM/Clang path. With legacy warp
+  intrinsics now supported, there is **no remaining gap within the function-template
+  model** — the CUDA-C *language* subset is at its practical ceiling; what is left of
+  "CUDA coverage" is the hardware-bound *runtime-API* functions (real PMU counters,
+  SASS, physical GPUDirect), documented in `missingFeatures.md`.
 
 *(No longer here — now supported on the from-scratch tiers: the **legacy (pre-CUDA-9)
 warp intrinsics without a mask** — `__shfl`/`__shfl_up`/`__shfl_down`/`__shfl_xor`/
