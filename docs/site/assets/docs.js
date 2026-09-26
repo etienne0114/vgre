@@ -12,49 +12,74 @@
     });
   }
 
-  // ── Copy buttons on every <pre> ──────────────────────────────────────────
+  // ── Copy button (lives in each terminal's title bar) ─────────────────────
+  function wireCopy(btn) {
+    btn.addEventListener("click", function () {
+      var host = btn.closest(".terminal") || btn.parentNode;
+      var code = host.querySelector("pre code") || host.querySelector("code");
+      var text = code ? code.innerText : "";
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = "Copied";
+        btn.classList.add("copied");
+        setTimeout(function () { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1500);
+      });
+    });
+  }
+  document.querySelectorAll(".copy-btn").forEach(wireCopy);
+  // Any bare <pre> not already inside a terminal still gets a copy button.
   document.querySelectorAll("pre").forEach(function (pre) {
+    if (pre.closest(".terminal") || pre.querySelector(".copy-btn")) return;
     var btn = document.createElement("button");
     btn.className = "copy-btn";
     btn.textContent = "Copy";
-    btn.addEventListener("click", function () {
-      var code = pre.querySelector("code");
-      var text = code ? code.innerText : pre.innerText;
-      navigator.clipboard.writeText(text).then(function () {
-        btn.textContent = "Copied";
-        setTimeout(function () { btn.textContent = "Copy"; }, 1500);
-      });
-    });
     pre.appendChild(btn);
+    wireCopy(btn);
   });
 
-  // ── Lightweight syntax highlighting ──────────────────────────────────────
-  // Single-pass tokenizer over the *raw* text so it never re-scans its own
-  // emitted markup (a sequential-replace approach corrupts spans whose
-  // attributes contain keywords like "class"). Runs only on <code class="lang-*">.
-  var KW = /^(sudo|bash|cmake|make|ninja|export|import|from|class|def|return|if|else|for|while|const|auto|void|int|float|struct|namespace|public|private|using|new|delete|true|false|null|None|self|async|await|pip|git|cd|source|assert)$/;
+  // ── Lightweight, dependency-free syntax highlighting ─────────────────────
+  // A manual per-line scanner: it emits already-escaped text so it can never
+  // corrupt its own markup, and it is language-aware — in shell blocks the
+  // leading word of each command is coloured as a command and --flags stand
+  // out, mirroring a real terminal. Runs on <code class="lang-*">.
+  var KW = /^(sudo|export|import|from|class|def|return|if|elif|else|fi|then|for|while|do|done|switch|case|const|auto|void|int|long|float|double|char|bool|struct|enum|namespace|public|private|template|using|new|delete|true|false|null|nullptr|None|self|async|await|assert|include|define|print|printf)$/;
+  var CMD = /^(bash|sh|zsh|cmake|make|ninja|pip|pip3|python|python3|node|npm|git|curl|wget|scp|ssh|nc|rsync|apt|apt-get|dnf|yum|snap|brew|winget|choco|ldd|otool|dumpbin|ls|cat|cd|rm|cp|mv|mkdir|echo|grep|sed|awk|tar|chmod|chown|kill|nproc|sysctl|ctest|ctest3|flutter|dart|docker|kubectl|helm|source|set|test|dnf|ufw|rdma|Test-Path|Test-NetConnection|New-NetFirewallRule|Get-ChildItem|Select-Object)$/;
   function esc(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  // One combined pattern; the winning alternative decides the token class.
-  // '//' is a comment only when not part of a URL scheme (not preceded by ':').
-  var TOKEN = /(#[^\n]*|(?<!:)\/\/[^\n]*)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(\b\d+\.?\d*\b)|([A-Za-z_]\w*)/g;
-  function highlight(el) {
-    var src = el.textContent; // raw, unescaped source
-    var out = "";
-    var last = 0;
-    var m;
-    TOKEN.lastIndex = 0;
-    while ((m = TOKEN.exec(src)) !== null) {
-      out += esc(src.slice(last, m.index));
-      if (m[1]) out += '<span class="tok-com">' + esc(m[1]) + "</span>";
-      else if (m[2]) out += '<span class="tok-str">' + esc(m[2]) + "</span>";
-      else if (m[3]) out += '<span class="tok-num">' + esc(m[3]) + "</span>";
-      else if (m[4]) out += KW.test(m[4]) ? '<span class="tok-kw">' + m[4] + "</span>" : esc(m[4]);
-      last = m.index + m[0].length;
+  function span(cls, s) { return '<span class="' + cls + '">' + esc(s) + "</span>"; }
+  function hlLine(line, shell) {
+    var out = "", i = 0, n = line.length, seenCmd = false;
+    while (i < n) {
+      var c = line[i], j;
+      if (/\s/.test(c)) { j = i; while (j < n && /\s/.test(line[j])) j++; out += esc(line.slice(i, j)); i = j; continue; }
+      // Comments: # anywhere (shell/py), // when not part of a URL scheme.
+      if (c === "#" || (c === "/" && line[i + 1] === "/" && line[i - 1] !== ":")) { out += span("tok-com", line.slice(i)); break; }
+      // Strings: " ' or ` with escapes.
+      if (c === '"' || c === "'" || c === "`") { j = i + 1; while (j < n) { if (line[j] === "\\") { j += 2; continue; } if (line[j] === c) { j++; break; } j++; } out += span("tok-str", line.slice(i, j)); i = j; seenCmd = true; continue; }
+      // Flags: -x / --flag (only at a token boundary).
+      if (c === "-" && /[A-Za-z-]/.test(line[i + 1] || "") && (i === 0 || /\s/.test(line[i - 1]))) { j = i; while (j < n && /[\w-]/.test(line[j])) j++; out += span("tok-flag", line.slice(i, j)); i = j; seenCmd = true; continue; }
+      // Variables: $VAR / ${...} / %VAR%.
+      if (c === "$") { j = i + 1; if (line[j] === "{") { while (j < n && line[j] !== "}") j++; j++; } else { while (j < n && /[\w]/.test(line[j])) j++; } out += span("tok-var", line.slice(i, j)); i = j; seenCmd = true; continue; }
+      if (c === "%" && /[A-Za-z_]/.test(line[i + 1] || "")) { j = i + 1; while (j < n && line[j] !== "%") j++; j++; out += span("tok-var", line.slice(i, j)); i = j; seenCmd = true; continue; }
+      // Numbers.
+      if (/\d/.test(c) && (i === 0 || !/[\w]/.test(line[i - 1]))) { j = i; while (j < n && /[\d.xa-fA-F]/.test(line[j])) j++; out += span("tok-num", line.slice(i, j)); i = j; seenCmd = true; continue; }
+      // Words (identifiers, commands, paths).
+      if (/[A-Za-z_]/.test(c)) { j = i; while (j < n && /[\w.\-]/.test(line[j])) j++; var w = line.slice(i, j); var cls = "";
+        if (shell && !seenCmd && (CMD.test(w) || /^vgre[\w-]*$/.test(w))) cls = "tok-cmd";
+        else if (KW.test(w)) cls = "tok-kw";
+        out += cls ? span(cls, w) : esc(w); i = j; seenCmd = true; continue; }
+      // Operators; a pipe / ; / && starts a fresh command segment in shell.
+      out += esc(c);
+      if (shell && (c === "|" || c === ";" || c === "&")) seenCmd = false;
+      i++;
     }
-    out += esc(src.slice(last));
-    el.innerHTML = out;
+    return out;
+  }
+  function highlight(el) {
+    var m = el.className.match(/lang-([\w+]+)/);
+    var lang = m ? m[1] : "";
+    var shell = lang === "bash" || lang === "sh" || lang === "shell" || lang === "console" || lang === "powershell" || lang === "ps1";
+    el.innerHTML = el.textContent.split("\n").map(function (ln) { return hlLine(ln, shell); }).join("\n");
   }
   document.querySelectorAll('code[class*="lang-"]').forEach(highlight);
 

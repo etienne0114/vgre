@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Public IP Discovery · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Public IP Discovery.">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/discovery.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link active" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
+  <main class="content">
+    <h1>Public IP Discovery</h1><p class="lead"><code>vgre-discover</code> solves the WAN bootstrap problem — finding the master's real public IP and handing it to workers without manual configuration.</p><h2>Commands</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-discover                  # show the real public IP + worker connect command
+vgre-discover --set-master     # set VGRE_CLUSTER_ADVERTISED_ADDRESS for this session
+vgre-discover --register       # register the master IP to a token-keyed KV store
+vgre-discover --find [BUCKET]  # (worker) retrieve the master IP using the local token
+vgre-discover --unregister     # remove the registration from the KV store</code></pre></div><h2>How it works</h2><p><strong>Public IP detection</strong> tries five HTTP endpoints in order and uses the first valid IPv4 response: <code>api.ipify.org</code>, <code>ipecho.net/plain</code>, <code>icanhazip.com</code>, <code>checkip.amazonaws.com</code>, <code>api4.my-ip.io/ip</code>.</p><p><strong>Master auto-broadcast</strong> — <code>vgre-start --master</code> calls <code>vgre-discover --set-master</code> first, setting <code>VGRE_CLUSTER_ADVERTISED_ADDRESS=&lt;public-ip&gt;:7777</code>. The UDP announcer embeds that real address in every broadcast so workers behind NAT receive the correct IP instead of the sender's internal one.</p><p><strong>Cross-LAN token-keyed discovery</strong> derives the KV-store key from the token:</p><div class="terminal" data-lang="text"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">text</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-text">key = &quot;vgre-&quot; + first_32_hex_chars_of( SHA256(token) )</code></pre></div><p>Only nodes holding the same token can compute or look up the same key. The bucket ID is a non-secret opaque identifier shared once with workers — like a meeting-room ID, not a password.</p><h2>Quick start: WAN cluster with automated discovery</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># ── Master ────────────────────────────────────────────────────
+vgre-token generate            # if not already done
+vgre-discover --register       # prints the BUCKET_ID to share
+#   [OK] Master registered.  Bucket ID: aBcDeFgH   Master IP: 78.45.12.99:7777
+vgre-start --master            # auto-detects IP and sets the advertised address
+
+# ── Workers (any network, same token) ─────────────────────────
+vgre-discover --find aBcDeFgH  # -&gt; Master found: 78.45.12.99:7777
+vgre-start --worker --master-address 78.45.12.99:7777</code></pre></div><h2>Discovery modes: LAN vs WAN</h2><table><thead><tr><th>Scenario</th><th>How discovery works</th></tr></thead><tbody><tr><td>Same LAN</td><td>UDP broadcast — automatic, no configuration</td></tr><tr><td>Different LAN, same token</td><td><code>vgre-discover --register</code> → <code>--find</code></td></tr><tr><td>Different LAN, manual</td><td><code>vgre-discover</code> shows the IP → share the one-liner</td></tr><tr><td>VPN (Tailscale / ZeroTier)</td><td>Same as LAN — auto-discovery works</td></tr><tr><td>Dynamic IP (home ISP)</td><td>Re-run <code>vgre-discover --register</code> after the IP changes</td></tr></tbody></table><div class="callout warn"><div class="callout-title">Warning</div><p><code>vgre-discover</code> finds your <strong>external</strong> IP, but workers can only reach the master if your router port-forwards TCP 7777, or you use a VPN (<a href="https://tailscale.com">Tailscale</a> / <a href="https://www.zerotier.com">ZeroTier</a> — no port-forward needed), or the master runs on a VPS / cloud VM with a direct public IP.</p></div>
+    <div class="page-nav"><a href="cluster.html"><div class="dir">← Previous</div><div class="ttl">Distributed Clusters</div></a><a class="next" href="token-management.html"><div class="dir">Next →</div><div class="ttl">Token Management</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
+</body>
+</html>

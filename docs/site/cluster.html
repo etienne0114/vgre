@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Distributed Clusters · VGRE Documentation</title>
 <meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Distributed Clusters.">
-<link rel="canonical" href="https://vgre.dev/docs/cluster.html">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/cluster.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=8348c6d247">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
 </head>
 <body>
 <header class="site-header">
@@ -27,33 +27,44 @@
   </nav>
 </header>
 <div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link active" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link active" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
   <main class="content">
-    <h1>Distributed Clusters</h1><p class="lead">Scale kernels across machines over LAN or WAN.</p><h2>Token setup</h2><p>Every node in a cluster shares one auth token. Generate it on the master and distribute it to workers:</p><pre><code class="lang-bash"># On the MASTER
-vgre-token generate            # writes ~/.vgre/token, prints SHA-256 fingerprint
-
-# On every WORKER (choose one)
-scp master:~/.vgre/token ~/.vgre/token
-vgre-token set &lt;paste-token-here&gt;
-
-# Verify both sides match
-vgre-token fingerprint</code></pre><h2>Start the cluster</h2><pre><code class="lang-bash"># Master (LAN auto-discovery on)
+    <h1>Distributed Clusters</h1><p class="lead">Scale kernels across machines over LAN or WAN. Channels are authenticated with HMAC-SHA256, encrypted with AES-256-CTR, and compressed with LZ4.</p><h2>vgre-start commands</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-start --master                              # start a master node (launches dashboard)
+vgre-start --worker                              # start a worker (LAN auto-discovery)
+vgre-start --worker --is-master                  # headless master (K8s / container mode)
+vgre-start --worker --master-ip &lt;IP&gt;             # LAN: connect to a specific master IP
+vgre-start --worker --master-address &lt;HOST:PORT&gt; # WAN: hostname, IPv4, or IPv6
+vgre-start --test                                # local self-test (master + worker)
+vgre-start --port &lt;N&gt;                            # custom TCP port (default 7777)
+vgre-start --threads &lt;N&gt;                         # worker thread count (default: auto)</code></pre></div><h2>LAN cluster — step by step</h2><p><strong>1. Install</strong> on every node (<a href="installation.html">Installation</a>). <strong>2. Generate</strong> the token on the master and <strong>3. distribute</strong> it to workers (<a href="token-management.html">Token Management</a>). <strong>4. Start</strong> the services:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Master:
 vgre-start --master
 
-# Workers on the same LAN
+# Workers (LAN auto-discovery):
 vgre-start --worker
 
-# Workers over WAN (explicit master address)
-vgre-start --worker --master-address 78.45.12.99:7777</code></pre><h2>WAN connectivity</h2><p>For NAT traversal, the master advertises its public address in UDP pings. <code>vgre-discover</code> finds your public IP and registers it:</p><pre><code class="lang-bash">vgre-discover --set-master     # master: publish public IP
-vgre-discover --register       # cross-LAN token-keyed discovery</code></pre><p>Channels are authenticated with HMAC-SHA256 and encrypted with AES-256-CTR; transfers use LZ4 compression. Tuning knobs are in <a href="env-vars.html">Environment Variables</a>.</p>
-    <div class="page-nav"><a href="running-cuda.html"><div class="dir">← Previous</div><div class="ttl">Running CUDA Apps</div></a><a class="next" href="dashboard.html"><div class="dir">Next →</div><div class="ttl">The Dashboard</div></a></div>
+# Workers (explicit LAN IP):
+vgre-start --worker --master-ip 192.168.1.10</code></pre></div><h2>WAN cluster</h2><p>For workers on a <strong>different network</strong>, UDP broadcast cannot cross routers — use a direct TCP connection. Three methods:</p><h3>Method A — explicit IP</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># On master: find your public IP
+vgre-discover        # -&gt; Public IP: 78.45.12.99  (prints the worker command)
+
+# On worker (any network):
+vgre-start --worker --master-address 78.45.12.99:7777</code></pre></div><h3>Method B — automated token-keyed discovery</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-discover --register     # on master (run once, or after the IP changes)
+#   -&gt; Bucket ID: aBcDeFgH   (share this with workers)
+vgre-discover --find aBcDeFgH  # on each worker (same token required)
+vgre-start --worker --master-address 78.45.12.99:7777</code></pre></div><p>See <a href="discovery.html">Public IP Discovery</a> for how the token-keyed KV store works.</p><h3>Method C — VPN overlay (Tailscale / ZeroTier)</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Both machines on the same Tailscale network; master&#x27;s Tailscale IP 100.64.0.1
+vgre-start --worker --master-ip 100.64.0.1</code></pre></div><h2>Firewall rules</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Linux (UFW)
+sudo ufw allow 7777/tcp     # TCP cluster
+sudo ufw allow 7778/udp     # UDP discovery (LAN only)
+
+# Windows PowerShell (admin)
+New-NetFirewallRule -DisplayName &quot;VGRE TCP&quot; -Direction Inbound -Protocol TCP -LocalPort 7777 -Action Allow</code></pre></div><h2>Automatic reconnection</h2><p>Workers reconnect after a master restart or a network drop using exponential backoff:</p><table><thead><tr><th>State</th><th>Behavior</th></tr></thead><tbody><tr><td>Connection drops</td><td>Retry immediately, then 1 s → 2 → 4 → … → 120 s</td></tr><tr><td>Master restarts</td><td>Worker reconnects within one backoff cycle</td></tr><tr><td>IP changes</td><td>Re-run <code>vgre-discover --register</code> on master; workers re-run <code>--find</code></td></tr></tbody></table><p>The backoff ceiling is configurable: <code>export VGRE_CLUSTER_MAX_BACKOFF_SEC=60</code>.</p><h2>Dashboard disconnect detection</h2><p>The dashboard detects worker disconnections automatically (TCP keepalive, ~12 s after a drop): the node card turns <strong>red</strong> with a <code>DISCONNECTED</code> countdown, a floating notification appears, and the node is removed from the topology after 30 s — the 3D canvas updates in real time.</p><h2>Cross-platform support</h2><p>The wire protocol is OS-agnostic (the <code>CrossPlatform*</code> socket/error/memory tests pass everywhere). Any OS can be master or worker:</p><table><thead><tr><th>Master</th><th>Worker</th><th>Status</th></tr></thead><tbody><tr><td>Linux</td><td>Linux / macOS / Windows</td><td>Fully supported (Linux CI-verified)</td></tr><tr><td>macOS</td><td>Linux / Windows</td><td>Fully supported (macOS CI-green)</td></tr><tr><td>Windows</td><td>Linux / macOS</td><td>Fully supported (Windows CI-green, full suite)</td></tr></tbody></table>
+    <div class="page-nav"><a href="running-cuda.html"><div class="dir">← Previous</div><div class="ttl">Running CUDA Apps</div></a><a class="next" href="discovery.html"><div class="dir">Next →</div><div class="ttl">Public IP Discovery</div></a></div>
   </main>
   <aside class="toc">
     <div class="toc-title">On this page</div>
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js?v=b90822216b"></script>
-<script src="assets/docs.js?v=087808cb8b"></script>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
 </body>
 </html>

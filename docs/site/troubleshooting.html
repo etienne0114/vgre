@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Troubleshooting.">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/troubleshooting.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link active" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
+  <main class="content">
+    <h1>Troubleshooting</h1><p class="lead">Fixes for the issues you are most likely to hit, by symptom.</p><h3>Dashboard fails to load (&quot;Failed to load native library&quot;)</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">source ~/.vgre/env
+ls -la ~/.local/share/VGRE/lib/libvgre.so
+ldd ~/.local/share/VGRE/lib/libvgre.so | grep &quot;not found&quot;
+sudo apt-get install libomp-dev        # if libomp.so is missing</code></pre></div><h3>vgre-start not recognised (Windows)</h3><div class="terminal" data-lang="powershell"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">powershell</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-powershell">Test-Path &quot;$env:LOCALAPPDATA\VGRE\scripts\vgre-start.bat&quot;
+$env:PATH = &quot;$env:LOCALAPPDATA\VGRE\scripts;$env:PATH&quot;   # if PATH not yet updated
+vgre-start --help
+.\scripts\vgre_sync.bat                                    # reinstall</code></pre></div><h3>Worker cannot connect to master</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-token fingerprint                       # 1. run on BOTH — must be identical
+nc -zv MASTER_IP 7777                        # 2. test reachability (Linux/macOS)
+Test-NetConnection MASTER_IP -Port 7777      #    (Windows PowerShell)
+sudo ufw allow 7777/tcp                      # 3. open the firewall (Linux)
+vgre-discover                                # 4. WAN: verify the public IP
+export VGRE_CLUSTER_CONNECT_TIMEOUT_SEC=30   # 5. raise the timeout on slow links</code></pre></div><h3>UDP auto-discovery not working across subnets</h3><p>UDP broadcast (<code>255.255.255.255</code>) cannot cross routers. Use a direct connection or token-keyed discovery instead:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-start --worker --master-ip 192.168.1.10           # same LAN, different subnet
+vgre-start --worker --master-address 78.45.12.99:7777  # WAN / internet
+vgre-discover --register   # on master
+vgre-discover --find &lt;ID&gt;  # on worker</code></pre></div><h3>Mismatched token fingerprints</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-token copy          # on master — prints the scp command
+scp ~/.vgre/token worker@WORKER_IP:~/.vgre/token
+vgre-token fingerprint   # verify on both machines</code></pre></div><h3>CMake cannot find LLVM</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Linux
+sudo apt-get install llvm-18 llvm-18-dev clang-18
+export LLVM_DIR=$(llvm-config-18 --cmakedir)
+
+# macOS (CMake auto-detects; override only if needed)
+brew install llvm@18 libomp
+export LLVM_DIR=&quot;$(brew --prefix llvm@18)/lib/cmake/llvm&quot;
+
+# Windows
+winget install LLVM.LLVM
+set LLVM_DIR=C:\Program Files\LLVM\lib\cmake\llvm</code></pre></div><div class="callout tip"><div class="callout-title">Tip</div><p>Or skip LLVM entirely: <code>cmake -S . -B build -DVGRE_ENABLE_JIT=OFF</code> builds with just a C++17 compiler.</p></div><h3>Flutter build fails (Windows)</h3><div class="terminal" data-lang="powershell"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">powershell</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-powershell">.\scripts\vgre_sync.bat            # re-run — it pre-caches engine artifacts
+
+flutter precache --windows         # or, manually:
+cd vgre_dashboard
+flutter pub get
+flutter build windows --release</code></pre></div><h3>Low compute performance</h3><p>SIMD is auto-detected at configure time. Confirm which level was selected, or force one:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">cmake -S . -B build -DCMAKE_BUILD_TYPE=Release 2&gt;&amp;1 | grep -i &quot;simd\|avx\|amx&quot;
+export VGRE_SIMD_LEVEL=AVX512        # force a level at runtime
+VGRE_LOG_LEVEL=DEBUG ./build/examples/matrix_multiply 2&gt;&amp;1 | grep &quot;SIMD\|AVX\|AMX&quot;</code></pre></div><h3>OpenMP not working (all kernels run on one thread)</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">ldd ~/.local/share/VGRE/lib/libvgre.so | grep omp
+sudo apt-get install libomp-dev        # Ubuntu/Debian
+sudo dnf install libomp-devel          # Fedora
+# macOS: brew install llvm@18 libomp &amp;&amp; rm -f build/CMakeCache.txt &amp;&amp; cmake -B build</code></pre></div><h3>Windows: DLL load failure (0xC000001D / error 1114)</h3><div class="terminal" data-lang="powershell"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">powershell</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-powershell">dumpbin /dependents $env:LOCALAPPDATA\VGRE\vgre.dll
+Get-ChildItem &quot;$env:LOCALAPPDATA\VGRE\lib&quot; -Filter &quot;*.dll&quot; | Select-Object Name
+.\scripts\vgre_sync.bat            # re-run to restore missing DLLs</code></pre></div><h3>Windows: socket / port-bind failures (ACCESS_VIOLATION 0xC0000005)</h3><p>These are handled inside the runtime; if a custom integration hits them:</p><ul><li><strong>WSAStartup lifecycle</strong> (WinSock 10093) — VGRE manages WSAStartup/WSACleanup with a thread-safe <code>WindowsSocketManager</code> (Meyers singletons + <code>std::call_once</code>); ensure no external library closes WinSock early.</li><li><strong>Struct packing</strong> — all cross-platform packet headers use <code>#pragma pack(push, 1)</code> / <code>__attribute__((packed))</code> for bit-identical layout across MSVC and GCC/Clang.</li><li><strong>Port conflicts</strong> (TIME_WAIT) — set <code>VGRE_PORT</code> to a free port or raise <code>VGRE_CLUSTER_CONNECT_TIMEOUT_SEC</code>.</li></ul>
+    <div class="page-nav"><a href="architecture.html"><div class="dir">← Previous</div><div class="ttl">Architecture</div></a><a class="next" href="faq.html"><div class="dir">Next →</div><div class="ttl">FAQ</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
+</body>
+</html>

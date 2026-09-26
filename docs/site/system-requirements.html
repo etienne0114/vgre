@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Requirements · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. System Requirements.">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/system-requirements.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link active" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
+  <main class="content">
+    <h1>System Requirements</h1><p class="lead">What VGRE needs to build and run — and the optional libraries that unlock extra features.</p><h2>All platforms</h2><table><thead><tr><th>Requirement</th><th>Minimum</th><th>Recommended</th></tr></thead><tbody><tr><td>Operating system</td><td>Linux 5.4 / Windows 10 22H2 / macOS 11</td><td>Ubuntu 22.04 / Windows 11 / macOS 14</td></tr><tr><td>CPU</td><td>x86-64, 2 cores</td><td>x86-64 with AVX-512 or ARM64, 8+ cores</td></tr><tr><td>RAM</td><td>4 GB</td><td>16 GB+</td></tr><tr><td>CMake</td><td>3.18</td><td>3.25+</td></tr><tr><td>LLVM / Clang</td><td>16 <em>(optional — only for the JIT build)</em></td><td>18</td></tr><tr><td>C++ standard</td><td>C++17</td><td>C++20</td></tr><tr><td>Flutter SDK</td><td>3.16 <em>(dashboard only)</em></td><td>3.24+</td></tr><tr><td>PowerShell</td><td>5.1 (Windows built-in)</td><td>7+</td></tr></tbody></table><div class="callout tip"><div class="callout-title">Tip</div><p>LLVM is <strong>optional</strong>. The zero-burden build (<code>-DVGRE_ENABLE_JIT=OFF</code>) needs nothing but a C++17 compiler and runs the full suite on the from-scratch four-tier CPU backend — see <a href="installation.html">Installation</a>.</p></div><h2>Optional libraries — auto-detected</h2><p>These activate silently when present at configure time; the build never fails for a missing optional dependency, it downgrades gracefully with a CMake warning.</p><table><thead><tr><th>Package</th><th>Feature unlocked</th><th>Detection</th></tr></thead><tbody><tr><td><code>libomp-dev</code></td><td>Multi-threaded kernel execution</td><td>Recommended</td></tr><tr><td><code>libssl-dev</code></td><td>Secure cluster transport (TLS)</td><td>Recommended</td></tr><tr><td><code>libtss2-dev</code></td><td>Hardware TPM 2.0 token storage (Linux)</td><td><strong>Auto</strong></td></tr><tr><td><code>libibverbs-dev</code></td><td>RDMA / RoCE zero-copy transport</td><td><strong>Auto</strong></td></tr><tr><td><code>libsecret-1-dev</code></td><td>GNOME Keyring token storage (Linux)</td><td><strong>Auto</strong></td></tr><tr><td><code>libgrpc++-dev</code></td><td>gRPC cluster transport</td><td>Manual (<code>-DVGRE_ENABLE_GRPC=ON</code>)</td></tr><tr><td>Intel AMX CPU</td><td>AMX tile acceleration</td><td><strong>Auto</strong> (CPUID at build time)</td></tr></tbody></table>
+    <div class="page-nav"><a href="installation.html"><div class="dir">← Previous</div><div class="ttl">Installation</div></a><a class="next" href="running-cuda.html"><div class="dir">Next →</div><div class="ttl">Running CUDA Apps</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
+</body>
+</html>

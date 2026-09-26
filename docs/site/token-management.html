@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Management · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Token Management.">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/token-management.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link active" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
+  <main class="content">
+    <h1>Token Management</h1><p class="lead"><code>vgre-token</code> manages the shared 256-bit cluster auth token — the secret that authenticates every node. It works from any directory on all three platforms.</p><h2>Commands</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-token generate       # generate a new secure 256-bit token
+vgre-token show           # print the stored token value
+vgre-token fingerprint    # print the SHA-256 fingerprint
+vgre-token set [TOKEN]    # store a token pasted from another machine
+vgre-token verify         # check the env var matches the stored file
+vgre-token copy           # print the scp / robocopy command for workers
+vgre-token revoke         # delete the stored token (with confirmation)
+vgre-token install        # install vgre-token to the User PATH (first run)</code></pre></div><h2>Typical workflow</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># ── On the MASTER machine ─────────────────────────────────────
+vgre-token generate
+#   Token saved to ~/.vgre/token
+#   Token fingerprint (SHA-256): a3f9bcd2...
+
+# Share the token with workers (pick one):
+vgre-token copy                      # prints the scp / robocopy command
+scp ~/.vgre/token worker@192.168.1.50:~/.vgre/token
+
+# ── On every WORKER machine ───────────────────────────────────
+vgre-token set a3f9bcd2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # option B: paste the value
+
+# ── Verify both machines match ────────────────────────────────
+vgre-token fingerprint               # run on BOTH — the output must be identical</code></pre></div><h2>Token storage</h2><table><thead><tr><th>Platform</th><th>Token file</th><th>Env var set in</th></tr></thead><tbody><tr><td>Linux / macOS</td><td><code>~/.vgre/token</code> (chmod 600)</td><td><code>~/.vgre/env</code> → shell profile</td></tr><tr><td>Windows</td><td><code>%USERPROFILE%\.vgre\token</code></td><td>User-scope env (no restart needed)</td></tr></tbody></table><div class="callout tip"><div class="callout-title">Tip</div><p>The token never travels over the network — only its HMAC-SHA256 challenge does. Distribute the file over a secure channel (<code>scp</code>) or paste the value directly; the fingerprint lets you confirm a match without revealing the secret.</p></div>
+    <div class="page-nav"><a href="discovery.html"><div class="dir">← Previous</div><div class="ttl">Public IP Discovery</div></a><a class="next" href="dashboard.html"><div class="dir">Next →</div><div class="ttl">The Dashboard</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
+</body>
+</html>

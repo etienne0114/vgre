@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Quick Start · VGRE Documentation</title>
 <meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Quick Start.">
-<link rel="canonical" href="https://vgre.dev/docs/quickstart.html">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/quickstart.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=8348c6d247">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
 </head>
 <body>
 <header class="site-header">
@@ -27,23 +27,23 @@
   </nav>
 </header>
 <div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link active" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link active" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
   <main class="content">
-    <h1>Quick Start</h1><p class="lead">From a one-line install to a running CUDA kernel on CPU in minutes.</p><h2>Fastest: install the prebuilt wheel (no toolchain)</h2><p>Each GitHub Release ships a self-contained, <strong>LLVM-free</strong> wheel per platform (Linux / macOS / Windows). It bundles the native engine, so you need nothing but Python 3.8+ and NumPy — no compiler, no CUDA, no GPU:</p><pre><code class="lang-bash"># Grab the wheel for your platform from the latest release, then:
+    <h1>Quick Start</h1><p class="lead">From a one-line install to a running CUDA kernel on CPU in minutes.</p><h2>Fastest: install the prebuilt wheel (no toolchain)</h2><p>Each GitHub Release ships a self-contained, <strong>LLVM-free</strong> wheel per platform (Linux / macOS / Windows). It bundles the native engine, so you need nothing but Python 3.8+ and NumPy — no compiler, no CUDA, no GPU:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Grab the wheel for your platform from the latest release, then:
 pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64
 
-python -c &quot;import vgre; print(&#x27;native:&#x27;, vgre.NATIVE_AVAILABLE)&quot;</code></pre><div class="callout tip"><div class="callout-title">Tip</div><p>Releases: <a href="https://github.com/etienne0114/vgre/releases">github.com/etienne0114/vgre/releases</a>. The wheel runs CUDA-C kernels and trains/serves the in-tree transformer LM entirely on CPU.</p></div><h2>Build from source (Linux / macOS)</h2><pre><code class="lang-bash">git clone https://github.com/etienne0114/vgre.git
+python -c &quot;import vgre; print(&#x27;native:&#x27;, vgre.NATIVE_AVAILABLE)&quot;</code></pre></div><div class="callout tip"><div class="callout-title">Tip</div><p>Releases: <a href="https://github.com/etienne0114/vgre/releases">github.com/etienne0114/vgre/releases</a>. The wheel runs CUDA-C kernels and trains/serves the in-tree transformer LM entirely on CPU.</p></div><h2>Build from source (Linux / macOS)</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">git clone https://github.com/etienne0114/vgre.git
 cd vgre
-bash install_local.sh</code></pre><p><code>install_local.sh</code> detects and installs missing dependencies (CMake, LLVM, OpenMP, Flutter), builds the native engine and dashboard, writes <code>~/.vgre/env</code>, creates your auth token, and links the CLI tools into <code>~/.local/bin</code>.</p><p>Open a <strong>new terminal</strong>, then:</p><pre><code class="lang-bash">vgre-dashboard          # launch the real-time monitor
-vgre-start --test       # local master + worker self-test</code></pre><h2>Run a CUDA program</h2><p>Build your CUDA source as usual, then run it against the VGRE runtime shim instead of the NVIDIA driver:</p><pre><code class="lang-bash"># Linux — preload the CUDA-runtime shim
+bash install_local.sh</code></pre></div><p><code>install_local.sh</code> detects and installs missing dependencies (CMake, LLVM, OpenMP, Flutter), builds the native engine and dashboard, writes <code>~/.vgre/env</code>, creates your auth token, and links the CLI tools into <code>~/.local/bin</code>.</p><p>Open a <strong>new terminal</strong>, then:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre-dashboard          # launch the real-time monitor
+vgre-start --test       # local master + worker self-test</code></pre></div><h2>Run a CUDA program</h2><p>Build your CUDA source as usual, then run it against the VGRE runtime shim instead of the NVIDIA driver:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Linux — preload the CUDA-runtime shim
 LD_PRELOAD=$VGRE_INSTALL_DIR/lib/libvgre_cudart.so ./my_cuda_app
 
 # macOS
-DYLD_INSERT_LIBRARIES=$VGRE_INSTALL_DIR/lib/libvgre_cudart.dylib ./my_cuda_app</code></pre><div class="callout tip"><div class="callout-title">Tip</div><p>No source changes are needed. VGRE implements ~95% of the commonly used CUDA Runtime and Driver APIs; unsupported calls return a clear error rather than silently misbehaving.</p></div><h2>Try the local language model</h2><pre><code class="lang-python">import vgre
+DYLD_INSERT_LIBRARIES=$VGRE_INSTALL_DIR/lib/libvgre_cudart.dylib ./my_cuda_app</code></pre></div><div class="callout tip"><div class="callout-title">Tip</div><p>No source changes are needed. VGRE implements ~95% of the commonly used CUDA Runtime and Driver APIs; unsupported calls return a clear error rather than silently misbehaving.</p></div><h2>Try the local language model</h2><div class="terminal" data-lang="python"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">python</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-python">import vgre
 tok = vgre.Tokenizer().train(open(&#x27;corpus.txt&#x27;).read(), num_merges=512)
 lm  = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=4, d_model=256, n_head=4)
 # ... train, then:
-print(tok.decode(lm.generate(tok.encode(&#x27;Once upon a time&#x27;), n_new=40)))</code></pre><p>See <a href="local-ai.html">Local AI</a> for LoRA fine-tuning and RAG.</p>
+print(tok.decode(lm.generate(tok.encode(&#x27;Once upon a time&#x27;), n_new=40)))</code></pre></div><p>See <a href="local-ai.html">Local AI</a> for LoRA fine-tuning and RAG.</p>
     <div class="page-nav"><a href="index.html"><div class="dir">← Previous</div><div class="ttl">Introduction</div></a><a class="next" href="downloads.html"><div class="dir">Next →</div><div class="ttl">Downloads</div></a></div>
   </main>
   <aside class="toc">
@@ -51,7 +51,7 @@ print(tok.decode(lm.generate(tok.encode(&#x27;Once upon a time&#x27;), n_new=40)
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js?v=b90822216b"></script>
-<script src="assets/docs.js?v=087808cb8b"></script>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
 </body>
 </html>

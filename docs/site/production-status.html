@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Production Status · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Production Status.">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/production-status.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link active" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
+  <main class="content">
+    <h1>Production Status</h1><p class="lead">Every shipped capability and its maturity. "Production" means real CPU math with no runtime stubs, exercised by the CI test suite.</p><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody><tr><td>CUDA runtime intercept (<code>cudart</code>)</td><td>Production</td></tr><tr><td>LLVM JIT kernel compilation</td><td>Production</td></tr><tr><td>From-scratch four-tier CPU backend (no LLVM)</td><td>Production</td></tr><tr><td>cuBLAS INT8 / FP32 / FP64</td><td>Production</td></tr><tr><td>cuDNN convolution (INT8, FP32)</td><td>Production</td></tr><tr><td>NCCL AllReduce (ring + barrier-tree)</td><td>Production</td></tr><tr><td>CUDA Graphs (IF / WHILE / SWITCH)</td><td>Production</td></tr><tr><td>Virtual memory (<code>cuMemCreate</code> / <code>cuMemMap</code>)</td><td>Production</td></tr><tr><td>External semaphores (eventfd / Win32)</td><td>Production</td></tr><tr><td>UVM managed memory</td><td>Production</td></tr><tr><td>NVTX profiling markers</td><td>Production</td></tr><tr><td>AVX-512 WMMA acceleration</td><td>Production</td></tr><tr><td>Intel AMX tile acceleration</td><td>Production (Sapphire Rapids+)</td></tr><tr><td>Hopper PTX (wgmma, TMA, cp.async.bulk)</td><td>Production</td></tr><tr><td>GPU L1 / L2 cache model</td><td>Production</td></tr><tr><td>TCP cluster + TLS</td><td>Production</td></tr><tr><td>WAN cluster (hostname / IPv6 / NAT)</td><td><strong>Production</strong></td></tr><tr><td>Worker auto-disconnect detection</td><td><strong>Production</strong></td></tr><tr><td>RDMA / RoCE transport</td><td>Optional (<code>-DVGRE_ENABLE_RDMA=ON</code>)</td></tr><tr><td>gRPC cluster transport</td><td>Optional (<code>-DVGRE_ENABLE_GRPC=ON</code>)</td></tr><tr><td>CUDA MPS multi-process</td><td>Production (Unix socket)</td></tr><tr><td><code>cuMemMulticast</code></td><td>Production</td></tr><tr><td>Flutter real-time dashboard</td><td>Production</td></tr><tr><td><code>vgre-token</code> CLI</td><td>Production (Linux / macOS / Windows)</td></tr><tr><td><code>vgre-start</code> cluster launcher</td><td>Production (Linux / macOS / Windows)</td></tr><tr><td><code>vgre-discover</code> IP discovery</td><td><strong>Production</strong></td></tr><tr><td>OpenTelemetry <code>hw.gpu.*</code> export</td><td>Production</td></tr></tbody></table>
+    <div class="page-nav"><a href="cli.html"><div class="dir">← Previous</div><div class="ttl">CLI Tools</div></a><a class="next" href="architecture.html"><div class="dir">Next →</div><div class="ttl">Architecture</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
+</body>
+</html>

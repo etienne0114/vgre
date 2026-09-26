@@ -161,21 +161,50 @@ code {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: 5px; padding: 2px 6px; color: var(--neon);
 }
+/* ── Terminal-style code blocks ─────────────────────────────────────────────
+   A title bar (traffic-light dots + language label + Copy) over a seamless
+   code body, so every snippet reads like a real terminal window. */
+.terminal {
+  background: #0a0c11; border: 1px solid var(--border-strong);
+  border-radius: 12px; margin: 0 0 22px; overflow: hidden;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.38);
+}
+.terminal-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; background: #0f131a;
+  border-bottom: 1px solid var(--border);
+}
+.term-dots { display: flex; gap: 6px; }
+.term-dots i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.term-dots i:nth-child(1) { background: #ff5f57; }
+.term-dots i:nth-child(2) { background: #febc2e; }
+.term-dots i:nth-child(3) { background: #28c840; }
+.term-lang {
+  color: var(--text-dim); font-family: var(--mono); font-size: 11px;
+  letter-spacing: 1.5px; text-transform: uppercase; user-select: none;
+}
 pre {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 18px 20px; overflow-x: auto;
-  margin: 0 0 20px; position: relative;
+  background: transparent; border: 0; border-radius: 0;
+  padding: 16px 18px; overflow-x: auto; margin: 0 0 22px; position: relative;
 }
-pre code { background: none; border: none; padding: 0; color: var(--text); font-size: 13.5px; line-height: 1.6; }
+.terminal pre { margin: 0; }
+pre code { background: none; border: none; padding: 0; color: #d6dbe4; font-size: 13.5px; line-height: 1.65; }
 .copy-btn {
-  position: absolute; top: 10px; right: 10px;
-  background: var(--surface-2); border: 1px solid var(--border);
-  color: var(--text-muted); border-radius: 6px; padding: 4px 10px;
-  font-size: 11px; font-family: var(--mono); cursor: pointer;
+  margin-left: auto; background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border); color: var(--text-muted);
+  border-radius: 6px; padding: 4px 12px; font-size: 11px;
+  font-family: var(--mono); letter-spacing: 0.3px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
 }
-.copy-btn:hover { color: var(--neon); border-color: var(--neon); }
+/* Bare <pre> fallback (no terminal wrapper): float the button in the corner. */
+pre > .copy-btn { position: absolute; top: 10px; right: 10px; margin: 0; }
+.copy-btn:hover { color: var(--neon); border-color: var(--neon); background: var(--neon-dim); }
+.copy-btn.copied { color: var(--green); border-color: var(--green); }
 
-/* Syntax highlight tokens (applied by prism-lite in docs.js) */
+/* Syntax-highlight tokens (applied by the in-house highlighter in docs.js). */
+.tok-cmd { color: var(--neon); font-weight: 500; }
+.tok-flag { color: var(--amber); }
+.tok-var { color: var(--cyan); }
 .tok-kw { color: var(--blue); }
 .tok-str { color: var(--green); }
 .tok-com { color: var(--text-dim); font-style: italic; }

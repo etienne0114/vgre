@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Running CUDA Apps · VGRE Documentation</title>
 <meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Running CUDA Apps.">
-<link rel="canonical" href="https://vgre.dev/docs/running-cuda.html">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/running-cuda.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=8348c6d247">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
 </head>
 <body>
 <header class="site-header">
@@ -27,17 +27,49 @@
   </nav>
 </header>
 <div class="layout">
-  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link active" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a></div><div class="nav-group"><div class="nav-group-title">About</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="faq.html">FAQ &amp; Troubleshooting</a></div></aside>
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link active" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
   <main class="content">
-    <h1>Running CUDA Applications</h1><p class="lead">How VGRE intercepts and executes CUDA on the CPU.</p><h2>Execution model</h2><p>VGRE parses each CUDA-C kernel with its <strong>own from-scratch front-end</strong> (no Clang required) and runs it on the fastest of four bit-exact CPU tiers that accepts it: a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional SSA optimizing backend. When LLVM dev libraries are present, an optional Clang → LLVM IR → ORC-JIT path (<code>-O3 -march=native</code>) is available as the high-performance tier. Kernel grids run on an in-tree work-stealing thread pool with SIMD vectorization (OpenMP is optional); managed memory is backed by an OS page-fault handler. See <a href="architecture.html">Architecture</a> for the tier table.</p><h2>What works</h2><ul><li>CUDA Runtime API (~101 functions): memory, streams, events, graphs, textures/surfaces, cooperative launch, CDP.</li><li>CUDA Driver API (~56 functions): contexts, modules, PTX load + JIT link.</li><li>cuBLAS (L1/L2/L3, complex), cuDNN (conv/pool/norm/attention/RNN), cuFFT/cuRAND/cuSOLVER/cuSPARSE.</li><li>NCCL collectives (~95%) and OpenCL 1.2.</li><li>PTX ISA (~95% of common instructions), kernel fusion, persistent JIT cache.</li></ul><h2>Performance expectations</h2><p>CPU execution is typically 10–50× slower than a real GPU for compute-bound kernels; AVX-512 + OpenMP narrow the gap substantially for memory-bound work. Call <code>getMemoryBandwidthStats()</code> to measure your effective bandwidth and the estimated GPU speedup factor for your specific workload.</p><div class="callout tip"><div class="callout-title">Tip</div><p>Best fit: learning CUDA, CI/CD test runs, moderate vector/matrix/graph workloads, and distributed CPU-cluster compute. Not a replacement for a GPU on latency-critical, heavy-FLOP production inference.</p></div>
-    <div class="page-nav"><a href="installation.html"><div class="dir">← Previous</div><div class="ttl">Installation</div></a><a class="next" href="cluster.html"><div class="dir">Next →</div><div class="ttl">Distributed Clusters</div></a></div>
+    <h1>Running CUDA Applications</h1><p class="lead">How VGRE intercepts and executes CUDA on the CPU.</p><h2>Execution model</h2><p>VGRE parses each CUDA-C kernel with its <strong>own from-scratch front-end</strong> (no Clang required) and runs it on the fastest of four bit-exact CPU tiers that accepts it: a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional SSA optimizing backend. When LLVM dev libraries are present, an optional Clang → LLVM IR → ORC-JIT path (<code>-O3 -march=native</code>) is available as the high-performance tier. Kernel grids run on an in-tree work-stealing thread pool with SIMD vectorization (OpenMP is optional); managed memory is backed by an OS page-fault handler. See <a href="architecture.html">Architecture</a> for the tier table.</p><h2>What works</h2><ul><li>CUDA Runtime API (~101 functions): memory, streams, events, graphs, textures/surfaces, cooperative launch, CDP.</li><li>CUDA Driver API (~56 functions): contexts, modules, PTX load + JIT link.</li><li>cuBLAS (L1/L2/L3, complex), cuDNN (conv/pool/norm/attention/RNN), cuFFT/cuRAND/cuSOLVER/cuSPARSE.</li><li>NCCL collectives (~95%) and OpenCL 1.2.</li><li>PTX ISA (~95% of common instructions), kernel fusion, persistent JIT cache.</li></ul><h2>Intercept mode — run an existing CUDA binary unchanged</h2><p>Preload the drop-in <code>libvgre_cudart</code> so an app's <code>cuda*</code> calls route into VGRE. No recompilation, no source changes:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Linux
+export LD_PRELOAD=&quot;$HOME/.local/share/VGRE/lib/libvgre_cudart.so&quot;
+python my_pytorch_script.py
+
+# macOS
+export DYLD_INSERT_LIBRARIES=&quot;$HOME/.local/share/VGRE/lib/libvgre_cudart.dylib&quot;
+python my_pytorch_script.py</code></pre></div><div class="callout tip"><div class="callout-title">Tip</div><p><strong>Windows:</strong> copy <code>%LOCALAPPDATA%\VGRE\vgre_cudart.dll</code> into the application directory and rename it <code>cudart64_120.dll</code> (match your CUDA version suffix).</p></div><h2>Python bindings</h2><p>Allocate, copy, compile a kernel from source, launch, and read back — all on the CPU:</p><div class="terminal" data-lang="python"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">python</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-python">import vgre
+import numpy as np
+
+rt = vgre.Runtime()
+rt.init(enable_profiling=True)
+
+a = rt.alloc(1024 * np.float32().itemsize)
+rt.memcpy_h2d(a, np.ones(1024, dtype=np.float32))
+
+kernel = vgre.Kernel(&quot;vector_scale&quot;, &quot;&quot;&quot;
+    __global__ void vector_scale(float* a, float scale, int n) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i &lt; n) a[i] *= scale;
+    }
+&quot;&quot;&quot;)
+rt.launch(kernel, grid=(4, 1, 1), block=(256, 1, 1), args=[a, 2.0, 1024])
+rt.synchronize()
+print(np.frombuffer(rt.memcpy_d2h(a, 1024 * 4), dtype=np.float32)[:8])</code></pre></div><h2>C API</h2><div class="terminal" data-lang="c"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">c</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-c">#include &lt;vgre/api/vgre_c_api.h&gt;
+
+int main(void) {
+    vgre_init();
+    void* ptr = NULL;
+    vgre_malloc(&amp;ptr, 1024 * sizeof(float));
+    // ... launch kernels ...
+    vgre_free(ptr);
+    vgre_shutdown();
+}</code></pre></div><h2>Performance expectations</h2><p>CPU execution is typically 10–50× slower than a real GPU for compute-bound kernels; AVX-512 + OpenMP narrow the gap substantially for memory-bound work. Call <code>getMemoryBandwidthStats()</code> to measure your effective bandwidth and the estimated GPU speedup factor for your specific workload.</p><div class="callout tip"><div class="callout-title">Tip</div><p>Best fit: learning CUDA, CI/CD test runs, moderate vector/matrix/graph workloads, and distributed CPU-cluster compute. Not a replacement for a GPU on latency-critical, heavy-FLOP production inference.</p></div>
+    <div class="page-nav"><a href="system-requirements.html"><div class="dir">← Previous</div><div class="ttl">System Requirements</div></a><a class="next" href="cluster.html"><div class="dir">Next →</div><div class="ttl">Distributed Clusters</div></a></div>
   </main>
   <aside class="toc">
     <div class="toc-title">On this page</div>
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js?v=b90822216b"></script>
-<script src="assets/docs.js?v=087808cb8b"></script>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
 </body>
 </html>

@@ -2,6 +2,8 @@
 
 **A CUDA emulation runtime** that allows CUDA applications to run on CPU without a physical GPU.
 
+📖 **Full documentation → [etienne0114.github.io/vgre](https://etienne0114.github.io/vgre/)** — installation, running CUDA apps, distributed clusters, the CLI tools, every environment variable, troubleshooting, and the API reference. The complete operator's guide now lives on the docs site.
+
 > **PROJECT STATUS** (2026-09): **All three platforms green in CI — Linux production-verified, macOS ARM64 CI-green, Windows x86-64 CI-green.** The full `ctest` suite passes on **x86-64 Linux**: **399 tests with LLVM, 379 in the LLVM-free build** (`VGRE_ENABLE_JIT=OFF`, `VGRE_ENABLE_OPENMP=OFF`) — the "runs on any machine, no toolchain" path is guarded on every push, not just built by hand. CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented with real CPU math (**no runtime stubs**). **VGRE no longer needs LLVM to execute kernels:** a **from-scratch CUDA-C front-end** (own lexer/parser → AST) feeds a four-tier CPU execution stack — a **PTX interpreter** (Tier 0), a **compiled-closure backend with a cooperative fiber executor** (Tier 1, `__shared__`/`__syncthreads`/warp intrinsics), a **native x86-64 machine-code JIT** (Tier 1b, ~18–118× the compiled tier), and an **optional own SSA optimizing backend** (Tier 2 / `VGRE_EXEC_BACKEND=ssa`: VGRE-IR → const-fold/GVN/LICM/DCE → linear-scan regalloc → x86-64 and AArch64 native (the latter on by default, validated by executing the emitted code on Apple-Silicon CI), feature-complete for the scalar + shared-memory + warp subset). Every tier is held **bit-exact** against the others. CI runs free on the public repo on **every push**; the macOS (Apple Silicon, auto-detected Homebrew `llvm@18`) and Windows (clang-cl on `windows-2022`) jobs both build **and run the whole `ctest` suite** to green, remaining `continue-on-error` pending promotion. A **free public demo** runs on CPU at **https://vgrengine.streamlit.app**. Hardware-only boundaries (physical GPU PMU counters, Metal MPS backend, GPUDirect RDMA) are in `docs/missingFeatures.md`.
 
 ## What is VGRE?
@@ -228,7 +230,7 @@ See [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) and
 - [`docs/implementationPlan.md`](docs/implementationPlan.md) — Forward-looking roadmap tracking advanced future expansions (SASS, RDMA, etc.)
 - [`docs/inTreeLibrariesPlan.md`](docs/inTreeLibrariesPlan.md) — The in-tree ML stack (GEMM, autograd, VGRE-LM, wheel): the from-scratch CPU train-and-serve programme
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — System architecture and execution pipeline
-- [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) — User guide and setup instructions
+- **[Documentation site](https://etienne0114.github.io/vgre/)** — the full operator's guide (install, run CUDA, clusters, CLI, env vars, troubleshooting); source under [`docs/site/`](docs/site/)
 - [`docs/api_reference.md`](docs/api_reference.md) — API reference for C/Python bindings
 
 ## License

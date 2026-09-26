@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Advanced Features · VGRE Documentation</title>
+<meta name="description" content="VGRE — run CUDA on CPU, plus a full local-AI stack. Advanced Features.">
+<link rel="canonical" href="https://etienne0114.github.io/vgre/advanced.html">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+</head>
+<body>
+<header class="site-header">
+  <button class="menu-toggle" aria-label="Menu">☰</button>
+  <a class="brand" href="index.html">
+    <span class="brand-mark">◈</span>
+    <span class="brand-name">VGRE</span>
+    <span class="brand-tag">VIRTUAL GPU RUNTIME</span>
+  </a>
+  <div class="header-spacer"></div>
+  <input class="header-search" type="search" placeholder="Search docs…" aria-label="Search">
+  <nav class="header-links">
+    <a href="index.html">Docs</a>
+    <a href="api.html">API</a>
+    <a href="https://github.com/etienne0114/vgre">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link active" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
+  <main class="content">
+    <h1>Advanced Features</h1><p class="lead">Cache modelling, SIMD/AMX acceleration, Hopper PTX emulation, MPS, and the optional RDMA / gRPC transports.</p><h2>GPU L1 / L2 cache model</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">export VGRE_L1_CACHE_KB=64    # 16 | 32 | 64 | 128
+export VGRE_L2_CACHE_MB=20    # 2 | 6 | 20 | 40</code></pre></div><div class="terminal" data-lang="c"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">c</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-c">vgre_cache_stats_t cs;
+vgre_get_cache_stats(&amp;cs);
+printf(&quot;L2 hit rate: %.1f%%  hits=%llu  misses=%llu\n&quot;,
+       cs.l2_hit_rate * 100.0, cs.l2_hits, cs.l2_misses);</code></pre></div><h2>AMX + AVX-512 WMMA acceleration</h2><ul><li><strong>AMX path</strong> — 16×16×16 BF16 matrix tiles (Sapphire Rapids and newer).</li><li><strong>AVX-512 path</strong> — N=16 tiles, ~16× over scalar.</li><li><strong>Scalar fallback</strong> — always available.</li></ul><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">VGRE_LOG_LEVEL=DEBUG vgre-dashboard 2&gt;&amp;1 | grep -E &quot;AMX|AVX-512|SIMD&quot;</code></pre></div><h2>Hopper PTX emulation</h2><table><thead><tr><th>PTX instruction</th><th>CPU emulation</th></tr></thead><tbody><tr><td><code>wgmma.mma_async.*</code></td><td>Full M×N×K GEMM via <code>vgre_wgmma_*</code> (AVX-512 when N=256)</td></tr><tr><td><code>cp.async.bulk.tensor.*</code></td><td>Synchronous <code>memcpy</code></td></tr><tr><td><code>wgmma.fence</code> / <code>wgmma.wait_group</code></td><td><code>__atomic_thread_fence(SEQ_CST)</code></td></tr><tr><td><code>mma.sync.aligned.m16n8k16</code></td><td><code>vgre_mma_m16n8k16_f32_f16</code> scalar tile GEMM</td></tr></tbody></table><h2>CUDA MPS (multi-process)</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">export VGRE_MPS_PIPE=/tmp/vgre_mps.sock
+# Each client process connects automatically when VGRE_MPS_PIPE is set.</code></pre></div><h2>RDMA / RoCE transport</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">cmake -S . -B build -DVGRE_ENABLE_RDMA=ON
+# Requires: sudo apt-get install libibverbs-dev rdma-core
+
+# Soft-RoCE loopback for testing:
+sudo rdma link add rxe0 type rxe netdev eth0
+export VGRE_RDMA_DEVICE=rxe0</code></pre></div><h2>gRPC cluster transport</h2><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">cmake -S . -B build -DVGRE_ENABLE_GRPC=ON
+export VGRE_GRPC_PORT=50051
+vgre-start --master</code></pre></div>
+    <div class="page-nav"><a href="debugging.html"><div class="dir">← Previous</div><div class="ttl">Debugging PTX (GDB)</div></a><a class="next" href="env-vars.html"><div class="dir">Next →</div><div class="ttl">Environment Variables</div></a></div>
+  </main>
+  <aside class="toc">
+    <div class="toc-title">On this page</div>
+    <nav class="toc-list"></nav>
+  </aside>
+</div>
+<script src="assets/search-index.js?v=6be76ba911"></script>
+<script src="assets/docs.js?v=a438fb4d98"></script>
+</body>
+</html>
