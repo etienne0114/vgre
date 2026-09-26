@@ -105,6 +105,48 @@ void gemm_row_avx2(int64_t N, int64_t K, const float* a,
     for (int64_t n = 0; n < N; ++n) c[n] = acc[n] * colScale[n];
 }
 
+// M-blocked AVX2: process a panel of up to MB output rows together. For each k the
+// ternary add/sub MASKS (compare + widen of the codes) are computed ONCE and reused
+// across all MB rows, and the K×N codes are streamed ONCE per panel instead of once
+// per row — so a large GEMM (memory-bound on the int8 codes) gets ~MB× less code
+// traffic and mask work. Per (row,col) the K-accumulation order is unchanged, so the
+// result is bit-identical to gemm_row_avx2 / the scalar path.
+constexpr int kTernMB = 8;   // rows per panel
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("avx2")))
+#endif
+void gemm_panel_avx2(int64_t N, int64_t K, int mb, const float* Apanel,
+                     const int8_t* codes, const float* colScale, float* Cpanel) {
+    std::vector<float> acc((size_t)mb * N, 0.0f);
+    for (int64_t k = 0; k < K; ++k) {
+        const int8_t* crow = codes + k * N;
+        __m256 va[kTernMB];
+        for (int r = 0; r < mb; ++r) va[r] = _mm256_set1_ps(Apanel[(size_t)r * K + k]);
+        int64_t n = 0;
+        for (; n + 8 <= N; n += 8) {
+            __m128i c8 = _mm_loadl_epi64((const __m128i*)(crow + n));
+            __m256 cf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(c8));
+            __m256 zero = _mm256_setzero_ps();
+            __m256 posMask = _mm256_cmp_ps(cf, zero, _CMP_GT_OQ);   // shared across rows
+            __m256 negMask = _mm256_cmp_ps(cf, zero, _CMP_LT_OQ);
+            for (int r = 0; r < mb; ++r) {
+                float* ar = &acc[(size_t)r * N + n];
+                __m256 v = _mm256_loadu_ps(ar);
+                v = _mm256_add_ps(v, _mm256_and_ps(va[r], posMask));
+                v = _mm256_sub_ps(v, _mm256_and_ps(va[r], negMask));
+                _mm256_storeu_ps(ar, v);
+            }
+        }
+        for (; n < N; ++n) {   // tail column
+            const int8_t cc = crow[n];
+            if (cc > 0)      for (int r = 0; r < mb; ++r) acc[(size_t)r * N + n] += Apanel[(size_t)r * K + k];
+            else if (cc < 0) for (int r = 0; r < mb; ++r) acc[(size_t)r * N + n] -= Apanel[(size_t)r * K + k];
+        }
+    }
+    for (int r = 0; r < mb; ++r)
+        for (int64_t n = 0; n < N; ++n) Cpanel[(size_t)r * N + n] = acc[(size_t)r * N + n] * colScale[n];
+}
+
 bool cpu_has_avx2() { return vgre::cpu::supports("avx2"); }
 #endif  // VGRE_TERNARY_AVX2
 
@@ -114,16 +156,17 @@ void gemm(int64_t M, int64_t N, int64_t K,
           const float* A, const int8_t* codes, const float* colScale,
           float* C) {
 #if defined(VGRE_TERNARY_AVX2)
-    const bool useAvx2 = cpu_has_avx2();
-#endif
-    for (int64_t m = 0; m < M; ++m) {
-        const float* a = A + m * K;
-        float* c = C + m * N;
-#if defined(VGRE_TERNARY_AVX2)
-        if (useAvx2) { gemm_row_avx2(N, K, a, codes, colScale, c); continue; }
-#endif
-        gemm_row_scalar(N, K, a, codes, colScale, c);
+    if (cpu_has_avx2()) {
+        // M-blocked: stream the codes + compute the masks once per panel of rows.
+        for (int64_t m0 = 0; m0 < M; m0 += kTernMB) {
+            const int mb = (int)std::min<int64_t>(kTernMB, M - m0);
+            gemm_panel_avx2(N, K, mb, A + m0 * K, codes, colScale, C + m0 * N);
+        }
+        return;
     }
+#endif
+    for (int64_t m = 0; m < M; ++m)
+        gemm_row_scalar(N, K, A + m * K, codes, colScale, C + m * N);
 }
 
 const char* isa() {

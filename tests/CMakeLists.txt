@@ -1129,6 +1129,11 @@ target_link_libraries(test_cuda_warp_legacy PRIVATE vgre Threads::Threads)
 add_test(NAME CudaWarpLegacy COMMAND test_cuda_warp_legacy)
 set_tests_properties(CudaWarpLegacy PROPERTIES TIMEOUT 30)
 
+# Mul-free ternary GEMM: correctness gate (+ prints the CPU timing evidence).
+# Small dims keep it fast; the tool itself is in tools/ and reruns at any size.
+add_test(NAME BenchTernaryGemm COMMAND bench_ternary_gemm 16 256 256 5)
+set_tests_properties(BenchTernaryGemm PROPERTIES TIMEOUT 30)
+
 # Track Z / Stage 3.2: 64-bit warp shuffle (double / long) — split into two .b32
 # shuffles + recombine. Frontend-only (interpreter), so it runs in the LLVM-free
 # build too.

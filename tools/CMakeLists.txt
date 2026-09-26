@@ -27,6 +27,11 @@ target_link_libraries(mamba_run PRIVATE vgre)
 add_executable(bitnet_run bitnet_run.cpp)
 target_link_libraries(bitnet_run PRIVATE vgre Threads::Threads)
 
+# bench_ternary_gemm: correctness + timing evidence for the mul-free ternary GEMM
+# (the CPU LLM-inference lever in docs/performanceResearch.md).
+add_executable(bench_ternary_gemm bench_ternary_gemm.cpp)
+target_link_libraries(bench_ternary_gemm PRIVATE vgre Threads::Threads)
+
 # quant_dequant: dequant raw ggml block bytes (stdin) → f32 (stdout), for
 # cross-checking the K-quant kernels vs gguf.quants.dequantize.
 add_executable(quant_dequant quant_dequant.cpp)

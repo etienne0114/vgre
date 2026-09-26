@@ -40,13 +40,27 @@ quantization keeps the accumulators cheap. **Delivered:** the GGUF `I2_S` ternar
 loader and a SubLN transformer forward run the real bitnet-b1.58-2B on CPU
 (`quant.h`, `hf_loader.cpp`, `tests/xla/test_bitnet_subln.cpp`); int8/int4
 weight-only inference and int8/int4 KV cache are wired (`model.h`,
-`kv_quant.h`). **Next (◇):** a hand-vectorized ternary GEMM micro-kernel (pack 4
-ternary weights/byte, AVX-512 VNNI/`_mm512_dpbusd` for the int8 activation path)
-and a fused dequant-GEMM so weights are never materialized to fp32.
+`kv_quant.h`). The ternary GEMM is already mul-free and never materializes fp32
+weights (it operates directly on the int8 codes, add/sub/skip — `ternary_gemm.cpp`).
+
+**Measured (`bench_ternary_gemm`, this AVX2 machine).** Correctness is *exact* vs
+an fp32 same-arithmetic reference (max\|rel\| = 0). Speed vs the in-tree dense fp32
+GEMM depends on shape: at a small GEMM (M=16, N=K=256) ternary is **~5.1× faster**
+(the dense kernel's packing overhead dominates), but at a large GEMM (M=32,
+N=K=2560) it is **~0.42×** — *slower* — because the dense path is a cache-blocked
+BLIS-style kernel (~24 GFLOP/s) while the ternary kernel is memory-bound on the
+K×N int8 codes. **Delivered (▶):** M-blocking — computing the ternary add/sub masks
+once per `k` and streaming the codes once per **panel of 8 rows** instead of per
+row — lifted the large-shape ternary kernel ~40% (0.26× → 0.42×) and the small
+shape to 5.1×, staying bit-exact. **Next (◇):** N-tiling to keep the accumulator
+panel L1-resident across the `k`-loop (the remaining traffic that lets the mul-free
+kernel actually beat dense fp32 at scale), then a pack-4-codes/byte format
+(4× less weight bandwidth) and an AVX-512 VNNI activation path.
 
 **Business.** Run 2–8B-parameter LLMs on a commodity laptop/server with no GPU —
-the cheapest possible private, on-prem inference. This is the single biggest
-"transform into a product" lever VGRE has.
+the cheapest possible private, on-prem inference. The honest status: the *memory*
+win (4× smaller weights) is real today; the *compute* win at scale needs the
+N-tiling above. This is still the single biggest "transform into a product" lever.
 
 ## 2. Operator fusion + a graph scheduler  ◇
 
