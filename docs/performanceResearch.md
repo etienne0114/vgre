@@ -75,9 +75,15 @@ layer: 26 MB fp32 → 1.6 MB). Benchmarked on this AVX2 box:
 Autoregressive **decode is M=1** — the dominant cost of LLM serving — and there the
 memory-bound 2-bit kernel beats optimized dense fp32 **2.27×** while using 16× less
 weight memory. Batch/prefill (large M) is compute-bound, so route those to fp32/int8.
-**Next (◇):** an AVX-512 VNNI int8-activation path on hardware that has it; wire the
-packed kernel into the decode path of the VGRE-LM/BitNet serving loop behind a
-shape heuristic (M small → packed, M large → dense).
+**Delivered (▶): wired into the model.** `GPT::set_ternary_inference()` quantizes
+the seven per-layer matmul weights to 2-bit packed ternary, and `generate_cached`
+runs `gemm_packed` for both the per-token decode (`mv`, M=1) and the batched
+prefill (`mvB`, M=P) — so real VGRE-LM/BitNet generation now uses the mul-free
+packed path (`test_ternary_inference`: batched-prefill==sequential-decode,
+deterministic, output differs from fp32, clean mode toggle). The embedding/output
+head stay fp32 for now. **Next (◇):** ternarize the tied head too (D×V is a large
+GEMM at BitNet scale); an AVX-512 VNNI int8-activation path on hardware that has it;
+a shape heuristic that keeps large-M prefill on dense fp32.
 
 **Business.** This is the measured, defensible pitch: on a commodity CPU with no
 GPU, 2-bit ternary makes a 2–8B model **fit in a fraction of the RAM (16× smaller

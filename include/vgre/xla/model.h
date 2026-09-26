@@ -105,6 +105,17 @@ public:
     void set_int8_inference(bool on);
     bool int8_inference() const { return int8_inference_; }
 
+    // Enable 2-bit packed ternary (BitNet b1.58) weight-only inference: each of the
+    // seven per-layer matmul weights is quantized to ternary {-1,0,+1} with a
+    // per-output-column scale and packed 4 codes/byte (16× smaller than fp32). The
+    // KV-cached decode path (M=1) then runs the mul-free packed GEMM, which is
+    // memory-bound and measurably faster than dense fp32 at decode — see
+    // docs/performanceResearch.md. Weights are lossily quantized; generation stays
+    // deterministic. Idempotent; pass false to disable. Mutually exclusive with
+    // bf16/int8 (the last one set wins). The embedding/output head stay fp32.
+    void set_ternary_inference(bool on);
+    bool ternary_inference() const { return ternary_inference_; }
+
     // Store the generation KV cache as int8 with a per-(position, head) absmax
     // scale instead of fp32. At long context the KV cache — not the weights —
     // dominates memory. Per head this stores Dh bytes + one fp32 scale instead
@@ -150,6 +161,8 @@ public:
 private:
     // int8 weight + per-output-channel scale, for weight-only int8 inference.
     struct Q8 { std::vector<int8_t> w; std::vector<float> scale; };
+    // 2-bit packed ternary weight + per-output-column scale, for BitNet inference.
+    struct TernW { std::vector<uint8_t> packed; std::vector<float> scale; };
     struct Layer {
         Var ln1_g, Wq, Wk, Wv, Wo, ln2_g, Wgate, Wup, Wdown;
         Var bq, bk, bv;   // optional Q/K/V projection biases (null unless attn_bias)
@@ -161,6 +174,9 @@ private:
                               Wgate_bf16, Wup_bf16, Wdown_bf16;
         // int8 caches of the same weights.
         Q8 Wq_q8, Wk_q8, Wv_q8, Wo_q8, Wgate_q8, Wup_q8, Wdown_q8;
+        // 2-bit packed ternary caches (BitNet b1.58) of the same weights: `packed`
+        // is K×⌈N/4⌉ bytes, `scale` is N per-column scales — see vgre/xla/ternary_gemm.h.
+        TernW Wq_tern, Wk_tern, Wv_tern, Wo_tern, Wgate_tern, Wup_tern, Wdown_tern;
     };
     Config            cfg_;
     Var               tok_emb_;     // [V, D]
@@ -170,6 +186,7 @@ private:
     std::vector<Var>  params_;
     bool                  bf16_inference_ = false;
     bool                  int8_inference_ = false;
+    bool                  ternary_inference_ = false;
     bool                  int8_kv_cache_  = false;
     bool                  int4_kv_cache_  = false;
     bool                  batched_prefill_ = true;

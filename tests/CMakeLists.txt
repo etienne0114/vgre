@@ -1134,6 +1134,12 @@ set_tests_properties(CudaWarpLegacy PROPERTIES TIMEOUT 30)
 add_test(NAME BenchTernaryGemm COMMAND bench_ternary_gemm 16 256 256 5)
 set_tests_properties(BenchTernaryGemm PROPERTIES TIMEOUT 30)
 
+# 2-bit packed ternary weight-only inference wired into the GPT decode path.
+add_executable(test_ternary_inference xla/test_ternary_inference.cpp)
+target_link_libraries(test_ternary_inference PRIVATE vgre Threads::Threads)
+add_test(NAME TernaryInference COMMAND test_ternary_inference)
+set_tests_properties(TernaryInference PROPERTIES TIMEOUT 30)
+
 # Track Z / Stage 3.2: 64-bit warp shuffle (double / long) — split into two .b32
 # shuffles + recombine. Frontend-only (interpreter), so it runs in the LLVM-free
 # build too.

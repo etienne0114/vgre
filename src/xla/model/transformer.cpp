@@ -2,6 +2,7 @@
 
 #include "vgre/xla/model.h"
 #include "vgre/xla/intree_gemm.h"
+#include "vgre/xla/ternary_gemm.h"
 #include "vgre/xla/half.h"
 #include "vgre/common/cpu_features.h"
 #include "vgre/xla/thread_pool.h"
@@ -358,12 +359,16 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
 
     const bool bf16 = bf16_inference_;
     const bool int8 = int8_inference_;
+    const bool tern = ternary_inference_;   // 2-bit packed ternary (BitNet), mul-free
     std::vector<uint16_t> xbf;   // activation scratch for bf16 GEMV
     std::vector<float> i8acc;    // accumulator scratch for int8 GEMV
-    // Matrix-vector y[N] = x[K]·W[K,N], dispatching to int8 / bf16 / fp32 weights.
+    // Matrix-vector y[N] = x[K]·W[K,N], dispatching to ternary / int8 / bf16 / fp32.
+    // `tw` is the layer weight's 2-bit packed ternary cache (null for the head).
     auto mv = [&](const float* xv, const float* Wf, const uint16_t* Wb,
-                  const Q8* q8, float* y, int K, int N) {
-        if (int8) {
+                  const Q8* q8, float* y, int K, int N, const TernW* tw = nullptr) {
+        if (tern && tw) {
+            ternary::gemm_packed(1, N, K, xv, tw->packed.data(), tw->scale.data(), y);
+        } else if (int8) {
             gemm_int8_rows(xv, 1, q8->w.data(), q8->scale.data(), y, K, N, i8acc);  // P=1 (per-token)
         } else if (bf16) {
             xbf.resize(K);
@@ -381,8 +386,10 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
     std::vector<uint16_t> xbfB;   // bf16 activation scratch [P*K]
     std::vector<float> i8accB;    // int8 accumulator scratch [P*N]
     auto mvB = [&](const float* Xf, int P, const float* Wf, const uint16_t* Wb,
-                   const Q8* q8, float* Y, int K, int N) {
-        if (int8) {
+                   const Q8* q8, float* Y, int K, int N, const TernW* tw = nullptr) {
+        if (tern && tw) {
+            ternary::gemm_packed(P, N, K, Xf, tw->packed.data(), tw->scale.data(), Y);
+        } else if (int8) {
             gemm_int8_rows(Xf, P, q8->w.data(), q8->scale.data(), Y, K, N, i8accB);
         } else if (bf16) {
             xbfB.resize((size_t)P * K);
@@ -442,9 +449,9 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         for (int l = 0; l < Lm; ++l) {
             const Layer& Ly = layers_[l];
             rmsNormVec(x.data(), Ly.ln1_g->data.data(), h.data(), D, cfg_.norm_eps);
-            mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D);
-            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, KVD);
-            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, KVD);
+            mv(h.data(), Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, q.data(), D, D, &Ly.Wq_tern);
+            mv(h.data(), Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, k.data(), D, KVD, &Ly.Wk_tern);
+            mv(h.data(), Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, v.data(), D, KVD, &Ly.Wv_tern);
             if (Ly.bq) {                                 // Q/K/V bias (Qwen2), before RoPE
                 for (int i = 0; i < D;   ++i) q[i] += Ly.bq->data[i];
                 for (int i = 0; i < KVD; ++i) { k[i] += Ly.bk->data[i]; v[i] += Ly.bv->data[i]; }
@@ -518,15 +525,15 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             }
             if (Ly.attn_sub_g)                                           // BitNet SubLN (in place)
                 rmsNormVec(attnOut.data(), Ly.attn_sub_g->data.data(), attnOut.data(), D, cfg_.norm_eps);
-            mv(attnOut.data(), Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, proj.data(), D, D);
+            mv(attnOut.data(), Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, proj.data(), D, D, &Ly.Wo_tern);
             for (int i = 0; i < D; ++i) x[i] += proj[i];                  // residual
             rmsNormVec(x.data(), Ly.ln2_g->data.data(), h2.data(), D, cfg_.norm_eps);
-            mv(h2.data(), Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, gate.data(), D, F);
-            mv(h2.data(), Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   up.data(),   D, F);
+            mv(h2.data(), Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, gate.data(), D, F, &Ly.Wgate_tern);
+            mv(h2.data(), Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   up.data(),   D, F, &Ly.Wup_tern);
             for (int i = 0; i < F; ++i) gate[i] = siluf(gate[i]) * up[i]; // SwiGLU
             if (Ly.ffn_sub_g)                                            // BitNet SubLN (in place)
                 rmsNormVec(gate.data(), Ly.ffn_sub_g->data.data(), gate.data(), F, cfg_.norm_eps);
-            mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, ff.data(), F, D);
+            mv(gate.data(), Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, ff.data(), F, D, &Ly.Wdown_tern);
             for (int i = 0; i < D; ++i) x[i] += ff[i];                    // residual
         }
         emitLogits(x.data());
@@ -569,9 +576,9 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             const Layer& Ly = layers_[l];
             for (int p = 0; p < P; ++p)
                 rmsNormVec(&Xb[(size_t)p * D], Ly.ln1_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
-            mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, Qb.data(), D, D);
-            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, KVD);
-            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, KVD);
+            mvB(Hn.data(), P, Ly.Wq->data.data(), Ly.Wq_bf16.data(), &Ly.Wq_q8, Qb.data(), D, D, &Ly.Wq_tern);
+            mvB(Hn.data(), P, Ly.Wk->data.data(), Ly.Wk_bf16.data(), &Ly.Wk_q8, Kb.data(), D, KVD, &Ly.Wk_tern);
+            mvB(Hn.data(), P, Ly.Wv->data.data(), Ly.Wv_bf16.data(), &Ly.Wv_q8, Vb.data(), D, KVD, &Ly.Wv_tern);
             if (Ly.bq) {                                 // Q/K/V bias (Qwen2), before RoPE
                 for (int p = 0; p < P; ++p) {
                     float* qq = &Qb[(size_t)p * D]; float* kk = &Kb[(size_t)p * KVD]; float* vv = &Vb[(size_t)p * KVD];
@@ -612,17 +619,17 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
             if (Ly.attn_sub_g)                                              // BitNet SubLN (per row, in place)
                 for (int p = 0; p < P; ++p)
                     rmsNormVec(&Ao[(size_t)p * D], Ly.attn_sub_g->data.data(), &Ao[(size_t)p * D], D, cfg_.norm_eps);
-            mvB(Ao.data(), P, Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, Pj.data(), D, D);
+            mvB(Ao.data(), P, Ly.Wo->data.data(), Ly.Wo_bf16.data(), &Ly.Wo_q8, Pj.data(), D, D, &Ly.Wo_tern);
             for (int i = 0; i < P * D; ++i) Xb[i] += Pj[i];  // residual
             for (int p = 0; p < P; ++p)
                 rmsNormVec(&Xb[(size_t)p * D], Ly.ln2_g->data.data(), &Hn[(size_t)p * D], D, cfg_.norm_eps);
-            mvB(Hn.data(), P, Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, Gt.data(),  D, F);
-            mvB(Hn.data(), P, Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   Up2.data(), D, F);
+            mvB(Hn.data(), P, Ly.Wgate->data.data(), Ly.Wgate_bf16.data(), &Ly.Wgate_q8, Gt.data(),  D, F, &Ly.Wgate_tern);
+            mvB(Hn.data(), P, Ly.Wup->data.data(),   Ly.Wup_bf16.data(),   &Ly.Wup_q8,   Up2.data(), D, F, &Ly.Wup_tern);
             for (int i = 0; i < P * F; ++i) Gt[i] = siluf(Gt[i]) * Up2[i];   // SwiGLU
             if (Ly.ffn_sub_g)                                               // BitNet SubLN (per row, in place)
                 for (int p = 0; p < P; ++p)
                     rmsNormVec(&Gt[(size_t)p * F], Ly.ffn_sub_g->data.data(), &Gt[(size_t)p * F], F, cfg_.norm_eps);
-            mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, Fb.data(), F, D);
+            mvB(Gt.data(), P, Ly.Wdown->data.data(), Ly.Wdown_bf16.data(), &Ly.Wdown_q8, Fb.data(), F, D, &Ly.Wdown_tern);
             for (int i = 0; i < P * D; ++i) Xb[i] += Fb[i];  // residual
         }
     };
@@ -748,7 +755,7 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
 
 void GPT::set_int8_inference(bool on) {
     int8_inference_ = on;
-    if (on) bf16_inference_ = false;   // mutually exclusive
+    if (on) { bf16_inference_ = false; ternary_inference_ = false; }   // mutually exclusive
     if (!on) return;
     const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff(), KVD = cfg_.kv_dim();
     // Per-ROW symmetric int8 quantization of a [R,C] table (one scale per row).
@@ -796,6 +803,29 @@ void GPT::set_int8_inference(bool on) {
     if (lm_head_) quant(lm_head_->data, D, V, lm_head_q8_);   // untied head; tied uses tok_emb_q8_
 }
 
+void GPT::set_ternary_inference(bool on) {
+    ternary_inference_ = on;
+    if (on) { bf16_inference_ = false; int8_inference_ = false; }   // mutually exclusive
+    if (!on) return;
+    const int D = cfg_.d_model, F = cfg_.ff(), KVD = cfg_.kv_dim();
+    // Ternary-quantize a [K,N] weight (per-column scale) and pack it 4 codes/byte.
+    // Idempotent — skip if already built.
+    auto quant = [](const std::vector<float>& W, int K, int N, TernW& t) {
+        if ((int64_t)t.packed.size() == ternary::packedBytes(K, N)) return;
+        std::vector<int8_t> codes((size_t)K * N);
+        t.scale.resize((size_t)N);
+        ternary::quantize(K, N, W.data(), codes.data(), t.scale.data());
+        t.packed.resize((size_t)ternary::packedBytes(K, N));
+        ternary::pack2bit(K, N, codes.data(), t.packed.data());
+    };
+    for (auto& L : layers_) {
+        quant(L.Wq->data, D, D, L.Wq_tern);        quant(L.Wk->data, D, KVD, L.Wk_tern);
+        quant(L.Wv->data, D, KVD, L.Wv_tern);      quant(L.Wo->data, D, D, L.Wo_tern);
+        quant(L.Wgate->data, D, F, L.Wgate_tern);  quant(L.Wup->data, D, F, L.Wup_tern);
+        quant(L.Wdown->data, F, D, L.Wdown_tern);
+    }
+}
+
 void GPT::drop_fp32_weights() {
     if (!bf16_inference_ && !int8_inference_)
         throw std::runtime_error("drop_fp32_weights: enable bf16/int8 inference first");
@@ -811,7 +841,7 @@ void GPT::drop_fp32_weights() {
 
 void GPT::set_bf16_inference(bool on) {
     bf16_inference_ = on;
-    if (on) int8_inference_ = false;   // mutually exclusive
+    if (on) { int8_inference_ = false; ternary_inference_ = false; }   // mutually exclusive
     if (!on) return;
     auto toBf16 = [](const std::vector<float>& src, std::vector<uint16_t>& dst) {
         if (dst.size() == src.size()) return;     // already built
