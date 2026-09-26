@@ -84,9 +84,7 @@ option(VGRE_ENABLE_NATIVE_SIMD
 # ANY CPU) and the hot kernels (GEMM, ternary) still pick AVX2/AVX-512 at RUNTIME via CPUID
 # (vgre::cpu::supports). Values: native|avx2|sse4|off.
 set(VGRE_SIMD_BASELINE "native" CACHE STRING
-    "Max GLOBAL SIMD ISA: native (build host) | avx2 | sse4 | off. Distributable wheels use 'off' — the "
-    "library then compiles at the universal x86-64 baseline (loads on any CPU) while the hot kernels "
-    "still select AVX2/AVX-512 at RUNTIME via CPUID, so it is portable AND fast per-CPU.")
+    "Max GLOBAL SIMD ISA: native (build host) | avx2 | sse4 | off. Distributable wheels use 'off' — the library then compiles at the universal x86-64 baseline (loads on any CPU) while the hot kernels still select AVX2/AVX-512 at RUNTIME via CPUID, so it is portable AND fast per-CPU.")
 # Windows: LAPACK does not ship by default — require explicit opt-in once the
 # user has installed Intel oneAPI MKL or vcpkg OpenBLAS (-DVGRE_USE_LAPACK=ON).
 # Linux/macOS: default ON because liblapack-dev / Accelerate are readily available.
@@ -359,6 +357,10 @@ if(VGRE_ENABLE_NATIVE_SIMD)
     elseif(VGRE_SIMD_BASELINE STREQUAL "off")
         set(HOST_HAS_AVX2 FALSE)
         set(HOST_HAS_SSE4 FALSE)
+        # AES-NI (and its -maes/-mpclmul flags) also SIGILL on CPUs that lack it
+        # (low-end Atom/Celeron, pre-2010). The universal baseline uses the
+        # software crypto fallback; AES-NI stays available on avx2/sse4/native.
+        set(HOST_HAS_AES_NI FALSE)
     endif()
 
     message(STATUS

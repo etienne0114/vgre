@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <cstddef>
+// Must be at file scope (it transitively includes <cstring>): never inside a namespace.
+#include "vgre/common/simd_dispatch.h"
 
 namespace vgre {
 namespace math {
@@ -57,14 +59,11 @@ template<typename T>
 void simdBlockMultiply(const T* A_block, const T* B_block, T* C_block,
                       size_t block_size);
 
-// AVX-512 optimized block multiplication (float)
-#ifdef __AVX512F__
+// AVX-512 / AVX2 optimized block multiplication (float). Compiled on x86
+// GCC/Clang and picked at runtime via CPUID; see blockMultiplyRuntime.
+#if defined(VGRE_SIMD_X86)
 void avx512BlockMultiplyF(const float* A_block, const float* B_block, float* C_block,
                          size_t block_size);
-#endif
-
-// AVX2 optimized block multiplication (float)
-#ifdef __AVX2__
 void avx2BlockMultiplyF(const float* A_block, const float* B_block, float* C_block,
                        size_t block_size);
 #endif

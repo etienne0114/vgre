@@ -24,295 +24,234 @@
 #include "vgre/common/os_backend.h"
 #endif
 
-// SIMD intrinsics — guarded by compile-time checks
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX2)
-#include <immintrin.h>
-#elif defined(VGRE_HAS_SSE4)
-#include <smmintrin.h>
-#include <xmmintrin.h>
+// SIMD is now RUNTIME-DISPATCHED, not compile-gated: the per-ISA kernels below are
+// compiled unconditionally (via #pragma GCC target so they codegen AVX2/AVX-512
+// regardless of the global baseline the library was built at), and each public
+// method picks the widest variant the running CPU supports via vgre::cpu::supports().
+// This lets one portable binary run on any x86-64 CPU and still use AVX-512/AVX2 where
+// present — no hardcoded ISA. On non-x86 or MSVC-driver builds it falls back to scalar.
+#include "vgre/common/cpu_features.h"
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define VGRE_VEC_X86 1
+#  include <immintrin.h>
 #endif
+#include <limits>
 
 namespace vgre {
 namespace runtime {
 
+// Widest usable SIMD ISA on this CPU, detected once at first use.
+namespace {
+enum class VecIsa { Scalar, Avx2, Avx512 };
+VecIsa vecIsa() {
+    static const VecIsa v = [] {
+#if defined(VGRE_VEC_X86)
+        if (vgre::cpu::supports("avx512f")) return VecIsa::Avx512;
+        if (vgre::cpu::supports("avx2") && vgre::cpu::supports("fma")) return VecIsa::Avx2;
+#endif
+        return VecIsa::Scalar;
+    }();
+    return v;
+}
+}  // namespace
+
 // ── Float vector addition ──────────────────────────────────────────────────
-void VectorEngine::vectorAdd(const float* a, const float* b,
-                              float* c, size_t n) {
-    size_t i = 0;
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void add_avx512(const float* a, const float* b, float* c, size_t n) {
+    size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16)
+        _mm512_storeu_ps(&c[i], _mm512_add_ps(_mm512_loadu_ps(&a[i]), _mm512_loadu_ps(&b[i])));
+    for (; i < n; ++i) c[i] = a[i] + b[i];
+}
+__attribute__((target("avx2,fma")))
+static void add_avx2(const float* a, const float* b, float* c, size_t n) {
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8)
+        _mm256_storeu_ps(&c[i], _mm256_add_ps(_mm256_loadu_ps(&a[i]), _mm256_loadu_ps(&b[i])));
+    for (; i < n; ++i) c[i] = a[i] + b[i];
+}
+#endif
 
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        __m512 va = _mm512_loadu_ps(&a[ii]);
-        __m512 vb = _mm512_loadu_ps(&b[ii]);
-        _mm512_storeu_ps(&c[ii], _mm512_add_ps(va, vb));
+void VectorEngine::vectorAdd(const float* a, const float* b, float* c, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: add_avx512(a, b, c, n); return;
+        case VecIsa::Avx2:   add_avx2(a, b, c, n);   return;
+        default: break;
     }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel for if (n > 1024)
-    for (int64_t ii = 0; ii < nAligned; ii += 8) {
-        __m256 va = _mm256_loadu_ps(&a[ii]);
-        __m256 vb = _mm256_loadu_ps(&b[ii]);
-        _mm256_storeu_ps(&c[ii], _mm256_add_ps(va, vb));
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_SSE4)
-    for (; i + 4 <= n; i += 4) {
-        __m128 va = _mm_loadu_ps(&a[i]);
-        __m128 vb = _mm_loadu_ps(&b[i]);
-        _mm_storeu_ps(&c[i], _mm_add_ps(va, vb));
-    }
-    #endif
-
-    for (; i < n; ++i) {
-        c[i] = a[i] + b[i];
-    }
+#endif
+    for (size_t i = 0; i < n; ++i) c[i] = a[i] + b[i];
 }
 
 // ── Float vector multiplication ────────────────────────────────────────────
-void VectorEngine::vectorMul(const float* a, const float* b,
-                              float* c, size_t n) {
-    size_t i = 0;
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void mul_avx512(const float* a, const float* b, float* c, size_t n) {
+    size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16)
+        _mm512_storeu_ps(&c[i], _mm512_mul_ps(_mm512_loadu_ps(&a[i]), _mm512_loadu_ps(&b[i])));
+    for (; i < n; ++i) c[i] = a[i] * b[i];
+}
+__attribute__((target("avx2,fma")))
+static void mul_avx2(const float* a, const float* b, float* c, size_t n) {
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8)
+        _mm256_storeu_ps(&c[i], _mm256_mul_ps(_mm256_loadu_ps(&a[i]), _mm256_loadu_ps(&b[i])));
+    for (; i < n; ++i) c[i] = a[i] * b[i];
+}
+#endif
 
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        __m512 va = _mm512_loadu_ps(&a[ii]);
-        __m512 vb = _mm512_loadu_ps(&b[ii]);
-        _mm512_storeu_ps(&c[ii], _mm512_mul_ps(va, vb));
+void VectorEngine::vectorMul(const float* a, const float* b, float* c, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: mul_avx512(a, b, c, n); return;
+        case VecIsa::Avx2:   mul_avx2(a, b, c, n);   return;
+        default: break;
     }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel for if (n > 1024)
-    for (int64_t ii = 0; ii < nAligned; ii += 8) {
-        __m256 va = _mm256_loadu_ps(&a[ii]);
-        __m256 vb = _mm256_loadu_ps(&b[ii]);
-        _mm256_storeu_ps(&c[ii], _mm256_mul_ps(va, vb));
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_SSE4)
-    for (; i + 4 <= n; i += 4) {
-        __m128 va = _mm_loadu_ps(&a[i]);
-        __m128 vb = _mm_loadu_ps(&b[i]);
-        _mm_storeu_ps(&c[i], _mm_mul_ps(va, vb));
-    }
-    #endif
-
-    for (; i < n; ++i) {
-        c[i] = a[i] * b[i];
-    }
+#endif
+    for (size_t i = 0; i < n; ++i) c[i] = a[i] * b[i];
 }
 
 // ── Float FMA: out = a*b + c ───────────────────────────────────────────────
-void VectorEngine::vectorFMA(const float* a, const float* b,
-                              const float* c, float* out, size_t n) {
-    size_t i = 0;
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void fma_avx512(const float* a, const float* b, const float* c, float* out, size_t n) {
+    size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16)
+        _mm512_storeu_ps(&out[i], _mm512_fmadd_ps(_mm512_loadu_ps(&a[i]), _mm512_loadu_ps(&b[i]), _mm512_loadu_ps(&c[i])));
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+}
+__attribute__((target("avx2,fma")))
+static void fma_avx2(const float* a, const float* b, const float* c, float* out, size_t n) {
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8)
+        _mm256_storeu_ps(&out[i], _mm256_fmadd_ps(_mm256_loadu_ps(&a[i]), _mm256_loadu_ps(&b[i]), _mm256_loadu_ps(&c[i])));
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+}
+#endif
 
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        __m512 va  = _mm512_loadu_ps(&a[ii]);
-        __m512 vb  = _mm512_loadu_ps(&b[ii]);
-        __m512 vc  = _mm512_loadu_ps(&c[ii]);
-        _mm512_storeu_ps(&out[ii], _mm512_fmadd_ps(va, vb, vc));
+void VectorEngine::vectorFMA(const float* a, const float* b, const float* c, float* out, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: fma_avx512(a, b, c, out, n); return;
+        case VecIsa::Avx2:   fma_avx2(a, b, c, out, n);   return;
+        default: break;
     }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel for if (n > 1024)
-    for (int64_t ii = 0; ii < nAligned; ii += 8) {
-        __m256 va = _mm256_loadu_ps(&a[ii]);
-        __m256 vb = _mm256_loadu_ps(&b[ii]);
-        __m256 vc = _mm256_loadu_ps(&c[ii]);
-        _mm256_storeu_ps(&out[ii], _mm256_fmadd_ps(va, vb, vc));
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #endif
-
-    for (; i < n; ++i) {
-        out[i] = a[i] * b[i] + c[i];
-    }
+#endif
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] * b[i] + c[i];
 }
 
 // ── Float vector scale ─────────────────────────────────────────────────────
-void VectorEngine::vectorScale(const float* a, float scalar,
-                                float* out, size_t n) {
-    size_t i = 0;
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void scale_avx512(const float* a, float s, float* out, size_t n) {
+    const __m512 vs = _mm512_set1_ps(s); size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16) _mm512_storeu_ps(&out[i], _mm512_mul_ps(_mm512_loadu_ps(&a[i]), vs));
+    for (; i < n; ++i) out[i] = a[i] * s;
+}
+__attribute__((target("avx2,fma")))
+static void scale_avx2(const float* a, float s, float* out, size_t n) {
+    const __m256 vs = _mm256_set1_ps(s); size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) _mm256_storeu_ps(&out[i], _mm256_mul_ps(_mm256_loadu_ps(&a[i]), vs));
+    for (; i < n; ++i) out[i] = a[i] * s;
+}
+#endif
 
-    #ifdef VGRE_HAS_AVX512
-    {
-    __m512 vs = _mm512_set1_ps(scalar);
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        __m512 va = _mm512_loadu_ps(&a[ii]);
-        _mm512_storeu_ps(&out[ii], _mm512_mul_ps(va, vs));
+void VectorEngine::vectorScale(const float* a, float scalar, float* out, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: scale_avx512(a, scalar, out, n); return;
+        case VecIsa::Avx2:   scale_avx2(a, scalar, out, n);   return;
+        default: break;
     }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    __m256 vs = _mm256_set1_ps(scalar);
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel for if (n > 1024)
-    for (int64_t ii = 0; ii < nAligned; ii += 8) {
-        __m256 va = _mm256_loadu_ps(&a[ii]);
-        _mm256_storeu_ps(&out[ii], _mm256_mul_ps(va, vs));
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_SSE4)
-    __m128 vs = _mm_set1_ps(scalar);
-    for (; i + 4 <= n; i += 4) {
-        __m128 va = _mm_loadu_ps(&a[i]);
-        _mm_storeu_ps(&out[i], _mm_mul_ps(va, vs));
-    }
-    #endif
-
-    for (; i < n; ++i) {
-        out[i] = a[i] * scalar;
-    }
+#endif
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] * scalar;
 }
 
 // ── Float dot product ──────────────────────────────────────────────────────
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static float dot_avx512(const float* a, const float* b, size_t n) {
+    __m512 vs = _mm512_setzero_ps(); size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16) vs = _mm512_fmadd_ps(_mm512_loadu_ps(&a[i]), _mm512_loadu_ps(&b[i]), vs);
+    float sum = _mm512_reduce_add_ps(vs);   // AVX512F horizontal add (no DQ needed)
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+}
+__attribute__((target("avx2,fma")))
+static float dot_avx2(const float* a, const float* b, size_t n) {
+    __m256 vs = _mm256_setzero_ps(); size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) vs = _mm256_fmadd_ps(_mm256_loadu_ps(&a[i]), _mm256_loadu_ps(&b[i]), vs);
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(vs), _mm256_extractf128_ps(vs, 1));
+    s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
+    float sum = _mm_cvtss_f32(s);
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+}
+#endif
+
 float VectorEngine::vectorDot(const float* a, const float* b, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: return dot_avx512(a, b, n);
+        case VecIsa::Avx2:   return dot_avx2(a, b, n);
+        default: break;
+    }
+#endif
     float sum = 0.0f;
-    size_t i = 0;
-
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel reduction(+:sum)
-    {
-        __m512 local_vsum = _mm512_setzero_ps();
-        #pragma omp for
-        for (int64_t j = 0; j < nAligned; j += 16) {
-            __m512 va = _mm512_loadu_ps(&a[j]);
-            __m512 vb = _mm512_loadu_ps(&b[j]);
-            local_vsum = _mm512_fmadd_ps(va, vb, local_vsum);
-        }
-        __m256 hi256 = _mm512_extractf32x8_ps(local_vsum, 1);
-        __m256 lo256 = _mm512_castps512_ps256(local_vsum);
-        __m256 s256  = _mm256_add_ps(lo256, hi256);
-        __m128 hi = _mm256_extractf128_ps(s256, 1);
-        __m128 lo = _mm256_castps256_ps128(s256);
-        __m128 s  = _mm_add_ps(lo, hi);
-        s = _mm_hadd_ps(s, s);
-        s = _mm_hadd_ps(s, s);
-        sum += _mm_cvtss_f32(s);
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel reduction(+:sum)
-    {
-        __m256 local_vsum = _mm256_setzero_ps();
-        #pragma omp for
-        for (int64_t j = 0; j < nAligned; j += 8) {
-            __m256 va = _mm256_loadu_ps(&a[j]);
-            __m256 vb = _mm256_loadu_ps(&b[j]);
-            local_vsum = _mm256_fmadd_ps(va, vb, local_vsum);
-        }
-        __m128 hi  = _mm256_extractf128_ps(local_vsum, 1);
-        __m128 lo  = _mm256_castps256_ps128(local_vsum);
-        __m128 s   = _mm_add_ps(lo, hi);
-        s = _mm_hadd_ps(s, s);
-        s = _mm_hadd_ps(s, s);
-        sum += _mm_cvtss_f32(s);
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #endif
-
-    for (; i < n; ++i) {
-        sum += a[i] * b[i];
-    }
-
+    for (size_t i = 0; i < n; ++i) sum += a[i] * b[i];
     return sum;
 }
 
 // ── Float sum (4-accumulator loop to hide FP-add latency) ─────────────────
-float VectorEngine::vectorSum(const float* a, size_t n) {
-    float sum = 0.0f;
-    size_t i = 0;
-
-    #ifdef VGRE_HAS_AVX512
-    __m512 vsum0_512 = _mm512_setzero_ps();
-    __m512 vsum1_512 = _mm512_setzero_ps();
-    __m512 vsum2_512 = _mm512_setzero_ps();
-    __m512 vsum3_512 = _mm512_setzero_ps();
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static float sum_avx512(const float* a, size_t n) {
+    __m512 v0 = _mm512_setzero_ps(), v1 = v0, v2 = v0, v3 = v0; size_t i = 0;
     for (; i + 64 <= n; i += 64) {
-        vsum0_512 = _mm512_add_ps(vsum0_512, _mm512_loadu_ps(&a[i]));
-        vsum1_512 = _mm512_add_ps(vsum1_512, _mm512_loadu_ps(&a[i + 16]));
-        vsum2_512 = _mm512_add_ps(vsum2_512, _mm512_loadu_ps(&a[i + 32]));
-        vsum3_512 = _mm512_add_ps(vsum3_512, _mm512_loadu_ps(&a[i + 48]));
+        v0 = _mm512_add_ps(v0, _mm512_loadu_ps(&a[i]));
+        v1 = _mm512_add_ps(v1, _mm512_loadu_ps(&a[i + 16]));
+        v2 = _mm512_add_ps(v2, _mm512_loadu_ps(&a[i + 32]));
+        v3 = _mm512_add_ps(v3, _mm512_loadu_ps(&a[i + 48]));
     }
-    vsum0_512 = _mm512_add_ps(vsum0_512, vsum2_512);
-    vsum1_512 = _mm512_add_ps(vsum1_512, vsum3_512);
-    for (; i + 16 <= n; i += 16) {
-        vsum0_512 = _mm512_add_ps(vsum0_512, _mm512_loadu_ps(&a[i]));
-    }
-    vsum0_512 = _mm512_add_ps(vsum0_512, vsum1_512);
-    __m256 hi256 = _mm512_extractf32x8_ps(vsum0_512, 1);
-    __m256 lo256 = _mm512_castps512_ps256(vsum0_512);
-    __m256 s256  = _mm256_add_ps(lo256, hi256);
-    __m128 hi = _mm256_extractf128_ps(s256, 1);
-    __m128 lo = _mm256_castps256_ps128(s256);
-    __m128 s  = _mm_add_ps(lo, hi);
-    s = _mm_hadd_ps(s, s);
-    s = _mm_hadd_ps(s, s);
-    sum = _mm_cvtss_f32(s);
-    #elif defined(VGRE_HAS_AVX2)
-    // Four independent accumulators hide the 4-cycle FP-add latency, giving
-    // ~4× throughput on modern Intel/AMD microarchitectures.
-    __m256 vsum0 = _mm256_setzero_ps();
-    __m256 vsum1 = _mm256_setzero_ps();
-    __m256 vsum2 = _mm256_setzero_ps();
-    __m256 vsum3 = _mm256_setzero_ps();
+    v0 = _mm512_add_ps(v0, v2); v1 = _mm512_add_ps(v1, v3);
+    for (; i + 16 <= n; i += 16) v0 = _mm512_add_ps(v0, _mm512_loadu_ps(&a[i]));
+    v0 = _mm512_add_ps(v0, v1);
+    float sum = _mm512_reduce_add_ps(v0);   // AVX512F horizontal add (no DQ needed)
+    for (; i < n; ++i) sum += a[i];
+    return sum;
+}
+__attribute__((target("avx2,fma")))
+static float sum_avx2(const float* a, size_t n) {
+    __m256 v0 = _mm256_setzero_ps(), v1 = v0, v2 = v0, v3 = v0; size_t i = 0;
     for (; i + 32 <= n; i += 32) {
-        vsum0 = _mm256_add_ps(vsum0, _mm256_loadu_ps(&a[i]));
-        vsum1 = _mm256_add_ps(vsum1, _mm256_loadu_ps(&a[i +  8]));
-        vsum2 = _mm256_add_ps(vsum2, _mm256_loadu_ps(&a[i + 16]));
-        vsum3 = _mm256_add_ps(vsum3, _mm256_loadu_ps(&a[i + 24]));
+        v0 = _mm256_add_ps(v0, _mm256_loadu_ps(&a[i]));
+        v1 = _mm256_add_ps(v1, _mm256_loadu_ps(&a[i + 8]));
+        v2 = _mm256_add_ps(v2, _mm256_loadu_ps(&a[i + 16]));
+        v3 = _mm256_add_ps(v3, _mm256_loadu_ps(&a[i + 24]));
     }
-    vsum0 = _mm256_add_ps(vsum0, vsum2);
-    vsum1 = _mm256_add_ps(vsum1, vsum3);
-    for (; i + 8 <= n; i += 8) {
-        vsum0 = _mm256_add_ps(vsum0, _mm256_loadu_ps(&a[i]));
-    }
-    vsum0 = _mm256_add_ps(vsum0, vsum1);
-    // Horizontal reduction: 8 lanes → 1 scalar
-    __m128 hi = _mm256_extractf128_ps(vsum0, 1);
-    __m128 lo = _mm256_castps256_ps128(vsum0);
-    __m128 s  = _mm_add_ps(lo, hi);
-    s = _mm_hadd_ps(s, s);
-    s = _mm_hadd_ps(s, s);
-    sum = _mm_cvtss_f32(s);
-    #endif
+    v0 = _mm256_add_ps(v0, v2); v1 = _mm256_add_ps(v1, v3);
+    for (; i + 8 <= n; i += 8) v0 = _mm256_add_ps(v0, _mm256_loadu_ps(&a[i]));
+    v0 = _mm256_add_ps(v0, v1);
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(v0), _mm256_extractf128_ps(v0, 1));
+    s = _mm_hadd_ps(s, s); s = _mm_hadd_ps(s, s);
+    float sum = _mm_cvtss_f32(s);
+    for (; i < n; ++i) sum += a[i];
+    return sum;
+}
+#endif
 
-    for (; i < n; ++i) {
-        sum += a[i];
+float VectorEngine::vectorSum(const float* a, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: return sum_avx512(a, n);
+        case VecIsa::Avx2:   return sum_avx2(a, n);
+        default: break;
     }
-
+#endif
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; ++i) sum += a[i];
     return sum;
 }
 
@@ -325,65 +264,68 @@ float VectorEngine::vectorSum(const float* a, size_t n) {
 // Error bound: AVX2 |e₁| ≤ e₀² ≤ 2⁻²⁴ (within float32 23-bit mantissa);
 //              AVX-512 |e₁| ≤ 2⁻²⁸. One step suffices for both.
 // Complexity: O(n/8) AVX2 or O(n/16) AVX-512 iterations.
-void VectorEngine::vectorDiv(const float* __restrict a,
-                              const float* __restrict b,
-                              float* __restrict c, size_t n) {
-    size_t i = 0;
-#ifdef VGRE_HAS_AVX512
-    {
-    const __m512 two16 = _mm512_set1_ps(2.0f);
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        __m512 va = _mm512_loadu_ps(&a[ii]);
-        __m512 vb = _mm512_loadu_ps(&b[ii]);
-        // 14-bit rcp estimate, one Newton step → ≤ 2⁻²⁸ error
-        __m512 x0 = _mm512_rcp14_ps(vb);
-        __m512 x1 = _mm512_mul_ps(x0, _mm512_fnmadd_ps(vb, x0, two16));
-        _mm512_storeu_ps(&c[ii], _mm512_mul_ps(va, x1));
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void div_avx512(const float* a, const float* b, float* c, size_t n) {
+    const __m512 two = _mm512_set1_ps(2.0f); size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16) {
+        __m512 vb = _mm512_loadu_ps(&b[i]);
+        __m512 x0 = _mm512_rcp14_ps(vb);                       // 14-bit rcp + 1 Newton step
+        __m512 x1 = _mm512_mul_ps(x0, _mm512_fnmadd_ps(vb, x0, two));
+        _mm512_storeu_ps(&c[i], _mm512_mul_ps(_mm512_loadu_ps(&a[i]), x1));
     }
-    i = static_cast<size_t>(nAligned);
-    }
-#elif defined(VGRE_HAS_AVX2)
-    {
-    const __m256 two8 = _mm256_set1_ps(2.0f);
-    for (; i + 8 <= n; i += 8) {
-        __m256 va = _mm256_loadu_ps(&a[i]);
+    for (; i < n; ++i) c[i] = a[i] / b[i];
+}
+__attribute__((target("avx2,fma")))
+static void div_avx2(const float* a, const float* b, float* c, size_t n) {
+    const __m256 two = _mm256_set1_ps(2.0f); size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) {
         __m256 vb = _mm256_loadu_ps(&b[i]);
-        // 12-bit rcp estimate, one Newton step → ≤ 2⁻²⁴ error
-        __m256 x0 = _mm256_rcp_ps(vb);
-        __m256 x1 = _mm256_mul_ps(x0, _mm256_fnmadd_ps(vb, x0, two8));
-        _mm256_storeu_ps(&c[i], _mm256_mul_ps(va, x1));
+        __m256 x0 = _mm256_rcp_ps(vb);                         // 12-bit rcp + 1 Newton step
+        __m256 x1 = _mm256_mul_ps(x0, _mm256_fnmadd_ps(vb, x0, two));
+        _mm256_storeu_ps(&c[i], _mm256_mul_ps(_mm256_loadu_ps(&a[i]), x1));
     }
+    for (; i < n; ++i) c[i] = a[i] / b[i];
+}
+#endif
+
+void VectorEngine::vectorDiv(const float* __restrict a, const float* __restrict b,
+                              float* __restrict c, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: div_avx512(a, b, c, n); return;
+        case VecIsa::Avx2:   div_avx2(a, b, c, n);   return;
+        default: break;
     }
 #endif
-    for (; i < n; ++i) {
-        c[i] = a[i] / b[i];
-    }
+    for (size_t i = 0; i < n; ++i) c[i] = a[i] / b[i];
 }
 
 // ── Float vector square root ────────────────────────────────────────────────
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void sqrt_avx512(const float* a, float* c, size_t n) {
+    size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16) _mm512_storeu_ps(&c[i], _mm512_sqrt_ps(_mm512_loadu_ps(&a[i])));
+    for (; i < n; ++i) c[i] = std::sqrt(a[i]);
+}
+__attribute__((target("avx2,fma")))
+static void sqrt_avx2(const float* a, float* c, size_t n) {
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) _mm256_storeu_ps(&c[i], _mm256_sqrt_ps(_mm256_loadu_ps(&a[i])));
+    for (; i < n; ++i) c[i] = std::sqrt(a[i]);
+}
+#endif
+
 void VectorEngine::vectorSqrt(const float* a, float* c, size_t n) {
-    size_t i = 0;
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        __m512 va = _mm512_loadu_ps(&a[ii]);
-        _mm512_storeu_ps(&c[ii], _mm512_sqrt_ps(va));
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: sqrt_avx512(a, c, n); return;
+        case VecIsa::Avx2:   sqrt_avx2(a, c, n);   return;
+        default: break;
     }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    for (; i + 8 <= n; i += 8) {
-        __m256 va = _mm256_loadu_ps(&a[i]);
-        _mm256_storeu_ps(&c[i], _mm256_sqrt_ps(va));
-    }
-    #endif
-    for (; i < n; ++i) {
-        c[i] = std::sqrt(a[i]);
-    }
+#endif
+    for (size_t i = 0; i < n; ++i) c[i] = std::sqrt(a[i]);
 }
 
 // ── Float inverse square root ──────────────────────────────────────────────
@@ -400,49 +342,39 @@ void VectorEngine::vectorSqrt(const float* a, float* c, size_t n) {
 // IEEE-754 special cases (preserved exactly via a blend against hardware rsqrt):
 //   a = +0    → +Inf     a = -0     → -Inf     a = +Inf → 0
 //   a < 0, NaN → NaN
-void VectorEngine::vectorRsqrt(const float* __restrict a,
-                                float* __restrict out, size_t n) {
-    size_t i = 0;
-#if defined(VGRE_HAS_AVX2)
-    const __m256 one    = _mm256_set1_ps(1.0f);
-    const __m256 zero   = _mm256_setzero_ps();
-    const __m256 posinf = _mm256_set1_ps(std::numeric_limits<float>::infinity());
-
-    for (; i + 8 <= n; i += 8) {
-        __m256 a8 = _mm256_loadu_ps(&a[i]);
-
-        // Accurate finite-positive path: 1/sqrt(a), ≤1 ULP (both ops rounded).
-        __m256 accurate = _mm256_div_ps(one, _mm256_sqrt_ps(a8));
-
-        // Specials source: hardware rsqrt gives +0→+Inf, -0→-Inf, +Inf→0,
-        // neg/NaN→NaN. div(1,sqrt) would also get these right except for -0
-        // (sqrt(-0)=-0 → -Inf, which matches), so blending keeps behaviour
-        // identical to the previous implementation for every special input.
-        __m256 x0 = _mm256_rsqrt_ps(a8);
-
-        // Apply the accurate value only for finite positive inputs; keep the
-        // hardware special results everywhere else.
-        __m256 is_finite_pos = _mm256_and_ps(
-            _mm256_cmp_ps(a8, zero,   _CMP_GT_OQ),   // a > 0
-            _mm256_cmp_ps(a8, posinf, _CMP_LT_OQ)    // a < +Inf
-        );
-        _mm256_storeu_ps(&out[i], _mm256_blendv_ps(x0, accurate, is_finite_pos));
-    }
-#endif
-    // Scalar tail — also handles the entire array when AVX2 is unavailable.
+// Scalar rsqrt with the exact IEEE special-case handling (shared by all paths).
+static inline void rsqrt_scalar(const float* a, float* out, size_t i, size_t n) {
     for (; i < n; ++i) {
         float a_i = a[i];
-        if (a_i == 0.0f) {
-            out[i] = std::numeric_limits<float>::infinity();  // rsqrt(0) = +Inf
-        } else if (!std::isfinite(a_i) && a_i > 0.0f) {
-            out[i] = 0.0f;                                    // rsqrt(+Inf) = 0
-        } else if (a_i < 0.0f || std::isnan(a_i)) {
-            out[i] = std::numeric_limits<float>::quiet_NaN();
-        } else {
-            // Normal positive finite: correctly-rounded 1/sqrt (≤1 ULP).
-            out[i] = 1.0f / std::sqrt(a_i);
-        }
+        if (a_i == 0.0f) out[i] = std::numeric_limits<float>::infinity();       // rsqrt(0)=+Inf
+        else if (!std::isfinite(a_i) && a_i > 0.0f) out[i] = 0.0f;              // rsqrt(+Inf)=0
+        else if (a_i < 0.0f || std::isnan(a_i)) out[i] = std::numeric_limits<float>::quiet_NaN();
+        else out[i] = 1.0f / std::sqrt(a_i);                                    // ≤1 ULP
     }
+}
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx2,fma")))
+static void rsqrt_avx2(const float* a, float* out, size_t n) {
+    const __m256 one = _mm256_set1_ps(1.0f), zero = _mm256_setzero_ps();
+    const __m256 posinf = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) {
+        __m256 a8 = _mm256_loadu_ps(&a[i]);
+        __m256 accurate = _mm256_div_ps(one, _mm256_sqrt_ps(a8));   // ≤1 ULP finite-positive
+        __m256 x0 = _mm256_rsqrt_ps(a8);                            // hardware specials
+        __m256 is_finite_pos = _mm256_and_ps(_mm256_cmp_ps(a8, zero, _CMP_GT_OQ),
+                                             _mm256_cmp_ps(a8, posinf, _CMP_LT_OQ));
+        _mm256_storeu_ps(&out[i], _mm256_blendv_ps(x0, accurate, is_finite_pos));
+    }
+    rsqrt_scalar(a, out, i, n);
+}
+#endif
+
+void VectorEngine::vectorRsqrt(const float* __restrict a, float* __restrict out, size_t n) {
+#if defined(VGRE_VEC_X86)
+    if (vecIsa() != VecIsa::Scalar) { rsqrt_avx2(a, out, n); return; }  // AVX2 path (also used under AVX-512)
+#endif
+    rsqrt_scalar(a, out, 0, n);
 }
 
 

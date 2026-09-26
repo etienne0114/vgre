@@ -8,9 +8,9 @@
 #include <cstring>
 #include <algorithm>
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
+// SIMD is RUNTIME-DISPATCHED: the AVX2 transpose kernels are compiled
+// unconditionally (target attribute) and selected at runtime via CPUID.
+#include "vgre/common/simd_dispatch.h"
 
 namespace vgre {
 namespace math {
@@ -114,8 +114,8 @@ void transposeRecursive(const T* src, T* dst,
 // Algorithm (Frigo et al. cache-oblivious): 3-layer butterfly of unpack ops.
 // Invariant: after return, A[i*ld+j] == A_orig[j*ld+i] for all i,j in [0,8).
 // Complexity: 8 loads + 8 stores + 8 unpacklo/hi + 8 shuffles + 8 permutes = O(1).
-#if defined(__AVX2__)
-static void transpose8x8_avx2(float* A, size_t ld) {
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX2 static void transpose8x8_avx2(float* A, size_t ld) {
     // Load 8 rows into YMM registers (8 floats each)
     __m256 r0 = _mm256_loadu_ps(A + 0*ld);
     __m256 r1 = _mm256_loadu_ps(A + 1*ld);
@@ -179,7 +179,7 @@ static void transpose8x8_avx2(float* A, size_t ld) {
 // On exit:   A holds transpose(tile_B), B holds transpose(tile_A).
 // Invariant: result[A][i][j] == input[B][j][i],
 //            result[B][i][j] == input[A][j][i]  for all i,j in [0,8).
-static void swapAndTranspose8x8_avx2(float* A, float* B, size_t ld) {
+VGRE_TARGET_AVX2 static void swapAndTranspose8x8_avx2(float* A, float* B, size_t ld) {
     // Load rows of tile A
     __m256 a0 = _mm256_loadu_ps(A + 0*ld);
     __m256 a1 = _mm256_loadu_ps(A + 1*ld);
@@ -275,7 +275,7 @@ static void swapAndTranspose8x8_avx2(float* A, float* B, size_t ld) {
     _mm256_storeu_ps(B + 6*ld, ta6);
     _mm256_storeu_ps(B + 7*ld, ta7);
 }
-#endif // __AVX2__
+#endif // VGRE_SIMD_X86
 
 // Scalar in-place square-tile transpose for sizes < 8 (or when AVX2 absent).
 // Invariant: A[i*ld+j] ↔ A[j*ld+i] for all 0 ≤ i < j < n; diagonal fixed.
@@ -310,8 +310,8 @@ static void swapBlocksRecursive(float* M, size_t ld,
                                 size_t h, size_t w) {
     if (h == 0 || w == 0) return;
 
-#if defined(__AVX2__)
-    if (h == 8 && w == 8) {
+#if defined(VGRE_SIMD_X86)
+    if (h == 8 && w == 8 && vgre::simd::have_avx2()) {
         // AVX2 fast path: swap-transpose two 8×8 tiles simultaneously
         // Invariant: A[i][j] ↔ B[i][j] with transposition applied to each
         swapAndTranspose8x8_avx2(M + r0 * ld + c0, M + r1 * ld + c1, ld);
@@ -358,8 +358,8 @@ static void swapBlocksRecursive(float* M, size_t ld,
 static void transposeInPlaceRecursive(float* A, size_t ld, size_t r, size_t n) {
     if (n == 0) return;
 
-#if defined(__AVX2__)
-    if (n == 8) {
+#if defined(VGRE_SIMD_X86)
+    if (n == 8 && vgre::simd::have_avx2()) {
         // AVX2 base case: 8×8 in-place transpose kernel, O(1) cache misses
         transpose8x8_avx2(A + r * ld + r, ld);
         return;
@@ -483,7 +483,7 @@ void cacheObliviousSpMV(const T* values, const IndexType* col_indices,
 //
 // AVX2 path: 8×8 base tiles use _mm256_unpacklo/hi_ps + _mm256_shuffle_ps +
 // _mm256_permute2f128_ps for a fully register-resident transpose kernel.
-// Scalar fallback active when __AVX2__ is not defined or N mod 8 != 0.
+// Scalar fallback active when the CPU lacks AVX2 (runtime) or N mod 8 != 0.
 void cacheObliviousTransposeInPlace(float* A, size_t N, size_t ld) {
     if (N == 0) return;
     // Delegate to recursive implementation starting at row/col 0, size N

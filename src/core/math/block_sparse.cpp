@@ -5,14 +5,11 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <type_traits>
 
-#ifdef __AVX512F__
-#include <immintrin.h>
-#endif
-
-#ifdef __AVX2__
-#include <immintrin.h>
-#endif
+// SIMD is RUNTIME-DISPATCHED: the AVX-512/AVX2 block kernels are compiled
+// unconditionally (target attribute) and selected at runtime via CPUID.
+#include "vgre/common/simd_dispatch.h"
 
 namespace vgre {
 namespace math {
@@ -108,8 +105,8 @@ void simdBlockMultiply(const T* A_block, const T* B_block, T* C_block,
     }
 }
 
-#ifdef __AVX512F__
-void avx512BlockMultiplyF(const float* A_block, const float* B_block, float* C_block,
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX512 void avx512BlockMultiplyF(const float* A_block, const float* B_block, float* C_block,
                          size_t block_size) {
     // Initialize C_block to zero
     std::memset(C_block, 0, block_size * block_size * sizeof(float));
@@ -133,10 +130,10 @@ void avx512BlockMultiplyF(const float* A_block, const float* B_block, float* C_b
         simdBlockMultiply(A_block, B_block, C_block, block_size);
     }
 }
-#endif
+#endif // VGRE_SIMD_X86 (AVX-512)
 
-#ifdef __AVX2__
-void avx2BlockMultiplyF(const float* A_block, const float* B_block, float* C_block,
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX2 void avx2BlockMultiplyF(const float* A_block, const float* B_block, float* C_block,
                        size_t block_size) {
     // Initialize C_block to zero
     std::memset(C_block, 0, block_size * block_size * sizeof(float));
@@ -160,7 +157,27 @@ void avx2BlockMultiplyF(const float* A_block, const float* B_block, float* C_blo
         simdBlockMultiply(A_block, B_block, C_block, block_size);
     }
 }
+#endif // VGRE_SIMD_X86 (AVX2)
+
+// Runtime-dispatched block multiply. Floats use the widest ISA the CPU has
+// (AVX-512 → AVX2 → scalar); other types use the scalar kernel. Kept separate
+// from simdBlockMultiply so the SIMD kernels' small-block fallback stays scalar
+// (no dispatch recursion).
+template<typename T>
+static inline void blockMultiplyRuntime(const T* A_block, const T* B_block,
+                                        T* C_block, size_t block_size) {
+#if defined(VGRE_SIMD_X86)
+    if constexpr (std::is_same_v<T, float>) {
+        if (block_size >= 16 && vgre::simd::have_avx512()) {
+            avx512BlockMultiplyF(A_block, B_block, C_block, block_size); return;
+        }
+        if (block_size >= 8 && vgre::simd::have_avx2()) {
+            avx2BlockMultiplyF(A_block, B_block, C_block, block_size); return;
+        }
+    }
 #endif
+    simdBlockMultiply(A_block, B_block, C_block, block_size);
+}
 
 template<typename T, typename IndexType>
 void blockSparseMV(const BlockSparseMatrix<T, IndexType>& bsm,
@@ -226,7 +243,7 @@ void blockSparseMM(const BlockSparseMatrix<T, IndexType>& A,
             IndexType col_start = block_col_b * block_size;
             IndexType col_end = std::min((block_col_b + 1) * block_size, C_cols);
 
-            simdBlockMultiply(block_a, block_b, temp_block.data(), block_size);
+            blockMultiplyRuntime(block_a, block_b, temp_block.data(), block_size);
             
             // Add to C
             for (IndexType i = row_start; i < row_end; ++i) {

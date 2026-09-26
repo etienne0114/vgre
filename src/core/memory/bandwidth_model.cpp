@@ -1,5 +1,6 @@
 #include "vgre/core/memory_manager.h"
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/common/cpu_features.h"  // vgre::cpu::supports — runtime ISA estimate
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -145,15 +146,13 @@ MemoryManager::MemoryBandwidthStats MemoryManager::getMemoryBandwidthStats() con
     static const double kPeakComputeGFLOPs = []() -> double {
         int cores = static_cast<int>(std::thread::hardware_concurrency());
         if (cores <= 0) cores = 1;
-#if defined(__AVX512F__)
-        return cores * 64.0;
-#elif defined(__AVX2__)
-        return cores * 40.0;
-#elif defined(__AVX__)
-        return cores * 20.0;
-#else
-        return cores * 5.0;
-#endif
+        // Per-core throughput from the RUNNING CPU's widest ISA (CPUID), not the
+        // compiler's -m flags, so the roofline reflects the actual host.
+        double perCore = 5.0;                                    // scalar/NEON
+        if (vgre::cpu::supports("avx512f"))   perCore = 64.0;    // 2×512-bit FMA
+        else if (vgre::cpu::supports("avx2")) perCore = 40.0;
+        else if (vgre::cpu::supports("avx"))  perCore = 20.0;
+        return cores * perCore;
     }();
 
     stats.peak_compute_gflops = kPeakComputeGFLOPs;

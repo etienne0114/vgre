@@ -15,11 +15,14 @@
 // sums are horizontally reduced and the scalar tail finishes with Kahan.
 // Used for the unit-stride fast path; non-unit stride falls back to scalar.
 
-#ifdef __AVX2__
-#include <immintrin.h>
+// SIMD is RUNTIME-DISPATCHED: the AVX2 Kahan kernels below are compiled
+// unconditionally (target attribute) and selected at runtime via CPUID, so one
+// portable binary uses AVX2 where present and scalar Kahan elsewhere.
+#include "vgre/common/simd_dispatch.h"
 
+#if defined(VGRE_SIMD_X86)
 // Horizontal sum of 8 float lanes — exact for ≤ 8 addends (no Kahan needed).
-static inline float kahan_hsum8_f32(__m256 v) {
+VGRE_TARGET_AVX2 static inline float kahan_hsum8_f32(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     __m128 s  = _mm_add_ps(lo, hi);
@@ -29,12 +32,103 @@ static inline float kahan_hsum8_f32(__m256 v) {
 }
 
 // Horizontal sum of 4 double lanes.
-static inline double kahan_hsum4_f64(__m256d v) {
+VGRE_TARGET_AVX2 static inline double kahan_hsum4_f64(__m256d v) {
     __m128d lo = _mm256_castpd256_pd128(v);
     __m128d hi = _mm256_extractf128_pd(v, 1);
     __m128d s  = _mm_add_pd(lo, hi);
     s = _mm_hadd_pd(s, s);
     return _mm_cvtsd_f64(s);
+}
+
+// Unit-stride AVX2 Kahan kernels (8 float / 4 double lanes). Each returns the
+// reduced sum; nrm2 callers take sqrt, asum sums |x|. Selected at runtime.
+VGRE_TARGET_AVX2 static float sdot_avx2(int n, const float* x, const float* y) {
+    __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 term = _mm256_mul_ps(_mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i));
+        __m256 yv = _mm256_sub_ps(term, vc);
+        __m256 vt = _mm256_add_ps(vsum, yv);
+        vc = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
+        vsum = vt;
+    }
+    float sum = kahan_hsum8_f32(vsum), c = 0.f;
+    for (; i < n; ++i) { float w = x[i]*y[i], yv = w-c, t = sum+yv; c = (t-sum)-yv; sum = t; }
+    return sum;
+}
+VGRE_TARGET_AVX2 static double ddot_avx2(int n, const double* x, const double* y) {
+    __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m256d term = _mm256_mul_pd(_mm256_loadu_pd(x + i), _mm256_loadu_pd(y + i));
+        __m256d yv = _mm256_sub_pd(term, vc);
+        __m256d vt = _mm256_add_pd(vsum, yv);
+        vc = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
+        vsum = vt;
+    }
+    double sum = kahan_hsum4_f64(vsum), c = 0.0;
+    for (; i < n; ++i) { double w = x[i]*y[i], yv = w-c, t = sum+yv; c = (t-sum)-yv; sum = t; }
+    return sum;
+}
+VGRE_TARGET_AVX2 static float snrm2_sq_avx2(int n, const float* x) {
+    __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 xi = _mm256_loadu_ps(x + i);
+        __m256 term = _mm256_mul_ps(xi, xi);
+        __m256 yv = _mm256_sub_ps(term, vc);
+        __m256 vt = _mm256_add_ps(vsum, yv);
+        vc = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
+        vsum = vt;
+    }
+    float sum = kahan_hsum8_f32(vsum), c = 0.f;
+    for (; i < n; ++i) { float w = x[i]*x[i], yv = w-c, t = sum+yv; c = (t-sum)-yv; sum = t; }
+    return sum;
+}
+VGRE_TARGET_AVX2 static double dnrm2_sq_avx2(int n, const double* x) {
+    __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m256d xi = _mm256_loadu_pd(x + i);
+        __m256d term = _mm256_mul_pd(xi, xi);
+        __m256d yv = _mm256_sub_pd(term, vc);
+        __m256d vt = _mm256_add_pd(vsum, yv);
+        vc = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
+        vsum = vt;
+    }
+    double sum = kahan_hsum4_f64(vsum), c = 0.0;
+    for (; i < n; ++i) { double w = x[i]*x[i], yv = w-c, t = sum+yv; c = (t-sum)-yv; sum = t; }
+    return sum;
+}
+VGRE_TARGET_AVX2 static float sasum_avx2(int n, const float* x) {
+    const __m256 sign_mask = _mm256_set1_ps(-0.0f);
+    __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 term = _mm256_andnot_ps(sign_mask, _mm256_loadu_ps(x + i));
+        __m256 yv = _mm256_sub_ps(term, vc);
+        __m256 vt = _mm256_add_ps(vsum, yv);
+        vc = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
+        vsum = vt;
+    }
+    float sum = kahan_hsum8_f32(vsum), c = 0.f;
+    for (; i < n; ++i) { float w = std::abs(x[i]), yv = w-c, t = sum+yv; c = (t-sum)-yv; sum = t; }
+    return sum;
+}
+VGRE_TARGET_AVX2 static double dasum_avx2(int n, const double* x) {
+    const __m256d sign_mask = _mm256_set1_pd(-0.0);
+    __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m256d term = _mm256_andnot_pd(sign_mask, _mm256_loadu_pd(x + i));
+        __m256d yv = _mm256_sub_pd(term, vc);
+        __m256d vt = _mm256_add_pd(vsum, yv);
+        vc = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
+        vsum = vt;
+    }
+    double sum = kahan_hsum4_f64(vsum), c = 0.0;
+    for (; i < n; ++i) { double w = std::abs(x[i]), yv = w-c, t = sum+yv; c = (t-sum)-yv; sum = t; }
+    return sum;
 }
 #endif
 
@@ -79,28 +173,9 @@ cublasStatus_t cublasSdot_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_sdot(n, x, incx, y, incy);
 #else
-#ifdef __AVX2__
-    if (incx == 1 && incy == 1) {
-        __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
-        int i = 0;
-        for (; i + 8 <= n; i += 8) {
-            __m256 xi   = _mm256_loadu_ps(x + i);
-            __m256 yi   = _mm256_loadu_ps(y + i);
-            __m256 term = _mm256_mul_ps(xi, yi);
-            __m256 yv   = _mm256_sub_ps(term, vc);
-            __m256 vt   = _mm256_add_ps(vsum, yv);
-            vc   = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
-            vsum = vt;
-        }
-        float sum = kahan_hsum8_f32(vsum), c = 0.f;
-        for (; i < n; ++i) {
-            float w = x[i] * y[i];
-            float yv2 = w - c;
-            float t  = sum + yv2;
-            c   = (t - sum) - yv2;
-            sum = t;
-        }
-        *result = sum;
+#if defined(VGRE_SIMD_X86)
+    if (incx == 1 && incy == 1 && vgre::simd::have_avx2()) {
+        *result = sdot_avx2(n, x, y);
         return CUBLAS_STATUS_SUCCESS;
     }
 #endif
@@ -124,28 +199,9 @@ cublasStatus_t cublasDdot_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_ddot(n, x, incx, y, incy);
 #else
-#ifdef __AVX2__
-    if (incx == 1 && incy == 1) {
-        __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
-        int i = 0;
-        for (; i + 4 <= n; i += 4) {
-            __m256d xi   = _mm256_loadu_pd(x + i);
-            __m256d yi   = _mm256_loadu_pd(y + i);
-            __m256d term = _mm256_mul_pd(xi, yi);
-            __m256d yv   = _mm256_sub_pd(term, vc);
-            __m256d vt   = _mm256_add_pd(vsum, yv);
-            vc   = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
-            vsum = vt;
-        }
-        double sum = kahan_hsum4_f64(vsum), c = 0.0;
-        for (; i < n; ++i) {
-            double w  = x[i] * y[i];
-            double yv = w - c;
-            double t  = sum + yv;
-            c   = (t - sum) - yv;
-            sum = t;
-        }
-        *result = sum;
+#if defined(VGRE_SIMD_X86)
+    if (incx == 1 && incy == 1 && vgre::simd::have_avx2()) {
+        *result = ddot_avx2(n, x, y);
         return CUBLAS_STATUS_SUCCESS;
     }
 #endif
@@ -170,27 +226,9 @@ cublasStatus_t cublasSnrm2_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_snrm2(n, x, incx);
 #else
-#ifdef __AVX2__
-    if (incx == 1) {
-        __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
-        int i = 0;
-        for (; i + 8 <= n; i += 8) {
-            __m256 xi   = _mm256_loadu_ps(x + i);
-            __m256 term = _mm256_mul_ps(xi, xi);
-            __m256 yv   = _mm256_sub_ps(term, vc);
-            __m256 vt   = _mm256_add_ps(vsum, yv);
-            vc   = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
-            vsum = vt;
-        }
-        float sum = kahan_hsum8_f32(vsum), c = 0.f;
-        for (; i < n; ++i) {
-            float w  = x[i] * x[i];
-            float yv = w - c;
-            float t  = sum + yv;
-            c   = (t - sum) - yv;
-            sum = t;
-        }
-        *result = sqrtf(sum);
+#if defined(VGRE_SIMD_X86)
+    if (incx == 1 && vgre::simd::have_avx2()) {
+        *result = sqrtf(snrm2_sq_avx2(n, x));
         return CUBLAS_STATUS_SUCCESS;
     }
 #endif
@@ -214,27 +252,9 @@ cublasStatus_t cublasDnrm2_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_dnrm2(n, x, incx);
 #else
-#ifdef __AVX2__
-    if (incx == 1) {
-        __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
-        int i = 0;
-        for (; i + 4 <= n; i += 4) {
-            __m256d xi   = _mm256_loadu_pd(x + i);
-            __m256d term = _mm256_mul_pd(xi, xi);
-            __m256d yv   = _mm256_sub_pd(term, vc);
-            __m256d vt   = _mm256_add_pd(vsum, yv);
-            vc   = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
-            vsum = vt;
-        }
-        double sum = kahan_hsum4_f64(vsum), c = 0.0;
-        for (; i < n; ++i) {
-            double w  = x[i] * x[i];
-            double yv = w - c;
-            double t  = sum + yv;
-            c   = (t - sum) - yv;
-            sum = t;
-        }
-        *result = sqrt(sum);
+#if defined(VGRE_SIMD_X86)
+    if (incx == 1 && vgre::simd::have_avx2()) {
+        *result = sqrt(dnrm2_sq_avx2(n, x));
         return CUBLAS_STATUS_SUCCESS;
     }
 #endif
@@ -348,28 +368,9 @@ cublasStatus_t cublasSasum_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_sasum(n, x, incx);
 #else
-#ifdef __AVX2__
-    if (incx == 1) {
-        // Clear sign bit to compute |x[i]| without branching.
-        const __m256 sign_mask = _mm256_set1_ps(-0.0f);
-        __m256 vsum = _mm256_setzero_ps(), vc = _mm256_setzero_ps();
-        int i = 0;
-        for (; i + 8 <= n; i += 8) {
-            __m256 term = _mm256_andnot_ps(sign_mask, _mm256_loadu_ps(x + i));
-            __m256 yv   = _mm256_sub_ps(term, vc);
-            __m256 vt   = _mm256_add_ps(vsum, yv);
-            vc   = _mm256_sub_ps(_mm256_sub_ps(vt, vsum), yv);
-            vsum = vt;
-        }
-        float sum = kahan_hsum8_f32(vsum), c = 0.f;
-        for (; i < n; ++i) {
-            float w  = std::abs(x[i]);
-            float yv = w - c;
-            float t  = sum + yv;
-            c   = (t - sum) - yv;
-            sum = t;
-        }
-        *result = sum;
+#if defined(VGRE_SIMD_X86)
+    if (incx == 1 && vgre::simd::have_avx2()) {
+        *result = sasum_avx2(n, x);
         return CUBLAS_STATUS_SUCCESS;
     }
 #endif
@@ -393,27 +394,9 @@ cublasStatus_t cublasDasum_v2(cublasHandle_t handle, int n,
 #if HAVE_CBLAS
     *result = cblas_dasum(n, x, incx);
 #else
-#ifdef __AVX2__
-    if (incx == 1) {
-        const __m256d sign_mask = _mm256_set1_pd(-0.0);
-        __m256d vsum = _mm256_setzero_pd(), vc = _mm256_setzero_pd();
-        int i = 0;
-        for (; i + 4 <= n; i += 4) {
-            __m256d term = _mm256_andnot_pd(sign_mask, _mm256_loadu_pd(x + i));
-            __m256d yv   = _mm256_sub_pd(term, vc);
-            __m256d vt   = _mm256_add_pd(vsum, yv);
-            vc   = _mm256_sub_pd(_mm256_sub_pd(vt, vsum), yv);
-            vsum = vt;
-        }
-        double sum = kahan_hsum4_f64(vsum), c = 0.0;
-        for (; i < n; ++i) {
-            double w  = std::abs(x[i]);
-            double yv = w - c;
-            double t  = sum + yv;
-            c   = (t - sum) - yv;
-            sum = t;
-        }
-        *result = sum;
+#if defined(VGRE_SIMD_X86)
+    if (incx == 1 && vgre::simd::have_avx2()) {
+        *result = dasum_avx2(n, x);
         return CUBLAS_STATUS_SUCCESS;
     }
 #endif

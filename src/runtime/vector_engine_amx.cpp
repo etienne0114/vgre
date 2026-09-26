@@ -25,6 +25,17 @@
 #include <cstring>
 #include <vector>
 
+// x86 GCC/Clang can compile every per-ISA kernel UNCONDITIONALLY via
+// __attribute__((target(...))) — the AVX2/AVX-VNNI/AMX intrinsics are usable
+// inside a target-attributed function even when no -m flag is on the command
+// line — then pick the kernel at runtime from caps_ (CPUID). This is what makes
+// one portable binary use AVX-VNNI on Alder Lake and AMX on Sapphire Rapids
+// without baking either ISA into the object. MSVC has no function target
+// attributes, so it falls through to the scalar dispatch.
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define VGRE_AMX_X86 1
+#endif
+
 // ── AMX tile config layout (XSAVE-area format, exactly 64 bytes) ─────────
 struct alignas(64) VgreTileCfg {
     uint8_t  palette_id;
@@ -67,12 +78,15 @@ static void transpose_int8(const int8_t* B, int8_t* BT, int K, int N) {
 }
 
 // Compute per-row sums of BT[N][K] (used for bias correction in dpbusd).
+// Only reached on the AVX-VNNI path, which implies AVX2 — so it is compiled as
+// an AVX2 kernel. (Not referenced off the VGRE_AMX_X86 path.)
+#if defined(VGRE_AMX_X86)
+__attribute__((target("avx2")))
 static void compute_bt_rowsums(const int8_t* BT, int32_t* sums, int N, int K) {
     for (int n = 0; n < N; ++n) {
         int32_t s = 0;
         const int8_t* row = BT + n * K;
         int k = 0;
-#if defined(__AVX2__)
         __m256i acc = _mm256_setzero_si256();
         for (; k + 31 < K; k += 32) {
             __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(row + k));
@@ -89,11 +103,11 @@ static void compute_bt_rowsums(const int8_t* BT, int32_t* sums, int N, int K) {
         s128 = _mm_add_epi32(s128, _mm_srli_si128(s128, 8));
         s128 = _mm_add_epi32(s128, _mm_srli_si128(s128, 4));
         s += _mm_cvtsi128_si32(s128);
-#endif
         for (; k < K; ++k) s += static_cast<int32_t>(row[k]);
         sums[n] = s;
     }
 }
+#endif // VGRE_AMX_X86
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kernel 1: AVX-VNNI INT8 GEMM
@@ -108,7 +122,8 @@ static void compute_bt_rowsums(const int8_t* BT, int32_t* sums, int N, int K) {
 // Processes 8 output columns per inner loop. K loop stride = 4.
 // Gathers 4 bytes from each of 8 BT rows via 8 × int32 loads + SIMD combine.
 // ─────────────────────────────────────────────────────────────────────────────
-#if defined(__AVXVNNI__) || defined(__AVX_VNNI__)
+#if defined(VGRE_AMX_X86)
+__attribute__((target("avx2,avxvnni")))
 static void gemm_int8_avxvnni(
         const int8_t* __restrict A,
         const int8_t* __restrict BT,      // B transposed: N×K
@@ -184,14 +199,15 @@ static void gemm_int8_avxvnni(
         }
     }
 }
-#endif // __AVXVNNI__
+#endif // VGRE_AMX_X86 (AVX-VNNI)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kernel 2: AVX2 INT8 GEMM (fallback when VNNI not available)
 // Uses int8→int16 widening + _mm256_madd_epi16 to accumulate 16 K-values/step.
 // Processes 8 output columns per N-group. No bias trick needed (uses signed mul).
 // ─────────────────────────────────────────────────────────────────────────────
-#if defined(__AVX2__)
+#if defined(VGRE_AMX_X86)
+__attribute__((target("avx2")))
 static void gemm_int8_avx2(
         const int8_t* __restrict A,
         const int8_t* __restrict BT, // B transposed: N×K
@@ -243,7 +259,7 @@ static void gemm_int8_avx2(
         }
     }
 }
-#endif // __AVX2__
+#endif // VGRE_AMX_X86 (AVX2 INT8)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Kernel 3: AMX BF16 GEMM (Sapphire Rapids / Granite Rapids)
@@ -270,13 +286,13 @@ static void pack_B_amx(const vgre_bf16* B, vgre_bf16* Bpk, int K, int N) {
     }
 }
 
+#if defined(VGRE_AMX_X86)
+__attribute__((target("amx-tile,amx-bf16")))
 static void gemm_bf16_amx(
         const vgre_bf16* __restrict A,
         const vgre_bf16* __restrict Bpk, // AMX-packed B
         float* __restrict C,
         int M, int N, int K) {
-    (void)A; (void)Bpk; (void)C; (void)M; (void)N; (void)K;
-#if defined(__AMX_BF16__) && defined(__AMX_TILE__)
     // Configure tile registers for this problem.
     // We use three tiles: TMM0=C, TMM1=A, TMM2=B.
     // Tile dimensions set to the minimum of the problem size and the AMX limits.
@@ -330,15 +346,21 @@ static void gemm_bf16_amx(
     }
 
     _tile_release();
-#endif // __AMX_BF16__ && __AMX_TILE__
 }
+#else  // !VGRE_AMX_X86 — AMX is x86-only; scalar callers never reach here (amxEnabled==false)
+static void gemm_bf16_amx(const vgre_bf16* A, const vgre_bf16* Bpk,
+                          float* C, int M, int N, int K) {
+    (void)A; (void)Bpk; (void)C; (void)M; (void)N; (void)K;
+}
+#endif // VGRE_AMX_X86 (AMX BF16)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AVX2 BF16→FP32 GEMM fallback (software emulation, no AMX hardware needed)
 // ─────────────────────────────────────────────────────────────────────────────
+#if defined(VGRE_AMX_X86)
+__attribute__((target("avx2")))
 static void gemm_bf16_avx2(const vgre_bf16* A, const vgre_bf16* B,
                             float* C, int M, int N, int K) {
-#if defined(__AVX2__)
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; n += 8) {
             const int nEnd = std::min(n + 8, N);
@@ -382,17 +404,8 @@ static void gemm_bf16_avx2(const vgre_bf16* A, const vgre_bf16* B,
             }
         }
     }
-#else
-    // Pure scalar fallback
-    for (int m = 0; m < M; ++m)
-    for (int n = 0; n < N; ++n) {
-        float acc = 0.f;
-        for (int k = 0; k < K; ++k)
-            acc += bf16_to_fp32(A[m*K+k]) * bf16_to_fp32(B[k*N+n]);
-        C[m*N+n] = acc;
-    }
-#endif
 }
+#endif // VGRE_AMX_X86 (AVX2 BF16) — non-x86 uses the scalar fallback in matMulBF16
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public dispatch — called from VectorEngine member functions
@@ -409,7 +422,7 @@ void VectorEngine::matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
     std::vector<int8_t> BT(static_cast<size_t>(N) * static_cast<size_t>(K));
     transpose_int8(B, BT.data(), K, N);
 
-#if defined(__AVXVNNI__) || defined(__AVX_VNNI__)
+#if defined(VGRE_AMX_X86)
     if (caps_.hasAVXVNNI) {
         // Compute B^T row sums for the +128 bias correction
         std::vector<int32_t> btSums(static_cast<size_t>(N));
@@ -419,9 +432,6 @@ void VectorEngine::matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
             + std::to_string(M) + "×" + std::to_string(N) + "×" + std::to_string(K) + ")");
         return;
     }
-#endif
-
-#if defined(__AVX2__)
     if (caps_.hasAVX2) {
         gemm_int8_avx2(A, BT.data(), C, M, N, K);
         VGRE_LOG_DEBUG("VectorEngine", "matMulInt8: AVX2 path");
@@ -456,7 +466,7 @@ void VectorEngine::matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
         return;
     }
 
-#if defined(__AVX2__)
+#if defined(VGRE_AMX_X86)
     if (caps_.hasAVX2) {
         gemm_bf16_avx2(A, B, C, M, N, K);
         VGRE_LOG_DEBUG("VectorEngine", "matMulBF16: AVX2 fallback");

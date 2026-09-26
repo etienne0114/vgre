@@ -14,8 +14,23 @@
 #include <algorithm>
 #include <vector>
 #include <random>
-#ifdef __AVX2__
-#include <immintrin.h>
+// SIMD is RUNTIME-DISPATCHED: the AVX2 Winograd kernel is compiled
+// unconditionally (target attribute) and selected at runtime via CPUID.
+#include "vgre/common/simd_dispatch.h"
+
+#if defined(VGRE_SIMD_X86)
+// Winograd transform-domain multiply-accumulate: mp[0..35] += gp[.]·dp[.].
+// The first 32 lanes use AVX2 FMA; the last 4 are scalar. Runtime-selected.
+VGRE_TARGET_AVX2 static inline void vgreWinoMadd36Avx2(
+        float* mp, const float* gp, const float* dp) {
+    for (int i = 0; i < 32; i += 8) {
+        __m256 m = _mm256_loadu_ps(mp + i);
+        __m256 g = _mm256_loadu_ps(gp + i);
+        __m256 d = _mm256_loadu_ps(dp + i);
+        _mm256_storeu_ps(mp + i, _mm256_fmadd_ps(g, d, m));
+    }
+    for (int i = 32; i < 36; ++i) mp[i] += gp[i] * dp[i];
+}
 #endif
 
 // Thin RAII timer for cuDNN operations — records AEE and profiler events.
@@ -516,18 +531,12 @@ inline void cpuWinograd4x4_3x3(
                 for (int cg = 0; cg < Cg; ++cg) {
                     const float* gp = g_hat.data() + (k * Cg + cg) * 36;
                     const float* dp = d_hat.data() + cg * 36;
-#ifdef __AVX2__
-                    // AVX2 FMA: 8 floats/iter × 4 iters = 32 elements
-                    for (int i = 0; i < 32; i += 8) {
-                        __m256 m = _mm256_loadu_ps(mp + i);
-                        __m256 g = _mm256_loadu_ps(gp + i);
-                        __m256 d = _mm256_loadu_ps(dp + i);
-                        _mm256_storeu_ps(mp + i, _mm256_fmadd_ps(g, d, m));
-                    }
-                    for (int i = 32; i < 36; ++i) mp[i] += gp[i] * dp[i];
-#else
-                    for (int i = 0; i < 36; ++i) mp[i] += gp[i] * dp[i];
+#if defined(VGRE_SIMD_X86)
+                    if (vgre::simd::have_avx2()) {
+                        vgreWinoMadd36Avx2(mp, gp, dp);
+                    } else
 #endif
+                    { for (int i = 0; i < 36; ++i) mp[i] += gp[i] * dp[i]; }
                 }
             }
 

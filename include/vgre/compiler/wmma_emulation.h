@@ -39,12 +39,16 @@ inline int vgre_popcount(unsigned int x) {
 #endif
 }
 
-// SIMD intrinsics for accelerated mma_sync paths
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX512F)
-#include <immintrin.h>
-#endif
-#ifdef VGRE_HAS_AMX
-#include <immintrin.h>  // also covers AMX headers on GCC/Clang with -mamx-*
+// SIMD is RUNTIME-DISPATCHED: the AVX-512 / AMX mma kernels are compiled
+// UNCONDITIONALLY via __attribute__((target(...))) — the intrinsics are usable
+// inside a target-attributed function with no -m flag on the command line — and
+// selected at runtime from CPUID, so one portable binary uses AVX-512 on any
+// AVX-512 CPU and AMX on Sapphire Rapids without either ISA baked into the
+// object. MSVC lacks function target attributes, so it uses the scalar path.
+#include "vgre/common/cpu_features.h"
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define VGRE_WMMA_X86 1
+#  include <immintrin.h>
 #endif
 
 namespace nvcuda {
@@ -175,11 +179,23 @@ inline float satf_clamp(float v) {
     return v;
 }
 
+// Cached runtime probe: does this CPU have AVX-512F? Selects the AVX-512 mma
+// kernels below. Evaluated once via CPUID.
+inline bool wmma_have_avx512() {
+#if defined(VGRE_WMMA_X86)
+    static const bool v = vgre::cpu::supports("avx512f");
+    return v;
+#else
+    return false;
+#endif
+}
+
 // ── Tier 1: AVX-512 vectorized path ──────────────────────────────────────────
 // Requires N == 16 so each output row fits exactly in one __m512 register.
 // Reduces 4096 scalar FMAs to 256 AVX-512 FMA instructions for 16×16×16 tile.
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX512F)
+#if defined(VGRE_WMMA_X86)
 template<int M, int N, int K>
+__attribute__((target("avx512f")))
 inline void mma_avx512(float* d, const float* a, const float* b,
                         const float* c, bool satf)
 {
@@ -198,14 +214,14 @@ inline void mma_avx512(float* d, const float* a, const float* b,
         _mm512_storeu_ps(&d[m * N], acc);
     }
 }
-#endif // VGRE_HAS_AVX512
+#endif // VGRE_WMMA_X86
 
 // ── Tier 2: Intel AMX path ────────────────────────────────────────────────────
 // Requires M==16, N==16, K==16. Uses AMX-BF16 tile dot-product.
 // A/B are converted float→bf16 before tile load; accumulator remains FP32.
 // arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA) must have been called
 // (done by VectorEngine::detectCapabilities at startup).
-#ifdef VGRE_HAS_AMX
+#if defined(VGRE_WMMA_X86)
 struct AmxTileConfig {
     uint8_t palette_id;           // must be 1
     uint8_t start_row;
@@ -214,6 +230,7 @@ struct AmxTileConfig {
     uint8_t  rows[16];            // number of rows for each tile
 };
 
+__attribute__((target("amx-tile,amx-bf16")))
 inline void mma_amx_bf16_16x16x16(float* d, const float* a, const float* b,
                                     const float* c, bool satf)
 {
@@ -253,7 +270,7 @@ inline void mma_amx_bf16_16x16x16(float* d, const float* a, const float* b,
         for (int i = 0; i < 16 * 16; ++i) d[i] = satf_clamp(d[i]);
     }
 }
-#endif // VGRE_HAS_AMX
+#endif // VGRE_WMMA_X86 (AMX)
 
 // ── Tier 3: scalar fallback ───────────────────────────────────────────────────
 template<int M, int N, int K>
@@ -288,7 +305,7 @@ inline void mma_sync(
     // Fragments are always row-major after load_matrix_sync (col_major is
     // transposed during load), so mma_sync always sees row-major data.
 
-#ifdef VGRE_HAS_AMX
+#if defined(VGRE_WMMA_X86)
     // AMX path: only for the canonical 16×16×16 WMMA tile shape.
     if constexpr (M == 16 && N == 16 && K == 16) {
         // Runtime check: amxEnabled is set only when arch_prctl succeeded.
@@ -297,12 +314,11 @@ inline void mma_sync(
             return;
         }
     }
-#endif
-
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX512F)
     if constexpr (N == 16) {
-        detail::mma_avx512<M, N, K>(d.data, a.data, b.data, c.data, satf);
-        return;
+        if (detail::wmma_have_avx512()) {
+            detail::mma_avx512<M, N, K>(d.data, a.data, b.data, c.data, satf);
+            return;
+        }
     }
 #endif
 
@@ -718,11 +734,9 @@ inline void vgre_wgmma_wg_tf32(float* dFrag, int N, uint64_t descA, uint64_t des
 // d[0..64*256-1]: FP32 accumulator (in/out)
 // descA: descriptor for 64×16 BF16 A matrix
 // descB: descriptor for 16×256 BF16 B matrix
-inline void vgre_wgmma_m64n256k16_bf16_f32(float* d, uint64_t descA, uint64_t descB)
-{
-    const uint16_t* A = detail::wgmma_desc_ptr_bf16(descA);
-    const uint16_t* B = detail::wgmma_desc_ptr_bf16(descB);
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX512F)
+#if defined(VGRE_WMMA_X86)
+__attribute__((target("avx512f")))
+static inline void wgmma_m64n256_avx512(float* d, const uint16_t* A, const uint16_t* B) {
     // AVX-512 vectorized inner loop over N=256 using 16-float chunks
     for (int m = 0; m < 64; ++m) {
         for (int n0 = 0; n0 < 256; n0 += 16) {
@@ -739,7 +753,15 @@ inline void vgre_wgmma_m64n256k16_bf16_f32(float* d, uint64_t descA, uint64_t de
             _mm512_storeu_ps(&d[m * 256 + n0], acc);
         }
     }
-#else
+}
+#endif
+inline void vgre_wgmma_m64n256k16_bf16_f32(float* d, uint64_t descA, uint64_t descB)
+{
+    const uint16_t* A = detail::wgmma_desc_ptr_bf16(descA);
+    const uint16_t* B = detail::wgmma_desc_ptr_bf16(descB);
+#if defined(VGRE_WMMA_X86)
+    if (nvcuda::wmma::detail::wmma_have_avx512()) { wgmma_m64n256_avx512(d, A, B); return; }
+#endif
     for (int m = 0; m < 64; ++m)
         for (int n = 0; n < 256; ++n) {
             float acc = d[m * 256 + n];
@@ -748,7 +770,6 @@ inline void vgre_wgmma_m64n256k16_bf16_f32(float* d, uint64_t descA, uint64_t de
                      * detail::wgmma_bf16_to_f32(B[k * 256 + n]);
             d[m * 256 + n] = acc;
         }
-#endif
 }
 
 // wgmma.mma_async m64n128k16 BF16→FP32
@@ -1409,9 +1430,12 @@ inline void fp8_gemm(float* d, const uint8_t* A, const uint8_t* B,
     }
 }
 
-// AVX-512 path: convert 16 E4M3 bytes to FP32 via scatter, then use VFMADD
-#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
+// AVX-512 path: convert 16 E4M3 bytes to FP32 via scatter, then use VFMADD.
+// Compiled unconditionally on x86 GCC/Clang and selected at runtime (see the
+// fp8_gemm_dispatch wrapper). Requires conv_a == conv_b (single conv fn).
+#if defined(VGRE_WMMA_X86)
 template<typename ConvFn>
+__attribute__((target("avx512f")))
 inline void fp8_gemm_avx512(float* d, const uint8_t* A, const uint8_t* B,
                              int M, int N, int K, ConvFn conv)
 {
@@ -1433,6 +1457,19 @@ inline void fp8_gemm_avx512(float* d, const uint8_t* A, const uint8_t* B,
 }
 #endif
 
+// Runtime dispatcher: AVX-512 kernel where the CPU supports it, scalar otherwise.
+// For same-format FP8 GEMMs (conv_a == conv_b). Mixed-format callers use the
+// scalar fp8_gemm directly (the AVX-512 kernel takes a single conv fn).
+template<typename ConvFn>
+inline void fp8_gemm_dispatch(float* d, const uint8_t* A, const uint8_t* B,
+                              int M, int N, int K, ConvFn conv)
+{
+#if defined(VGRE_WMMA_X86)
+    if (nvcuda::wmma::detail::wmma_have_avx512()) { fp8_gemm_avx512(d, A, B, M, N, K, conv); return; }
+#endif
+    fp8_gemm(d, A, B, M, N, K, conv, conv);
+}
+
 } // namespace detail
 
 // ── tcgen05 FP8 MMA — E4M3×E4M3→FP32, K=32 ──────────────────────────────────
@@ -1442,22 +1479,14 @@ inline void vgre_tcgen05_m64n256k32_e4m3_f32(float* d, uint64_t descA, uint64_t 
 {
     const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
     const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
-#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
-    detail::fp8_gemm_avx512(d, A, B, 64, 256, 32, detail::fp8e4m3_to_f32);
-#else
-    detail::fp8_gemm(d, A, B, 64, 256, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
-#endif
+    detail::fp8_gemm_dispatch(d, A, B, 64, 256, 32, detail::fp8e4m3_to_f32);
 }
 
 inline void vgre_tcgen05_m64n128k32_e4m3_f32(float* d, uint64_t descA, uint64_t descB)
 {
     const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
     const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
-#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
-    detail::fp8_gemm_avx512(d, A, B, 64, 128, 32, detail::fp8e4m3_to_f32);
-#else
-    detail::fp8_gemm(d, A, B, 64, 128, 32, detail::fp8e4m3_to_f32, detail::fp8e4m3_to_f32);
-#endif
+    detail::fp8_gemm_dispatch(d, A, B, 64, 128, 32, detail::fp8e4m3_to_f32);
 }
 
 inline void vgre_tcgen05_m64n64k32_e4m3_f32(float* d, uint64_t descA, uint64_t descB)
@@ -1472,22 +1501,14 @@ inline void vgre_tcgen05_m64n256k32_e5m2_f32(float* d, uint64_t descA, uint64_t 
 {
     const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
     const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
-#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
-    detail::fp8_gemm_avx512(d, A, B, 64, 256, 32, detail::fp8e5m2_to_f32);
-#else
-    detail::fp8_gemm(d, A, B, 64, 256, 32, detail::fp8e5m2_to_f32, detail::fp8e5m2_to_f32);
-#endif
+    detail::fp8_gemm_dispatch(d, A, B, 64, 256, 32, detail::fp8e5m2_to_f32);
 }
 
 inline void vgre_tcgen05_m64n128k32_e5m2_f32(float* d, uint64_t descA, uint64_t descB)
 {
     const uint8_t* A = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descA << 4));
     const uint8_t* B = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(descB << 4));
-#if defined(VGRE_HAS_AVX512F) || defined(VGRE_HAS_AVX512)
-    detail::fp8_gemm_avx512(d, A, B, 64, 128, 32, detail::fp8e5m2_to_f32);
-#else
-    detail::fp8_gemm(d, A, B, 64, 128, 32, detail::fp8e5m2_to_f32, detail::fp8e5m2_to_f32);
-#endif
+    detail::fp8_gemm_dispatch(d, A, B, 64, 128, 32, detail::fp8e5m2_to_f32);
 }
 
 // ── tcgen05 FP8 MMA — mixed E4M3×E5M2→FP32 (common in Blackwell transformers) ─

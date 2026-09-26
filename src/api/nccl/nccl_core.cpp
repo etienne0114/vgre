@@ -6,13 +6,31 @@
 #  include <sys/random.h>  // getrandom()
 #endif
 
-// SIMD for reduction
-#if defined(__AVX2__)
-#  include <immintrin.h>
-#elif defined(__SSE2__) || defined(_M_X64)
+// SIMD for reduction — AVX2 is RUNTIME-DISPATCHED (compiled unconditionally via
+// target attribute, selected by CPUID). SSE2 is part of the x86-64 baseline, so
+// it is always available on x86-64 and needs no runtime guard.
+#include "vgre/common/simd_dispatch.h"
+#if defined(__SSE2__) || defined(_M_X64)
 #  include <emmintrin.h>
 #elif defined(__ARM_NEON__) || defined(__aarch64__)
 #  include <arm_neon.h>
+#endif
+
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX2 static void reduce_sum_f32_avx2(float* d, const float* s, size_t count) {
+    size_t i = 0, end8 = (count / 8) * 8;
+    for (; i < end8; i += 8)
+        _mm256_storeu_ps(d + i, _mm256_add_ps(_mm256_loadu_ps(d + i), _mm256_loadu_ps(s + i)));
+    for (; i < count; ++i) d[i] += s[i];
+}
+VGRE_TARGET_AVX2 static void reduce_sum_i32_avx2(int32_t* d, const int32_t* s, size_t count) {
+    size_t i = 0, end8 = (count / 8) * 8;
+    for (; i < end8; i += 8)
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(d + i),
+            _mm256_add_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(d + i)),
+                             _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s + i))));
+    for (; i < count; ++i) d[i] += s[i];
+}
 #endif
 
 // ── TCPCluster multi-node delegation helpers ──────────────────────────────────
@@ -71,15 +89,12 @@ static void reduce_sum(void* dst, const void* src, size_t count, ncclDataType_t 
     if (dt == ncclFloat32) {
         float* d = static_cast<float*>(dst);
         const float* s = static_cast<const float*>(src);
-#if defined(__AVX2__)
-        size_t i = 0, end8 = (count / 8) * 8;
-        for (; i < end8; i += 8) {
-            __m256 dv = _mm256_loadu_ps(d + i);
-            __m256 sv = _mm256_loadu_ps(s + i);
-            _mm256_storeu_ps(d + i, _mm256_add_ps(dv, sv));
-        }
-        for (; i < count; ++i) d[i] += s[i];
-#elif defined(__SSE2__) || defined(_M_X64)
+#if defined(VGRE_SIMD_X86)
+        if (vgre::simd::have_avx2()) { reduce_sum_f32_avx2(d, s, count); }
+        else
+#endif
+        {
+#if defined(__SSE2__) || defined(_M_X64)
         size_t i = 0, end4 = (count / 4) * 4;
         for (; i < end4; i += 4) {
             __m128 dv = _mm_loadu_ps(d + i);
@@ -90,6 +105,7 @@ static void reduce_sum(void* dst, const void* src, size_t count, ncclDataType_t 
 #else
         for (size_t i = 0; i < count; ++i) d[i] += s[i];
 #endif
+        }
     } else if (dt == ncclFloat64) {
         double* d = static_cast<double*>(dst);
         const double* s = static_cast<const double*>(src);
@@ -97,17 +113,11 @@ static void reduce_sum(void* dst, const void* src, size_t count, ncclDataType_t 
     } else if (dt == ncclInt32 || dt == ncclUint32) {
         int32_t* d = static_cast<int32_t*>(dst);
         const int32_t* s = static_cast<const int32_t*>(src);
-#if defined(__AVX2__)
-        size_t i = 0, end8 = (count / 8) * 8;
-        for (; i < end8; i += 8) {
-            __m256i dv = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(d + i));
-            __m256i sv = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(s + i));
-            _mm256_storeu_si256(reinterpret_cast<__m256i*>(d + i), _mm256_add_epi32(dv, sv));
-        }
-        for (; i < count; ++i) d[i] += s[i];
-#else
-        for (size_t i = 0; i < count; ++i) d[i] += s[i];
+#if defined(VGRE_SIMD_X86)
+        if (vgre::simd::have_avx2()) { reduce_sum_i32_avx2(d, s, count); }
+        else
 #endif
+        for (size_t i = 0; i < count; ++i) d[i] += s[i];
     } else if (dt == ncclInt64 || dt == ncclUint64) {
         int64_t* d = static_cast<int64_t*>(dst);
         const int64_t* s = static_cast<const int64_t*>(src);

@@ -16,6 +16,9 @@
 #include <thread>
 #include <mutex>
 #include <algorithm>
+// SIMD is RUNTIME-DISPATCHED: the AVX2 TLB tag-probe is compiled unconditionally
+// (target attribute) and selected at runtime via CPUID.
+#include "vgre/common/simd_dispatch.h"
 #include "vgre/common/os_backend.h"
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -152,6 +155,24 @@ inline void tlbEvict(uintptr_t addr, size_t size);
 
 // ── Vectorized TLB Lookup ────────────────────────────────────────────────────
 // For kTlbWays == 8, AVX2 can compare 4 tags per 256-bit register in two rounds.
+#if defined(VGRE_SIMD_X86)
+// Returns the hit way index in [0,kTlbWays), or -1 on miss. Runtime-selected.
+VGRE_TARGET_AVX2 static inline int tlbL1ProbeAvx2(const uintptr_t* tags, uintptr_t page) {
+    const __m256i vtgt = _mm256_set1_epi64x(static_cast<int64_t>(page));
+    __m256i vcmp = _mm256_cmpeq_epi64(
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(tags)), vtgt);
+    int mask = _mm256_movemask_epi8(vcmp);
+    if (mask) return __builtin_ctz(static_cast<unsigned>(mask)) >> 3;
+    if constexpr (kTlbWays > 4) {
+        __m256i vcmp2 = _mm256_cmpeq_epi64(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(tags + 4)), vtgt);
+        int mask2 = _mm256_movemask_epi8(vcmp2);
+        if (mask2) return 4 + (__builtin_ctz(static_cast<unsigned>(mask2)) >> 3);
+    }
+    return -1;
+}
+#endif
+
 inline vgre::core::ManagedRegion* tlbLookup(uintptr_t addr) {
     if (!kTlbEnabled) return nullptr;
 
@@ -161,42 +182,25 @@ inline vgre::core::ManagedRegion* tlbLookup(uintptr_t addr) {
     const int l1_set = static_cast<int>(page % static_cast<uintptr_t>(kTlbSets));
     TlbSet& S1 = t_tlb[l1_set];
 
-#if defined(__AVX2__) && defined(ENABLE_VGRE_TLB)
-    // Load 4 tags at a time using 256-bit vector (4 × 64-bit)
-    const __m256i vtgt = _mm256_set1_epi64x(static_cast<int64_t>(page));
-    // First 4 ways
-    {
-        __m256i vtags = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(S1.tags));
-        __m256i vcmp  = _mm256_cmpeq_epi64(vtags, vtgt);
-        int     mask  = _mm256_movemask_epi8(vcmp); // 8 bits → 4 bits active
-        if (mask) {
-            int way = __builtin_ctz(static_cast<unsigned>(mask)) >> 3; // 8 bytes per lane
+#if defined(VGRE_SIMD_X86)
+    if (vgre::simd::have_avx2()) {
+        int way = tlbL1ProbeAvx2(S1.tags, page);
+        if (way >= 0) {
             S1.access[way] = ++t_tlb_ctr;
             g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
             return S1.regions[way];
         }
-    }
-    // Ways 4-7
-    if constexpr (kTlbWays > 4) {
-        __m256i vtags = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(S1.tags + 4));
-        __m256i vcmp  = _mm256_cmpeq_epi64(vtags, vtgt);
-        int     mask  = _mm256_movemask_epi8(vcmp);
-        if (mask) {
-            int way = 4 + (__builtin_ctz(static_cast<unsigned>(mask)) >> 3);
-            S1.access[way] = ++t_tlb_ctr;
-            g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
-            return S1.regions[way];
-        }
-    }
-#else
-    for (int w = 0; w < kTlbWays; ++w) {
-        if (S1.tags[w] == page) {
-            S1.access[w] = ++t_tlb_ctr;
-            g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
-            return S1.regions[w];
-        }
-    }
+    } else
 #endif
+    {
+        for (int w = 0; w < kTlbWays; ++w) {
+            if (S1.tags[w] == page) {
+                S1.access[w] = ++t_tlb_ctr;
+                g_tlbStats.l1Hits.fetch_add(1, std::memory_order_relaxed);
+                return S1.regions[w];
+            }
+        }
+    }
     g_tlbStats.l1Misses.fetch_add(1, std::memory_order_relaxed);
 
     // ── L2 Thread-Local TLB ──────────────────────────────────────────────────

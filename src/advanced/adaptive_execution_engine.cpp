@@ -1,5 +1,6 @@
 #include "vgre/advanced/adaptive_execution_engine.h"
 #include "vgre/api/vgre_c_api.h"
+#include "vgre/common/cpu_features.h"  // vgre::cpu::supports — runtime ISA seed
 #include "vgre/common/logger.h"
 #include "vgre/runtime/cpu_parallel_executor.h"
 #include "vgre/runtime/vector_engine.h"
@@ -182,6 +183,16 @@ AdaptiveExecutionEngine::AdaptiveExecutionEngine()
       lastFlops_(0),
       lastBytes_(0),
       lastSampleTime_(std::chrono::steady_clock::now()) {
+
+  // Seed the optimal vector width from the RUNNING CPU (CPUID), so a profile
+  // consumed before the first benchmark still reflects this machine's ISA.
+  {
+      int w = 1;
+      if (vgre::cpu::supports("avx512f")) w = 16;
+      else if (vgre::cpu::supports("avx2")) w = 8;
+      else if (vgre::cpu::supports("sse4.1")) w = 4;
+      globalOptimalVectorWidth_.store(w, std::memory_order_relaxed);
+  }
 
   // Allow the moving-average alpha to be tuned at runtime via env var.
   // VGRE_ADAPTIVE_ALPHA=0.1  → smoother (less reactive to spikes)

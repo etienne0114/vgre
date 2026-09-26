@@ -170,18 +170,11 @@ private:
   bool   manual_alpha_set_      = false;
   int    alpha_kernel_count_    = 0;  // rate-limiter: update alpha at most every 100 kernels
 
-  // Process-wide optimal SIMD vector width, set once by runBenchmark() and
-  // consumed by analyzeProfile() without re-benchmarking on every profile update.
-  // Default: widest width enabled at compile time.
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX512F)
-  std::atomic<int> globalOptimalVectorWidth_{16};
-#elif defined(VGRE_HAS_AVX2)
-  std::atomic<int> globalOptimalVectorWidth_{8};
-#elif defined(VGRE_HAS_SSE4)
-  std::atomic<int> globalOptimalVectorWidth_{4};
-#else
+  // Process-wide optimal SIMD vector width. The constructor seeds it from the
+  // RUNNING CPU's widest ISA (CPUID) — not a compile-time constant — and
+  // runBenchmark() later refines it; analyzeProfile() consumes it without
+  // re-benchmarking on every profile update.
   std::atomic<int> globalOptimalVectorWidth_{1};
-#endif
 
   // Background benchmark thread — stored so the destructor can join it and
   // prevent a segfault when the singleton is destroyed while the thread is still

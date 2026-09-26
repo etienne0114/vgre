@@ -1,6 +1,7 @@
 #include "vgre/core/graph_optimizer.h"
 #include "vgre/core/graph_manager.h"
 #include "vgre/core/runtime_engine.h"
+#include "vgre/common/cpu_features.h"  // vgre::cpu::supports — runtime ISA estimate
 #include "vgre/common/logger.h"
 #include "vgre/common/os_backend.h"
 #include <algorithm>
@@ -356,15 +357,13 @@ bool GraphOptimizer::areFusible(const GraphNode& a, const GraphNode& b) {
         static const float kPeakComputeGFLOPs = []() -> float {
             int cores = vgre::os::get_cpu_count();
             if (cores <= 0) cores = 1;
-#if defined(__AVX512F__)
-            return static_cast<float>(cores) * 64.0f;   // 2 × 512-bit = 32 FP32; ×2 FMAs
-#elif defined(__AVX2__)
-            return static_cast<float>(cores) * 40.0f;   // 16 FP32/cycle × ~2.5 GHz
-#elif defined(__AVX__)
-            return static_cast<float>(cores) * 20.0f;   // 8 FP32/cycle × ~2.5 GHz
-#else
-            return static_cast<float>(cores) * 5.0f;    // scalar/NEON conservative
-#endif
+            // Per-core throughput from the RUNNING CPU's widest ISA (CPUID), not
+            // the compiler's -m flags, so the roofline estimate matches the host.
+            float perCore = 5.0f;                                   // scalar/NEON
+            if (vgre::cpu::supports("avx512f"))   perCore = 64.0f;  // 2×512-bit FMA
+            else if (vgre::cpu::supports("avx2")) perCore = 40.0f;  // 16 FP32/cycle
+            else if (vgre::cpu::supports("avx"))  perCore = 20.0f;  // 8 FP32/cycle
+            return static_cast<float>(cores) * perCore;
         }();
 
         // Measure system memory bandwidth via a STREAM-style copy benchmark.

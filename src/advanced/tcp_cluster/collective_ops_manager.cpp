@@ -17,10 +17,11 @@
 #include <sys/sysctl.h>   // sysctl — memory query
 #endif
 
-// SIMD intrinsics headers
-#if defined(__AVX2__)
-#include <immintrin.h>  // AVX2 + SSE2
-#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+// SIMD intrinsics headers — AVX2 is RUNTIME-DISPATCHED (compiled unconditionally
+// via target attribute, picked by CPUID). SSE2 is part of the x86-64 baseline so
+// it is always available on x86-64 and needs no runtime guard.
+#include "vgre/common/simd_dispatch.h"
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>  // SSE2
 #elif defined(__ARM_NEON__) || defined(__aarch64__)
 #include <arm_neon.h>   // ARM NEON (AArch32 / AArch64)
@@ -229,44 +230,46 @@ VGREResult CollectiveOpsManager::barrier() {
   }
 }
 
+#if defined(VGRE_SIMD_X86)
+// Runtime-selected AVX2 element-wise add (dst += src), compiled unconditionally.
+template<typename T>
+VGRE_TARGET_AVX2 static void reduce_add_avx2(T* dst, const T* src, size_t count) {
+  size_t i = 0;
+  if constexpr (std::is_same_v<T, float>) {
+    size_t e = (count / 8) * 8;
+    for (; i < e; i += 8)
+      _mm256_storeu_ps(dst + i, _mm256_add_ps(_mm256_loadu_ps(dst + i), _mm256_loadu_ps(src + i)));
+  } else if constexpr (std::is_same_v<T, double>) {
+    size_t e = (count / 4) * 4;
+    for (; i < e; i += 4)
+      _mm256_storeu_pd(dst + i, _mm256_add_pd(_mm256_loadu_pd(dst + i), _mm256_loadu_pd(src + i)));
+  } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+    size_t e = (count / 8) * 8;
+    for (; i < e; i += 8)
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+        _mm256_add_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i)),
+                         _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i))));
+  } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+    size_t e = (count / 4) * 4;
+    for (; i < e; i += 4)
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i),
+        _mm256_add_epi64(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i)),
+                         _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i))));
+  }
+  for (; i < count; ++i) dst[i] += src[i];
+}
+#endif
+
 // applyReduce — supports Sum (SIMD-optimized), Prod, Max, Min.
 template<typename T>
 void CollectiveOpsManager::applyReduce(T* dst, const T* src, size_t count, ReductionOp op) {
   if (op == ReductionOp::Sum) {
-    // SIMD-optimized sum reduction
-#if defined(__AVX2__)
-    if constexpr (std::is_same_v<T, float>) {
-      size_t i = 0; const size_t simd_width = 8; const size_t simd_end = (count / simd_width) * simd_width;
-      for (; i < simd_end; i += simd_width) {
-        __m256 dst_vec = _mm256_loadu_ps(dst + i); __m256 src_vec = _mm256_loadu_ps(src + i);
-        _mm256_storeu_ps(dst + i, _mm256_add_ps(dst_vec, src_vec));
-      }
-      for (; i < count; ++i) dst[i] += src[i];
-    } else if constexpr (std::is_same_v<T, double>) {
-      size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
-      for (; i < simd_end; i += simd_width) {
-        __m256d dst_vec = _mm256_loadu_pd(dst + i); __m256d src_vec = _mm256_loadu_pd(src + i);
-        _mm256_storeu_pd(dst + i, _mm256_add_pd(dst_vec, src_vec));
-      }
-      for (; i < count; ++i) dst[i] += src[i];
-    } else if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
-      size_t i = 0; const size_t simd_width = 8; const size_t simd_end = (count / simd_width) * simd_width;
-      for (; i < simd_end; i += simd_width) {
-        __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
-        __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_add_epi32(dst_vec, src_vec));
-      }
-      for (; i < count; ++i) dst[i] += src[i];
-    } else if constexpr (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
-      size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
-      for (; i < simd_end; i += simd_width) {
-        __m256i dst_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(dst + i));
-        __m256i src_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + i), _mm256_add_epi64(dst_vec, src_vec));
-      }
-      for (; i < count; ++i) dst[i] += src[i];
-    } else { for (size_t i = 0; i < count; ++i) dst[i] += src[i]; }
-#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+    // SIMD-optimized sum reduction. AVX2 is selected at runtime; otherwise the
+    // SSE2 baseline (always present on x86-64) or NEON handles it.
+#if defined(VGRE_SIMD_X86)
+    if (vgre::simd::have_avx2()) { reduce_add_avx2(dst, src, count); return; }
+#endif
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
     if constexpr (std::is_same_v<T, float>) {
       size_t i = 0; const size_t simd_width = 4; const size_t simd_end = (count / simd_width) * simd_width;
       for (; i < simd_end; i += simd_width) {

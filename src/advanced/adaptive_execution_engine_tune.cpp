@@ -162,13 +162,12 @@ int AdaptiveExecutionEngine::getOptimalVectorWidth(
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   auto it = profiles_.find(kernelName);
   if (it == profiles_.end() || it->second.optimalVectorWidth == 0) {
-#ifdef VGRE_HAS_AVX2
-    return 8;
-#elif defined(VGRE_HAS_SSE4)
-    return 4;
-#else
+    // No profile yet: fall back to the widest width the RUNNING CPU supports
+    // (CPUID), not a compile-time constant, so this adapts per machine.
+    if (vgre::cpu::supports("avx512f")) return 16;
+    if (vgre::cpu::supports("avx2"))    return 8;
+    if (vgre::cpu::supports("sse4.1"))  return 4;
     return 1;
-#endif
   }
   return it->second.optimalVectorWidth;
 }
@@ -493,15 +492,10 @@ void AdaptiveExecutionEngine::runBenchmark() {
         for (int i = 0; i < 4; ++i) {
             if (shuttingDown_.load()) break;
             int w = kWidths[i];
-#if !defined(VGRE_HAS_AVX512) && !defined(VGRE_HAS_AVX512F)
-            if (w == 16) continue;
-#endif
-#ifndef VGRE_HAS_AVX2
-            if (w == 8)  continue;
-#endif
-#ifndef VGRE_HAS_SSE4
-            if (w == 4)  continue;
-#endif
+            // Skip widths the RUNNING CPU cannot use (CPUID), not compile-time.
+            if (w == 16 && !vgre::cpu::supports("avx512f")) continue;
+            if (w == 8  && !vgre::cpu::supports("avx2"))    continue;
+            if (w == 4  && !vgre::cpu::supports("sse4.1"))  continue;
             double throughput = 0.0;
             for (int it = 0; it < 3 && !shuttingDown_.load(); ++it)
                 throughput = std::max(throughput, ve.benchmarkFMA(kBenchN, 10));

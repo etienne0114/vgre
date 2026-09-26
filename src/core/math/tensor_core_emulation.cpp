@@ -7,56 +7,52 @@
 #include <algorithm>
 #include <vector>
 
-#ifdef __AVX512VNNI__
-#include <immintrin.h>
-#endif
-
-#ifdef __AVX512BF16__
-#include <immintrin.h>
-#endif
-
-#ifdef __AMX__
-#include <immintrin.h>
-#endif
+// SIMD is RUNTIME-DISPATCHED: the AVX-512-VNNI / AVX-512-BF16 / AMX kernels are
+// compiled unconditionally (target attribute) and the feature-detection below
+// reflects the LIVE CPU (CPUID), not the compiler's -m flags.
+#include "vgre/common/simd_dispatch.h"
 
 namespace vgre {
 namespace math {
 
 namespace {
 
-// CPU feature detection
-bool g_hasAVX512VNNI = false;
-bool g_hasAVX512BF16 = false;
-bool g_hasAMX = false;
-
-struct CPUFeatures {
-    CPUFeatures() {
-#ifdef __AVX512VNNI__
-        g_hasAVX512VNNI = true;
+// Runtime CPU feature detection (CPUID via __builtin_cpu_supports on GCC/Clang;
+// AMX-tile state is verified by VectorEngine's arch_prctl at startup). These are
+// what makes the tensor-core precision/kernel choice adapt to each machine.
+bool detect_avx512vnni() {
+#if defined(VGRE_SIMD_X86)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx512vnni");
+#else
+    return false;
 #endif
-#ifdef __AVX512BF16__
-        g_hasAVX512BF16 = true;
+}
+bool detect_avx512bf16() {
+#if defined(VGRE_SIMD_X86)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx512bf16");
+#else
+    return false;
 #endif
-#ifdef __AMX__
-        g_hasAMX = true;
-#endif
-    }
-};
-
-static CPUFeatures g_cpuFeatures;
+}
 
 } // anonymous namespace
 
 bool hasAVX512VNNI() {
-    return g_hasAVX512VNNI;
+    static const bool v = detect_avx512vnni();
+    return v;
 }
 
 bool hasAVX512BF16() {
-    return g_hasAVX512BF16;
+    static const bool v = detect_avx512bf16();
+    return v;
 }
 
 bool hasAMX() {
-    return g_hasAMX;
+    // AMX needs both the CPUID bits AND OS tile-data enablement; VectorEngine
+    // performs the arch_prctl(ARCH_REQ_XCOMP_PERM) handshake at startup.
+    return vgre::runtime::VectorEngine::instance().getCapabilities().amxEnabled;
 }
 
 TensorCoreConfig getOptimalTensorCoreConfig(size_t m, size_t n, size_t k,
@@ -112,7 +108,8 @@ void tensorCoreMatmul(const InputType* A, const InputType* B, OutputType* C,
     }
 }
 
-#ifdef __AVX512VNNI__
+#if defined(VGRE_SIMD_X86)
+__attribute__((target("avx512f,avx512vnni")))
 void avx512vnniInt8Matmul(const int8_t* A, const int8_t* B, int32_t* C,
                           size_t m, size_t n, size_t k,
                           size_t lda, size_t ldb, size_t ldc) {
@@ -138,37 +135,42 @@ void avx512vnniInt8Matmul(const int8_t* A, const int8_t* B, int32_t* C,
         }
     }
 }
-#endif
+#endif // VGRE_SIMD_X86 (AVX-512 VNNI)
 
-#ifdef __AVX512BF16__
+#if defined(VGRE_SIMD_X86)
+// BF16 GEMM using AVX-512F: each bf16 (uint16) is widened to fp32 by placing its
+// bits in the high half of a 32-bit word (bf16 IS the top 16 bits of fp32), then
+// a 16-wide FMA accumulates. Correct on any AVX-512F CPU (no AVX-512-BF16 ISA
+// required); selected at runtime via hasAVX512BF16()/CPUID by external callers.
+__attribute__((target("avx512f")))
 void avx512bf16Matmul(const uint16_t* A, const uint16_t* B, float* C,
                      size_t m, size_t n, size_t k,
                      size_t lda, size_t ldb, size_t ldc) {
-    // Initialize C to zero
+    auto bf16_to_f32 = [](uint16_t h) -> float {
+        uint32_t bits = static_cast<uint32_t>(h) << 16;
+        float f; std::memcpy(&f, &bits, sizeof(f)); return f;
+    };
     std::memset(C, 0, m * ldc * sizeof(float));
-    
-    // Use AVX-512 BF16 for matrix multiplication
     for (size_t i = 0; i < m; ++i) {
-        for (size_t kk = 0; kk < k; kk += 32) {
-            for (size_t j = 0; j < n; j += 32) {
-                // Load 32x32 block from A and B as BF16
-                __m512bh a_block = _mm512_loadu_ph(A + i * lda + kk);
-                __m512bh b_block = _mm512_loadu_ph(B + kk * ldb + j);
-                
-                // Convert to float and multiply
-                __m512 a_float = _mm512_castph_ps(a_block);
-                __m512 b_float = _mm512_castph_ps(b_block);
-                
-                __m512 c_row = _mm512_loadu_ps(C + i * ldc + j);
-                __m512 result = _mm512_fmadd_ps(a_float, b_float, c_row);
-                _mm512_storeu_ps(C + i * ldc + j, result);
+        for (size_t kk = 0; kk < k; ++kk) {
+            __m512 a = _mm512_set1_ps(bf16_to_f32(A[i * lda + kk]));
+            size_t j = 0;
+            for (; j + 16 <= n; j += 16) {
+                __m256i braw = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i*>(B + kk * ldb + j));
+                __m512i b32 = _mm512_slli_epi32(_mm512_cvtepu16_epi32(braw), 16);
+                __m512 b = _mm512_castsi512_ps(b32);
+                __m512 c = _mm512_loadu_ps(C + i * ldc + j);
+                _mm512_storeu_ps(C + i * ldc + j, _mm512_fmadd_ps(a, b, c));
             }
+            for (; j < n; ++j)
+                C[i * ldc + j] += bf16_to_f32(A[i * lda + kk]) * bf16_to_f32(B[kk * ldb + j]);
         }
     }
 }
-#endif
+#endif // VGRE_SIMD_X86 (AVX-512 BF16)
 
-#ifdef __AMX__
+#if defined(VGRE_SIMD_X86)
 
 // Convert FP32 → BF16 with round-to-nearest-even (standard IEEE truncation).
 static inline uint16_t f32_to_bf16(float f) noexcept {
@@ -188,6 +190,7 @@ struct alignas(64) TileCfg {
     uint8_t  rows[16];      // row count for each tile (up to 16)
 };
 
+__attribute__((target("amx-tile,amx-bf16")))
 void amxMatmul(const void* A, const void* B, void* C,
                size_t m, size_t n, size_t k,
                size_t lda, size_t ldb, size_t ldc) {
@@ -253,7 +256,7 @@ void amxMatmul(const void* A, const void* B, void* C,
                 _tile_loadd(0, pbA,   static_cast<int>(TK  * sizeof(uint16_t)));
                 _tile_loadd(1, pbB,   static_cast<int>(TN  * 2 * sizeof(uint16_t)));
                 _tile_loadd(2, c_buf, static_cast<int>(TN  * sizeof(float)));
-                _tdpbf16ps(2, 0, 1);  // TMM2 += TMM0 × TMM1 (BF16 in, FP32 accumulate)
+                _tile_dpbf16ps(2, 0, 1);  // TMM2 += TMM0 × TMM1 (BF16 in, FP32 accumulate)
                 _tile_stored(2, c_buf, static_cast<int>(TN * sizeof(float)));
             }
 
@@ -265,7 +268,7 @@ void amxMatmul(const void* A, const void* B, void* C,
     }
     _tile_release();
 }
-#endif
+#endif // VGRE_SIMD_X86 (AMX)
 
 template<typename T>
 void simdMatmul(const T* A, const T* B, T* C,

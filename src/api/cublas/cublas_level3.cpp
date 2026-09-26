@@ -5,16 +5,16 @@
 #include "vgre/common/openmp_helper.h"
 #include "vgre/runtime/vector_engine.h"
 
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
+// SIMD is RUNTIME-DISPATCHED: the AVX2 GEMM kernels are compiled unconditionally
+// (target attribute) and selected at runtime via CPUID.
+#include "vgre/common/simd_dispatch.h"
 
 #include "vgre/common/os_backend.h"
 
 // ── AVX2 SGEMM kernel (NN layout: C += alpha * A * B) ────────────────────────
 // Processes 8 output columns at a time using 256-bit FMA.
-#if defined(__AVX2__)
-static void sgemm_nn_avx2(int M, int N, int K,
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX2 static void sgemm_nn_avx2(int M, int N, int K,
                            float alpha, const float* __restrict A, int lda,
                                         const float* __restrict B, int ldb,
                            float beta,        float* __restrict C, int ldc)
@@ -54,7 +54,7 @@ static void sgemm_nn_avx2(int M, int N, int K,
         }
     }
 }
-#endif // __AVX2__
+#endif // VGRE_SIMD_X86
 
 // ── Strassen matrix multiply (QUEUE-37) ───────────────────────────────────────
 // C = alpha * A * B + beta * C for square n×n matrices stored row-major contiguously.
@@ -168,9 +168,9 @@ void refSgemm(bool tA, bool tB,
         strassen_mul<float>(M, alpha, A, B, beta, C);
         return;
     }
-    // AVX2 fast path: non-transposed row-major NN form
-#if defined(__AVX2__)
-    if (!tA && !tB) {
+    // AVX2 fast path: non-transposed row-major NN form (runtime-selected)
+#if defined(VGRE_SIMD_X86)
+    if (!tA && !tB && vgre::simd::have_avx2()) {
         sgemm_nn_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
@@ -222,8 +222,8 @@ void refSgemm(bool tA, bool tB,
 
 // ── AVX2 DGEMM kernel (NN layout: C += alpha * A * B) ────────────────────────
 // Processes 4 output columns per iteration using 256-bit FMA on doubles.
-#if defined(__AVX2__)
-static void dgemm_nn_avx2(int M, int N, int K,
+#if defined(VGRE_SIMD_X86)
+VGRE_TARGET_AVX2 static void dgemm_nn_avx2(int M, int N, int K,
                            double alpha, const double* __restrict A, int lda,
                                          const double* __restrict B, int ldb,
                            double beta,        double* __restrict C, int ldc)
@@ -260,7 +260,7 @@ static void dgemm_nn_avx2(int M, int N, int K,
         }
     }
 }
-#endif // __AVX2__
+#endif // VGRE_SIMD_X86
 
 void refDgemm(bool tA, bool tB,
     int M, int N, int K,
@@ -274,9 +274,9 @@ void refDgemm(bool tA, bool tB,
         strassen_mul<double>(M, alpha, A, B, beta, C);
         return;
     }
-    // AVX2 fast path for non-transposed row-major NN form
-#if defined(__AVX2__)
-    if (!tA && !tB) {
+    // AVX2 fast path for non-transposed row-major NN form (runtime-selected)
+#if defined(VGRE_SIMD_X86)
+    if (!tA && !tB && vgre::simd::have_avx2()) {
         dgemm_nn_avx2(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }

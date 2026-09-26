@@ -7,6 +7,8 @@
 
 #include <cstdint>
 #include <cstddef>
+// Must be at file scope (it transitively includes <cstring>): never inside a namespace.
+#include "vgre/common/simd_dispatch.h"
 
 namespace vgre {
 namespace math {
@@ -44,22 +46,16 @@ template<typename InputType, typename AccumType, typename OutputType>
 void tensorCoreMatmul(const InputType* A, const InputType* B, OutputType* C,
                      const TensorCoreConfig& config);
 
-// AVX-512 VNNI optimized INT8 matrix multiplication
-#ifdef __AVX512VNNI__
+// AVX-512-VNNI INT8, AVX-512 BF16, and Intel AMX matrix multiplication kernels.
+// Compiled on x86 GCC/Clang and picked at runtime via hasAVX512VNNI() /
+// hasAVX512BF16() / hasAMX() (CPUID), not the compiler's -m flags.
+#if defined(VGRE_SIMD_X86)
 void avx512vnniInt8Matmul(const int8_t* A, const int8_t* B, int32_t* C,
                           size_t m, size_t n, size_t k,
                           size_t lda, size_t ldb, size_t ldc);
-#endif
-
-// AVX-512 BF16 matrix multiplication
-#ifdef __AVX512BF16__
 void avx512bf16Matmul(const uint16_t* A, const uint16_t* B, float* C,
                      size_t m, size_t n, size_t k,
                      size_t lda, size_t ldb, size_t ldc);
-#endif
-
-// Intel AMX matrix multiplication (Sapphire Rapids and later)
-#ifdef __AMX__
 void amxMatmul(const void* A, const void* B, void* C,
               size_t m, size_t n, size_t k,
               size_t lda, size_t ldb, size_t ldc);

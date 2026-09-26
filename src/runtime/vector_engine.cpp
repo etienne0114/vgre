@@ -66,16 +66,32 @@ static inline int __get_cpuid_count(unsigned leaf, unsigned subleaf,
 #include "vgre/common/os_backend.h"
 #endif
 
-// SIMD intrinsics — guarded by compile-time checks
-#if defined(VGRE_HAS_AVX512) || defined(VGRE_HAS_AVX2)
-#include <immintrin.h>
-#elif defined(VGRE_HAS_SSE4)
-#include <smmintrin.h>
-#include <xmmintrin.h>
+// SIMD is RUNTIME-DISPATCHED: the per-ISA kernels below are compiled
+// unconditionally via __attribute__((target(...))) and selected at runtime by
+// CPUID (vgre::cpu::supports), so one portable binary runs the widest ISA the
+// host actually has — no ISA is baked into the object at compile time.
+#include "vgre/common/cpu_features.h"
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+#  define VGRE_VEC_X86 1
+#  include <immintrin.h>
 #endif
 
 namespace vgre {
 namespace runtime {
+
+namespace {
+enum class VecIsa { Scalar, Avx2, Avx512 };
+VecIsa vecIsa() {
+    static const VecIsa v = [] {
+#if defined(VGRE_VEC_X86)
+        if (vgre::cpu::supports("avx512f")) return VecIsa::Avx512;
+        if (vgre::cpu::supports("avx2") && vgre::cpu::supports("fma")) return VecIsa::Avx2;
+#endif
+        return VecIsa::Scalar;
+    }();
+    return v;
+}
+}  // namespace
 
 
 VectorEngine::VectorEngine() {
@@ -183,6 +199,39 @@ std::string VectorEngine::getCapabilityString() const {
 }
 
 // ── High-Performance GFLOPS Benchmark ────────────────────────────────────────
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static size_t fma_bench_avx512(const float* pa, const float* pb, const float* pc,
+                               float* pout, size_t n, int iterations) {
+    size_t nAligned = n & ~size_t(15);
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t i = 0; i < nAligned; i += 16) {
+            __m512 va = _mm512_loadu_ps(&pa[i]);
+            __m512 vb = _mm512_loadu_ps(&pb[i]);
+            __m512 vc = _mm512_loadu_ps(&pc[i]);
+            for (int k = 0; k < 32; ++k) vc = _mm512_fmadd_ps(va, vb, vc);  // stay in regs
+            _mm512_storeu_ps(&pout[i], vc);
+        }
+    }
+    return nAligned;
+}
+__attribute__((target("avx2,fma")))
+static size_t fma_bench_avx2(const float* pa, const float* pb, const float* pc,
+                             float* pout, size_t n, int iterations) {
+    size_t nAligned = n & ~size_t(7);
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t i = 0; i < nAligned; i += 8) {
+            __m256 va = _mm256_loadu_ps(&pa[i]);
+            __m256 vb = _mm256_loadu_ps(&pb[i]);
+            __m256 vc = _mm256_loadu_ps(&pc[i]);
+            for (int k = 0; k < 32; ++k) vc = _mm256_fmadd_ps(va, vb, vc);
+            _mm256_storeu_ps(&pout[i], vc);
+        }
+    }
+    return nAligned;
+}
+#endif
+
 double VectorEngine::benchmarkFMA(size_t n, int iterations) {
     if (n == 0 || iterations == 0) return 0.0;
     // Guard against callers passing huge n that would exhaust memory (OOM DoS).
@@ -204,68 +253,75 @@ double VectorEngine::benchmarkFMA(size_t n, int iterations) {
 
     auto start = std::chrono::steady_clock::now();
 
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel
-    {
-        for (int iter = 0; iter < iterations; ++iter) {
-            #pragma omp for
-            for (int64_t i = 0; i < nAligned; i += 16) {
-                __m512 va = _mm512_loadu_ps(&pa[i]);
-                __m512 vb = _mm512_loadu_ps(&pb[i]);
-                __m512 vc = _mm512_loadu_ps(&pc[i]);
-                // 32 FMAs per load to stay entirely in registers
-                for (int k = 0; k < 32; ++k) {
-                    vc = _mm512_fmadd_ps(va, vb, vc);
-                }
-                _mm512_storeu_ps(&pout[i], vc);
-            }
-        }
+    // Returns the element count processed per iteration (aligned n) so the
+    // caller can compute FLOPs. 32 FMAs/elem in the SIMD paths, 1 MAC/elem scalar.
+    size_t elemsPerIter = 0;
+    double flopsPerElem = 2.0;   // scalar: 1 mul + 1 add
+    switch (vecIsa()) {
+#if defined(VGRE_VEC_X86)
+        case VecIsa::Avx512: elemsPerIter = fma_bench_avx512(pa, pb, pc, pout, n, iterations); flopsPerElem = 64.0; break;
+        case VecIsa::Avx2:   elemsPerIter = fma_bench_avx2(pa, pb, pc, pout, n, iterations);   flopsPerElem = 64.0; break;
+#endif
+        default:
+            for (int iter = 0; iter < iterations; ++iter)
+                for (size_t i = 0; i < n; ++i) pout[i] = pa[i] * pb[i] + pc[i];
+            elemsPerIter = n;
+            break;
     }
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel
-    {
-        for (int iter = 0; iter < iterations; ++iter) {
-            #pragma omp for
-            for (int64_t i = 0; i < nAligned; i += 8) {
-                __m256 va = _mm256_loadu_ps(&pa[i]);
-                __m256 vb = _mm256_loadu_ps(&pb[i]);
-                __m256 vc = _mm256_loadu_ps(&pc[i]);
-                // 32 FMAs per load to stay entirely in registers
-                for (int k = 0; k < 32; ++k) {
-                    vc = _mm256_fmadd_ps(va, vb, vc);
-                }
-                _mm256_storeu_ps(&pout[i], vc);
-            }
-        }
-    }
-    }
-    #else
-    for (int iter = 0; iter < iterations; ++iter) {
-        for (size_t i = 0; i < n; ++i) {
-            pout[i] = pa[i] * pb[i] + pc[i];
-        }
-    }
-    #endif
 
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
-    
-    // Each inner loop iteration does 32 FMAs per element block
-    #ifdef VGRE_HAS_AVX512
-    double totalFlops = static_cast<double>(n & ~15) * 32.0 * 2.0 * iterations;
-    #elif defined(VGRE_HAS_AVX2)
-    double totalFlops = static_cast<double>(n & ~7) * 32.0 * 2.0 * iterations;
-    #else
-    double totalFlops = static_cast<double>(n) * 2.0 * iterations;
-    #endif
-    
+
+    double totalFlops = static_cast<double>(elemsPerIter) * flopsPerElem * iterations;
     return totalFlops / (seconds * 1e9);
 }
+
+// Escape a SIMD register via an asm barrier so the compiler cannot dead-code-
+// eliminate the FMA chain. Zero-instruction hint — no load/store, no aliasing.
+#if defined(__GNUC__) || defined(__clang__)
+#define VGRE_ESCAPE_XMM(v128) __asm__ volatile("" : "+x"(v128))
+#else
+#define VGRE_ESCAPE_XMM(v128) (void)(v128)
+#endif
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static size_t bf16_bench_avx512(const vgre_bf16* pa, const vgre_bf16* pb, size_t n, int iterations) {
+    size_t nAligned = n & ~size_t(15);
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t i = 0; i < nAligned; i += 16) {
+            __m256i raw_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pa[i]));
+            __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pb[i]));
+            __m512i i_a = _mm512_slli_epi32(_mm512_cvtepu16_epi32(raw_a), 16);
+            __m512i i_b = _mm512_slli_epi32(_mm512_cvtepu16_epi32(raw_b), 16);
+            __m512 va = _mm512_castsi512_ps(i_a), vb = _mm512_castsi512_ps(i_b);
+            __m512 vsum = _mm512_setzero_ps();
+            for (int k = 0; k < 32; ++k) vsum = _mm512_fmadd_ps(va, vb, vsum);
+            __m128 v128 = _mm512_castps512_ps128(vsum);
+            VGRE_ESCAPE_XMM(v128);
+        }
+    }
+    return nAligned;
+}
+__attribute__((target("avx2,fma")))
+static size_t bf16_bench_avx2(const vgre_bf16* pa, const vgre_bf16* pb, size_t n, int iterations) {
+    size_t nAligned = n & ~size_t(7);
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (size_t i = 0; i < nAligned; i += 8) {
+            __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pa[i]));
+            __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pb[i]));
+            __m256i i_a = _mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_a), 16);
+            __m256i i_b = _mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_b), 16);
+            __m256 va = _mm256_castsi256_ps(i_a), vb = _mm256_castsi256_ps(i_b);
+            __m256 vsum = _mm256_setzero_ps();
+            for (int k = 0; k < 32; ++k) vsum = _mm256_fmadd_ps(va, vb, vsum);
+            __m128 v128 = _mm256_castps256_ps128(vsum);
+            VGRE_ESCAPE_XMM(v128);
+        }
+    }
+    return nAligned;
+}
+#endif
+#undef VGRE_ESCAPE_XMM
 
 double VectorEngine::benchmarkBF16(size_t n, int iterations) {
     if (n == 0 || iterations == 0) return 0.0;
@@ -280,83 +336,26 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
 
     auto start = std::chrono::steady_clock::now();
 
-    // Macro: escape a SIMD register via an asm barrier so the compiler cannot
-    // dead-code-eliminate the FMA chain.  This is a zero-instruction hint —
-    // no actual load/store is emitted, no buffer write, no aliasing issue.
-    // Works on GCC and Clang with -O2/-O3.  MSVC does not need this because
-    // it does not perform aggressive dead-code elimination on SIMD intrinsics.
-#if defined(__GNUC__) || defined(__clang__)
-#define VGRE_ESCAPE_XMM(v128) __asm__ volatile("" : "+x"(v128))
-#else
-#define VGRE_ESCAPE_XMM(v128) (void)(v128)
+    size_t elemsPerIter = 0;
+    double flopsPerElem = 2.0;   // scalar
+    switch (vecIsa()) {
+#if defined(VGRE_VEC_X86)
+        case VecIsa::Avx512: elemsPerIter = bf16_bench_avx512(pa, pb, n, iterations); flopsPerElem = 64.0; break;
+        case VecIsa::Avx2:   elemsPerIter = bf16_bench_avx2(pa, pb, n, iterations);   flopsPerElem = 64.0; break;
 #endif
-
-    #ifdef VGRE_HAS_AVX512
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel
-    {
-        for (int iter = 0; iter < iterations; ++iter) {
-            #pragma omp for
-            for (int64_t i = 0; i < nAligned; i += 16) {
-                __m256i raw_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pa[i]));
-                __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&pb[i]));
-                __m512i i_a = _mm512_cvtepu16_epi32(raw_a);
-                __m512i i_b = _mm512_cvtepu16_epi32(raw_b);
-                i_a = _mm512_slli_epi32(i_a, 16);
-                i_b = _mm512_slli_epi32(i_b, 16);
-                __m512 va = _mm512_castsi512_ps(i_a);
-                __m512 vb = _mm512_castsi512_ps(i_b);
-                __m512 vsum = _mm512_setzero_ps();
-                for (int k = 0; k < 32; ++k)
-                    vsum = _mm512_fmadd_ps(va, vb, vsum);
-                // Escape the accumulator register — no memory write, no overflow
-                __m128 v128 = _mm512_castps512_ps128(vsum);
-                VGRE_ESCAPE_XMM(v128);
+        default: {
+            volatile float sink = 0.0f;
+            for (int iter = 0; iter < iterations; ++iter) {
+                float sum = 0.0f;
+                for (size_t i = 0; i < n; ++i)
+                    sum += bf16_to_fp32(pa[i]) * bf16_to_fp32(pb[i]);
+                sink = sum;
             }
+            (void)sink;
+            elemsPerIter = n;
+            break;
         }
     }
-    }
-    #elif defined(VGRE_HAS_AVX2)
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel
-    {
-        for (int iter = 0; iter < iterations; ++iter) {
-            #pragma omp for
-            for (int64_t i = 0; i < nAligned; i += 8) {
-                __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pa[i]));
-                __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&pb[i]));
-                __m256i i_a = _mm256_cvtepu16_epi32(raw_a);
-                __m256i i_b = _mm256_cvtepu16_epi32(raw_b);
-                i_a = _mm256_slli_epi32(i_a, 16);
-                i_b = _mm256_slli_epi32(i_b, 16);
-                __m256 va = _mm256_castsi256_ps(i_a);
-                __m256 vb = _mm256_castsi256_ps(i_b);
-                __m256 vsum = _mm256_setzero_ps();
-                for (int k = 0; k < 32; ++k)
-                    vsum = _mm256_fmadd_ps(va, vb, vsum);
-                // Escape the accumulator register — no memory write, no overflow
-                __m128 v128 = _mm256_castps256_ps128(vsum);
-                VGRE_ESCAPE_XMM(v128);
-            }
-        }
-    }
-    }
-    #else
-    {
-    volatile float sink = 0.0f;
-    for (int iter = 0; iter < iterations; ++iter) {
-        float sum = 0.0f;
-        for (size_t i = 0; i < n; ++i)
-            sum += bf16_to_fp32(pa[i]) * bf16_to_fp32(pb[i]);
-        sink = sum;
-    }
-    (void)sink;
-    }
-    #endif
-
-#undef VGRE_ESCAPE_XMM
 
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
@@ -364,41 +363,36 @@ double VectorEngine::benchmarkBF16(size_t n, int iterations) {
     // produce physically impossible GFLOPS values and mislead calibration.
     if (seconds < 1e-4) seconds = 1e-4;
 
-    #ifdef VGRE_HAS_AVX512
-    double totalFlops = static_cast<double>(n & ~15) * 32.0 * 2.0 * iterations;
-    #elif defined(VGRE_HAS_AVX2)
-    double totalFlops = static_cast<double>(n & ~7) * 32.0 * 2.0 * iterations;
-    #else
-    double totalFlops = static_cast<double>(n) * 2.0 * iterations;
-    #endif
-
+    double totalFlops = static_cast<double>(elemsPerIter) * flopsPerElem * iterations;
     return totalFlops / (seconds * 1e9);
 }
 
 // ── Memory operations ──────────────────────────────────────────────────────
-void VectorEngine::vectorFill(float* dst, float value, size_t n) {
-    size_t i = 0;
-
-    #ifdef VGRE_HAS_AVX512
-    {
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static void fill_avx512(float* dst, float value, size_t n) {
     __m512 vval = _mm512_set1_ps(value);
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel for if (n > 2048)
-    for (int64_t ii = 0; ii < nAligned; ii += 16) {
-        _mm512_storeu_ps(&dst[ii], vval);
-    }
-    i = static_cast<size_t>(nAligned);
-    }
-    #elif defined(VGRE_HAS_AVX2)
+    size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16) _mm512_storeu_ps(&dst[i], vval);
+    for (; i < n; ++i) dst[i] = value;
+}
+__attribute__((target("avx2,fma")))
+static void fill_avx2(float* dst, float value, size_t n) {
     __m256 vval = _mm256_set1_ps(value);
-    for (; i + 8 <= n; i += 8) {
-        _mm256_storeu_ps(&dst[i], vval);
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) _mm256_storeu_ps(&dst[i], vval);
+    for (; i < n; ++i) dst[i] = value;
+}
+#endif
+void VectorEngine::vectorFill(float* dst, float value, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: fill_avx512(dst, value, n); return;
+        case VecIsa::Avx2:   fill_avx2(dst, value, n);   return;
+        default: break;
     }
-    #endif
-
-    for (; i < n; ++i) {
-        dst[i] = value;
-    }
+#endif
+    for (size_t i = 0; i < n; ++i) dst[i] = value;
 }
 
 void VectorEngine::vectorCopy(const float* src, float* dst, size_t n) {
@@ -406,96 +400,54 @@ void VectorEngine::vectorCopy(const float* src, float* dst, size_t n) {
 }
 
 // ── BF16 dot product ───────────────────────────────────────────────────────
-float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) {
-    float sum = 0.0f;
-    size_t i = 0;
-
-    #ifdef VGRE_HAS_AVX512
-    __m512 vsum_512 = _mm512_setzero_ps();
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~15ULL);
-    #pragma omp parallel
-    {
-        __m512 local_vsum = _mm512_setzero_ps();
-        #pragma omp for
-        for (int64_t j = 0; j < nAligned; j += 16) {
-            // Load 16 BF16s (256 bits)
-            __m256i raw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a[j]));
-            __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&b[j]));
-
-            // Convert to FP32 by shifting left 16 bits
-            __m512i i_a = _mm512_cvtepu16_epi32(raw);
-            __m512i i_b = _mm512_cvtepu16_epi32(raw_b);
-            i_a = _mm512_slli_epi32(i_a, 16);
-            i_b = _mm512_slli_epi32(i_b, 16);
-
-            __m512 va = _mm512_castsi512_ps(i_a);
-            __m512 vb = _mm512_castsi512_ps(i_b);
-            local_vsum = _mm512_fmadd_ps(va, vb, local_vsum);
-        }
-        #pragma omp critical
-        {
-            vsum_512 = _mm512_add_ps(vsum_512, local_vsum);
-        }
+#if defined(VGRE_VEC_X86)
+__attribute__((target("avx512f")))
+static float bf16_dot_avx512(const vgre_bf16* a, const vgre_bf16* b, size_t n) {
+    __m512 vsum = _mm512_setzero_ps();
+    size_t i = 0, na = n & ~size_t(15);
+    for (; i < na; i += 16) {
+        __m256i raw_a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a[i]));
+        __m256i raw_b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&b[i]));
+        // BF16 → FP32: zero-extend to 32b then shift the bits into the high half
+        __m512i i_a = _mm512_slli_epi32(_mm512_cvtepu16_epi32(raw_a), 16);
+        __m512i i_b = _mm512_slli_epi32(_mm512_cvtepu16_epi32(raw_b), 16);
+        vsum = _mm512_fmadd_ps(_mm512_castsi512_ps(i_a), _mm512_castsi512_ps(i_b), vsum);
     }
-    i = static_cast<size_t>(nAligned);
+    float sum = _mm512_reduce_add_ps(vsum);   // AVX512F-only horizontal reduce
+    for (; i < n; ++i) sum += bf16_to_fp32(a[i]) * bf16_to_fp32(b[i]);
+    return sum;
+}
+__attribute__((target("avx2,fma")))
+static float bf16_dot_avx2(const vgre_bf16* a, const vgre_bf16* b, size_t n) {
+    __m256 vsum = _mm256_setzero_ps();
+    size_t i = 0, na = n & ~size_t(7);
+    for (; i < na; i += 8) {
+        __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&a[i]));
+        __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&b[i]));
+        __m256i i_a = _mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_a), 16);
+        __m256i i_b = _mm256_slli_epi32(_mm256_cvtepu16_epi32(raw_b), 16);
+        vsum = _mm256_fmadd_ps(_mm256_castsi256_ps(i_a), _mm256_castsi256_ps(i_b), vsum);
     }
-    __m256 hi256 = _mm512_extractf32x8_ps(vsum_512, 1);
-    __m256 lo256 = _mm512_castps512_ps256(vsum_512);
-    __m256 s256  = _mm256_add_ps(lo256, hi256);
-    __m128 hi = _mm256_extractf128_ps(s256, 1);
-    __m128 lo = _mm256_castps256_ps128(s256);
+    __m128 hi = _mm256_extractf128_ps(vsum, 1);
+    __m128 lo = _mm256_castps256_ps128(vsum);
     __m128 s  = _mm_add_ps(lo, hi);
     s = _mm_hadd_ps(s, s);
     s = _mm_hadd_ps(s, s);
-    sum = _mm_cvtss_f32(s);
-    #elif defined(VGRE_HAS_AVX2)
-    __m256 vsum = _mm256_setzero_ps();
-    {
-    int64_t nAligned = static_cast<int64_t>(n & ~7ULL);
-    #pragma omp parallel
-    {
-        __m256 local_vsum = _mm256_setzero_ps();
-        #pragma omp for
-        for (int64_t j = 0; j < nAligned; j += 8) {
-            // Load 8 BF16s
-            __m128i raw_a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&a[j]));
-            __m128i raw_b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&b[j]));
-
-            // Convert BF16 to FP32 by shifting left 16 bits
-            // 1. Zero-extend 8 values to 32 bits
-            __m256i i_a = _mm256_cvtepu16_epi32(raw_a);
-            __m256i i_b = _mm256_cvtepu16_epi32(raw_b);
-            
-            // 2. Shift left 16 to move BF16 to the high 16 bits of FP32
-            i_a = _mm256_slli_epi32(i_a, 16);
-            i_b = _mm256_slli_epi32(i_b, 16);
-
-            // 3. Bitcast to float and FMA
-            __m256 va = _mm256_castsi256_ps(i_a);
-            __m256 vb = _mm256_castsi256_ps(i_b);
-            local_vsum = _mm256_fmadd_ps(va, vb, local_vsum);
-        }
-        #pragma omp critical
-        {
-            vsum = _mm256_add_ps(vsum, local_vsum);
-        }
+    float sum = _mm_cvtss_f32(s);
+    for (; i < n; ++i) sum += bf16_to_fp32(a[i]) * bf16_to_fp32(b[i]);
+    return sum;
+}
+#endif
+float VectorEngine::vectorDot(const vgre_bf16* a, const vgre_bf16* b, size_t n) {
+#if defined(VGRE_VEC_X86)
+    switch (vecIsa()) {
+        case VecIsa::Avx512: return bf16_dot_avx512(a, b, n);
+        case VecIsa::Avx2:   return bf16_dot_avx2(a, b, n);
+        default: break;
     }
-    i = static_cast<size_t>(nAligned);
-    }
-    // Horizontal sum of 8 floats
-    __m128 hi  = _mm256_extractf128_ps(vsum, 1);
-    __m128 lo  = _mm256_castps256_ps128(vsum);
-    __m128 s   = _mm_add_ps(lo, hi);
-    s = _mm_hadd_ps(s, s);
-    s = _mm_hadd_ps(s, s);
-    sum = _mm_cvtss_f32(s);
-    #endif
-
-    for (; i < n; ++i) {
-        sum += bf16_to_fp32(a[i]) * bf16_to_fp32(b[i]);
-    }
-
+#endif
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; ++i) sum += bf16_to_fp32(a[i]) * bf16_to_fp32(b[i]);
     return sum;
 }
 
