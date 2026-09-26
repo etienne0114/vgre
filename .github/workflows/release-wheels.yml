@@ -59,7 +59,7 @@ jobs:
             libsqlite3-dev liblapack-dev libkeyutils-dev libssl-dev zlib1g-dev
           python -m pip install --upgrade build wheel setuptools numpy
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=avx2 \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
@@ -72,7 +72,7 @@ jobs:
           brew install cmake ninja sqlite lapack || true
           python -m pip install --upgrade build wheel setuptools numpy
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=avx2 \
             -DVGRE_WARNINGS_AS_ERRORS=OFF \
             -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"
           cmake --build build_rel --target vgre vgre_cudart --parallel
@@ -87,7 +87,7 @@ jobs:
           export PATH="/c/Program Files/LLVM/bin:$PATH"
           python -m pip install --upgrade build wheel setuptools numpy
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF \
+            -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=avx2 \
             -DVGRE_WARNINGS_AS_ERRORS=OFF \
             -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
           cmake --build build_rel --target vgre vgre_cudart --parallel

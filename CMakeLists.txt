@@ -76,6 +76,13 @@ option(VGRE_BUILD_SLURM_GRES  "Build the SLURM GRES vGPU plugin"        ON)
 # ── Feature toggles ───────────────────────────────────────────────────────────
 option(VGRE_ENABLE_NATIVE_SIMD
     "Enable host-specific SIMD flags (AVX2/AVX-512). OFF = portable binaries."  ON)
+# Cap the SIMD baseline for DISTRIBUTABLE binaries so they don't require an ISA the
+# target CPU may lack. The default "native" uses the build machine's ISA (fine for a
+# local build). A wheel built on an AVX-512 CI runner with "native" would SIGILL on a
+# consumer CPU (e.g. Alder Lake, which has AVX2 but no AVX-512) — so wheels build with
+# "avx2" (portable to virtually every x86-64 CPU since ~2015). Values: native|avx2|sse4|off.
+set(VGRE_SIMD_BASELINE "native" CACHE STRING
+    "Max SIMD ISA to compile for: native (build host) | avx2 | sse4 | off. Use avx2 for portable wheels.")
 # Windows: LAPACK does not ship by default — require explicit opt-in once the
 # user has installed Intel oneAPI MKL or vcpkg OpenBLAS (-DVGRE_USE_LAPACK=ON).
 # Linux/macOS: default ON because liblapack-dev / Accelerate are readily available.
@@ -334,9 +341,25 @@ if(VGRE_ENABLE_NATIVE_SIMD)
     endif()
 
     set(VGRE_CPU_FEATURES_DETECTED TRUE)
+
+    # Cap the baseline for portable/distributable binaries (VGRE_SIMD_BASELINE). This
+    # is what makes a wheel run on CPUs weaker than the build machine: a "native" build
+    # on an AVX-512 CI runner bakes AVX-512 into the whole library and SIGILLs on any
+    # CPU without it. Wheels build with "avx2".
+    if(NOT VGRE_SIMD_BASELINE STREQUAL "native")
+        set(HOST_HAS_AVX512F FALSE)   # AVX-512 is absent on most consumer CPUs
+        set(HOST_HAS_AMX FALSE)       # AMX is Sapphire-Rapids+ server only
+    endif()
+    if(VGRE_SIMD_BASELINE STREQUAL "sse4")
+        set(HOST_HAS_AVX2 FALSE)
+    elseif(VGRE_SIMD_BASELINE STREQUAL "off")
+        set(HOST_HAS_AVX2 FALSE)
+        set(HOST_HAS_SSE4 FALSE)
+    endif()
+
     message(STATUS
-        "SIMD host ISA: AVX-512F=${HOST_HAS_AVX512F}  AVX2=${HOST_HAS_AVX2}  "
-        "SSE4.1=${HOST_HAS_SSE4}  AMX=${HOST_HAS_AMX}  AES-NI=${HOST_HAS_AES_NI}")
+        "SIMD baseline=${VGRE_SIMD_BASELINE} → compiling for: AVX-512F=${HOST_HAS_AVX512F}  "
+        "AVX2=${HOST_HAS_AVX2}  SSE4.1=${HOST_HAS_SSE4}  AMX=${HOST_HAS_AMX}  AES-NI=${HOST_HAS_AES_NI}")
 
     # ── Resolve compile flags (GCC/Clang) ─────────────────────────────────────
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
