@@ -114,6 +114,17 @@ foreach ($dir in $dirsToAdd) {
 }
 Write-Host "[OK] Current session PATH updated — tools available NOW." -ForegroundColor Cyan
 
+# ── Model CLI (vgre generate / train / tokenize / info) ───────────────────────
+# Install the vgre Python package into %USERPROFILE%\.vgre\venv when a source
+# checkout is present, so the model subcommands work. Best-effort.
+$pkgDir = Join-Path (Split-Path -Parent $ScriptDir) "bindings\python"
+$setupPy = Join-Path $ScriptDir "vgre-setup-python.ps1"
+if ((Test-Path $pkgDir) -and (Test-Path $setupPy)) {
+    Write-Host ""
+    Write-Host "=== Setting up the vgre model CLI (Python) ===" -ForegroundColor Cyan
+    & $setupPy -PackageDir $pkgDir
+}
+
 # ── Set VGRE_TCP_AUTH_TOKEN_FILE if token file already exists ─────────────────
 $tokenFile = Join-Path $env:USERPROFILE ".vgre\token"
 if (Test-Path $tokenFile) {

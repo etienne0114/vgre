@@ -1072,6 +1072,12 @@ copy /Y "%SCRIPT_DIR%vgre-discover.bat"     "%TOKEN_SCRIPT_DIR%\vgre-discover.ba
 copy /Y "%SCRIPT_DIR%vgre-discover.ps1"     "%TOKEN_SCRIPT_DIR%\vgre-discover.ps1"     >nul 2>&1
 copy /Y "%SCRIPT_DIR%Setup-VGRECluster.ps1" "%TOKEN_SCRIPT_DIR%\Setup-VGRECluster.ps1" >nul 2>&1
 
+rem -- Model CLI (vgre generate / train / tokenize / info): install the Python
+rem    package into %USERPROFILE%\.vgre\venv so the model subcommands work. --
+echo.
+echo === Setting up the vgre model CLI (Python) ===
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%vgre-setup-python.ps1" -PackageDir "%PROJECT_ROOT%\bindings\python"
+
 echo.
 echo ============================================================
 echo  VGRE Sync Complete
@@ -1092,6 +1098,11 @@ echo    vgre-token fingerprint       show SHA-256 for comparison
 echo    vgre-token set ^<TOKEN^>       paste token from master node
 echo    vgre-token copy              show copy command for workers
 echo    vgre-token verify            check master/worker match
+echo.
+echo  MODEL CLI ^(CPU, no GPU^):
+echo    vgre --version                                   version + native backend
+echo    vgre generate --prompt "the "                    generate text
+echo    vgre train --corpus data.txt --out model.vgre    train a small LM
 echo.
 echo  START COMMANDS:
 echo    vgre-start --master                              launch master + dashboard
