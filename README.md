@@ -203,7 +203,8 @@ BLAS, no PyTorch/JAX, and no downloaded checkpoint**. Everything runs on VGRE's 
   accumulation**, a from-scratch **BPE tokenizer**, and standard-**safetensors** checkpoints.
 - **VGRE-LM**: a configurable **Llama-style decoder** with **KV-cached** generation and
   **top-k / top-p / repetition-penalty** sampling, served in **fp32 / bf16 (½×) / int8 (¼×)** weights.
-- **Python wheel**: `pip install vgre` → `import vgre` and train/generate offline.
+- **Python wheel**: `pip install <release-wheel-url>` (into a venv) → `import vgre`, plus a
+  `vgre` CLI to train/generate offline. Wheels are on [GitHub Releases](https://github.com/etienne0114/vgre/releases), not PyPI.
 
 ```bash
 # Train a tiny model on the bundled public-domain sample (CPU, fully offline):

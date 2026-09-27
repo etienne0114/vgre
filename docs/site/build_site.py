@@ -273,10 +273,13 @@ def page_quickstart():
              "bash install_local.sh"),
         p("<code>install_local.sh</code> detects and installs missing dependencies "
           "(CMake, LLVM, OpenMP, Flutter), builds the native engine and dashboard, "
-          "writes <code>~/.vgre/env</code>, creates your auth token, and links the "
-          "CLI tools into <code>~/.local/bin</code>."),
+          "writes <code>~/.vgre/env</code>, creates your auth token, links the "
+          "CLI tools into <code>~/.local/bin</code>, and installs the model CLI into a "
+          "managed venv at <code>~/.vgre/venv</code>."),
         p("Open a <strong>new terminal</strong>, then:"),
-        code("vgre-dashboard          # launch the real-time monitor\n"
+        code("vgre --version          # version + native backend status\n"
+             "vgre generate --prompt \"the \"   # trains a tiny demo model and generates text\n"
+             "vgre-dashboard          # launch the real-time monitor\n"
              "vgre-start --test       # local master + worker self-test"),
         h2("Run a CUDA program"),
         p("Build your CUDA source as usual, then run it against the VGRE runtime shim "
@@ -735,9 +738,16 @@ def page_cli():
           "commands ship as <code>.bat</code> / <code>.ps1</code> scripts (see the note at the "
           "bottom). Every command below prints usage with <code>--help</code>."),
 
-        h2("The <code>vgre</code> command (pip wheel)"),
-        p("<code>pip install vgre</code> puts a <code>vgre</code> command on your PATH for the "
-          "model &amp; runtime tools — no source build needed:"),
+        h2("The <code>vgre</code> command"),
+        p("Installing a <a href=\"downloads.html\">release wheel</a> into a virtual "
+          "environment puts a <code>vgre</code> command on your PATH for the model &amp; "
+          "runtime tools — no source build needed (the wheels live on "
+          "<a href=\"https://github.com/etienne0114/vgre/releases\">GitHub Releases</a>, "
+          "not PyPI, so install by URL/file, not <code>pip install vgre</code>):"),
+        code("python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
+             "pip install numpy\n"
+             "pip install https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl\n"
+             "vgre --version"),
         table(["Command", "What it does", "Common usage"], [
             ["<code>vgre --version</code>", "Print the version and native-backend status.",
              "<code>vgre --version</code> · <code>vgre info</code> (library path, platform, numpy)"],
@@ -748,8 +758,11 @@ def page_cli():
             ["<code>vgre tokenize</code>", "Byte / BPE tokenizer helpers.",
              "<code>vgre tokenize --encode \"hi\"</code> · <code>--decode 104,105</code> · <code>--train corpus.txt --merges 512</code>"],
         ], "cmd-table"),
-        p("A source install also gets <code>vgre</code>, as a unified dispatcher: model "
-          "subcommands run the Python CLI above, and <code>vgre start</code> / <code>worker</code> "
+        p("A source install also gets <code>vgre</code>, as a unified dispatcher — and sets up "
+          "the model CLI for you: <code>./scripts/vgre_sync.sh</code> (or "
+          "<code>install_local.sh</code>) installs the Python package into a managed venv at "
+          "<code>~/.vgre/venv</code>, which the dispatcher finds automatically. The model "
+          "subcommands run that Python CLI, while <code>vgre start</code> / <code>worker</code> "
           "/ <code>token</code> / <code>discover</code> / <code>dashboard</code> delegate to the "
           "cluster tools below."),
 
