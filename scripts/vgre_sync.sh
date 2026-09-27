@@ -717,6 +717,23 @@ fi
 vgre_install_cli_symlinks "$SCRIPT_DIR"
 vgre_ensure_cli_path
 
+# ── Python model CLI (vgre generate / train / tokenize / info) ────────────────
+# Install the vgre Python package into ~/.vgre/venv (shared helper). If the
+# venv module is missing (Debian splits it into python3-venv), install it and
+# retry once — we have a package manager here.
+echo ""
+echo "=== Setting up the vgre model CLI (Python) ==="
+_PYCLI_RC=0
+vgre_setup_python_cli "$PROJECT_ROOT/bindings/python" || _PYCLI_RC=$?
+if [ "$_PYCLI_RC" -eq 2 ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+        _pkg_install python3-venv python3-pip || true
+    elif command -v dnf >/dev/null 2>&1; then
+        _pkg_install python3-pip || true
+    fi
+    vgre_setup_python_cli "$PROJECT_ROOT/bindings/python" || true
+fi
+
 echo ""
 echo "✅ VGRE Sync Complete!"
 echo "📍 Installed to: $INSTALL_DIR"

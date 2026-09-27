@@ -108,6 +108,44 @@ vgre_install_cli_symlinks() {
     fi
 }
 
+# Install the vgre Python package (model CLI: generate / train / tokenize / info)
+# into a dedicated venv at ~/.vgre/venv. Debian/Ubuntu mark the system Python
+# "externally managed" (PEP 668), so a venv is the only clean, sudo-free path.
+# Best-effort: prints guidance and returns non-zero rather than aborting.
+#   $1 = path to the Python package (…/bindings/python)
+# Return: 0 ok · 2 venv module missing (caller may install python3-venv + retry)
+#         · 1 other failure
+vgre_setup_python_cli() {
+    _pkg_dir="$1"
+    _pyenv="${VGRE_VENV:-$HOME/.vgre/venv}"
+    [ -d "$_pkg_dir" ] || return 1
+
+    _pybin=""
+    for _p in python3 python; do
+        if command -v "$_p" >/dev/null 2>&1; then _pybin="$_p"; break; fi
+    done
+    if [ -z "$_pybin" ]; then
+        printf '  [WARN] python3 not found — model subcommands (vgre generate/train) unavailable\n'
+        return 1
+    fi
+
+    if [ ! -x "$_pyenv/bin/python" ]; then
+        if ! "$_pybin" -m venv "$_pyenv" >/dev/null 2>&1; then
+            printf '  [WARN] python venv module missing — install it (e.g. sudo apt-get install python3-venv), then re-run.\n'
+            return 2
+        fi
+    fi
+
+    "$_pyenv/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+    if "$_pyenv/bin/python" -m pip install --quiet "$_pkg_dir" >/dev/null 2>&1 \
+        && "$_pyenv/bin/python" -c 'import vgre' >/dev/null 2>&1; then
+        printf '  [OK] vgre model CLI ready — try:  vgre generate --prompt "the "\n'
+        return 0
+    fi
+    printf '  [WARN] pip install failed (offline?). Retry:  %s/bin/pip install "%s"\n' "$_pyenv" "$_pkg_dir"
+    return 1
+}
+
 # When run directly: bash scripts/vgre-cli-install.sh
 if [ "$(basename "$0")" = "vgre-cli-install.sh" ]; then
     _VGRE_CLI_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"

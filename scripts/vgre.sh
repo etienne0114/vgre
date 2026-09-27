@@ -24,10 +24,47 @@ while [ -h "$_self" ]; do
 done
 SCRIPT_DIR=$(cd "$(dirname "$_self")" && pwd)
 
-_python() {
-    if command -v python3 >/dev/null 2>&1; then echo python3;
-    elif command -v python >/dev/null 2>&1; then echo python;
-    else echo ""; fi
+# The managed virtualenv that vgre_sync.sh / install_local.sh populate with the
+# vgre Python package (numpy-based). Overridable with VGRE_VENV.
+_VGRE_VENV_PY="${VGRE_VENV:-$HOME/.vgre/venv}/bin/python"
+
+# Echo the first interpreter that can actually `import vgre`, or return 1.
+# Priority: $VGRE_PYTHON → the managed venv → system python3/python.
+_python_with_vgre() {
+    if [ -n "${VGRE_PYTHON:-}" ] && "$VGRE_PYTHON" -c 'import vgre' >/dev/null 2>&1; then
+        echo "$VGRE_PYTHON"; return 0
+    fi
+    if [ -x "$_VGRE_VENV_PY" ] && "$_VGRE_VENV_PY" -c 'import vgre' >/dev/null 2>&1; then
+        echo "$_VGRE_VENV_PY"; return 0
+    fi
+    for _p in python3 python; do
+        if command -v "$_p" >/dev/null 2>&1 && "$_p" -c 'import vgre' >/dev/null 2>&1; then
+            echo "$_p"; return 0
+        fi
+    done
+    return 1
+}
+
+# Print correct, copy-pasteable setup steps (works on PEP 668 / Debian).
+_emit_setup_help() {
+    _repo=$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "<vgre-source>")
+    cat >&2 <<EOF
+vgre: the Python model package isn't set up, so '$1' can't run yet.
+
+The quickest fix is to re-run the sync, which installs it into a venv for you:
+    ./scripts/vgre_sync.sh
+
+Or set it up by hand (Debian/Ubuntu's system Python is "externally managed",
+so use a venv — do NOT 'pip install' into the system Python):
+    python3 -m venv ~/.vgre/venv
+    ~/.vgre/venv/bin/pip install $_repo/bindings/python
+    # …or a prebuilt wheel:
+    ~/.vgre/venv/bin/pip install \\
+      https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl
+
+Then re-run:  vgre $1 ...
+(If 'python3 -m venv' fails: sudo apt-get install python3-venv)
+EOF
 }
 
 usage() {
@@ -36,7 +73,7 @@ vgre — run CUDA and a local language model on the CPU (no GPU required).
 
 Usage: vgre <command> [options]
 
-Model & runtime (Python package — pip install vgre, or the wheel):
+Model & runtime (Python package — set up by ./scripts/vgre_sync.sh):
   info                 show version, native backend, library path, platform
   generate             generate text (trains a tiny demo model if no --model)
   train                train a small language model on a text corpus
@@ -59,26 +96,34 @@ EOF
 
 version() {
     printf 'vgre %s\n' "$VGRE_VERSION"
-    _py=$(_python)
-    if [ -n "$_py" ] && "$_py" -c "import vgre" >/dev/null 2>&1; then
+    if _py=$(_python_with_vgre); then
         "$_py" -m vgre version 2>/dev/null | grep -iE 'native' || true
     else
-        printf 'native backend: python package not installed (pip install vgre)\n'
+        printf 'native backend: model package not set up — run ./scripts/vgre_sync.sh\n'
     fi
 }
 
 # Delegate a model/tokenizer subcommand to the Python CLI.
 run_python_cli() {
-    _py=$(_python)
-    if [ -z "$_py" ]; then
-        echo "vgre: python3 is required for '$1'." >&2; exit 127
+    _sub="$1"; shift
+    # 1. A ready interpreter (venv / $VGRE_PYTHON / system) that has the package.
+    if _py=$(_python_with_vgre); then
+        exec "$_py" -m vgre "$_sub" "$@"
     fi
-    if ! "$_py" -c "import vgre" >/dev/null 2>&1; then
-        echo "vgre: the Python package is not installed. Install it with:" >&2
-        echo "        pip install vgre        # or a release wheel" >&2
-        exit 127
+    # 2. Source-tree fallback: run straight from bindings/python when this
+    #    dispatcher lives in a checkout and the interpreter already has numpy.
+    _src="$SCRIPT_DIR/../bindings/python"
+    if [ -d "$_src" ]; then
+        for _p in python3 python; do
+            if command -v "$_p" >/dev/null 2>&1 && \
+               PYTHONPATH="$_src${PYTHONPATH:+:$PYTHONPATH}" "$_p" -c 'import vgre' >/dev/null 2>&1; then
+                exec env PYTHONPATH="$_src${PYTHONPATH:+:$PYTHONPATH}" "$_p" -m vgre "$_sub" "$@"
+            fi
+        done
     fi
-    exec "$_py" -m vgre "$@"
+    # 3. Nothing works — print correct setup steps.
+    _emit_setup_help "$_sub"
+    exit 127
 }
 
 # Delegate a cluster subcommand to a sibling vgre-<name> script/binary.

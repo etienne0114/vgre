@@ -624,6 +624,9 @@ vgre_install_cli_symlinks "$REPO_DIR/scripts"
 vgre_ensure_cli_path
 ok "CLI tools installed → $BIN_DIR (run vgre-token install to refresh)"
 
+# Model CLI (vgre generate / train / tokenize / info) into ~/.vgre/venv.
+vgre_setup_python_cli "$REPO_DIR/bindings/python" || true
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════════╗"

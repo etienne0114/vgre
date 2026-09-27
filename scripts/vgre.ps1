@@ -16,12 +16,40 @@ $ErrorActionPreference = "Stop"
 $VgreVersion = "0.1.0"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# The managed venv that the installers can populate with the vgre package.
+$VgreVenvPy = Join-Path $env:USERPROFILE ".vgre\venv\Scripts\python.exe"
+
 function Find-Python {
+    # Prefer a Python that can actually import vgre: an override, then the
+    # managed venv, then any interpreter on PATH.
+    if ($env:VGRE_PYTHON -and (Test-Path $env:VGRE_PYTHON)) {
+        & $env:VGRE_PYTHON -c "import vgre" 2>$null
+        if ($LASTEXITCODE -eq 0) { return $env:VGRE_PYTHON }
+    }
+    if (Test-Path $VgreVenvPy) {
+        & $VgreVenvPy -c "import vgre" 2>$null
+        if ($LASTEXITCODE -eq 0) { return $VgreVenvPy }
+    }
     foreach ($p in @("python", "py", "python3")) {
         $cmd = Get-Command $p -ErrorAction SilentlyContinue
         if ($cmd) { return $p }
     }
+    if (Test-Path $VgreVenvPy) { return $VgreVenvPy }
     return $null
+}
+
+function Show-SetupHelp([string] $sub) {
+    $wheel = "https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-win_amd64.whl"
+    Write-Error @"
+vgre: the Python model package isn't set up, so '$sub' can't run yet.
+
+Set it up once (a venv keeps it isolated):
+    python -m venv %USERPROFILE%\.vgre\venv
+    %USERPROFILE%\.vgre\venv\Scripts\pip install $wheel
+    # …or from a source checkout:  ...\Scripts\pip install <vgre-source>\bindings\python
+
+Then re-run:  vgre $sub ...
+"@
 }
 
 function Show-Usage {
@@ -30,7 +58,7 @@ vgre - run CUDA and a local language model on the CPU (no GPU required).
 
 Usage: vgre <command> [options]
 
-Model & runtime (Python package - pip install vgre, or the wheel):
+Model & runtime (Python package - set up by the VGRE installer):
   info                 show version, native backend, library path, platform
   generate             generate text (trains a tiny demo model if no --model)
   train                train a small language model on a text corpus
@@ -61,7 +89,7 @@ function Show-Version {
             return
         }
     }
-    Write-Output "native backend: python package not installed (pip install vgre)"
+    Write-Output "native backend: model package not set up (run the VGRE installer, or see 'vgre generate')"
 }
 
 function Invoke-PythonCli([string] $sub, [string[]] $rest) {
@@ -69,7 +97,7 @@ function Invoke-PythonCli([string] $sub, [string[]] $rest) {
     if (-not $py) { Write-Error "vgre: python is required for '$sub'."; exit 127 }
     & $py -c "import vgre" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "vgre: the Python package is not installed. Install it with:  pip install vgre"
+        Show-SetupHelp $sub
         exit 127
     }
     & $py -m vgre $sub @rest
