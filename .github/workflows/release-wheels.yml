@@ -102,9 +102,7 @@ jobs:
             -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"
-          # -k 0: surface every x86_64-slice portability error in one run (the
-          # x86_64 half is newly cross-compiled on the arm64 runner).
-          cmake --build build_rel --target vgre vgre_cudart --parallel -- -k 0
+          cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
           # The binaries are fat (arm64+x86_64); retag the wheel universal2.
           python -m wheel tags --platform-tag macosx_11_0_universal2 --remove bindings/python/dist/*macosx*.whl
