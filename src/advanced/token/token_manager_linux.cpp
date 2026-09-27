@@ -3,7 +3,13 @@
 
 #if defined(__linux__)
 #include "vgre/common/os_backend.h"
+// Force C linkage: keyutils.h before ~1.6.3 (e.g. Ubuntu 22.04) lacks the
+// `extern "C"` guard, so a C++ TU would mangle add_key/keyctl_* and fail to
+// resolve against libkeyutils at load time (undefined symbol _Z7add_key...).
+// Wrapping the include is harmless on newer, already-guarded headers.
+extern "C" {
 #include <keyutils.h>  // Linux kernel keyring API
+}
 #include <vector>
 
 #if defined(VGRE_HAS_LIBSECRET)
