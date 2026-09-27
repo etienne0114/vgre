@@ -52,7 +52,10 @@ int main() {
         for (size_t i = 0; i < N; ++i)
             CHECK(close(in[i], back[i], 1e-2f), "fp16 batch round-trip");
 
-        // When the CPU has AVX-512, the vectorized kernel must match the scalar codec.
+        // When the CPU has AVX-512, the vectorized kernel must match the scalar
+        // codec. Guarded by VGRE_SIMD_X86 because the *_avx512 symbol only exists
+        // on x86 GCC/Clang (on arm64/MSVC the batch converter above is scalar).
+#if defined(VGRE_SIMD_X86)
         if (vgre::simd::have_avx512()) {
             std::vector<float> vref(N);
             for (size_t i = 0; i < N; ++i) vref[i] = h[i].to_float();
@@ -61,6 +64,7 @@ int main() {
             for (size_t i = 0; i < N; ++i)
                 CHECK(vref[i] == vavx[i], "fp16_to_float_avx512 == scalar codec");
         }
+#endif
     }
 
     // ── 2. BF16 batch converters round-trip ─────────────────────────────────

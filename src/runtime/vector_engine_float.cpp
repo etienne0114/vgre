@@ -7,10 +7,6 @@
 #include <chrono>
 #include <sstream>
 
-#ifdef __x86_64__
-#include <cpuid.h>
-#endif
-
 #if defined(__linux__) && defined(__x86_64__)
 #include "vgre/common/os_backend.h"
 #include <sys/syscall.h>  // SYS_arch_prctl — AMX tile-data state
