@@ -64,15 +64,15 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 18
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build patchelf \
+            cmake ninja-build \
             libsqlite3-dev liblapack-dev libkeyutils-dev libssl-dev zlib1g-dev
-          python -m pip install --upgrade build wheel setuptools numpy auditwheel
+          # patchelf from PyPI (>= 0.17) — 22.04's apt patchelf (0.14.3) is too old
+          # for auditwheel (needs >= 0.14.5).
+          python -m pip install --upgrade build wheel setuptools numpy auditwheel patchelf
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=off \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
-          # -k 0: keep going after a compile error so one run surfaces every
-          # header-portability issue on this (older) stdlib, not just the first.
-          cmake --build build_rel --target vgre vgre_cudart --parallel -- -k 0
+          cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
           # PyPI rejects plain linux_x86_64 wheels. auditwheel vendors the native
           # library's shared-object dependencies and stamps a valid manylinux tag,
