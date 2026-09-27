@@ -11,7 +11,11 @@
 #include <cstdio>
 #include <vector>
 
-using namespace nvcuda::wmma;
+// A namespace ALIAS, not `using namespace nvcuda::wmma` — the latter pulls
+// nvcuda::wmma::detail into the global scope of this TU, which makes the header's
+// own global-scope templates (they reference the unrelated global ::detail as
+// `detail::`) ambiguous under clang-cl. The alias avoids that.
+namespace wm = nvcuda::wmma;
 
 static int g_fail = 0;
 #define CHECK(cond, msg)                                                   \
@@ -38,14 +42,14 @@ int main() {
         }
 
     // WMMA path: load, mma, store.
-    fragment<matrix_a, M, N, K, float, row_major> a;
-    fragment<matrix_b, M, N, K, float, row_major> b;
-    fragment<accumulator, M, N, K, float> c;
-    load_matrix_sync(a, A.data(), K);
-    load_matrix_sync(b, B.data(), N);
-    load_matrix_sync(c, Cin.data(), N, mem_row_major);
-    mma_sync(c, a, b, c);
-    store_matrix_sync(Cout.data(), c, N, mem_row_major);
+    wm::fragment<wm::matrix_a, M, N, K, float, wm::row_major> a;
+    wm::fragment<wm::matrix_b, M, N, K, float, wm::row_major> b;
+    wm::fragment<wm::accumulator, M, N, K, float> c;
+    wm::load_matrix_sync(a, A.data(), K);
+    wm::load_matrix_sync(b, B.data(), N);
+    wm::load_matrix_sync(c, Cin.data(), N, wm::mem_row_major);
+    wm::mma_sync(c, a, b, c);
+    wm::store_matrix_sync(Cout.data(), c, N, wm::mem_row_major);
 
     float maxd = 0.f;
     for (int i = 0; i < M * N; ++i) { float d = std::fabs(Cout[i] - Ref[i]); if (d > maxd) maxd = d; }
