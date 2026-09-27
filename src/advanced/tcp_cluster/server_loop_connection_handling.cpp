@@ -5,6 +5,7 @@
 #include "vgre/advanced/tcp_cluster.h"
 #include <algorithm>  // std::find/sort/... (don't rely on transitive includes)
 #include "vgre/advanced/tcp_cluster/internal/connection_manager.h"
+#include "vgre/advanced/tcp_cluster/internal/network_utilities.h"  // NetworkUtils::configureSocket
 #include "vgre/advanced/tcp_cluster/internal/security_manager.h"
 #include "vgre/api/vgre_c_api.h"
 #include "vgre/core/shm_manager.h"
@@ -180,8 +181,9 @@ void TCPClusterManager::handleNewInboundConnection() {
     rateLimiter_.record(inbound_ip);
 
     vgre::common::vgre_set_nosigpipe(new_socket);
-    vgre::common::vgre_ioctl_nonblock(new_socket);
-    vgre::common::vgre_set_tcp_nodelay(new_socket);
+    // Cross-platform TCP_NODELAY + non-blocking (and, on Windows, socket buffer
+    // tuning) via the shared helper — was duplicated inline here.
+    NetworkUtils::configureSocket(new_socket);
     vgre::common::vgre_set_tcp_keepalive(new_socket, 5, 2, 3);
 
     if (!is_master_) {

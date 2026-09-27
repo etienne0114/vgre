@@ -45,13 +45,6 @@ public:
   ConnectionManager& operator=(ConnectionManager&&) = delete;
   
   /**
-   * @brief Accept a new connection from server socket
-   * @param server_fd Server socket file descriptor
-   * @return VGREResult::SUCCESS on success, error code otherwise
-   */
-  VGREResult acceptConnection(vgre::common::vgre_socket_t server_fd);
-  
-  /**
    * @brief Connect to master node (worker-side)
    * @param host Master hostname or IP address
    * @param port Master port number

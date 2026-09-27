@@ -162,16 +162,6 @@ std::string ErrorHandlingPatterns::translateVGREResult(VGREResult result) {
   }
 }
 
-bool ErrorHandlingPatterns::isSocketError(int error_code) {
-#ifdef _WIN32
-  return error_code == WSAECONNRESET || error_code == WSAETIMEDOUT ||
-         error_code == WSAECONNABORTED;
-#else
-  return error_code == ECONNRESET || error_code == ETIMEDOUT ||
-         error_code == ECONNABORTED;
-#endif
-}
-
 std::string ErrorHandlingPatterns::getSocketErrorString(int error_code) {
 #ifdef _WIN32
   // Configurable error buffer size via VGRE_ERROR_BUFFER_SIZE (default 256)
@@ -212,26 +202,6 @@ void ErrorHandlingPatterns::logErrorWithContext(
   if (!additional_context.empty()) {
     full_msg += " - " + additional_context;
   }
-}
-
-bool ErrorHandlingPatterns::isRecoverableSocketError(int error_code) {
-#ifdef _WIN32
-  return error_code == WSAETIMEDOUT || error_code == WSAEWOULDBLOCK;
-#else
-  return error_code == ETIMEDOUT || error_code == EAGAIN ||
-         error_code == EWOULDBLOCK;
-#endif
-}
-
-bool ErrorHandlingPatterns::isRetryableError(VGREResult error) {
-  return error == VGREResult::ERR_TIMEOUT || error == VGREResult::ERR_BUSY ||
-         false;
-}
-
-bool ErrorHandlingPatterns::isCriticalError(VGREResult error) {
-  return error == VGREResult::ERR_OUT_OF_MEMORY ||
-         error == VGREResult::ERR_CRYPTO ||
-         error == VGREResult::ERR_AUTH_FAILED;
 }
 
 std::string
