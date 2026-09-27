@@ -3,6 +3,7 @@
  */
 
 #include "vgre/advanced/tcp_cluster/internal/shared_utilities.h"
+#include "vgre/common/logger.h"   // VGRE_LOG_ERROR (logErrorWithContext)
 #include <cstring>
 
 namespace vgre {
@@ -196,12 +197,13 @@ std::string ErrorHandlingPatterns::getSocketErrorString(int error_code) {
 void ErrorHandlingPatterns::logErrorWithContext(
     VGREResult error, const std::string &operation,
     const std::string &component, const std::string &additional_context) {
-  std::string error_msg = translateVGREResult(error);
-  std::string full_msg =
-      "[" + component + "] " + operation + " failed: " + error_msg;
+  std::string msg = operation + " failed: " + translateVGREResult(error);
   if (!additional_context.empty()) {
-    full_msg += " - " + additional_context;
+    msg += " - " + additional_context;
   }
+  // Previously this built the message and dropped it (a silent no-op), so the
+  // two callers in tcp_cluster_transport.cpp logged nothing. Actually emit it.
+  VGRE_LOG_ERROR(component, msg);
 }
 
 std::string
