@@ -196,76 +196,82 @@ def page_index():
 
 
 REL = "https://github.com/etienne0114/vgre/releases"
-DL = REL + "/download/v0.1.0"
+DL = REL + "/download/v0.1.1"
 
 
 def page_downloads():
     return "".join([
-        h1("Downloads", "Prebuilt, self-contained wheels — no compiler, no CUDA, no GPU."),
-        p("Every <a href=\"" + REL + "\">GitHub Release</a> ships a <strong>self-contained, "
-          "LLVM-free</strong> wheel per platform. Each bundles the native engine, so you need "
-          "only <strong>Python 3.8+ and NumPy</strong>. The wheels are built and smoke-tested "
-          "(import + train a language model) on Linux, macOS and Windows runners in CI."),
-        h2("Latest release — v0.1.0"),
-        p("Pick your platform, download the wheel, then copy the <code>pip install</code> "
-          "command (each block has a <strong>Copy</strong> button):"),
-        h3("🐧 Linux x86-64"),
-        p('<a href="' + DL + '/vgre-0.1.0-py3-none-linux_x86_64.whl">⬇ Download vgre-0.1.0-py3-none-linux_x86_64.whl</a>'),
-        code("pip install vgre-0.1.0-py3-none-linux_x86_64.whl"),
-        h3("🍎 macOS (Apple Silicon)"),
-        p('<a href="' + DL + '/vgre-0.1.0-py3-none-macosx_10_13_universal2.whl">⬇ Download vgre-0.1.0-py3-none-macosx_10_13_universal2.whl</a>'),
-        code("pip install vgre-0.1.0-py3-none-macosx_10_13_universal2.whl"),
-        h3("🪟 Windows x86-64"),
-        p('<a href="' + DL + '/vgre-0.1.0-py3-none-win_amd64.whl">⬇ Download vgre-0.1.0-py3-none-win_amd64.whl</a>'),
-        code("pip install vgre-0.1.0-py3-none-win_amd64.whl"),
-        h2("Install straight from the release URL"),
-        p("No manual download — <code>pip</code> fetches the wheel for you. Install into a "
-          "<strong>virtual environment</strong>: modern Debian/Ubuntu block <code>pip</code> into "
-          "the system Python (PEP 668 &ldquo;externally-managed&rdquo;)."),
+        h1("Downloads", "One command: pip install vgre — no compiler, no CUDA, no GPU."),
+        p("<code>vgre</code> is on <a href=\"https://pypi.org/project/vgre/\">PyPI</a> as a "
+          "<strong>self-contained, LLVM-free</strong> wheel for each platform. Each bundles the "
+          "native engine, so the only dependency is <strong>NumPy</strong> (pip pulls it "
+          "automatically). Every wheel is built and smoke-tested (import + train a language "
+          "model) on Linux, macOS and Windows runners in CI."),
+        h2("Install from PyPI (recommended)"),
+        p("Install into a <strong>virtual environment</strong> — modern Debian/Ubuntu block "
+          "<code>pip</code> into the system Python (PEP 668 &ldquo;externally-managed&rdquo;). "
+          "<code>pip</code> picks the right wheel for your OS and CPU automatically:"),
         code("python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
-             "pip install numpy\n"
-             "pip install " + DL + "/vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n"
-             "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
-        callout(p("The wheels are compiled at the <strong>universal x86-64 baseline</strong>, so "
-                  "they load on any x86-64 CPU; the hot kernels then <strong>detect the CPU at "
-                  "runtime</strong> and use AVX2 / AVX-512 automatically where present — one wheel, "
-                  "portable to a low-end laptop and fast on a server, no fixed ISA required."), "tip"),
+             "pip install vgre\n"
+             "vgre --version                 # version + native-backend status\n"
+             "vgre generate --prompt \"the \"  # trains a tiny demo model and generates text"),
+        callout(p("On Windows, create the venv with <code>py -m venv %USERPROFILE%\\.venvs\\vgre</code> "
+                  "and activate it with <code>%USERPROFILE%\\.venvs\\vgre\\Scripts\\activate</code>, "
+                  "then <code>pip install vgre</code>."), "tip"),
+        h2("Platform wheels — v0.1.1"),
+        p("PyPI serves the correct one automatically; these are the direct downloads from the "
+          "<a href=\"" + REL + "\">GitHub Release</a> if you need them:"),
+        table(["Platform", "Wheel", "Runs on"], [
+            ["🐧 Linux x86-64",
+             '<a href="' + DL + '/vgre-0.1.1-py3-none-manylinux_2_35_x86_64.whl"><code>manylinux_2_35_x86_64</code></a>',
+             "glibc ≥ 2.35 — Ubuntu 22.04+, Debian 12, RHEL/Rocky 9, Fedora 36+"],
+            ["🍎 macOS (universal2)",
+             '<a href="' + DL + '/vgre-0.1.1-py3-none-macosx_11_0_universal2.whl"><code>macosx_11_0_universal2</code></a>',
+             "Apple Silicon <em>and</em> Intel Macs, macOS 11+"],
+            ["🪟 Windows x86-64",
+             '<a href="' + DL + '/vgre-0.1.1-py3-none-win_amd64.whl"><code>win_amd64</code></a>',
+             "Windows 10/11 x86-64"],
+        ], "cmd-table"),
+        callout(p("The wheels are compiled at the <strong>universal x86-64 baseline</strong> (and a "
+                  "universal2 fat binary on macOS), so they load on any supported CPU; the hot "
+                  "kernels then <strong>detect the CPU at runtime</strong> and use AVX2 / AVX-512 "
+                  "automatically where present — one wheel, portable to a low-end laptop and fast on "
+                  "a server."), "tip"),
         h2("Verify it works"),
         p("The bundled native library runs CUDA-C kernels and trains/serves the in-tree "
           "transformer LM on CPU:"),
         code("import vgre\n"
+             "print('native:', vgre.NATIVE_AVAILABLE)\n"
              "tok = vgre.Tokenizer().train(open('corpus.txt').read(), num_merges=1024)\n"
              "lm  = vgre.LanguageModel(vocab=tok.vocab_size, n_layer=6, d_model=256, n_head=8)\n"
              "# lm.train_step(...) then lm.generate(...) — CPU only, no GPU/LLVM/BLAS.",
              "python"),
         h2("Container image (GHCR)"),
-        p("A multi-arch (amd64/arm64) LLVM-free image is published on a tagged release:"),
-        code("docker run --rm ghcr.io/etienne0114/vgre:0.1.0 --version"),
+        p("A multi-arch (amd64/arm64) LLVM-free image is published on each tagged release:"),
+        code("docker run --rm ghcr.io/etienne0114/vgre:0.1.1 --version"),
         h2("Build from source"),
         p("Prefer to build your own? See the <a href=\"installation.html\">Installation</a> guide "
           "— including the zero-burden LLVM-free build and <code>bindings/python/build_wheel.sh</code> "
           "to produce a wheel for your exact platform."),
-        callout(p("The macOS wheel is built on Apple Silicon (arm64). Intel-Mac (x86-64) users "
-                  "should build from source until an x86-64 macOS wheel is added to the release."), "warn"),
     ])
 
 
 def page_quickstart():
     return "".join([
         h1("Quick Start", "From a one-line install to a running CUDA kernel on CPU in minutes."),
-        h2("Fastest: install the prebuilt wheel (no toolchain)"),
-        p("Each GitHub Release ships a self-contained, <strong>LLVM-free</strong> wheel per "
-          "platform (Linux / macOS / Windows). It bundles the native engine, so you need "
-          "nothing but Python 3.8+ and NumPy — no compiler, no CUDA, no GPU:"),
+        h2("Fastest: pip install vgre (no toolchain)"),
+        p("<code>vgre</code> is on <a href=\"https://pypi.org/project/vgre/\">PyPI</a> as a "
+          "self-contained, <strong>LLVM-free</strong> wheel per platform (Linux / macOS / "
+          "Windows). It bundles the native engine and pulls NumPy automatically — no compiler, "
+          "no CUDA, no GPU:"),
         code("# Use a virtual environment (modern Debian/Ubuntu block pip into the\n"
              "# system Python — PEP 668 'externally-managed'):\n"
              "python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
-             "pip install numpy\n"
-             "pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n\n"
+             "pip install vgre\n\n"
              "vgre --version                 # the wheel installs a `vgre` command on PATH\n"
              "vgre generate --prompt \"the \"  # trains a tiny demo model and generates text"),
-        callout(p("Releases: <a href=\"https://github.com/etienne0114/vgre/releases\">"
-                  "github.com/etienne0114/vgre/releases</a>. The wheel runs CUDA-C kernels "
+        callout(p("Also on <a href=\"downloads.html\">GitHub Releases</a> (direct wheel downloads) "
+                  "and GHCR (<code>ghcr.io/etienne0114/vgre</code>). The wheel runs CUDA-C kernels "
                   "and trains/serves the in-tree transformer LM entirely on CPU."), "tip"),
         h2("Build from source (Linux / macOS)"),
         code("git clone https://github.com/etienne0114/vgre.git\n"
@@ -739,14 +745,11 @@ def page_cli():
           "bottom). Every command below prints usage with <code>--help</code>."),
 
         h2("The <code>vgre</code> command"),
-        p("Installing a <a href=\"downloads.html\">release wheel</a> into a virtual "
-          "environment puts a <code>vgre</code> command on your PATH for the model &amp; "
-          "runtime tools — no source build needed (the wheels live on "
-          "<a href=\"https://github.com/etienne0114/vgre/releases\">GitHub Releases</a>, "
-          "not PyPI, so install by URL/file, not <code>pip install vgre</code>):"),
+        p("<code>pip install vgre</code> (from <a href=\"https://pypi.org/project/vgre/\">PyPI</a>) "
+          "puts a <code>vgre</code> command on your PATH for the model &amp; runtime tools — no "
+          "source build needed. Install into a virtual environment (PEP 668):"),
         code("python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
-             "pip install numpy\n"
-             "pip install https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl\n"
+             "pip install vgre\n"
              "vgre --version"),
         table(["Command", "What it does", "Common usage"], [
             ["<code>vgre --version</code>", "Print the version and native-backend status.",

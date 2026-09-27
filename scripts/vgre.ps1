@@ -39,13 +39,12 @@ function Find-Python {
 }
 
 function Show-SetupHelp([string] $sub) {
-    $wheel = "https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-win_amd64.whl"
     Write-Error @"
 vgre: the Python model package isn't set up, so '$sub' can't run yet.
 
 Set it up once (a venv keeps it isolated):
     python -m venv %USERPROFILE%\.vgre\venv
-    %USERPROFILE%\.vgre\venv\Scripts\pip install $wheel
+    %USERPROFILE%\.vgre\venv\Scripts\pip install vgre
     # …or from a source checkout:  ...\Scripts\pip install <vgre-source>\bindings\python
 
 Then re-run:  vgre $sub ...

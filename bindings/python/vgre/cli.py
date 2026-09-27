@@ -56,9 +56,8 @@ def _require_native() -> None:
         sys.stderr.write(
             "error: the native VGRE library is not available in this install, so "
             "model commands cannot run.\n"
-            "       Reinstall the platform wheel from a GitHub Release "
-            "(it bundles the native library), e.g.:\n"
-            "         pip install vgre-0.1.0-py3-none-linux_x86_64.whl\n"
+            "       Reinstall the wheel (it bundles the native library) into a venv:\n"
+            "         pip install --force-reinstall vgre\n"
         )
         raise SystemExit(2)
 

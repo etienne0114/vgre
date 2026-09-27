@@ -147,16 +147,15 @@ See `docs/missingFeatures.md` for the complete exhaustive list.
 
 ## Quick Start
 
-**Fastest — install a prebuilt, self-contained wheel (no toolchain):** each
-[GitHub Release](https://github.com/etienne0114/vgre/releases) ships an **LLVM-free**
-wheel per platform (Linux / macOS / Windows) that bundles the native engine, so you
-need only Python 3.8+ and NumPy. Install into a **virtual environment** — modern
-Debian/Ubuntu block `pip` into the system Python (PEP 668 "externally-managed"):
+**Fastest — `pip install vgre`:** [on PyPI](https://pypi.org/project/vgre/) as a
+self-contained, **LLVM-free** wheel per platform (Linux / macOS / Windows) that
+bundles the native engine and pulls NumPy automatically — no compiler, no CUDA,
+no GPU. Install into a **virtual environment** — modern Debian/Ubuntu block `pip`
+into the system Python (PEP 668 "externally-managed"):
 
 ```bash
 python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate   # avoids PEP 668
-pip install numpy
-pip install https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl   # or macOS / Windows
+pip install vgre
 vgre --version                 # the wheel installs a `vgre` command on PATH
 vgre generate --prompt "the "  # trains a tiny demo model and generates text
 ```
@@ -203,8 +202,8 @@ BLAS, no PyTorch/JAX, and no downloaded checkpoint**. Everything runs on VGRE's 
   accumulation**, a from-scratch **BPE tokenizer**, and standard-**safetensors** checkpoints.
 - **VGRE-LM**: a configurable **Llama-style decoder** with **KV-cached** generation and
   **top-k / top-p / repetition-penalty** sampling, served in **fp32 / bf16 (½×) / int8 (¼×)** weights.
-- **Python wheel**: `pip install <release-wheel-url>` (into a venv) → `import vgre`, plus a
-  `vgre` CLI to train/generate offline. Wheels are on [GitHub Releases](https://github.com/etienne0114/vgre/releases), not PyPI.
+- **Python wheel**: `pip install vgre` (into a venv) → `import vgre`, plus a `vgre` CLI to
+  train/generate offline. On [PyPI](https://pypi.org/project/vgre/) and [GitHub Releases](https://github.com/etienne0114/vgre/releases).
 
 ```bash
 # Train a tiny model on the bundled public-domain sample (CPU, fully offline):

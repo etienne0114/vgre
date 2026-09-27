@@ -57,10 +57,9 @@ The quickest fix is to re-run the sync, which installs it into a venv for you:
 Or set it up by hand (Debian/Ubuntu's system Python is "externally managed",
 so use a venv — do NOT 'pip install' into the system Python):
     python3 -m venv ~/.vgre/venv
+    ~/.vgre/venv/bin/pip install vgre          # from PyPI
+    # …or from this source checkout:
     ~/.vgre/venv/bin/pip install $_repo/bindings/python
-    # …or a prebuilt wheel:
-    ~/.vgre/venv/bin/pip install \\
-      https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl
 
 Then re-run:  vgre $1 ...
 (If 'python3 -m venv' fails: sudo apt-get install python3-venv)
