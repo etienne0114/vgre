@@ -645,8 +645,14 @@ void MemoryManager::segfaultHandler(int sig, siginfo_t *si, void *unused) {
               }
           }
           
-          // Mark dirty if it's a write fault — enqueue and also mark immediately
-#if defined(__x86_64__) && !defined(_WIN32)
+          // Mark dirty if it's a write fault — enqueue and also mark immediately.
+          // Reading the page-fault error code needs the platform's mcontext
+          // layout; gregs[REG_ERR] is Linux/glibc-specific (macOS uses
+          // __darwin_mcontext64, and its uc_mcontext is a pointer). Elsewhere we
+          // fall back to marking dirty unconditionally, which is safe (a read
+          // fault just triggers one extra sync) — so scope the precise path to
+          // Linux x86-64 only.
+#if defined(__x86_64__) && defined(__linux__)
           ucontext_t *uc = (ucontext_t *)unused;
           // Bit 1 of error code is Write/Read (1=Write)
           if (uc->uc_mcontext.gregs[REG_ERR] & 0x2) {
