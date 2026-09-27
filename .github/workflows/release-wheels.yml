@@ -83,6 +83,15 @@ jobs:
           rm -f bindings/python/dist/*.whl
           mv bindings/python/dist_manylinux/*.whl bindings/python/dist/
           echo "==> Final Linux wheel:"; ls -1 bindings/python/dist/*.whl
+          # ---- one-shot diagnostic: why won't the repaired wheel load? ----
+          echo "===== WHEEL CONTENTS (.so) ====="
+          python -m zipfile -l bindings/python/dist/*.whl | grep -Ei "\.so|\.libs" || true
+          python -m pip install --force-reinstall --no-deps bindings/python/dist/*.whl
+          LIB=$(python -c "import vgre._native as n; print(n._find_library() or '')")
+          echo "===== FOUND LIB: $LIB ====="
+          echo "----- ldd -----"; ldd "$LIB" || true
+          echo "----- direct ctypes load -----"
+          python -c "import ctypes; ctypes.CDLL('$LIB', mode=ctypes.RTLD_GLOBAL); print('DIRECT LOAD OK')" || echo "DIRECT LOAD FAILED (error above)"
 
       # ── macOS: Apple clang, LLVM-free (arm64 on macos-14, x86_64 on macos-13) ──
       - name: Build native + wheel (macOS, LLVM-free)
