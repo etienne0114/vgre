@@ -257,7 +257,8 @@ def page_quickstart():
              "python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
              "pip install numpy\n"
              "pip install vgre-0.1.0-py3-none-linux_x86_64.whl   # or -macosx_* / -win_amd64\n\n"
-             "python -c \"import vgre; print('native:', vgre.NATIVE_AVAILABLE)\""),
+             "vgre --version                 # the wheel installs a `vgre` command on PATH\n"
+             "vgre generate --prompt \"the \"  # trains a tiny demo model and generates text"),
         callout(p("Releases: <a href=\"https://github.com/etienne0114/vgre/releases\">"
                   "github.com/etienne0114/vgre/releases</a>. The wheel runs CUDA-C kernels "
                   "and trains/serves the in-tree transformer LM entirely on CPU."), "tip"),
@@ -728,6 +729,24 @@ def page_cli():
           "(add it to <code>PATH</code> — the installer does this for you). On Windows the same "
           "commands ship as <code>.bat</code> / <code>.ps1</code> scripts (see the note at the "
           "bottom). Every command below prints usage with <code>--help</code>."),
+
+        h2("The <code>vgre</code> command (pip wheel)"),
+        p("<code>pip install vgre</code> puts a <code>vgre</code> command on your PATH for the "
+          "model &amp; runtime tools — no source build needed:"),
+        table(["Command", "What it does", "Common usage"], [
+            ["<code>vgre --version</code>", "Print the version and native-backend status.",
+             "<code>vgre --version</code> · <code>vgre info</code> (library path, platform, numpy)"],
+            ["<code>vgre generate</code>", "Generate text; trains a tiny demo model when no <code>--model</code> is given, so it works right after install.",
+             "<code>vgre generate --prompt \"…\" --max-tokens 64</code> · <code>--model model.gguf</code> · <code>--temperature 0.8 --top-k 40</code>"],
+            ["<code>vgre train</code>", "Train a small in-tree language model on a text corpus and save a checkpoint (+ config sidecar).",
+             "<code>vgre train --corpus data.txt --out model.vgre --layers 4 --d-model 256</code>"],
+            ["<code>vgre tokenize</code>", "Byte / BPE tokenizer helpers.",
+             "<code>vgre tokenize --encode \"hi\"</code> · <code>--decode 104,105</code> · <code>--train corpus.txt --merges 512</code>"],
+        ]),
+        p("A source install also gets <code>vgre</code>, as a unified dispatcher: model "
+          "subcommands run the Python CLI above, and <code>vgre start</code> / <code>worker</code> "
+          "/ <code>token</code> / <code>discover</code> / <code>dashboard</code> delegate to the "
+          "cluster tools below."),
 
         h2("Cluster &amp; runtime"),
         table(["Command", "What it does", "Common usage"], [

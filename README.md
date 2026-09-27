@@ -157,7 +157,8 @@ Debian/Ubuntu block `pip` into the system Python (PEP 668 "externally-managed"):
 python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate   # avoids PEP 668
 pip install numpy
 pip install https://github.com/etienne0114/vgre/releases/download/v0.1.0/vgre-0.1.0-py3-none-linux_x86_64.whl   # or macOS / Windows
-python -c "import vgre; print('native:', vgre.NATIVE_AVAILABLE)"
+vgre --version                 # the wheel installs a `vgre` command on PATH
+vgre generate --prompt "the "  # trains a tiny demo model and generates text
 ```
 
 The wheels are compiled at the **universal x86-64 baseline**, so they load on any
