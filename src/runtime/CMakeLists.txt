@@ -49,3 +49,14 @@ if(MSVC)
         target_compile_definitions(vgre_runtime PRIVATE ${VGRE_SIMD_COMPILE_DEFS})
     endif()
 endif()
+
+# vector_engine_amx.cpp is gated by ENABLE_VGRE_AMX (INT8 AVX-VNNI + AMX-BF16
+# GEMM). _vgre_configure_library() applies that define to the FINAL shared libs
+# (vgre / vgre_cudart), but this is an OBJECT library — where the sources are
+# actually compiled — so it must receive the define here too. Without it the
+# file compiled its scalar #else branch and matMulInt8/matMulBF16 silently ran
+# scalar (the AVX-VNNI/AMX kernels were dead), while the MatMulAMX test still
+# passed against its scalar reference.
+if(ENABLE_VGRE_AMX)
+    target_compile_definitions(vgre_runtime PRIVATE ENABLE_VGRE_AMX)
+endif()

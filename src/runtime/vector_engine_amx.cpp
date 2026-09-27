@@ -287,7 +287,11 @@ static void pack_B_amx(const vgre_bf16* B, vgre_bf16* Bpk, int K, int N) {
 }
 
 #if defined(VGRE_AMX_X86)
-__attribute__((target("amx-tile,amx-bf16")))
+// noinline: keep this out-of-line. If clang inlines an AMX-target function into
+// the non-AMX matMulBF16, it silently drops the tile instructions (verified via
+// SDE instruction-mix: the inlined form executed ZERO tile ops). Out-of-line, it
+// is compiled with the amx target and emits real TDPBF16PS/TILE* instructions.
+__attribute__((target("amx-tile,amx-bf16"), noinline))
 static void gemm_bf16_amx(
         const vgre_bf16* __restrict A,
         const vgre_bf16* __restrict Bpk, // AMX-packed B
@@ -358,7 +362,7 @@ static void gemm_bf16_amx(const vgre_bf16* A, const vgre_bf16* Bpk,
 // AVX2 BF16→FP32 GEMM fallback (software emulation, no AMX hardware needed)
 // ─────────────────────────────────────────────────────────────────────────────
 #if defined(VGRE_AMX_X86)
-__attribute__((target("avx2")))
+__attribute__((target("avx2,fma")))   // _mm256_fmadd_ps needs the fma feature, not just avx2
 static void gemm_bf16_avx2(const vgre_bf16* A, const vgre_bf16* B,
                             float* C, int M, int N, int K) {
     for (int m = 0; m < M; ++m) {
@@ -455,7 +459,14 @@ void VectorEngine::matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
 
     memset(C, 0, static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float));
 
-    if (caps_.amxEnabled) {
+    // The AMX tile kernel configures one fixed tile shape (16×16×32) and does NOT
+    // reconfigure for partial edge tiles, so it is only correct — and only avoids
+    // an illegal-tile-dimension #GP (e.g. K<2 → K/2=0 rows) — when the problem is
+    // an exact multiple of the tile shape. Any other size uses the AVX2/scalar
+    // path below (verified bit-exact). Full-tile GEMMs still get AMX.
+    const bool amxAligned = (M % kAmxMT == 0) && (N % kAmxNT == 0) && (K % kAmxKT == 0)
+                            && M >= kAmxMT && N >= kAmxNT && K >= kAmxKT;
+    if (caps_.amxEnabled && amxAligned) {
         // Pack B into AMX VNNI format: (K/2) rows × (N*4 bytes)
         const int Kpairs = (K + 1) / 2;
         std::vector<vgre_bf16> Bpk(static_cast<size_t>(Kpairs) * N * 2);
