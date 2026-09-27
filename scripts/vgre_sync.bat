@@ -383,13 +383,15 @@ echo flutter: !FLUTTER_CMD!
 echo LLVM_DIR: !LLVM_DIR!
 
 echo.
-echo === Installing VGRE CLI Tools (vgre-token, vgre-start) ===
+echo === Installing VGRE CLI Tools (vgre, vgre-token, vgre-start) ===
 rem Install CLI tools NOW - before the build - so they are available even if
 rem the native build fails.  Also updates the current session PATH immediately
 rem so the user does not need to restart their terminal.
 set "TOKEN_SCRIPT_DIR=%INSTALL_DIR%\scripts"
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 if not exist "%TOKEN_SCRIPT_DIR%" mkdir "%TOKEN_SCRIPT_DIR%"
+copy /Y "%SCRIPT_DIR%vgre.ps1"              "%TOKEN_SCRIPT_DIR%\vgre.ps1"              >nul 2>&1
+copy /Y "%SCRIPT_DIR%vgre.bat"              "%TOKEN_SCRIPT_DIR%\vgre.bat"              >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre-token.ps1"        "%TOKEN_SCRIPT_DIR%\vgre-token.ps1"        >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre-token.bat"        "%TOKEN_SCRIPT_DIR%\vgre-token.bat"        >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre-start.bat"        "%TOKEN_SCRIPT_DIR%\vgre-start.bat"        >nul 2>&1
@@ -399,7 +401,7 @@ copy /Y "%SCRIPT_DIR%vgre-discover.ps1"     "%TOKEN_SCRIPT_DIR%\vgre-discover.ps
 copy /Y "%SCRIPT_DIR%Setup-VGRECluster.ps1" "%TOKEN_SCRIPT_DIR%\Setup-VGRECluster.ps1" >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre_env.ps1"          "%TOKEN_SCRIPT_DIR%\vgre_env.ps1"          >nul 2>&1
 copy /Y "%SCRIPT_DIR%Install-VGRETools.ps1" "%TOKEN_SCRIPT_DIR%\Install-VGRETools.ps1" >nul 2>&1
-echo [OK] vgre-token + vgre-start + vgre-discover installed to %TOKEN_SCRIPT_DIR%
+echo [OK] vgre + vgre-token + vgre-start + vgre-discover installed to %TOKEN_SCRIPT_DIR%
 
 rem Update User PATH (persistent across new terminals)
 for /f "usebackq" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$d='%TOKEN_SCRIPT_DIR%';$d2='%INSTALL_DIR%';$p=[Environment]::GetEnvironmentVariable('Path','User');$changed=$false;foreach($dir in @($d2,$d)){if($p -notlike '*'+$dir+'*'){$p+=';'+$dir;$changed=$true}};if($changed){[Environment]::SetEnvironmentVariable('Path',$p,'User');'CHANGED'}else{'EXISTS'}"`) do set "_CLI_PATH_STATUS=%%I"

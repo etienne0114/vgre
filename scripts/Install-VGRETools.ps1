@@ -1,5 +1,5 @@
 # Install-VGRETools.ps1
-# Installs VGRE CLI tools (vgre-token, vgre-start) to %LOCALAPPDATA%\VGRE\scripts\
+# Installs VGRE CLI tools (vgre, vgre-token, vgre-start) to %LOCALAPPDATA%\VGRE\scripts\
 # and adds that directory to User PATH — no build or admin rights required.
 #
 # Usage (from the repo root):
@@ -33,6 +33,8 @@ foreach ($dir in @($VgreDir, $InstallDir)) {
 
 # ── Copy CLI scripts ──────────────────────────────────────────────────────────
 $tools = @(
+    @{ Src = "vgre.ps1";                Dst = "vgre.ps1" },
+    @{ Src = "vgre.bat";                Dst = "vgre.bat" },
     @{ Src = "vgre-token.ps1";          Dst = "vgre-token.ps1" },
     @{ Src = "vgre-token.bat";          Dst = "vgre-token.bat" },
     @{ Src = "Setup-VGRECluster.ps1";   Dst = "Setup-VGRECluster.ps1" },
@@ -127,6 +129,8 @@ Write-Host "==================================================" -ForegroundColor
 Write-Host ""
 Write-Host "Run these commands right now in this terminal:" -ForegroundColor White
 Write-Host ""
+Write-Host "  vgre --version             # show the VGRE version + native backend" -ForegroundColor Yellow
+Write-Host "  vgre generate --prompt hi  # generate text on the CPU (no GPU)" -ForegroundColor Yellow
 Write-Host "  vgre-token generate        # create a cluster auth token" -ForegroundColor Yellow
 Write-Host "  vgre-token fingerprint     # verify SHA-256 matches on all nodes" -ForegroundColor Yellow
 Write-Host "  Setup-VGRECluster          # interactive cluster setup wizard" -ForegroundColor Yellow
