@@ -10,6 +10,7 @@
 // is exactly PagedAttention: it eliminates KV fragmentation so many sequences of
 // different lengths share one pool, and a sequence grows one block at a time.
 
+#include <cstddef>   // size_t (not transitively guaranteed on older libstdc++)
 #include <cstdint>
 #include <unordered_map>
 #include <vector>

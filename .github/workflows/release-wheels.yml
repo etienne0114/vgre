@@ -70,7 +70,9 @@ jobs:
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=off \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
-          cmake --build build_rel --target vgre vgre_cudart --parallel
+          # -k 0: keep going after a compile error so one run surfaces every
+          # header-portability issue on this (older) stdlib, not just the first.
+          cmake --build build_rel --target vgre vgre_cudart --parallel -- -k 0
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
           # PyPI rejects plain linux_x86_64 wheels. auditwheel vendors the native
           # library's shared-object dependencies and stamps a valid manylinux tag,
