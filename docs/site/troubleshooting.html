@@ -8,7 +8,7 @@
 <link rel="canonical" href="https://etienne0114.github.io/vgre/troubleshooting.html">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/style.css?v=1102055ac6">
+<link rel="stylesheet" href="assets/style.css?v=cf4a1cf769">
 </head>
 <body>
 <header class="site-header">
@@ -29,7 +29,7 @@
 <div class="layout">
   <aside class="sidebar"><div class="nav-group"><div class="nav-group-title">Getting Started</div><a class="nav-link" href="index.html">Introduction</a><a class="nav-link" href="quickstart.html">Quick Start</a><a class="nav-link" href="downloads.html">Downloads</a><a class="nav-link" href="installation.html">Installation</a><a class="nav-link" href="system-requirements.html">System Requirements</a></div><div class="nav-group"><div class="nav-group-title">Guides</div><a class="nav-link" href="running-cuda.html">Running CUDA Apps</a><a class="nav-link" href="cluster.html">Distributed Clusters</a><a class="nav-link" href="discovery.html">Public IP Discovery</a><a class="nav-link" href="token-management.html">Token Management</a><a class="nav-link" href="dashboard.html">The Dashboard</a><a class="nav-link" href="local-ai.html">Local AI: LoRA · RAG · LM</a><a class="nav-link" href="debugging.html">Debugging PTX (GDB)</a><a class="nav-link" href="advanced.html">Advanced Features</a></div><div class="nav-group"><div class="nav-group-title">Reference</div><a class="nav-link" href="env-vars.html">Environment Variables</a><a class="nav-link" href="api.html">API Reference</a><a class="nav-link" href="cli.html">CLI Tools</a><a class="nav-link" href="production-status.html">Production Status</a></div><div class="nav-group"><div class="nav-group-title">About &amp; Help</div><a class="nav-link" href="architecture.html">Architecture</a><a class="nav-link active" href="troubleshooting.html">Troubleshooting</a><a class="nav-link" href="faq.html">FAQ</a></div></aside>
   <main class="content">
-    <h1>Troubleshooting</h1><p class="lead">Fixes for the issues you are most likely to hit, by symptom.</p><h3>Dashboard fails to load (&quot;Failed to load native library&quot;)</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">source ~/.vgre/env
+    <h1>Troubleshooting</h1><p class="lead">Fixes for the issues you are most likely to hit, by symptom.</p><h3>Dashboard fails to load ("Failed to load native library")</h3><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">source ~/.vgre/env
 ls -la ~/.local/share/VGRE/lib/libvgre.so
 ldd ~/.local/share/VGRE/lib/libvgre.so | grep &quot;not found&quot;
 sudo apt-get install libomp-dev        # if libomp.so is missing</code></pre></div><h3>vgre-start not recognised (Windows)</h3><div class="terminal" data-lang="powershell"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">powershell</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-powershell">Test-Path &quot;$env:LOCALAPPDATA\VGRE\scripts\vgre-start.bat&quot;
@@ -75,7 +75,7 @@ Get-ChildItem &quot;$env:LOCALAPPDATA\VGRE\lib&quot; -Filter &quot;*.dll&quot; |
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js?v=812e6875f2"></script>
+<script src="assets/search-index.js?v=b6fea8206d"></script>
 <script src="assets/docs.js?v=a438fb4d98"></script>
 </body>
 </html>

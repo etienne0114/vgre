@@ -68,19 +68,23 @@ FLAT = [(f, t) for _, items in NAV for f, t in items]
 
 
 # ── Tiny content DSL ──────────────────────────────────────────────────────────
+# Headings accept inline HTML (e.g. <code>…</code>, entities like &amp;) — same
+# contract as p()/ul()/callout(). Callers pass ready-to-render markup; the JS
+# that builds the "On this page" ToC reads each heading's textContent, so the
+# markup must be real elements, not escaped text.
 def h1(t, lead=""):
-    s = f"<h1>{html.escape(t)}</h1>"
+    s = f"<h1>{t}</h1>"
     if lead:
         s += f'<p class="lead">{lead}</p>'
     return s
 
 
 def h2(t):
-    return f"<h2>{html.escape(t)}</h2>"
+    return f"<h2>{t}</h2>"
 
 
 def h3(t):
-    return f"<h3>{html.escape(t)}</h3>"
+    return f"<h3>{t}</h3>"
 
 
 def p(t):
@@ -122,10 +126,11 @@ def ol(items):
     return "<ol>" + "".join(f"<li>{i}</li>" for i in items) + "</ol>"
 
 
-def table(headers, rows):
+def table(headers, rows, cls=""):
+    c = f' class="{cls}"' if cls else ""
     th = "".join(f"<th>{h}</th>" for h in headers)
     trs = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
-    return f"<table><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>"
+    return f"<table{c}><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>"
 
 
 def callout(body, kind="", title=None):
@@ -742,7 +747,7 @@ def page_cli():
              "<code>vgre train --corpus data.txt --out model.vgre --layers 4 --d-model 256</code>"],
             ["<code>vgre tokenize</code>", "Byte / BPE tokenizer helpers.",
              "<code>vgre tokenize --encode \"hi\"</code> · <code>--decode 104,105</code> · <code>--train corpus.txt --merges 512</code>"],
-        ]),
+        ], "cmd-table"),
         p("A source install also gets <code>vgre</code>, as a unified dispatcher: model "
           "subcommands run the Python CLI above, and <code>vgre start</code> / <code>worker</code> "
           "/ <code>token</code> / <code>discover</code> / <code>dashboard</code> delegate to the "
@@ -762,7 +767,7 @@ def page_cli():
              "<code>vgre-discover</code> (show public IP) · <code>--set-master</code> · <code>--register</code> · <code>--find</code> · <code>--unregister</code>"],
             ["<code>vgre-connect-check</code>", "Verify WAN/LAN connectivity to a master before starting a worker.",
              "<code>vgre-connect-check &lt;master-ip&gt; [port]</code>"],
-        ]),
+        ], "cmd-table"),
 
         h2("Cluster quick recipes"),
         code("# One machine — spin up a master + worker and self-test:\n"
@@ -784,7 +789,7 @@ def page_cli():
              "<code>vgre_ptx_gdbserver kernel.ptx</code> then <code>gdb</code> → <code>target remote :1234</code> (see <a href=\"debugging.html\">Debugging PTX</a>)"],
             ["<code>gpt2_infer</code>", "Real GPT-2 inference from a safetensors / GGUF checkpoint (matches Hugging Face bit-for-bit).",
              "<code>gpt2_infer model.safetensors --gen \"Hello\"</code>"],
-        ]),
+        ], "cmd-table"),
 
         h2("Setup helpers"),
         table(["Script", "What it does"], [
@@ -796,11 +801,14 @@ def page_cli():
         ]),
 
         callout(p("<strong>Windows:</strong> the same commands ship as scripts under "
-                  "<code>scripts\\</code> — <code>vgre-start.bat</code>, <code>vgre-token.bat</code> / "
+                  "<code>scripts\\</code> — the unified <code>vgre.bat</code> / <code>vgre.ps1</code>, "
+                  "<code>vgre-start.bat</code>, <code>vgre-token.bat</code> / "
                   "<code>vgre-token.ps1</code>, <code>vgre-discover.bat</code> / <code>.ps1</code>, plus "
                   "PowerShell installers <code>Install-VGRETools.ps1</code>, "
-                  "<code>Setup-VGRECluster.ps1</code>, and <code>Start-VGRE.ps1</code>. Env vars are set in "
-                  "User scope by <code>vgre_sync.bat</code> / <code>vgre_env.ps1</code>."), "tip"),
+                  "<code>Setup-VGRECluster.ps1</code>, and <code>Start-VGRE.ps1</code>. They install to "
+                  "<code>%LOCALAPPDATA%\\VGRE\\scripts</code> (on <code>PATH</code>) via "
+                  "<code>vgre_sync.bat</code> / <code>Install-VGRETools.ps1</code>, and env vars are set "
+                  "in User scope by <code>vgre_sync.bat</code> / <code>vgre_env.ps1</code>."), "tip"),
     ])
 
 

@@ -217,6 +217,36 @@ th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--bo
 th { color: var(--text-dim); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
 td code { white-space: nowrap; }
 
+/* Command-reference tables (CLI page): fixed proportional columns so the prose
+   column can't be starved by long, no-wrap code chips in the usage column. */
+.cmd-table { table-layout: fixed; }
+.cmd-table th, .cmd-table td { padding: 12px 16px; }
+.cmd-table th:nth-child(1), .cmd-table td:nth-child(1) { width: 22%; }
+.cmd-table th:nth-child(2), .cmd-table td:nth-child(2) { width: 32%; }
+.cmd-table th:nth-child(3), .cmd-table td:nth-child(3) { width: 46%; }
+/* Col 1: the command itself — read it as the key; break long hyphenated names
+   at a boundary rather than overflow the fixed cell. */
+.cmd-table td:first-child code { overflow-wrap: anywhere; font-weight: 500; }
+.cmd-table td:nth-child(2) { color: var(--text-muted); line-height: 1.6; }
+/* Col 3: usage examples — let each chip wrap at spaces instead of forcing the
+   column wide; keep rounded corners on wrapped fragments. */
+.cmd-table td:nth-child(3) { line-height: 2; }
+.cmd-table td:nth-child(3) code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+@media (max-width: 720px) {
+  /* Stack to two columns' worth of room on phones: drop fixed layout and let
+     the table scroll rather than crush the prose. */
+  .cmd-table { table-layout: auto; display: block; overflow-x: auto; }
+  .cmd-table th:nth-child(1), .cmd-table td:nth-child(1),
+  .cmd-table th:nth-child(2), .cmd-table td:nth-child(2),
+  .cmd-table th:nth-child(3), .cmd-table td:nth-child(3) { width: auto; }
+}
+
 /* ── Callouts ───────────────────────────────────────────────────────────── */
 .callout {
   border-left: 3px solid var(--blue);
