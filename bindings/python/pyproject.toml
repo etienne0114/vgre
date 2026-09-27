@@ -18,8 +18,13 @@ classifiers = [
 ]
 dependencies = ["numpy"]
 
+# Console entry point: `pip install vgre` puts a `vgre` command on PATH
+# (so `vgre --version`, `vgre info`, `vgre generate …` work after install).
+[project.scripts]
+vgre = "vgre.cli:main"
+
 [project.urls]
-Homepage = "https://github.com/etienne0114/virtual-gpu-runtime"
+Homepage = "https://github.com/etienne0114/vgre"
 
 # Pure-Python ctypes package; the native libvgre.so / libvgre_cudart.so are
 # bundled under vgre/lib/ as package data (see build_wheel.sh, which copies the

@@ -22,6 +22,7 @@ vgre_cli_bin_dir() {
 # Single source of truth for CLI wrapper scripts (basename without .sh for commands).
 vgre_cli_script_names() {
     printf '%s\n' \
+        vgre \
         vgre-token \
         vgre-start \
         vgre-discover \
