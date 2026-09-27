@@ -329,6 +329,12 @@ target_link_libraries(test_math_kernels_capi PRIVATE vgre)
 add_test(NAME MathKernelsCApi COMMAND test_math_kernels_capi)
 set_tests_properties(MathKernelsCApi PROPERTIES TIMEOUT 30)
 
+# MIG C API — previously-unexported FFI surface for multi-instance-GPU control.
+add_executable(test_mig_c_api core/test_mig_c_api.cpp)
+target_link_libraries(test_mig_c_api PRIVATE vgre)
+add_test(NAME MigCApi COMMAND test_mig_c_api)
+set_tests_properties(MigCApi PROPERTIES TIMEOUT 30)
+
 # QUEUE-60: Blelloch (1990) parallel prefix scan
 add_executable(test_prefix_scan core/test_prefix_scan.cpp)
 target_link_libraries(test_prefix_scan PRIVATE vgre)

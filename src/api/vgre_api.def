@@ -65,3 +65,12 @@ EXPORTS
     vgre_tensor_core_gemm_int8
     vgre_block_sparse_spmv
     vgre_cache_oblivious_matmul
+    vgre_mig_configure
+    vgre_mig_create_gpu_instance
+    vgre_mig_destroy_gpu_instance
+    vgre_mig_instance_count
+    vgre_mig_set_active
+    vgre_mig_clear_active
+    vgre_mig_get_memory_info
+    vgre_mig_instance_allocate
+    vgre_mig_instance_free
