@@ -335,6 +335,13 @@ target_link_libraries(test_mig_c_api PRIVATE vgre)
 add_test(NAME MigCApi COMMAND test_mig_c_api)
 set_tests_properties(MigCApi PROPERTIES TIMEOUT 30)
 
+# nvcuda::wmma tile MMA (self-contained, no JIT). Exercises the scalar path
+# natively and the AVX-512 mma kernel under SDE (`sde64 -spr`).
+add_executable(test_wmma_mma core/test_wmma_mma.cpp)
+target_link_libraries(test_wmma_mma PRIVATE vgre)
+add_test(NAME WmmaMma COMMAND test_wmma_mma)
+set_tests_properties(WmmaMma PROPERTIES TIMEOUT 30)
+
 # QUEUE-60: Blelloch (1990) parallel prefix scan
 add_executable(test_prefix_scan core/test_prefix_scan.cpp)
 target_link_libraries(test_prefix_scan PRIVATE vgre)

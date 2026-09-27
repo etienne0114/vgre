@@ -306,14 +306,14 @@ inline void mma_sync(
     // transposed during load), so mma_sync always sees row-major data.
 
 #if defined(VGRE_WMMA_X86)
-    // AMX path: only for the canonical 16×16×16 WMMA tile shape.
-    if constexpr (M == 16 && N == 16 && K == 16) {
-        // Runtime check: amxEnabled is set only when arch_prctl succeeded.
-        if (vgre::runtime::VectorEngine::instance().getCapabilities().amxEnabled) {
-            detail::mma_amx_bf16_16x16x16(d.data, a.data, b.data, c.data, satf);
-            return;
-        }
-    }
+    // NOTE: the AMX path (mma_amx_bf16_16x16x16) is DISABLED. Verified under
+    // Intel SDE that it raises #UD "AMX op mismatch in matrix dimension" — it
+    // loads B as a plain 16×16 tile and never VNNI-packs it (TDPBF16PS requires
+    // B as K/2 rows × N*2 bf16), so its tile shapes are inconsistent. It never
+    // executed before because the kernel was only compiled, never run. Until it
+    // is reimplemented with VNNI packing (as gemm_bf16_amx does) and validated
+    // under SDE, mma_sync uses the AVX-512 (verified) / scalar path, which is
+    // correct on every CPU including Sapphire Rapids.
     if constexpr (N == 16) {
         if (detail::wmma_have_avx512()) {
             detail::mma_avx512<M, N, K>(d.data, a.data, b.data, c.data, satf);
