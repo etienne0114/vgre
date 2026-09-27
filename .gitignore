@@ -9,6 +9,7 @@
 *.exe
 test_cudart
 vgre_test_*
+.vgre_test/           # runtime token-store output from test_hardware_token_manager (regenerated each run)
 
 # IDEs and Editors
 .vscode/
