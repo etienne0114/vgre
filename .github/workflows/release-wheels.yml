@@ -39,8 +39,7 @@ jobs:
           # auditwheel can stamp a broadly-compatible manylinux_2_35 tag that
           # installs on current distros (Ubuntu 22.04+, Debian 12, RHEL 9, …).
           - { os: ubuntu-22.04, name: linux-x86_64 }
-          - { os: macos-14,     name: macos-arm64  }
-          - { os: macos-13,     name: macos-x86_64 }   # Intel Macs (macos-13 runners are x86_64)
+          - { os: macos-14,     name: macos-universal2 }  # one wheel: arm64 + x86_64
           - { os: windows-2022, name: windows-x86_64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -83,29 +82,32 @@ jobs:
           rm -f bindings/python/dist/*.whl
           mv bindings/python/dist_manylinux/*.whl bindings/python/dist/
           echo "==> Final Linux wheel:"; ls -1 bindings/python/dist/*.whl
-          # ---- one-shot diagnostic: why won't the repaired wheel load? ----
-          echo "===== WHEEL CONTENTS (.so) ====="
-          python -m zipfile -l bindings/python/dist/*.whl | grep -Ei "\.so|\.libs" || true
-          python -m pip install --force-reinstall --no-deps bindings/python/dist/*.whl
-          LIB=$(python -c "import vgre._native as n; print(n._find_library() or '')")
-          echo "===== FOUND LIB: $LIB ====="
-          echo "----- ldd -----"; ldd "$LIB" || true
-          echo "----- direct ctypes load -----"
-          python -c "import ctypes; ctypes.CDLL('$LIB', mode=ctypes.RTLD_GLOBAL); print('DIRECT LOAD OK')" || echo "DIRECT LOAD FAILED (error above)"
 
-      # ── macOS: Apple clang, LLVM-free (arm64 on macos-14, x86_64 on macos-13) ──
-      - name: Build native + wheel (macOS, LLVM-free)
+      # ── macOS: Apple clang, LLVM-free — one universal2 wheel (arm64 + x86_64) ──
+      # Built on macos-14 (Apple Silicon) targeting both arches, so it installs on
+      # Intel and Apple-Silicon Macs from a single wheel. No Homebrew libs (which
+      # are single-arch); LAPACK/OpenSSL are disabled and SQLite comes from the
+      # universal macOS SDK, so every linked library is universal.
+      - name: Build native + wheel (macOS universal2, LLVM-free)
         if: startsWith(matrix.os, 'macos')
         shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
-          brew install cmake ninja sqlite lapack || true
+          brew install cmake ninja || true
           python -m pip install --upgrade build wheel setuptools numpy
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=off \
-            -DVGRE_WARNINGS_AS_ERRORS=OFF \
+            -DVGRE_USE_LAPACK=OFF -DVGRE_WARNINGS_AS_ERRORS=OFF \
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)"
           cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
+          # The binaries are fat (arm64+x86_64); retag the wheel universal2.
+          python -m wheel tags --platform-tag macosx_11_0_universal2 --remove bindings/python/dist/*macosx*.whl
+          echo "==> Final macOS wheel:"; ls -1 bindings/python/dist/*.whl
+          lipo -info build_rel/libvgre.dylib || true
 
       # ── Windows: clang-cl (choco llvm), LLVM-free; git-bash runs build_wheel.sh ──
       - name: Build native + wheel (Windows, LLVM-free)
