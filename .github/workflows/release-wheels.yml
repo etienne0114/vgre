@@ -35,7 +35,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, name: linux-x86_64 }
+          # Build the Linux wheel on the oldest supported glibc (22.04 = 2.35) so
+          # auditwheel can stamp a broadly-compatible manylinux_2_35 tag that
+          # installs on current distros (Ubuntu 22.04+, Debian 12, RHEL 9, …).
+          - { os: ubuntu-22.04, name: linux-x86_64 }
           - { os: macos-14,     name: macos-arm64  }
           - { os: macos-13,     name: macos-x86_64 }   # Intel Macs (macos-13 runners are x86_64)
           - { os: windows-2022, name: windows-x86_64 }
@@ -49,20 +52,34 @@ jobs:
           python-version: "3.12"
 
       # ── Linux: clang-18, LLVM-free (matches the linux-x86_64-llvm-free CI lane) ──
+      # Built on ubuntu-22.04 (glibc 2.35). clang-18 isn't in 22.04's repos, so we
+      # add the official LLVM apt channel — this keeps the compiler identical to the
+      # known-good 24.04 lane while lowering the glibc floor for a portable wheel.
       - name: Build native + wheel (Linux, LLVM-free)
-        if: matrix.os == 'ubuntu-24.04'
+        if: matrix.os == 'ubuntu-22.04'
         shell: bash
         run: |
           sudo apt-get update
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build clang-18 \
+            cmake ninja-build patchelf \
             libsqlite3-dev liblapack-dev libkeyutils-dev libssl-dev zlib1g-dev
-          python -m pip install --upgrade build wheel setuptools numpy
+          python -m pip install --upgrade build wheel setuptools numpy auditwheel
           cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF -DVGRE_SIMD_BASELINE=off \
             -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build_rel --target vgre vgre_cudart --parallel
           bash bindings/python/build_wheel.sh "$PWD/build_rel"
+          # PyPI rejects plain linux_x86_64 wheels. auditwheel vendors the native
+          # library's shared-object dependencies and stamps a valid manylinux tag,
+          # producing a self-contained, broadly-installable wheel.
+          auditwheel show bindings/python/dist/*.whl || true
+          auditwheel repair bindings/python/dist/*.whl -w bindings/python/dist_manylinux
+          rm -f bindings/python/dist/*.whl
+          mv bindings/python/dist_manylinux/*.whl bindings/python/dist/
+          echo "==> Final Linux wheel:"; ls -1 bindings/python/dist/*.whl
 
       # ── macOS: Apple clang, LLVM-free (arm64 on macos-14, x86_64 on macos-13) ──
       - name: Build native + wheel (macOS, LLVM-free)
@@ -142,14 +159,17 @@ jobs:
             on CPU. See the README for the full CUDA-emulation API.
 
   # ── PyPI (trusted publishing — no API token) ─────────────────────────────────
-  # Opt-in: run the workflow manually with publish_pypi=true. Requires a one-time
-  # PyPI-side setup — create the `vgre` project and add a trusted publisher pointing
-  # at this repo + workflow + the `pypi` environment (docs.pypi.org/trusted-publishers).
-  # Kept off the auto-tag path so releases never fail before that setup exists.
+  # Publishes on a version tag (vX.Y.Z) and on a manual run with publish_pypi=true.
+  # Requires a one-time PyPI-side setup: create a trusted publisher (a "pending
+  # publisher" for the not-yet-existing `vgre` project) pointing at this repo,
+  # workflow file `release-wheels.yml`, and the `pypi` environment
+  # (docs.pypi.org/trusted-publishers). This job runs independently of the GitHub
+  # Release job, so if the publisher isn't set up yet only this job fails — the
+  # Release still succeeds.
   pypi:
     name: publish-pypi
     needs: build
-    if: inputs.publish_pypi
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_pypi
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
@@ -163,3 +183,6 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # A version's files are immutable on PyPI; skip any already uploaded so
+          # a retry after a partial multi-wheel upload doesn't hard-fail.
+          skip-existing: true
