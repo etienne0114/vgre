@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vgre"
-version = "0.1.0"
+version = "0.1.1"
 description = "Virtual GPU Runtime Engine — run CUDA, and train/run an in-tree LM, on CPU"
 readme = "README.md"
 requires-python = ">=3.8"
