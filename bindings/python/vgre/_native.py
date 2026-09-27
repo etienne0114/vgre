@@ -190,6 +190,47 @@ def _find_library() -> Optional[str]:
     return None
 
 
+def _preload_siblings(path: str) -> None:
+    """Preload the other native libraries that ship next to libvgre with
+    RTLD_GLOBAL, so an inter-library dependency (e.g. libvgre -> libvgre_cudart)
+    resolves regardless of the main library's RPATH.
+
+    This matters for repaired wheels: `auditwheel repair` (Linux) and
+    `delocate` (macOS) rewrite the main library's RPATH to point only at the
+    vendored `*.libs` / `.dylibs` directory, dropping the original `$ORIGIN`
+    that let libvgre find its sibling in the same folder. Preloading the sibling
+    by soname satisfies the NEEDED entry from the already-loaded set. Best-effort
+    — failures are ignored; the real load below reports any genuine problem.
+    """
+    if sys.platform == "win32":
+        return
+    mode = getattr(ctypes, "RTLD_GLOBAL", 0)
+    main = os.path.realpath(path)
+    main_dir = os.path.dirname(main)
+    # The library's own dir, plus the wheel-vendored dirs the repair tools create.
+    search = [main_dir,
+              os.path.join(main_dir, os.pardir, "vgre.libs"),   # auditwheel (Linux)
+              os.path.join(main_dir, ".dylibs"),                # delocate (macOS)
+              os.path.join(main_dir, os.pardir, "vgre", ".dylibs")]
+    seen = set()
+    for d in search:
+        try:
+            entries = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in entries:
+            if not (name.endswith((".so", ".dylib")) or ".so." in name):
+                continue
+            cand = os.path.realpath(os.path.join(d, name))
+            if cand == main or cand in seen or not os.path.isfile(cand):
+                continue
+            seen.add(cand)
+            try:
+                ctypes.CDLL(cand, mode=mode)
+            except OSError:
+                pass  # a lib that needs the main one may fail here; that's fine
+
+
 def _load_library() -> Optional[ctypes.CDLL]:
     """Load libvgre and set up function signatures."""
     path = _find_library()
@@ -213,6 +254,7 @@ def _load_library() -> Optional[ctypes.CDLL]:
                 pass
             lib = ctypes.CDLL(path, winmode=0)
         else:
+            _preload_siblings(path)
             mode = getattr(ctypes, "RTLD_GLOBAL", None)
             if mode is None:
                 lib = ctypes.CDLL(path)
