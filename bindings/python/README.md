@@ -1,4 +1,4 @@
-# VGRE — Virtual GPU Runtime
+# VGRE — Virtual GPU Runtime Engine
 
 **Run unmodified CUDA on any CPU — no GPU required — and train/run real language
 models in the same package.** Self-contained and LLVM-free: the wheel bundles the

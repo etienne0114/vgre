@@ -403,9 +403,9 @@ if [[ ! -f "$TOKEN_FILE" ]]; then
     printf '%s' "$TOKEN" > "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
     ok "Auth token saved to $TOKEN_FILE"
-    warn "Share with workers:  vgre-token copy  (after install completes)"
+    warn "Share with workers:  vgre token copy  (after install completes)"
 else
-    ok "Auth token already exists (run  vgre-token fingerprint  to verify)"
+    ok "Auth token already exists (run  vgre token fingerprint  to verify)"
 fi
 
 # ── Step 5: Write ~/.vgre/env with ALL environment variables ─────────────────
@@ -622,7 +622,7 @@ fi
 . "$REPO_DIR/scripts/vgre-cli-install.sh"
 vgre_install_cli_symlinks "$REPO_DIR/scripts"
 vgre_ensure_cli_path
-ok "CLI tools installed → $BIN_DIR (run vgre-token install to refresh)"
+ok "CLI tools installed → $BIN_DIR (run vgre token install to refresh)"
 
 # Model CLI (vgre generate / train / tokenize / info) into ~/.vgre/venv.
 vgre_setup_python_cli "$REPO_DIR/bindings/python" || true
@@ -638,17 +638,17 @@ echo "║  New terminals will load it automatically from:          ║"
 echo "║    $ENV_FILE"
 echo "║                                                          ║"
 echo "║  Quick start:                                            ║"
-echo "║    vgre-dashboard               launch the dashboard     ║"
-echo "║    vgre-start --master          start master node        ║"
-echo "║    vgre-start --worker          start worker node        ║"
-echo "║    vgre-start --test            local self-test          ║"
+echo "║    vgre dashboard               launch the dashboard     ║"
+echo "║    vgre start --master          start master node        ║"
+echo "║    vgre start --worker          start worker node        ║"
+echo "║    vgre start --test            local self-test          ║"
 echo "║                                                          ║"
 echo "║  Token management (run from any terminal):               ║"
-echo "║    vgre-token generate          create new token         ║"
-echo "║    vgre-token fingerprint       show SHA-256 fingerprint ║"
-echo "║    vgre-token set <TOKEN>       paste token from master  ║"
-echo "║    vgre-token copy              show scp copy command    ║"
-echo "║    vgre-token verify            check master/worker match║"
+echo "║    vgre token generate          create new token         ║"
+echo "║    vgre token fingerprint       show SHA-256 fingerprint ║"
+echo "║    vgre token set <TOKEN>       paste token from master  ║"
+echo "║    vgre token copy              show scp copy command    ║"
+echo "║    vgre token verify            check master/worker match║"
 echo "║                                                          ║"
 echo "║  Current token fingerprint (share with workers):         ║"
 if command -v sha256sum >/dev/null 2>&1; then

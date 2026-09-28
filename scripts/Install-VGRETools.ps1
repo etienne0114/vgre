@@ -6,9 +6,9 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\Install-VGRETools.ps1
 #
 # After running, the following commands are available in THIS terminal immediately:
-#   vgre-token generate
-#   vgre-token fingerprint
-#   vgre-token set <TOKEN>
+#   vgre token generate
+#   vgre token fingerprint
+#   vgre token set <TOKEN>
 #   Setup-VGRECluster   (alias for scripts\Setup-VGRECluster.ps1)
 
 $ErrorActionPreference = "Stop"
@@ -142,8 +142,8 @@ Write-Host "Run these commands right now in this terminal:" -ForegroundColor Whi
 Write-Host ""
 Write-Host "  vgre --version             # show the VGRE version + native backend" -ForegroundColor Yellow
 Write-Host "  vgre generate --prompt hi  # generate text on the CPU (no GPU)" -ForegroundColor Yellow
-Write-Host "  vgre-token generate        # create a cluster auth token" -ForegroundColor Yellow
-Write-Host "  vgre-token fingerprint     # verify SHA-256 matches on all nodes" -ForegroundColor Yellow
+Write-Host "  vgre token generate        # create a cluster auth token" -ForegroundColor Yellow
+Write-Host "  vgre token fingerprint     # verify SHA-256 matches on all nodes" -ForegroundColor Yellow
 Write-Host "  Setup-VGRECluster          # interactive cluster setup wizard" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Token file:  $tokenFile" -ForegroundColor DarkGray

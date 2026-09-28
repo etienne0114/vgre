@@ -302,8 +302,8 @@ def page_quickstart():
         p("Open a <strong>new terminal</strong>, then:"),
         code("vgre --version          # version + native backend status\n"
              "vgre generate --prompt \"the \"   # trains a tiny demo model and generates text\n"
-             "vgre-dashboard          # launch the real-time monitor\n"
-             "vgre-start --test       # local master + worker self-test"),
+             "vgre dashboard          # launch the real-time monitor\n"
+             "vgre start --test       # local master + worker self-test"),
         h2("Run a CUDA program"),
         p("Build your CUDA source as usual, then run it against the VGRE runtime shim "
           "instead of the NVIDIA driver:"),
@@ -467,15 +467,15 @@ def page_cluster():
         h1("Distributed Clusters",
            "Scale kernels across machines over LAN or WAN. Channels are authenticated with "
            "HMAC-SHA256, encrypted with AES-256-CTR, and compressed with LZ4."),
-        h2("vgre-start commands"),
-        code("vgre-start --master                              # start a master node (launches dashboard)\n"
-             "vgre-start --worker                              # start a worker (LAN auto-discovery)\n"
-             "vgre-start --worker --is-master                  # headless master (K8s / container mode)\n"
-             "vgre-start --worker --master-ip <IP>             # LAN: connect to a specific master IP\n"
-             "vgre-start --worker --master-address <HOST:PORT> # WAN: hostname, IPv4, or IPv6\n"
-             "vgre-start --test                                # local self-test (master + worker)\n"
-             "vgre-start --port <N>                            # custom TCP port (default 7777)\n"
-             "vgre-start --threads <N>                         # worker thread count (default: auto)"),
+        h2("vgre start commands"),
+        code("vgre start --master                              # start a master node (launches dashboard)\n"
+             "vgre start --worker                              # start a worker (LAN auto-discovery)\n"
+             "vgre start --worker --is-master                  # headless master (K8s / container mode)\n"
+             "vgre start --worker --master-ip <IP>             # LAN: connect to a specific master IP\n"
+             "vgre start --worker --master-address <HOST:PORT> # WAN: hostname, IPv4, or IPv6\n"
+             "vgre start --test                                # local self-test (master + worker)\n"
+             "vgre start --port <N>                            # custom TCP port (default 7777)\n"
+             "vgre start --threads <N>                         # worker thread count (default: auto)"),
 
         h2("LAN cluster — step by step"),
         p("<strong>1. Install</strong> on every node "
@@ -485,29 +485,29 @@ def page_cluster():
           "(<a href=\"token-management.html\">Token Management</a>). "
           "<strong>4. Start</strong> the services:"),
         code("# Master:\n"
-             "vgre-start --master\n\n"
+             "vgre start --master\n\n"
              "# Workers (LAN auto-discovery):\n"
-             "vgre-start --worker\n\n"
+             "vgre start --worker\n\n"
              "# Workers (explicit LAN IP):\n"
-             "vgre-start --worker --master-ip 192.168.1.10"),
+             "vgre start --worker --master-ip 192.168.1.10"),
 
         h2("WAN cluster"),
         p("For workers on a <strong>different network</strong>, UDP broadcast cannot cross routers — "
           "use a direct TCP connection. Three methods:"),
         h3("Method A — explicit IP"),
         code("# On master: find your public IP\n"
-             "vgre-discover        # -> Public IP: 78.45.12.99  (prints the worker command)\n\n"
+             "vgre discover        # -> Public IP: 78.45.12.99  (prints the worker command)\n\n"
              "# On worker (any network):\n"
-             "vgre-start --worker --master-address 78.45.12.99:7777"),
+             "vgre start --worker --master-address 78.45.12.99:7777"),
         h3("Method B — automated token-keyed discovery"),
-        code("vgre-discover --register     # on master (run once, or after the IP changes)\n"
+        code("vgre discover --register     # on master (run once, or after the IP changes)\n"
              "#   -> Bucket ID: aBcDeFgH   (share this with workers)\n"
-             "vgre-discover --find aBcDeFgH  # on each worker (same token required)\n"
-             "vgre-start --worker --master-address 78.45.12.99:7777"),
+             "vgre discover --find aBcDeFgH  # on each worker (same token required)\n"
+             "vgre start --worker --master-address 78.45.12.99:7777"),
         p("See <a href=\"discovery.html\">Public IP Discovery</a> for how the token-keyed KV store works."),
         h3("Method C — VPN overlay (Tailscale / ZeroTier)"),
         code("# Both machines on the same Tailscale network; master's Tailscale IP 100.64.0.1\n"
-             "vgre-start --worker --master-ip 100.64.0.1"),
+             "vgre start --worker --master-ip 100.64.0.1"),
 
         h2("Firewall rules"),
         code("# Linux (UFW)\n"
@@ -521,7 +521,7 @@ def page_cluster():
         table(["State", "Behavior"], [
             ["Connection drops", "Retry immediately, then 1 s → 2 → 4 → … → 120 s"],
             ["Master restarts", "Worker reconnects within one backoff cycle"],
-            ["IP changes", "Re-run <code>vgre-discover --register</code> on master; workers re-run <code>--find</code>"],
+            ["IP changes", "Re-run <code>vgre discover --register</code> on master; workers re-run <code>--find</code>"],
         ]),
         p("The backoff ceiling is configurable: <code>export VGRE_CLUSTER_MAX_BACKOFF_SEC=60</code>."),
 
@@ -545,7 +545,7 @@ def page_cluster():
 def page_dashboard():
     return "".join([
         h1("The Dashboard", "A real-time Flutter monitor for the running engine."),
-        p("Launch with <code>vgre-dashboard</code>. It loads the native library "
+        p("Launch with <code>vgre dashboard</code>. It loads the native library "
           "in-process and polls live telemetry — no mock data. Pages:"),
         table(["Page", "What it shows"], [
             ["Dashboard", "Live utilization gauges, workload throughput, UVM activity, log stream."],
@@ -814,32 +814,34 @@ def page_cli():
           "cluster tools below."),
 
         h2("Cluster &amp; runtime"),
+        p("A source install exposes these as <code>vgre</code> subcommands — the same "
+          "<code>vgre &lt;command&gt;</code> style as above:"),
         table(["Command", "What it does", "Common usage"], [
-            ["<code>vgre-start</code>", "Start a master or worker node (auto-sources <code>~/.vgre/env</code>).",
-             "<code>vgre-start --master</code> · <code>--worker</code> · <code>--worker --master-ip 10.0.0.5</code> · <code>--worker --port 7778</code> · <code>--test</code> (master+worker on one box)"],
-            ["<code>vgre-worker</code>", "The worker binary itself (usually launched by <code>vgre-start</code>).",
-             "<code>vgre-worker --version</code> (prints build-info JSON) · <code>--is-master</code> (headless master in containers)"],
-            ["<code>vgre-dashboard</code>", "Launch the real-time Flutter monitor (utilization, kernels, cluster, memory, logs).",
-             "<code>vgre-dashboard</code>"],
-            ["<code>vgre-token</code>", "Manage the shared cluster auth token (HMAC-SHA256 / AES-256-CTR channels).",
-             "<code>vgre-token generate</code> · <code>fingerprint</code> · <code>set &lt;TOKEN&gt;</code> · <code>copy</code> · <code>push user@HOST</code>"],
-            ["<code>vgre-discover</code>", "Public-IP discovery + token-keyed cross-LAN registration (find a master over WAN).",
-             "<code>vgre-discover</code> (show public IP) · <code>--set-master</code> · <code>--register</code> · <code>--find</code> · <code>--unregister</code>"],
-            ["<code>vgre-connect-check</code>", "Verify WAN/LAN connectivity to a master before starting a worker.",
-             "<code>vgre-connect-check &lt;master-ip&gt; [port]</code>"],
+            ["<code>vgre start</code>", "Start a master or worker node (auto-sources <code>~/.vgre/env</code>).",
+             "<code>vgre start --master</code> · <code>--worker</code> · <code>--worker --master-ip 10.0.0.5</code> · <code>--worker --port 7778</code> · <code>--test</code> (master+worker on one box)"],
+            ["<code>vgre worker</code>", "The worker binary itself (usually launched by <code>vgre start</code>).",
+             "<code>vgre worker --version</code> (prints build-info JSON) · <code>--is-master</code> (headless master in containers)"],
+            ["<code>vgre dashboard</code>", "Launch the real-time Flutter monitor (utilization, kernels, cluster, memory, logs).",
+             "<code>vgre dashboard</code>"],
+            ["<code>vgre token</code>", "Manage the shared cluster auth token (HMAC-SHA256 / AES-256-CTR channels).",
+             "<code>vgre token generate</code> · <code>fingerprint</code> · <code>set &lt;TOKEN&gt;</code> · <code>copy</code> · <code>push user@HOST</code>"],
+            ["<code>vgre discover</code>", "Public-IP discovery + token-keyed cross-LAN registration (find a master over WAN).",
+             "<code>vgre discover</code> (show public IP) · <code>--set-master</code> · <code>--register</code> · <code>--find</code> · <code>--unregister</code>"],
+            ["<code>vgre connect-check</code>", "Verify WAN/LAN connectivity to a master before starting a worker.",
+             "<code>vgre connect-check &lt;master-ip&gt; [port]</code>"],
         ], "cmd-table"),
 
         h2("Cluster quick recipes"),
         code("# One machine — spin up a master + worker and self-test:\n"
-             "vgre-start --test\n\n"
+             "vgre start --test\n\n"
              "# Master node:\n"
-             "vgre-token generate           # create the shared token (prints its fingerprint)\n"
-             "vgre-token copy               # prints the scp command to share it with workers\n"
-             "vgre-start --master           # starts the master + dashboard\n\n"
+             "vgre token generate           # create the shared token (prints its fingerprint)\n"
+             "vgre token copy               # prints the scp command to share it with workers\n"
+             "vgre start --master           # starts the master + dashboard\n\n"
              "# Worker node (after receiving the token):\n"
-             "vgre-token set <TOKEN>        # or: vgre-token push user@worker  (from the master)\n"
-             "vgre-connect-check 10.0.0.5   # confirm reachability first\n"
-             "vgre-start --worker --master-ip 10.0.0.5"),
+             "vgre token set <TOKEN>        # or: vgre token push user@worker  (from the master)\n"
+             "vgre connect-check 10.0.0.5   # confirm reachability first\n"
+             "vgre start --worker --master-ip 10.0.0.5"),
 
         h2("Developer tools"),
         p("Built binaries land in <code>build/tools/</code> (run them from there, or add it to "
@@ -860,15 +862,12 @@ def page_cli():
             ["<code>scripts/vgre-print-linux-setup.sh</code>", "Linux desktop-launcher / print setup for the dashboard."],
         ]),
 
-        callout(p("<strong>Windows:</strong> the same commands ship as scripts under "
-                  "<code>scripts\\</code> — the unified <code>vgre.bat</code> / <code>vgre.ps1</code>, "
-                  "<code>vgre-start.bat</code>, <code>vgre-token.bat</code> / "
-                  "<code>vgre-token.ps1</code>, <code>vgre-discover.bat</code> / <code>.ps1</code>, plus "
-                  "PowerShell installers <code>Install-VGRETools.ps1</code>, "
-                  "<code>Setup-VGRECluster.ps1</code>, and <code>Start-VGRE.ps1</code>. They install to "
-                  "<code>%LOCALAPPDATA%\\VGRE\\scripts</code> (on <code>PATH</code>) via "
-                  "<code>vgre_sync.bat</code> / <code>Install-VGRETools.ps1</code>, and env vars are set "
-                  "in User scope by <code>vgre_sync.bat</code> / <code>vgre_env.ps1</code>."), "tip"),
+        callout(p("<strong>Windows:</strong> the same <code>vgre &lt;command&gt;</code> works. The "
+                  "installers put <code>vgre.bat</code> / <code>vgre.ps1</code> on <code>PATH</code> "
+                  "(under <code>%LOCALAPPDATA%\\VGRE\\scripts</code>) via <code>vgre_sync.bat</code> or "
+                  "<code>Install-VGRETools.ps1</code>, so <code>vgre token generate</code>, "
+                  "<code>vgre start --master</code>, and the rest run just like on Linux/macOS. "
+                  "Env vars are set in User scope by <code>vgre_env.ps1</code>."), "tip"),
     ])
 
 
@@ -983,29 +982,29 @@ def page_system_requirements():
 def page_token_management():
     return "".join([
         h1("Token Management",
-           "<code>vgre-token</code> manages the shared 256-bit cluster auth token — the secret "
+           "<code>vgre token</code> manages the shared 256-bit cluster auth token — the secret "
            "that authenticates every node. It works from any directory on all three platforms."),
         h2("Commands"),
-        code("vgre-token generate       # generate a new secure 256-bit token\n"
-             "vgre-token show           # print the stored token value\n"
-             "vgre-token fingerprint    # print the SHA-256 fingerprint\n"
-             "vgre-token set [TOKEN]    # store a token pasted from another machine\n"
-             "vgre-token verify         # check the env var matches the stored file\n"
-             "vgre-token copy           # print the scp / robocopy command for workers\n"
-             "vgre-token revoke         # delete the stored token (with confirmation)\n"
-             "vgre-token install        # install vgre-token to the User PATH (first run)"),
+        code("vgre token generate       # generate a new secure 256-bit token\n"
+             "vgre token show           # print the stored token value\n"
+             "vgre token fingerprint    # print the SHA-256 fingerprint\n"
+             "vgre token set [TOKEN]    # store a token pasted from another machine\n"
+             "vgre token verify         # check the env var matches the stored file\n"
+             "vgre token copy           # print the scp / robocopy command for workers\n"
+             "vgre token revoke         # delete the stored token (with confirmation)\n"
+             "vgre token install        # install vgre token to the User PATH (first run)"),
         h2("Typical workflow"),
         code("# ── On the MASTER machine ─────────────────────────────────────\n"
-             "vgre-token generate\n"
+             "vgre token generate\n"
              "#   Token saved to ~/.vgre/token\n"
              "#   Token fingerprint (SHA-256): a3f9bcd2...\n\n"
              "# Share the token with workers (pick one):\n"
-             "vgre-token copy                      # prints the scp / robocopy command\n"
+             "vgre token copy                      # prints the scp / robocopy command\n"
              "scp ~/.vgre/token worker@192.168.1.50:~/.vgre/token\n\n"
              "# ── On every WORKER machine ───────────────────────────────────\n"
-             "vgre-token set a3f9bcd2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # option B: paste the value\n\n"
+             "vgre token set a3f9bcd2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  # option B: paste the value\n\n"
              "# ── Verify both machines match ────────────────────────────────\n"
-             "vgre-token fingerprint               # run on BOTH — the output must be identical"),
+             "vgre token fingerprint               # run on BOTH — the output must be identical"),
         h2("Token storage"),
         table(["Platform", "Token file", "Env var set in"], [
             ["Linux / macOS", "<code>~/.vgre/token</code> (chmod 600)", "<code>~/.vgre/env</code> → shell profile"],
@@ -1020,20 +1019,20 @@ def page_token_management():
 def page_discovery():
     return "".join([
         h1("Public IP Discovery",
-           "<code>vgre-discover</code> solves the WAN bootstrap problem — finding the master's "
+           "<code>vgre discover</code> solves the WAN bootstrap problem — finding the master's "
            "real public IP and handing it to workers without manual configuration."),
         h2("Commands"),
-        code("vgre-discover                  # show the real public IP + worker connect command\n"
-             "vgre-discover --set-master     # set VGRE_CLUSTER_ADVERTISED_ADDRESS for this session\n"
-             "vgre-discover --register       # register the master IP to a token-keyed KV store\n"
-             "vgre-discover --find [BUCKET]  # (worker) retrieve the master IP using the local token\n"
-             "vgre-discover --unregister     # remove the registration from the KV store"),
+        code("vgre discover                  # show the real public IP + worker connect command\n"
+             "vgre discover --set-master     # set VGRE_CLUSTER_ADVERTISED_ADDRESS for this session\n"
+             "vgre discover --register       # register the master IP to a token-keyed KV store\n"
+             "vgre discover --find [BUCKET]  # (worker) retrieve the master IP using the local token\n"
+             "vgre discover --unregister     # remove the registration from the KV store"),
         h2("How it works"),
         p("<strong>Public IP detection</strong> tries five HTTP endpoints in order and uses the "
           "first valid IPv4 response: <code>api.ipify.org</code>, <code>ipecho.net/plain</code>, "
           "<code>icanhazip.com</code>, <code>checkip.amazonaws.com</code>, <code>api4.my-ip.io/ip</code>."),
-        p("<strong>Master auto-broadcast</strong> — <code>vgre-start --master</code> calls "
-          "<code>vgre-discover --set-master</code> first, setting "
+        p("<strong>Master auto-broadcast</strong> — <code>vgre start --master</code> calls "
+          "<code>vgre discover --set-master</code> first, setting "
           "<code>VGRE_CLUSTER_ADVERTISED_ADDRESS=&lt;public-ip&gt;:7777</code>. The UDP announcer "
           "embeds that real address in every broadcast so workers behind NAT receive the correct "
           "IP instead of the sender's internal one."),
@@ -1044,22 +1043,22 @@ def page_discovery():
           "password."),
         h2("Quick start: WAN cluster with automated discovery"),
         code("# ── Master ────────────────────────────────────────────────────\n"
-             "vgre-token generate            # if not already done\n"
-             "vgre-discover --register       # prints the BUCKET_ID to share\n"
+             "vgre token generate            # if not already done\n"
+             "vgre discover --register       # prints the BUCKET_ID to share\n"
              "#   [OK] Master registered.  Bucket ID: aBcDeFgH   Master IP: 78.45.12.99:7777\n"
-             "vgre-start --master            # auto-detects IP and sets the advertised address\n\n"
+             "vgre start --master            # auto-detects IP and sets the advertised address\n\n"
              "# ── Workers (any network, same token) ─────────────────────────\n"
-             "vgre-discover --find aBcDeFgH  # -> Master found: 78.45.12.99:7777\n"
-             "vgre-start --worker --master-address 78.45.12.99:7777"),
+             "vgre discover --find aBcDeFgH  # -> Master found: 78.45.12.99:7777\n"
+             "vgre start --worker --master-address 78.45.12.99:7777"),
         h2("Discovery modes: LAN vs WAN"),
         table(["Scenario", "How discovery works"], [
             ["Same LAN", "UDP broadcast — automatic, no configuration"],
-            ["Different LAN, same token", "<code>vgre-discover --register</code> → <code>--find</code>"],
-            ["Different LAN, manual", "<code>vgre-discover</code> shows the IP → share the one-liner"],
+            ["Different LAN, same token", "<code>vgre discover --register</code> → <code>--find</code>"],
+            ["Different LAN, manual", "<code>vgre discover</code> shows the IP → share the one-liner"],
             ["VPN (Tailscale / ZeroTier)", "Same as LAN — auto-discovery works"],
-            ["Dynamic IP (home ISP)", "Re-run <code>vgre-discover --register</code> after the IP changes"],
+            ["Dynamic IP (home ISP)", "Re-run <code>vgre discover --register</code> after the IP changes"],
         ]),
-        callout(p("<code>vgre-discover</code> finds your <strong>external</strong> IP, but workers can "
+        callout(p("<code>vgre discover</code> finds your <strong>external</strong> IP, but workers can "
                   "only reach the master if your router port-forwards TCP 7777, or you use a VPN "
                   "(<a href=\"https://tailscale.com\">Tailscale</a> / "
                   "<a href=\"https://www.zerotier.com\">ZeroTier</a> — no port-forward needed), or the "
@@ -1085,7 +1084,7 @@ def page_advanced():
             "<strong>AVX-512 path</strong> — N=16 tiles, ~16× over scalar.",
             "<strong>Scalar fallback</strong> — always available.",
         ]),
-        code("VGRE_LOG_LEVEL=DEBUG vgre-dashboard 2>&1 | grep -E \"AMX|AVX-512|SIMD\""),
+        code("VGRE_LOG_LEVEL=DEBUG vgre dashboard 2>&1 | grep -E \"AMX|AVX-512|SIMD\""),
         h2("Hopper PTX emulation"),
         table(["PTX instruction", "CPU emulation"], [
             ["<code>wgmma.mma_async.*</code>", "Full M×N×K GEMM via <code>vgre_wgmma_*</code> (AVX-512 when N=256)"],
@@ -1105,7 +1104,7 @@ def page_advanced():
         h2("gRPC cluster transport"),
         code("cmake -S . -B build -DVGRE_ENABLE_GRPC=ON\n"
              "export VGRE_GRPC_PORT=50051\n"
-             "vgre-start --master"),
+             "vgre start --master"),
     ])
 
 
@@ -1119,32 +1118,32 @@ def page_troubleshooting():
              "ldd ~/.local/share/VGRE/lib/libvgre.so | grep \"not found\"\n"
              "sudo apt-get install libomp-dev        # if libomp.so is missing"),
 
-        h3("vgre-start not recognised (Windows)"),
+        h3("vgre start not recognised (Windows)"),
         code("Test-Path \"$env:LOCALAPPDATA\\VGRE\\scripts\\vgre-start.bat\"\n"
              "$env:PATH = \"$env:LOCALAPPDATA\\VGRE\\scripts;$env:PATH\"   # if PATH not yet updated\n"
-             "vgre-start --help\n"
+             "vgre start --help\n"
              ".\\scripts\\vgre_sync.bat                                    # reinstall", "powershell"),
 
         h3("Worker cannot connect to master"),
-        code("vgre-token fingerprint                       # 1. run on BOTH — must be identical\n"
+        code("vgre token fingerprint                       # 1. run on BOTH — must be identical\n"
              "nc -zv MASTER_IP 7777                        # 2. test reachability (Linux/macOS)\n"
              "Test-NetConnection MASTER_IP -Port 7777      #    (Windows PowerShell)\n"
              "sudo ufw allow 7777/tcp                      # 3. open the firewall (Linux)\n"
-             "vgre-discover                                # 4. WAN: verify the public IP\n"
+             "vgre discover                                # 4. WAN: verify the public IP\n"
              "export VGRE_CLUSTER_CONNECT_TIMEOUT_SEC=30   # 5. raise the timeout on slow links"),
 
         h3("UDP auto-discovery not working across subnets"),
         p("UDP broadcast (<code>255.255.255.255</code>) cannot cross routers. Use a direct "
           "connection or token-keyed discovery instead:"),
-        code("vgre-start --worker --master-ip 192.168.1.10           # same LAN, different subnet\n"
-             "vgre-start --worker --master-address 78.45.12.99:7777  # WAN / internet\n"
-             "vgre-discover --register   # on master\n"
-             "vgre-discover --find <ID>  # on worker"),
+        code("vgre start --worker --master-ip 192.168.1.10           # same LAN, different subnet\n"
+             "vgre start --worker --master-address 78.45.12.99:7777  # WAN / internet\n"
+             "vgre discover --register   # on master\n"
+             "vgre discover --find <ID>  # on worker"),
 
         h3("Mismatched token fingerprints"),
-        code("vgre-token copy          # on master — prints the scp command\n"
+        code("vgre token copy          # on master — prints the scp command\n"
              "scp ~/.vgre/token worker@WORKER_IP:~/.vgre/token\n"
-             "vgre-token fingerprint   # verify on both machines"),
+             "vgre token fingerprint   # verify on both machines"),
 
         h3("CMake cannot find LLVM"),
         code("# Linux\n"
@@ -1229,9 +1228,9 @@ def page_production_status():
             ("CUDA MPS multi-process", "Production (Unix socket)"),
             ("<code>cuMemMulticast</code>", "Production"),
             ("Flutter real-time dashboard", "Production"),
-            ("<code>vgre-token</code> CLI", "Production (Linux / macOS / Windows)"),
-            ("<code>vgre-start</code> cluster launcher", "Production (Linux / macOS / Windows)"),
-            ("<code>vgre-discover</code> IP discovery", "<strong>Production</strong>"),
+            ("<code>vgre token</code> CLI", "Production (Linux / macOS / Windows)"),
+            ("<code>vgre start</code> cluster launcher", "Production (Linux / macOS / Windows)"),
+            ("<code>vgre discover</code> IP discovery", "<strong>Production</strong>"),
             ("OpenTelemetry <code>hw.gpu.*</code> export", "Production"),
         ])),
     ])

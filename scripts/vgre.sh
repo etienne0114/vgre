@@ -79,11 +79,12 @@ Model & runtime (Python package — set up by ./scripts/vgre_sync.sh):
   tokenize             byte / BPE tokenization helpers
 
 Cluster & node (source install — install_local.sh):
-  start                start a master or worker node        (vgre-start)
-  worker               run the worker binary directly       (vgre-worker)
-  token                manage the shared cluster auth token (vgre-token)
-  discover             find / publish the master's public IP (vgre-discover)
-  dashboard            launch the Flutter monitoring dashboard (vgre-dashboard)
+  start                start a master or worker node
+  worker               run the worker binary directly
+  token                manage the shared cluster auth token
+  discover             find / publish the master's public IP
+  connect-check        verify connectivity to a master before starting a worker
+  dashboard            launch the Flutter monitoring dashboard
 
 Other:
   version, --version   print the VGRE version and native backend status
@@ -149,6 +150,7 @@ case "$cmd" in
     worker)     run_sibling vgre-worker "$@" ;;
     token)      run_sibling vgre-token "$@" ;;
     discover)   run_sibling vgre-discover "$@" ;;
+    connect-check) run_sibling vgre-connect-check "$@" ;;
     dashboard)  run_sibling vgre-dashboard "$@" ;;
     *)
         echo "vgre: unknown command '$cmd'" >&2

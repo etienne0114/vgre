@@ -39,8 +39,8 @@ vgre generate --prompt &quot;the &quot;  # trains a tiny demo model and generate
 cd vgre
 bash install_local.sh</code></pre></div><p><code>install_local.sh</code> detects and installs missing dependencies (CMake, LLVM, OpenMP, Flutter), builds the native engine and dashboard, writes <code>~/.vgre/env</code>, creates your auth token, links the CLI tools into <code>~/.local/bin</code>, and installs the model CLI into a managed venv at <code>~/.vgre/venv</code>.</p><p>Open a <strong>new terminal</strong>, then:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash">vgre --version          # version + native backend status
 vgre generate --prompt &quot;the &quot;   # trains a tiny demo model and generates text
-vgre-dashboard          # launch the real-time monitor
-vgre-start --test       # local master + worker self-test</code></pre></div><h2>Run a CUDA program</h2><p>Build your CUDA source as usual, then run it against the VGRE runtime shim instead of the NVIDIA driver:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Linux — preload the CUDA-runtime shim
+vgre dashboard          # launch the real-time monitor
+vgre start --test       # local master + worker self-test</code></pre></div><h2>Run a CUDA program</h2><p>Build your CUDA source as usual, then run it against the VGRE runtime shim instead of the NVIDIA driver:</p><div class="terminal" data-lang="bash"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">bash</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-bash"># Linux — preload the CUDA-runtime shim
 LD_PRELOAD=$VGRE_INSTALL_DIR/lib/libvgre_cudart.so ./my_cuda_app
 
 # macOS

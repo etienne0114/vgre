@@ -383,7 +383,7 @@ echo flutter: !FLUTTER_CMD!
 echo LLVM_DIR: !LLVM_DIR!
 
 echo.
-echo === Installing VGRE CLI Tools (vgre, vgre-token, vgre-start) ===
+echo === Installing VGRE CLI + cluster subcommands (vgre token, vgre start, ...) ===
 rem Install CLI tools NOW - before the build - so they are available even if
 rem the native build fails.  Also updates the current session PATH immediately
 rem so the user does not need to restart their terminal.
@@ -401,18 +401,18 @@ copy /Y "%SCRIPT_DIR%vgre-discover.ps1"     "%TOKEN_SCRIPT_DIR%\vgre-discover.ps
 copy /Y "%SCRIPT_DIR%Setup-VGRECluster.ps1" "%TOKEN_SCRIPT_DIR%\Setup-VGRECluster.ps1" >nul 2>&1
 copy /Y "%SCRIPT_DIR%vgre_env.ps1"          "%TOKEN_SCRIPT_DIR%\vgre_env.ps1"          >nul 2>&1
 copy /Y "%SCRIPT_DIR%Install-VGRETools.ps1" "%TOKEN_SCRIPT_DIR%\Install-VGRETools.ps1" >nul 2>&1
-echo [OK] vgre + vgre-token + vgre-start + vgre-discover installed to %TOKEN_SCRIPT_DIR%
+echo [OK] vgre CLI + subcommands (token/start/discover) installed to %TOKEN_SCRIPT_DIR%
 
 rem Update User PATH (persistent across new terminals)
 for /f "usebackq" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$d='%TOKEN_SCRIPT_DIR%';$d2='%INSTALL_DIR%';$p=[Environment]::GetEnvironmentVariable('Path','User');$changed=$false;foreach($dir in @($d2,$d)){if($p -notlike '*'+$dir+'*'){$p+=';'+$dir;$changed=$true}};if($changed){[Environment]::SetEnvironmentVariable('Path',$p,'User');'CHANGED'}else{'EXISTS'}"`) do set "_CLI_PATH_STATUS=%%I"
 if "!_CLI_PATH_STATUS!"=="CHANGED" echo [OK] Added CLI tools to User PATH.
 
-rem Update current session PATH too - vgre-token works WITHOUT restarting terminal
+rem Update current session PATH too - vgre token works WITHOUT restarting terminal
 if "!PATH!" neq "!PATH:%TOKEN_SCRIPT_DIR%=!" goto :cli_path_ok
 set "PATH=%TOKEN_SCRIPT_DIR%;%INSTALL_DIR%;!PATH!"
 :cli_path_ok
-echo [INFO] vgre-token is available in this terminal and all new terminals.
-echo        Run: vgre-token generate
+echo [INFO] vgre token is available in this terminal and all new terminals.
+echo        Run: vgre token generate
 
 echo.
 echo === Pulling Latest Source ===
@@ -1086,18 +1086,18 @@ echo  Installed to:  %INSTALL_DIR%
 if not "%SHORTCUT_PATH%"=="" echo  Desktop shortcut: %SHORTCUT_PATH%
 echo.
 if exist "!DEFAULT_TOKEN_FILE!" (
-    echo  Auth token:  READY ^(run  vgre-token fingerprint  to verify^)
+    echo  Auth token:  READY ^(run  vgre token fingerprint  to verify^)
 ) else (
     echo  Auth token:  NOT configured
-    echo  Run from any NEW terminal:  vgre-token generate
+    echo  Run from any NEW terminal:  vgre token generate
 )
 echo.
 echo  TOKEN MANAGEMENT ^(run from any terminal after restart^):
-echo    vgre-token generate          create / rotate auth token
-echo    vgre-token fingerprint       show SHA-256 for comparison
-echo    vgre-token set ^<TOKEN^>       paste token from master node
-echo    vgre-token copy              show copy command for workers
-echo    vgre-token verify            check master/worker match
+echo    vgre token generate          create / rotate auth token
+echo    vgre token fingerprint       show SHA-256 for comparison
+echo    vgre token set ^<TOKEN^>       paste token from master node
+echo    vgre token copy              show copy command for workers
+echo    vgre token verify            check master/worker match
 echo.
 echo  MODEL CLI ^(CPU, no GPU^):
 echo    vgre --version                                   version + native backend
@@ -1105,12 +1105,12 @@ echo    vgre generate --prompt "the "                    generate text
 echo    vgre train --corpus data.txt --out model.vgre    train a small LM
 echo.
 echo  START COMMANDS:
-echo    vgre-start --master                              launch master + dashboard
-echo    vgre-start --worker                              launch worker (LAN auto-discover)
-echo    vgre-start --worker --master-ip ^<IP^>             connect to specific LAN master
-echo    vgre-start --worker --master-address ^<HOST:PORT^>  WAN / hostname / IPv6
-echo    vgre-start --test                                local self-test
-echo    vgre-start --help                                show all options
+echo    vgre start --master                              launch master + dashboard
+echo    vgre start --worker                              launch worker (LAN auto-discover)
+echo    vgre start --worker --master-ip ^<IP^>             connect to specific LAN master
+echo    vgre start --worker --master-address ^<HOST:PORT^>  WAN / hostname / IPv6
+echo    vgre start --test                                local self-test
+echo    vgre start --help                                show all options
 echo.
 echo  Open a NEW terminal for PATH changes to take effect.
 echo ============================================================
