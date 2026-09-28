@@ -9,7 +9,7 @@
 # Windows ships the same commands as vgre-*.bat / vgre-*.ps1 (see scripts/).
 set -eu
 
-VGRE_VERSION="0.1.2"
+VGRE_VERSION="0.1.3"
 
 # Resolve this script's real directory even when invoked via a ~/.local/bin
 # symlink, so we can find the sibling vgre-<cmd>.sh wrappers.

@@ -240,13 +240,56 @@ def cmd_tokenize(args) -> int:
 
 
 # ── argument parser ──────────────────────────────────────────────────────────
+# Cluster / node subcommands are provided by the source install (vgre_sync.sh /
+# install_local.sh) as sibling `vgre-<name>` tools. Delegate to them so the pip
+# `vgre` command and the source dispatcher expose the same `vgre <subcommand>`
+# interface (otherwise `vgre token` / `vgre connect-check` would error here).
+_CLUSTER_SUBCOMMANDS = {
+    "start": "vgre-start",
+    "worker": "vgre-worker",
+    "token": "vgre-token",
+    "discover": "vgre-discover",
+    "connect-check": "vgre-connect-check",
+    "dashboard": "vgre-dashboard",
+}
+
+
+def _find_cluster_tool(exe: str) -> Optional[str]:
+    import shutil
+    found = shutil.which(exe)
+    if found:
+        return found
+    candidates = [os.path.expanduser(os.path.join("~", ".local", "bin", exe))]
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            base = os.path.join(local, "VGRE", "scripts", exe)
+            candidates += [base + ".bat", base + ".ps1"]
+    return next((c for c in candidates if os.path.exists(c)), None)
+
+
+def _delegate_cluster(name: str, rest: List[str]) -> int:
+    import subprocess
+    path = _find_cluster_tool(_CLUSTER_SUBCOMMANDS[name])
+    if not path:
+        sys.stderr.write(
+            f"vgre: '{name}' is a cluster/runtime tool that comes with the source "
+            f"install, not the pip wheel.\n"
+            f"      Set it up with:\n"
+            f"        git clone https://github.com/etienne0114/vgre && cd vgre && ./scripts/vgre_sync.sh\n"
+            f"      (the model commands — generate/train/tokenize/info — work from the wheel.)\n")
+        return 127
+    return subprocess.call([path] + rest)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vgre",
         description="Virtual GPU Runtime — run CUDA and a local language model on the CPU.",
-        epilog="Cluster/dashboard tools (vgre-start, vgre-worker, vgre-token, "
-               "vgre-discover, vgre-dashboard) ship with the source build's "
-               "install_local.sh; this wheel provides the model/runtime CLI above.",
+        epilog="Cluster / node subcommands (vgre start, vgre worker, vgre token, "
+               "vgre discover, vgre connect-check, vgre dashboard) come from the "
+               "source install (./scripts/vgre_sync.sh); this wheel provides the "
+               "model/runtime commands above and delegates the cluster ones.",
     )
     p.add_argument("--version", action="store_true", help="print version and native backend status")
     sub = p.add_subparsers(dest="command", metavar="<command>")
@@ -293,6 +336,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Delegate cluster subcommands to the installed vgre-<name> tools before
+    # argparse (which would reject them as an invalid choice).
+    if argv and argv[0] in _CLUSTER_SUBCOMMANDS:
+        return _delegate_cluster(argv[0], argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.version:
