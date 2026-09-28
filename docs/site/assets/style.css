@@ -238,13 +238,23 @@ td code { white-space: nowrap; }
   box-decoration-break: clone;
 }
 
+/* Four-column comparison table (index "How VGRE compares"): fixed columns so
+   the 4th column can't overflow into the sidebar. */
+.compare-table { table-layout: fixed; }
+.compare-table th, .compare-table td {
+  padding: 12px 14px; vertical-align: top; line-height: 1.5; overflow-wrap: anywhere;
+}
+.compare-table th:nth-child(1), .compare-table td:nth-child(1) { width: 28%; font-weight: 500; }
+.compare-table th:nth-child(2), .compare-table td:nth-child(2) { width: 26%; color: var(--neon); }
+.compare-table th:nth-child(3), .compare-table td:nth-child(3) { width: 23%; }
+.compare-table th:nth-child(4), .compare-table td:nth-child(4) { width: 23%; }
+.compare-table code { white-space: normal; }
+
 @media (max-width: 720px) {
   /* Stack to two columns' worth of room on phones: drop fixed layout and let
      the table scroll rather than crush the prose. */
-  .cmd-table { table-layout: auto; display: block; overflow-x: auto; }
-  .cmd-table th:nth-child(1), .cmd-table td:nth-child(1),
-  .cmd-table th:nth-child(2), .cmd-table td:nth-child(2),
-  .cmd-table th:nth-child(3), .cmd-table td:nth-child(3) { width: auto; }
+  .cmd-table, .compare-table { table-layout: auto; display: block; overflow-x: auto; white-space: nowrap; }
+  .cmd-table th, .cmd-table td, .compare-table th, .compare-table td { width: auto; }
 }
 
 /* ── Callouts ───────────────────────────────────────────────────────────── */

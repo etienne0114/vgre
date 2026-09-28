@@ -204,7 +204,7 @@ def page_index():
             ["Run <strong>unmodified CUDA</strong> on CPU", "✅ its core purpose", "❌", "❌"],
             ["Needs a GPU / CUDA toolkit / LLVM", "❌ none", "❌ none", "GPU optional"],
             ["Everything in-tree / auditable", "✅ front-end, GEMM, JIT, tokenizer", "engine only", "❌ large deps"],
-        ], "cmd-table"),
+        ], "compare-table"),
         p("Use a dedicated inference engine when raw tokens/sec on a fixed model is all you "
           "need. Reach for VGRE when you want <strong>no GPU, minimal dependencies, and one "
           "transparent toolchain</strong> for CUDA development, training, and inference — for "
