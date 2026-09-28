@@ -192,6 +192,23 @@ def page_index():
                   "job), and the whole suite runs green on macOS (Apple Silicon) and Windows "
                   "(clang-cl). Hardware-only gaps (physical GPU PMU counters, Metal MPS, GPUDirect "
                   "RDMA) are listed in the <a href=\"faq.html\">FAQ &amp; Troubleshooting</a>."), "tip"),
+        h2("How VGRE compares"),
+        p("For running <em>one</em> pretrained model as fast as possible, a specialized engine "
+          "like llama.cpp is typically faster. VGRE's value is different: <strong>one "
+          "self-contained, GPU-free stack</strong> that emulates CUDA <em>and</em> trains "
+          "<em>and</em> runs inference — from a single <code>pip install</code>."),
+        table(["Capability", "VGRE", "llama.cpp", "PyTorch + transformers"], [
+            ["Install footprint", "<code>pip install vgre</code> (+ NumPy)", "build a C++ binary", "multi-GB (torch + HF)"],
+            ["Run a pretrained GGUF on CPU", "✅ ~28 tok/s (135M, int8)", "✅ fastest — specialized", "✅ but heavy, fp16/32"],
+            ["Train / fine-tune from scratch", "✅ autograd + AdamW + LoRA", "❌ inference only", "✅ (heavyweight)"],
+            ["Run <strong>unmodified CUDA</strong> on CPU", "✅ its core purpose", "❌", "❌"],
+            ["Needs a GPU / CUDA toolkit / LLVM", "❌ none", "❌ none", "GPU optional"],
+            ["Everything in-tree / auditable", "✅ front-end, GEMM, JIT, tokenizer", "engine only", "❌ large deps"],
+        ], "cmd-table"),
+        p("Use a dedicated inference engine when raw tokens/sec on a fixed model is all you "
+          "need. Reach for VGRE when you want <strong>no GPU, minimal dependencies, and one "
+          "transparent toolchain</strong> for CUDA development, training, and inference — for "
+          "learning, CI, and research."),
     ])
 
 
@@ -583,6 +600,33 @@ def page_local_ai():
              "ids = tok.encode('Hello, world!')\n"
              "assert tok.decode(ids) == 'Hello, world!'",
              "python"),
+        h2("Run a real pretrained model — fluent output, no training"),
+        p("Point <code>LanguageModel.load_gguf</code> at a pretrained "
+          "<strong>Llama-family</strong> GGUF checkpoint and generate: VGRE dequantizes the "
+          "weights and runs the forward pass on the CPU. Below is SmolLM2-135M-Instruct — "
+          "verified at <strong>~28 tokens/s</strong> with weight-only int8 inference:"),
+        code("import vgre\n"
+             "# the model's own tokenizer + a legacy-quant (Q8_0) GGUF of its weights\n"
+             "tok = vgre.Tokenizer().load_hf('tokenizer.json')\n"
+             "lm  = vgre.LanguageModel(vocab=49152, n_layer=30, d_model=576, n_head=9,\n"
+             "                         n_kv_head=3, d_ff=1536, max_seq=2048, tie_embeddings=True)\n"
+             "lm.load_gguf('SmolLM2-135M-Instruct.Q8_0.gguf')   # dequantizes Q8_0 -> f32\n"
+             "lm.set_int8_inference()                            # ~4x smaller, faster on CPU\n"
+             "ids = tok.encode('Explain what a GPU does in two sentences.')\n"
+             "print(tok.decode(lm.generate(ids, n_new=120, temperature=0.7, top_k=50)))",
+             "python"),
+        callout(p("<strong>Output:</strong> <em>“A GPU (Graphics Processing Unit) is an "
+                  "electronic component that executes calculations on data stored in memory, "
+                  "allowing for faster and more efficient processing of graphics and other "
+                  "digital content.”</em> — 134.5M params loaded in 1.1 s, 120 tokens at 27.6 "
+                  "tok/s on CPU."), "tip"),
+        p("<strong>What loads:</strong> a Llama-architecture checkpoint (RoPE + grouped-query "
+          "attention + SwiGLU + RMSNorm). Create the model with the checkpoint's <em>exact</em> "
+          "dims first (from its <code>config.json</code>); use a legacy quant "
+          "(<code>Q8_0</code> / <code>Q4_0</code> / <code>Q4_1</code>); models with rope-theta "
+          "10000 (SmolLM2, TinyLlama). Get the two files from Hugging Face — see the "
+          "<a href=\"https://github.com/etienne0114/vgre/blob/main/pretrained_demo.py\">pretrained_demo.py</a> "
+          "recipe."),
         callout(p("Together these complete a fully local <strong>embed → index → "
                   "retrieve → generate → fine-tune</strong> RAG loop that never touches "
                   "the network."), "tip"),

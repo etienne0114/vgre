@@ -42,7 +42,15 @@ ids, dists = ix.search(query_vec, k=10)
 ix.save(&#x27;docs.vgvx&#x27;)</code></pre></div><h2>Tokenizer + language model</h2><p>Load any modern Hugging Face <code>tokenizer.json</code> (GPT-2, Llama-3, Qwen, Phi, DeepSeek) and get that model's exact token ids — verified token-for-token against the real HF <code>tokenizers</code> library.</p><div class="terminal" data-lang="python"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">python</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-python">import vgre
 tok = vgre.Tokenizer().load_hf(&#x27;tokenizer.json&#x27;)
 ids = tok.encode(&#x27;Hello, world!&#x27;)
-assert tok.decode(ids) == &#x27;Hello, world!&#x27;</code></pre></div><div class="callout tip"><div class="callout-title">Tip</div><p>Together these complete a fully local <strong>embed → index → retrieve → generate → fine-tune</strong> RAG loop that never touches the network.</p></div>
+assert tok.decode(ids) == &#x27;Hello, world!&#x27;</code></pre></div><h2>Run a real pretrained model — fluent output, no training</h2><p>Point <code>LanguageModel.load_gguf</code> at a pretrained <strong>Llama-family</strong> GGUF checkpoint and generate: VGRE dequantizes the weights and runs the forward pass on the CPU. Below is SmolLM2-135M-Instruct — verified at <strong>~28 tokens/s</strong> with weight-only int8 inference:</p><div class="terminal" data-lang="python"><div class="terminal-bar"><span class="term-dots"><i></i><i></i><i></i></span><span class="term-lang">python</span><button class="copy-btn" type="button" aria-label="Copy code">Copy</button></div><pre><code class="lang-python">import vgre
+# the model&#x27;s own tokenizer + a legacy-quant (Q8_0) GGUF of its weights
+tok = vgre.Tokenizer().load_hf(&#x27;tokenizer.json&#x27;)
+lm  = vgre.LanguageModel(vocab=49152, n_layer=30, d_model=576, n_head=9,
+                         n_kv_head=3, d_ff=1536, max_seq=2048, tie_embeddings=True)
+lm.load_gguf(&#x27;SmolLM2-135M-Instruct.Q8_0.gguf&#x27;)   # dequantizes Q8_0 -&gt; f32
+lm.set_int8_inference()                            # ~4x smaller, faster on CPU
+ids = tok.encode(&#x27;Explain what a GPU does in two sentences.&#x27;)
+print(tok.decode(lm.generate(ids, n_new=120, temperature=0.7, top_k=50)))</code></pre></div><div class="callout tip"><div class="callout-title">Tip</div><p><strong>Output:</strong> <em>“A GPU (Graphics Processing Unit) is an electronic component that executes calculations on data stored in memory, allowing for faster and more efficient processing of graphics and other digital content.”</em> — 134.5M params loaded in 1.1 s, 120 tokens at 27.6 tok/s on CPU.</p></div><p><strong>What loads:</strong> a Llama-architecture checkpoint (RoPE + grouped-query attention + SwiGLU + RMSNorm). Create the model with the checkpoint's <em>exact</em> dims first (from its <code>config.json</code>); use a legacy quant (<code>Q8_0</code> / <code>Q4_0</code> / <code>Q4_1</code>); models with rope-theta 10000 (SmolLM2, TinyLlama). Get the two files from Hugging Face — see the <a href="https://github.com/etienne0114/vgre/blob/main/pretrained_demo.py">pretrained_demo.py</a> recipe.</p><div class="callout tip"><div class="callout-title">Tip</div><p>Together these complete a fully local <strong>embed → index → retrieve → generate → fine-tune</strong> RAG loop that never touches the network.</p></div>
     <div class="page-nav"><a href="dashboard.html"><div class="dir">← Previous</div><div class="ttl">The Dashboard</div></a><a class="next" href="debugging.html"><div class="dir">Next →</div><div class="ttl">Debugging PTX (GDB)</div></a></div>
   </main>
   <aside class="toc">
@@ -50,7 +58,7 @@ assert tok.decode(ids) == &#x27;Hello, world!&#x27;</code></pre></div><div class
     <nav class="toc-list"></nav>
   </aside>
 </div>
-<script src="assets/search-index.js?v=6128db449c"></script>
+<script src="assets/search-index.js?v=20bcf867b2"></script>
 <script src="assets/docs.js?v=a438fb4d98"></script>
 </body>
 </html>
