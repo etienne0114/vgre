@@ -3,17 +3,20 @@
  *
  * Production authentication mode tests.
  *
- * Production policy: security auto-generates a secure token if none is
- * configured, guaranteeing clusters are secure out-of-the-box.
+ * Production policy: enabling security requires a configured token so the
+ * master and workers can share the same credential. Tests use an isolated
+ * in-memory token configuration and an absent token-file path.
  */
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <thread>
 #include <chrono>
 
+#include "vgre/api/vgre_c_api.h"
 #include "vgre/advanced/tcp_cluster.h"
 #include "vgre/common/error_codes.h"
 #include "vgre/common/logger.h"
@@ -29,6 +32,17 @@ inline int unsetenv(const char* name) { return _putenv_s(name, ""); }
 static std::string getEnv(const char* name) {
     const char* val = std::getenv(name);
     return val ? std::string(val) : "";
+}
+
+static bool configureTestToken(const char* token) {
+    static const std::string absentTokenFile = [] {
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        return (std::filesystem::temp_directory_path() /
+                ("vgre-security-test-token-" + std::to_string(stamp)))
+            .string();
+    }();
+    return vgre_set_config("VGRE_TCP_AUTH_TOKEN_FILE", absentTokenFile.c_str()) == VGRE_SUCCESS &&
+           vgre_set_config("VGRE_TCP_AUTH_TOKEN", token) == VGRE_SUCCESS;
 }
 
 #define CHECK(cond) \
@@ -78,22 +92,22 @@ static bool test_auth_retry_error_code() {
     return true;
 }
 
-// Test 3: Enabling security without a token auto-generates one
-static bool test_enable_security_auto_generates_token() {
-    std::cout << "[TEST 3] enableSecurity(true) auto-generates token...\n";
+// Test 3: Enabling security accepts an explicitly configured shared token
+static bool test_enable_security_with_configured_token() {
+    std::cout << "[TEST 3] enableSecurity(true) uses a configured token...\n";
 
-    unsetenv("VGRE_CLUSTER_STRICT_AUTH");
-    unsetenv("VGRE_TCP_AUTH_TOKEN");
+    CHECK(vgre_set_config("VGRE_CLUSTER_STRICT_AUTH", "0") == VGRE_SUCCESS);
+    CHECK(configureTestToken("hybrid-test-token-3"));
 
     vgre::advanced::TCPClusterManager& mgr =
         vgre::advanced::TCPClusterManager::instance();
-    mgr.initialize(true, "127.0.0.1", 19988);
+    CHECK(mgr.initialize(true, "127.0.0.1", 19988) == vgre::VGREResult::SUCCESS);
     vgre::VGREResult r = mgr.enableSecurity(true);
     CHECK(r == vgre::VGREResult::SUCCESS);
     CHECK(mgr.isSecurityEnabled());
     mgr.shutdown();
 
-    std::cout << "[PASS] enableSecurity auto-generates token\n";
+    std::cout << "[PASS] enableSecurity uses a configured token\n";
     return true;
 }
 
@@ -101,18 +115,19 @@ static bool test_enable_security_auto_generates_token() {
 static bool test_strict_mode_opt_in() {
     std::cout << "[TEST 4] Strict mode opt-in...\n";
 
-    setenv("VGRE_CLUSTER_STRICT_AUTH", "1", 1);
-    setenv("VGRE_TCP_AUTH_TOKEN", "test-secret", 1);
+    CHECK(vgre_set_config("VGRE_CLUSTER_STRICT_AUTH", "1") == VGRE_SUCCESS);
+    CHECK(configureTestToken("hybrid-test-token-4"));
 
     vgre::advanced::TCPClusterManager& mgr =
         vgre::advanced::TCPClusterManager::instance();
-    mgr.initialize(true, "127.0.0.1", 19987);
+    CHECK(mgr.initialize(true, "127.0.0.1", 19987) == vgre::VGREResult::SUCCESS);
     vgre::VGREResult r = mgr.enableSecurity(true);
     CHECK(r == vgre::VGREResult::SUCCESS);
     mgr.shutdown();
 
-    unsetenv("VGRE_CLUSTER_STRICT_AUTH");
-    unsetenv("VGRE_TCP_AUTH_TOKEN");
+    CHECK(vgre_set_config("VGRE_CLUSTER_STRICT_AUTH", "") == VGRE_SUCCESS);
+    CHECK(vgre_set_config("VGRE_TCP_AUTH_TOKEN", "") == VGRE_SUCCESS);
+    CHECK(vgre_set_config("VGRE_TCP_AUTH_TOKEN_FILE", "") == VGRE_SUCCESS);
 
     std::cout << "[PASS] Strict mode opt-in\n";
     return true;
@@ -122,17 +137,18 @@ static bool test_strict_mode_opt_in() {
 static bool test_security_info_cipher() {
     std::cout << "[TEST 5] Security info cipher name...\n";
 
-    setenv("VGRE_TCP_AUTH_TOKEN", "test-cipher-check", 1);
+    CHECK(configureTestToken("hybrid-test-cipher-token"));
     vgre::advanced::TCPClusterManager& mgr =
         vgre::advanced::TCPClusterManager::instance();
-    mgr.initialize(true, "127.0.0.1", 19986);
-    mgr.enableSecurity(true);
+    CHECK(mgr.initialize(true, "127.0.0.1", 19986) == vgre::VGREResult::SUCCESS);
+    CHECK(mgr.enableSecurity(true) == vgre::VGREResult::SUCCESS);
 
     vgre::advanced::SessionInfo info = mgr.getSecurityInfo();
     CHECK(strlen(info.cipher_name) > 0);
 
     mgr.shutdown();
-    unsetenv("VGRE_TCP_AUTH_TOKEN");
+    CHECK(vgre_set_config("VGRE_TCP_AUTH_TOKEN", "") == VGRE_SUCCESS);
+    CHECK(vgre_set_config("VGRE_TCP_AUTH_TOKEN_FILE", "") == VGRE_SUCCESS);
 
     std::cout << "[PASS] Security info cipher name = \"" << info.cipher_name << "\"\n";
     return true;
@@ -156,7 +172,7 @@ int main() {
     bool ok = true;
     ok &= test_env_parsing();
     ok &= test_auth_retry_error_code();
-    ok &= test_enable_security_auto_generates_token();
+    ok &= test_enable_security_with_configured_token();
     ok &= test_strict_mode_opt_in();
     ok &= test_security_info_cipher();
     ok &= test_logging();

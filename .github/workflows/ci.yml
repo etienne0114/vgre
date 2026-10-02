@@ -92,7 +92,7 @@ jobs:
           GENERATED="$(python3 -m vgre generate --model "$MODEL" --prompt "One plus one is" --max-tokens 8 --temperature 0)"
           test -n "$GENERATED"
           CHAT_OUTPUT="$(printf 'What is one plus one?\n' | python3 -m vgre chat --max-tokens 8 --temperature 0)"
-          printf '%s\n' "$CHAT_OUTPUT" | grep -q '^Assistant:'
+          printf '%s\n' "$CHAT_OUTPUT" | grep -q 'Assistant:'
 
       - name: Test
         # Bounded parallelism + load awareness: the JIT tests each fork clang and
@@ -276,7 +276,7 @@ jobs:
           GENERATED="$(python3 -m vgre generate --model "$MODEL" --prompt "One plus one is" --max-tokens 8 --temperature 0)"
           test -n "$GENERATED"
           CHAT_OUTPUT="$(printf 'What is one plus one?\n' | python3 -m vgre chat --max-tokens 8 --temperature 0)"
-          printf '%s\n' "$CHAT_OUTPUT" | grep -q '^Assistant:'
+          printf '%s\n' "$CHAT_OUTPUT" | grep -q 'Assistant:'
 
       - name: Test
         working-directory: build
@@ -435,7 +435,7 @@ jobs:
           $generated = python -m vgre generate --model $modelPath --prompt "One plus one is" --max-tokens 8 --temperature 0
           if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($generated -join ""))) { throw "vgre generate failed or returned no text" }
           $chatOutput = "What is one plus one?" | python -m vgre chat --max-tokens 8 --temperature 0
-          if ($LASTEXITCODE -ne 0 -or -not ($chatOutput -match '^Assistant:')) { throw "vgre chat failed or returned no assistant output" }
+          if ($LASTEXITCODE -ne 0 -or -not ($chatOutput -match 'Assistant:')) { throw "vgre chat failed or returned no assistant output" }
 
       - name: Test
         env:

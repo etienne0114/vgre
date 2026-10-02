@@ -61,13 +61,13 @@ PyPI publication and Vercel Git integration are external release/deployment
 settings; repository tests cannot verify credentials or configure those hosted
 services.
 
-## GitHub CI audit (2026-10-02)
+## Prior GitHub CI audit (2026-10-02)
 
-The latest available GitHub Actions run for `main` was [run 36388156153](https://github.com/etienne0114/vgre/actions/runs/36388156153), created on 2026-09-28. Its Linux CTest artifact showed the same LLVM command-line option registration crash in `PythonLmBindings`, `PythonNn`, `PyTorchIntegration`, and `TensorFlowIntegration`. The Windows build and tests passed; the macOS test step failed. GitHub redirected the macOS log download to its artifact storage host, which was unreachable from this environment, so that failure's exact test is not confirmed here.
+At the time, the latest available GitHub Actions run for `main` was [run 36388156153](https://github.com/etienne0114/vgre/actions/runs/36388156153), created on 2026-09-28. Its Linux CTest artifact showed the same LLVM command-line option registration crash in `PythonLmBindings`, `PythonNn`, `PyTorchIntegration`, and `TensorFlowIntegration`. The Windows build and tests passed; the macOS test step failed. GitHub redirected the macOS log download to its artifact storage host, which was unreachable from this environment, so that failure's exact test is not confirmed here.
 
 The Linux cause was the Python loader preloading the sibling `libvgre_cudart` library into the same process as `libvgre`; both libraries contain the statically linked LLVM runtime. The loader now skips VGRE libraries during sibling preloading. Local CTest verification passed `PythonLmBindings`, `PythonNn`, `PythonGgufAutoConfig`, and `VgreCliNativeLibrarySelection`; the metadata C and C++ API tests and `TCPClusterSecurityHybrid` also pass.
 
-The current cross-platform Python integration set passed 104 tests locally. Its two memory-measurement tests skipped because `psutil` is not installed in the local virtual environment; CI installs that dependency. The workflow runs this set on Linux, macOS, and Windows, includes the previously excluded security hybrid test, uploads CTest logs on failure for each OS, and treats each OS job as required. These workflow changes have not run remotely yet.
+At that point, the cross-platform Python integration set passed 104 tests locally. Its two memory-measurement tests skipped because `psutil` was not installed in the local virtual environment; CI installs that dependency. The workflow ran this set on Linux, macOS, and Windows, included the previously excluded security hybrid test, uploaded CTest logs on failure for each OS, and treated each OS job as required. The later hosted run and its fixes are recorded below.
 
 The full native project build completed locally, and all 410 CTest tests passed
 with `HOME` redirected to a temporary test directory. The weak chat test fixtures
@@ -77,3 +77,22 @@ GGUF fixture and actual native inference. The CI workflow also runs generation
 and interactive chat against the downloaded SmolLM2 model on each OS.
 
 Removed the unreferenced root-level `test_model.gguf` (15-byte plain text, not a GGUF file) and `test_bench.json` (unreferenced benchmark numbers without provenance).
+
+## Latest GitHub CI run (2026-10-02)
+
+Run [37005920162](https://github.com/etienne0114/vgre/actions/runs/37005920162)
+on commit `3cd525f5` exposed two issues. Linux, macOS, and Windows all passed
+the real model pull and generation steps, then failed the chat smoke assertion:
+the interactive output prefixes `Assistant:` with `User: `, while the workflow
+required it at the start of the line. The Linux LLVM-free CTest artifact showed
+one failing test, `TCPClusterSecurityHybrid`; its test expected token
+auto-generation although production correctly requires a configured shared
+token before enabling cluster security.
+
+The smoke checks now search for the assistant label anywhere in the output on
+all three operating systems. The security integration test now supplies an
+isolated configured token and checks initialization results; production remains
+fail-closed. The targeted `TCPClusterSecurityHybrid` CTest and the complete
+local Linux CTest suite pass (410/410). Local socket tests were run with
+localhost socket access. A new hosted run is needed to verify these changes on
+the GitHub Linux, macOS, Windows, and LLVM-free runners.
