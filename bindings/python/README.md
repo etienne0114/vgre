@@ -15,28 +15,37 @@ vgre generate --prompt "the "
 
 ## Run a real pretrained model — fluent output, no training
 
-Load a pretrained **Llama-family** GGUF checkpoint and generate on the CPU. VGRE
-dequantizes the weights and runs the forward pass — verified with
-SmolLM2-135M-Instruct at **~28 tokens/s** (weight-only int8):
+Load a supported Llama-family or Qwen2 GGUF checkpoint without hand-writing
+dimension sidecars. VGRE reads the model dimensions, RoPE base, and norm epsilon
+from GGUF, then dequantizes supported tensors for CPU inference:
 
 ```python
 import vgre
-tok = vgre.Tokenizer().load_hf("tokenizer.json")          # the model's own tokenizer
-lm  = vgre.LanguageModel(vocab=49152, n_layer=30, d_model=576, n_head=9,
-                         n_kv_head=3, d_ff=1536, max_seq=2048, tie_embeddings=True)
-lm.load_gguf("SmolLM2-135M-Instruct.Q8_0.gguf")           # dequantizes Q8_0 -> f32
-lm.set_int8_inference()                                   # ~4x smaller, faster on CPU
+tok = vgre.Tokenizer().load_hf("tokenizer.json")
+lm = vgre.LanguageModel.from_gguf("model.gguf")
 ids = tok.encode("Explain what a GPU does in two sentences.")
 print(tok.decode(lm.generate(ids, n_new=120, temperature=0.7, top_k=50)))
-# → "A GPU (Graphics Processing Unit) is an electronic component that executes
-#    calculations on data stored in memory, allowing for faster and more
-#    efficient processing of graphics and other digital content."
 ```
 
-Constraints: a **Llama-architecture** checkpoint, the model's **exact dims** (from
-its `config.json`), a **legacy quant** (`Q8_0` / `Q4_0` / `Q4_1`), and rope-theta
-10000 (SmolLM2, TinyLlama). Full recipe:
-[`pretrained_demo.py`](https://github.com/etienne0114/vgre/blob/main/pretrained_demo.py).
+The matching HF `tokenizer.json` is still required because GGUF model loading
+does not yet implement every tokenizer format. Current auto-config support is
+limited to Llama and Qwen2 tensor layouts; architectures with fused QKV or other
+non-Llama layouts (including Phi-3) are not supported yet. The CLI can download
+the pinned SmolLM2 preset and use it directly:
+
+```bash
+vgre chat
+vgre pull smollm2
+vgre chat smollm2
+```
+
+Or run `vgre chat` to download the pinned preset and start chatting on first use.
+The model is stored in the platform's cache directory; set
+`VGRE_MODEL_CACHE_DIR` to choose another cache root. Use an actual file path for
+local GGUFs—`vgre_sync.sh` installs the runtime but does not download weights.
+For an opt-in, lower-quality decode path, pass `--ternary` to `vgre chat` or
+`vgre generate`; it uses the packed 2-bit ternary GEMM. `--bf16` is a separate,
+mutually exclusive inference mode.
 
 ## Train a small model from scratch
 

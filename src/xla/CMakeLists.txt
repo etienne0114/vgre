@@ -17,6 +17,8 @@ add_library(vgre_xla OBJECT
     autograd_c_api.cpp
     safetensors.cpp
     gguf.cpp
+    gguf_metadata.cpp
+    gguf_metadata_c_api.cpp
     generation.cpp
     tokenizer.cpp
     parallel.cpp
@@ -110,6 +112,8 @@ if(VGRE_BUILD_NN_LIB)
         autograd_c_api.cpp
         safetensors.cpp
         gguf.cpp
+        gguf_metadata.cpp
+        gguf_metadata_c_api.cpp
         generation.cpp
         tokenizer.cpp
         hlo_evaluator.cpp

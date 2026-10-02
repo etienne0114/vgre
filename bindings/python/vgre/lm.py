@@ -20,6 +20,7 @@ Example
 """
 
 import ctypes
+import os
 from typing import List, Optional
 
 from ._native import _lib, NATIVE_AVAILABLE
@@ -38,11 +39,14 @@ def _bind() -> None:
     _lib.vgre_lm_create.restype = c.c_void_p
     _lib.vgre_lm_create_gqa.argtypes = [c.c_int] * 7 + [c.c_float, c.c_int, c.c_uint, c.c_int]
     _lib.vgre_lm_create_gqa.restype = c.c_void_p
+    _lib.vgre_lm_set_rope_norm.argtypes = [c.c_void_p, c.c_float, c.c_float]
+    _lib.vgre_lm_set_rope_norm.restype = c.c_int
     _lib.vgre_lm_create.restype = c.c_void_p
     _lib.vgre_lm_free.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.argtypes = [c.c_void_p]
     _lib.vgre_lm_num_params.restype = c.c_longlong
     _lib.vgre_lm_set_bf16_inference.argtypes = [c.c_void_p, c.c_int]
+    _lib.vgre_lm_set_ternary_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_inference.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int8_kv_cache.argtypes = [c.c_void_p, c.c_int]
     _lib.vgre_lm_set_int4_kv_cache.argtypes = [c.c_void_p, c.c_int]
@@ -70,6 +74,41 @@ def _bind() -> None:
     _lib.vgre_lm_load_llama.restype = c.c_int
     _lib.vgre_lm_load_gguf.argtypes = [c.c_void_p, c.c_char_p]
     _lib.vgre_lm_load_gguf.restype = c.c_int
+
+    # GGUF Metadata C API bindings
+    _lib.vgre_gguf_metadata_open.argtypes = [c.c_char_p]
+    _lib.vgre_gguf_metadata_open.restype = c.c_void_p
+    _lib.vgre_gguf_metadata_free.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_get_block_count.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_block_count.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_embedding_length.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_embedding_length.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_head_count.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_head_count.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_head_count_kv.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_head_count_kv.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_feed_forward_length.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_feed_forward_length.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_vocabulary_size.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_vocabulary_size.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_context_length.argtypes = [c.c_void_p, P(c.c_int32)]
+    _lib.vgre_gguf_metadata_get_context_length.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_rope_freq_base.argtypes = [c.c_void_p, P(c.c_float)]
+    _lib.vgre_gguf_metadata_get_rope_freq_base.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_norm_eps.argtypes = [c.c_void_p, P(c.c_float)]
+    _lib.vgre_gguf_metadata_get_norm_eps.restype = c.c_int
+    _lib.vgre_gguf_metadata_has_attention_bias.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_has_attention_bias.restype = c.c_int
+    _lib.vgre_gguf_metadata_has_output_weight.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_has_output_weight.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_architecture.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_get_architecture.restype = c.c_char_p
+    _lib.vgre_gguf_metadata_get_chat_template.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_get_chat_template.restype = c.c_char_p
+    _lib.vgre_gguf_metadata_is_valid.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_is_valid.restype = c.c_int
+    _lib.vgre_gguf_metadata_get_last_error.argtypes = [c.c_void_p]
+    _lib.vgre_gguf_metadata_get_last_error.restype = c.c_char_p
 
     _lib.vgre_cosine_lr.argtypes = [c.c_longlong, c.c_longlong, c.c_longlong, c.c_float, c.c_float]
     _lib.vgre_cosine_lr.restype = c.c_float
@@ -124,6 +163,219 @@ def cosine_lr(step: int, warmup: int, total: int, base_lr: float, min_lr: float 
     """Cosine learning-rate schedule with linear warmup (matches the C++ trainer)."""
     _require()
     return float(_lib.vgre_cosine_lr(int(step), int(warmup), int(total), float(base_lr), float(min_lr)))
+
+
+class GGUFMetadataReader:
+    """Python interface for GGUF metadata extraction.
+
+    This class provides a Pythonic wrapper around the C API for extracting
+    model configuration parameters from GGUF files. It handles automatic
+    memory management and converts C errors to Python exceptions.
+
+    Example:
+        reader = GGUFMetadataReader("model.gguf")
+        params = reader.get_model_parameters()
+        print(f"Model has {params.get('n_layer', 'unknown')} layers")
+    """
+
+    def __init__(self, path: str):
+        """Open a GGUF file for metadata reading.
+
+        Args:
+            path: Path to the GGUF file
+
+        Raises:
+            RuntimeError: If the file cannot be opened or is invalid
+        """
+        _require()
+        path = os.fspath(path)
+        if not os.path.isfile(path):
+            if os.path.isdir(path):
+                raise IsADirectoryError(f"GGUF model path is a directory: {path}")
+            raise FileNotFoundError(f"GGUF model file does not exist: {path}")
+        with open(path, 'rb') as gguf_file:
+            if gguf_file.read(4) != b'GGUF':
+                raise ValueError(f"File is not a GGUF model: {path}")
+
+        self._h = _lib.vgre_gguf_metadata_open(path.encode('utf-8'))
+        if not self._h:
+            raise ValueError(f"Invalid or truncated GGUF file: {path}")
+
+        if not _lib.vgre_gguf_metadata_is_valid(self._h):
+            error_msg = self._get_last_error()
+            self.close()
+            raise ValueError(f"Invalid GGUF file: {error_msg}")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+    def get_model_parameters(self) -> dict:
+        """Extract all available model parameters from GGUF metadata.
+
+        Returns:
+            Dictionary containing extracted parameters with keys:
+            - n_layer: Number of transformer layers
+            - d_model: Embedding/hidden dimension size
+            - n_head: Number of attention heads
+            - n_kv_head: Number of key-value heads (for GQA)
+            - d_ff: Feed-forward dimension
+            - rope_theta: RoPE frequency base
+            - norm_eps: Layer normalization epsilon
+        """
+        params = {}
+
+        for param_name, getter_func in self._PARAMETER_GETTERS.items():
+            value = getter_func()
+            if value is not None:
+                params[param_name] = value
+            else:
+                error = self._get_last_error()
+                if error.startswith("Invalid numeric value"):
+                    raise ValueError(error)
+
+        params["attn_bias"] = self.has_attention_bias
+        params["tie_embeddings"] = not self.has_output_weight
+        if self.architecture:
+            params["architecture"] = self.architecture
+        if self.chat_template:
+            params["chat_template"] = self.chat_template
+
+        return params
+
+    def get_block_count(self) -> Optional[int]:
+        """Extract n_layer parameter from GGUF metadata.
+
+        Returns:
+            Number of transformer layers, or None if not found
+        """
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_block_count(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_embedding_length(self) -> Optional[int]:
+        """Extract d_model parameter from GGUF metadata.
+
+        Returns:
+            Embedding dimension size, or None if not found
+        """
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_embedding_length(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_head_count(self) -> Optional[int]:
+        """Extract n_head parameter from GGUF metadata.
+
+        Returns:
+            Number of attention heads, or None if not found
+        """
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_head_count(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_head_count_kv(self) -> Optional[int]:
+        """Extract n_kv_head parameter from GGUF metadata.
+
+        Returns:
+            Number of key-value heads, or None if not found
+        """
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_head_count_kv(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_feed_forward_length(self) -> Optional[int]:
+        """Extract d_ff parameter from GGUF metadata.
+
+        Returns:
+            Feed-forward dimension, or None if not found
+        """
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_feed_forward_length(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_vocabulary_size(self) -> Optional[int]:
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_vocabulary_size(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_context_length(self) -> Optional[int]:
+        value = ctypes.c_int32()
+        result = _lib.vgre_gguf_metadata_get_context_length(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_rope_freq_base(self) -> Optional[float]:
+        """Extract rope_theta parameter from GGUF metadata.
+
+        Returns:
+            RoPE frequency base, or None if not found
+        """
+        value = ctypes.c_float()
+        result = _lib.vgre_gguf_metadata_get_rope_freq_base(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    def get_norm_eps(self) -> Optional[float]:
+        """Extract norm_eps parameter from GGUF metadata.
+
+        Returns:
+            Layer normalization epsilon, or None if not found
+        """
+        value = ctypes.c_float()
+        result = _lib.vgre_gguf_metadata_get_norm_eps(self._h, ctypes.byref(value))
+        return value.value if result == 1 else None
+
+    @property
+    def has_attention_bias(self) -> bool:
+        return _lib.vgre_gguf_metadata_has_attention_bias(self._h) == 1
+
+    @property
+    def has_output_weight(self) -> bool:
+        return _lib.vgre_gguf_metadata_has_output_weight(self._h) == 1
+
+    @property
+    def architecture(self) -> Optional[str]:
+        value = _lib.vgre_gguf_metadata_get_architecture(self._h)
+        return value.decode("utf-8") if value else None
+
+    @property
+    def chat_template(self) -> Optional[str]:
+        value = _lib.vgre_gguf_metadata_get_chat_template(self._h)
+        return value.decode("utf-8") if value else None
+
+    def _get_last_error(self) -> str:
+        """Get the last error message from the C API.
+
+        Returns:
+            Error message string, or empty string if no error
+        """
+        error_ptr = _lib.vgre_gguf_metadata_get_last_error(self._h)
+        return error_ptr.decode('utf-8') if error_ptr else ""
+
+    def close(self):
+        """Release resources associated with this metadata reader."""
+        if getattr(self, '_h', None):
+            _lib.vgre_gguf_metadata_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        self.close()
+
+    # Parameter getter mapping for convenience
+    @property
+    def _PARAMETER_GETTERS(self):
+        return {
+            'n_layer': self.get_block_count,
+            'd_model': self.get_embedding_length,
+            'n_head': self.get_head_count,
+            'n_kv_head': self.get_head_count_kv,
+            'd_ff': self.get_feed_forward_length,
+            'vocab': self.get_vocabulary_size,
+            'context_length': self.get_context_length,
+            'rope_theta': self.get_rope_freq_base,
+            'norm_eps': self.get_norm_eps,
+        }
 
 
 class Tokenizer:
@@ -274,8 +526,15 @@ class LanguageModel:
     def __init__(self, vocab: int, n_layer: int = 4, d_model: int = 256,
                  n_head: int = 8, d_ff: int = 0, max_seq: int = 256,
                  dropout: float = 0.0, tie_embeddings: bool = False,
-                 seed: int = 1234, n_kv_head: int = 0, attn_bias: bool = False) -> None:
+                 seed: int = 1234, n_kv_head: int = 0, attn_bias: bool = False,
+                 # New parameters for enhanced model support
+                 rope_theta: float = 10000.0, norm_eps: float = 1e-5) -> None:
         _require()
+        self.vocab = int(vocab)
+        self._gguf_chat_template = None
+        self._rope_theta = rope_theta
+        self._norm_eps = norm_eps
+
         # n_kv_head < n_head → grouped-query attention (smaller K/V + KV cache);
         # 0 or == n_head → plain multi-head attention. attn_bias → Qwen2-style
         # Q/K/V projection biases.
@@ -285,10 +544,24 @@ class LanguageModel:
                                           int(seed) & 0xFFFFFFFF, 1 if attn_bias else 0)
         if not self._h:
             raise RuntimeError("vgre_lm_create failed (check d_model % n_head == 0 and head_dim even)")
+        if not _lib.vgre_lm_set_rope_norm(self._h, float(rope_theta), float(norm_eps)):
+            _lib.vgre_lm_free(self._h)
+            self._h = None
+            raise ValueError("rope_theta and norm_eps must be finite and positive")
 
     @property
     def num_parameters(self) -> int:
         return int(_lib.vgre_lm_num_params(self._h))
+
+    @property
+    def rope_theta(self) -> float:
+        """Rotational Position Embedding frequency base."""
+        return self._rope_theta
+
+    @property
+    def norm_eps(self) -> float:
+        """Layer normalization epsilon parameter."""
+        return self._norm_eps
 
     def set_bf16_inference(self, on: bool = True) -> None:
         """Run generation on bf16-cached weights (half the matmul-weight
@@ -300,6 +573,10 @@ class LanguageModel:
         scale, fp32 accumulation). Mutually exclusive with bf16; training stays
         fp32."""
         _lib.vgre_lm_set_int8_inference(self._h, 1 if on else 0)
+
+    def set_ternary_inference(self, on: bool = True) -> None:
+        """Use packed 2-bit ternary weights for faster inference at reduced quality."""
+        _lib.vgre_lm_set_ternary_inference(self._h, 1 if on else 0)
 
     def set_int8_kv_cache(self, on: bool = True) -> None:
         """Store the generation KV cache as int8 with a per-(position, head)
@@ -430,6 +707,31 @@ class LanguageModel:
         permute)."""
         if not _lib.vgre_lm_load_gguf(self._h, str(path).encode("utf-8")):
             raise RuntimeError("load_gguf failed (config mismatch or missing tensor)")
+
+    @classmethod
+    def from_gguf(cls, gguf_path: str,
+                  json_sidecar_path: Optional[str] = None) -> 'LanguageModel':
+        """Factory method for auto-configuration from GGUF files.
+
+        Creates a LanguageModel instance automatically configured from GGUF metadata,
+        eliminating the need for manual parameter specification or JSON sidecars.
+
+        Args:
+            gguf_path: Path to the GGUF file
+            json_sidecar_path: Optional path to JSON sidecar (overrides GGUF metadata)
+
+        Returns:
+            Configured LanguageModel with weights loaded from GGUF
+
+        Example:
+            # Simple auto-configuration
+            model = LanguageModel.from_gguf("llama-3-8b.gguf")
+
+            # With JSON sidecar override
+            model = LanguageModel.from_gguf("model.gguf", "config.json")
+        """
+        from .auto_config import ModelAutoConfigurator
+        return ModelAutoConfigurator.from_gguf(gguf_path, json_sidecar_path)
 
     def close(self) -> None:
         if getattr(self, "_h", None):

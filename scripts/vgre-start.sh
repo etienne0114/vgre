@@ -67,16 +67,16 @@ while [[ $# -gt 0 ]]; do
         --lan)              LAN_MODE=1 ;;
         --help|-h)
             cat <<'EOF'
-vgre-start -- VGRE Cluster Launcher
+vgre start -- VGRE Cluster Launcher
 
 Usage:
-  vgre-start --master                          Start master + dashboard
-  vgre-start --worker                          Start worker (LAN UDP auto-discover)
-  vgre-start --worker --lan                    Same as --worker (ignore persisted WAN IP)
-  vgre-start --worker --wan                    Use persisted/kvdb public master address
-  vgre-start --worker --master-ip <IP>         LAN: connect to specific master IP
-  vgre-start --worker --master-address <H:P>   Explicit hostname/IPv4/IPv6 + port
-  vgre-start --test                            Local self-test (master+worker)
+  vgre start --master                          Start master + dashboard
+  vgre start --worker                          Start worker (LAN UDP auto-discover)
+  vgre start --worker --lan                    Same as --worker (ignore persisted WAN IP)
+  vgre start --worker --wan                    Use persisted/kvdb public master address
+  vgre start --worker --master-ip <IP>         LAN: connect to specific master IP
+  vgre start --worker --master-address <H:P>   Explicit hostname/IPv4/IPv6 + port
+  vgre start --test                            Local self-test (master+worker)
 
 Options:
   --port <N>       TCP port (default 7777)
@@ -86,7 +86,7 @@ EOF
             exit 0
             ;;
         *)
-            echo "[ERROR] Unknown option: $1  (run vgre-start --help)"
+            echo "[ERROR] Unknown option: $1  (run vgre start --help)"
             exit 1
             ;;
     esac
@@ -94,8 +94,8 @@ EOF
 done
 
 if [[ -z "$MODE" ]]; then
-    echo "Usage: vgre-start --master | --worker [--master-ip IP] [--port PORT]"
-    echo "       vgre-start --test   (local self-test, master + worker on same machine)"
+    echo "Usage: vgre start --master | --worker [--master-ip IP] [--port PORT]"
+    echo "       vgre start --test   (local self-test, master + worker on same machine)"
     exit 1
 fi
 

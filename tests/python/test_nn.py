@@ -1974,6 +1974,22 @@ def test_moe() -> bool:
             and aux_val > 0.0 and l2 < f2 * 0.7)
 
 
+def _pytest_assert_result(test):
+    def run_test():
+        result = test()
+        assert result, f"{test.__name__} returned False"
+        return result if __name__ == "__main__" else None
+
+    run_test.__name__ = test.__name__
+    run_test.__doc__ = test.__doc__
+    return run_test
+
+
+for _test_name, _test_function in list(globals().items()):
+    if _test_name.startswith("test_") and callable(_test_function):
+        globals()[_test_name] = _pytest_assert_result(_test_function)
+
+
 def main() -> int:
     # Run each test, catch exceptions, and record which ones returned False so a
     # failure names itself (essential when a threshold tips over only on one

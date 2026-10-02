@@ -724,14 +724,20 @@ vgre_ensure_cli_path
 echo ""
 echo "=== Setting up the vgre model CLI (Python) ==="
 _PYCLI_RC=0
-vgre_setup_python_cli "$PROJECT_ROOT/bindings/python" || _PYCLI_RC=$?
+vgre_setup_python_cli "$PROJECT_ROOT/bindings/python" "$INSTALL_DIR/lib" || _PYCLI_RC=$?
 if [ "$_PYCLI_RC" -eq 2 ]; then
     if command -v apt-get >/dev/null 2>&1; then
         _pkg_install python3-venv python3-pip || true
     elif command -v dnf >/dev/null 2>&1; then
         _pkg_install python3-pip || true
     fi
-    vgre_setup_python_cli "$PROJECT_ROOT/bindings/python" || true
+    _PYCLI_RC=0
+    vgre_setup_python_cli "$PROJECT_ROOT/bindings/python" "$INSTALL_DIR/lib" || _PYCLI_RC=$?
+fi
+if [ "$_PYCLI_RC" -ne 0 ]; then
+    echo "ERROR: Python model CLI setup failed (status $_PYCLI_RC)."
+    echo "       Install Python with venv and pip support, then re-run scripts/vgre_sync.sh."
+    exit 1
 fi
 
 echo ""

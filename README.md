@@ -4,7 +4,7 @@
 
 📖 **Full documentation → [vgre.vercel.app](https://vgre.vercel.app/)** — installation, running CUDA apps, distributed clusters, the CLI tools, every environment variable, troubleshooting, and the API reference. The complete operator's guide now lives on the docs site (also mirrored on [GitHub Pages](https://etienne0114.github.io/vgre/)).
 
-> **PROJECT STATUS** (2026-09): **All three platforms green in CI — Linux production-verified, macOS ARM64 CI-green, Windows x86-64 CI-green.** The full `ctest` suite passes on **x86-64 Linux**: **399 tests with LLVM, 379 in the LLVM-free build** (`VGRE_ENABLE_JIT=OFF`, `VGRE_ENABLE_OPENMP=OFF`) — the "runs on any machine, no toolchain" path is guarded on every push, not just built by hand. CUDA, BLAS, DNN, FFT/RNG/solver/sparse, NCCL, profiling, and distributed-cluster paths are implemented with real CPU math (**no runtime stubs**). **VGRE no longer needs LLVM to execute kernels:** a **from-scratch CUDA-C front-end** (own lexer/parser → AST) feeds a four-tier CPU execution stack — a **PTX interpreter** (Tier 0), a **compiled-closure backend with a cooperative fiber executor** (Tier 1, `__shared__`/`__syncthreads`/warp intrinsics), a **native x86-64 machine-code JIT** (Tier 1b, ~18–118× the compiled tier), and an **optional own SSA optimizing backend** (Tier 2 / `VGRE_EXEC_BACKEND=ssa`: VGRE-IR → const-fold/GVN/LICM/DCE → linear-scan regalloc → x86-64 and AArch64 native (the latter on by default, validated by executing the emitted code on Apple-Silicon CI), feature-complete for the scalar + shared-memory + warp subset). Every tier is held **bit-exact** against the others. CI runs free on the public repo on **every push**; the macOS (Apple Silicon, auto-detected Homebrew `llvm@18`) and Windows (clang-cl on `windows-2022`) jobs both build **and run the whole `ctest` suite** to green, remaining `continue-on-error` pending promotion. A **free public demo** runs on CPU at **https://vgrengine.streamlit.app**. Hardware-only boundaries (physical GPU PMU counters, Metal MPS backend, GPUDirect RDMA) are in `docs/missingFeatures.md`.
+> **Verification status (2026-10-02):** Local x86-64 Linux build completed; all 410 CTest tests passed. The latest hosted GitHub run (2026-09-28) passed Windows and failed Linux and macOS. Updated required OS jobs, Nightly scheduling, and pretrained-model CLI checks are in the working tree and need a hosted run. This status does not claim blanket API completeness or physical GPU execution.
 
 ## What is VGRE?
 
@@ -27,23 +27,23 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 
 ## Current Status
 
-**Core Stability**: ✅ full `ctest` suite passing on x86-64 Linux, zero warnings, zero critical issues (Linux)  
+**Core Stability**: ✅ local x86-64 Linux build and 410/410 CTest tests passed (2026-10-02)
 **CUDA Runtime API Coverage**: ~95% (~101+ of ~110 commonly-used functions)  
 **CUDA Driver API Coverage**: ~95% (~56+ of ~60 commonly-used functions)  
 **cuBLAS Coverage**: Level-1/2/3 real + complex C/Z + Hermitian core API implemented  
 **cuDNN Coverage**: Major legacy ops + backward/training + Backend API attention routing implemented  
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
-**Critical Issues**: 0 known on the verified (Linux) platform  
-**Cross-Platform**: Linux **verified** (full `ctest`, required CI job); macOS **CI-green** on Apple Silicon; Windows **CI-green** (full `ctest` suite, clang-cl) — all three platforms pass in CI (macOS/Windows still `continue-on-error` pending promotion)  
-**Zero-burden build**: a dedicated `linux-x86_64-llvm-free` CI job builds with **no LLVM/Clang dev libs or OpenMP** (`VGRE_ENABLE_JIT=OFF`, `VGRE_ENABLE_OPENMP=OFF`) and runs the **379-test** JIT-free suite green — the lightweight "runs on any machine, no toolchain" path is now guarded on every push, not just built by hand. Kernels execute through the from-scratch CUDA-C front-end + four-tier CPU backend (interpreter / compiled-fiber / native x86-64 JIT / SSA), not LLVM
+**Current Verification**: Local Linux CTest passed 410/410; hosted Linux and macOS failed in the last available run.
+**Cross-Platform**: Last hosted run: Windows passed; Linux and macOS failed. The current workflow makes all three OS jobs required; updated hosted verification is pending.
+**Zero-burden build**: A Linux LLVM-free workflow lane is configured (`VGRE_ENABLE_JIT=OFF`, `VGRE_ENABLE_OPENMP=OFF`); its current working-tree result is pending a hosted run.
 
 ### Platform Support
-- ✅ **Linux**: Verified — built and full test suite passing on x86-64 (NUMA + Linux Keyring). The required CI job.
-- ✅ **macOS**: **CI-green** on Apple Silicon (ARM64) — auto-detects Homebrew `llvm@18` + `libomp` at configure time (no hardcoded paths); JIT kernel compilation, UVM, Keychain token storage (`SecItem` API), IOKit SMC temperature, OpenCL iGPU path, and `dispatch_semaphore` external-semaphore sync are implemented. Run `bash install_local.sh` or `bash scripts/vgre_sync.sh`. NUMA affinity uses Mach thread-policy hints (not Linux `sched_setaffinity`). Two platform-specific test tolerances were fixed for CI (ARM FMA rounding in `test_mamba`; ctypes ABI signatures in `PythonCAPIVectorAdd`).
-- ✅ **Windows**: **CI-green** — builds and runs the full `ctest` suite (clang-cl on `windows-2022`, LLVM-18 tarball cached), confirmed 2026-09-18. Credential Manager, shared memory, and Winsock paths are code-complete. The bring-up cleared these Windows-specific issues: AVX2 `rsqrt`/GEMM numerical accuracy (clang-cl activates AVX2 paths not compiled on Linux), `vgre.dll` dependency loading under Python 3.8+ (`os.add_dll_directory` + `winmode=0`), and cp1252 encoding of non-ASCII test output (force UTF-8 stdout). Kept `continue-on-error` in the workflow pending a few more consecutive green runs before promotion to required. The large LLVM download is the slow part; see the LLVM-optional plan below.
+- ⚠️ **Linux**: The current working tree passed 410/410 CTest tests locally. The latest hosted Linux test step failed; an updated hosted run is pending.
+- ⚠️ **macOS**: Apple Silicon build/test support is configured; the latest hosted run failed. The exact failing test is unknown because its GitHub artifact log could not be retrieved from this environment. Current workflow changes need a fresh hosted run.
+- ⚠️ **Windows**: The latest hosted build and test job passed. Current workflow changes, including the pretrained CLI smoke, need a fresh hosted run. The clang/LLVM toolchain path is configured for `windows-2022`.
 
-> Linux remains the canonical verification platform (full `ctest` green). macOS was brought up in-tree with dynamic toolchain discovery (`cmake/VGREPlatform.cmake`). CI (`.github/workflows/ci.yml`) runs free on the public repo on every push; macOS/Windows are `continue-on-error` until each is fully green. See `docs/missingFeatures.md` for hardware-only boundaries (Metal MPS, NVIDIA PMU/CUPTI, GPUDirect RDMA).
+> Local Linux verification is current for this working tree. GitHub Actions has not yet run the workflow edits; the latest hosted run is the one linked above. See `docs/missingFeatures.md` for hardware-only boundaries (Metal MPS, NVIDIA PMU/CUPTI, GPUDirect RDMA).
 
 ### What Works ✅
 - **CUDA Runtime API** (~101+ functions): memory alloc/free (`cudaMalloc`, `cudaFree`, `cudaMallocManaged`, `cudaMallocAsync`, `cudaMallocFromPoolAsync`, `cudaMallocPitch`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaMalloc3D`), stream create/destroy/query/sync/wait-event/add-callback/launch-host-func, events (create/record/query/sync/destroy/elapsed-time), error introspection (`cudaGetErrorName`/`GetErrorString`), symbol copies (`cudaMemcpyToSymbol`/`FromSymbol` sync+async), array allocation (1D/2D/3D via `TextureManager`), pointer introspection (`cudaPointerGetAttributes`), device queries, peer access, kernel launch (`cudaLaunchKernel`, `cudaLaunchCooperativeKernel`, `cudaLaunchKernelExC`), graph APIs (capture, instantiate, launch, clone, destroy, exec update, all 11 node types including kernel, memset, host, child, empty, event-record/wait, mem-alloc/free), texture/surface objects (`cudaCreateTextureObject`, `cudaDestroyTextureObject`, `cudaCreateSurfaceObject`, `cudaDestroySurfaceObject`, legacy `cudaBindTexture`/`cudaBindTextureToArray`/`cudaBindTexture2D`/`cudaBindSurfaceToArray`), external memory/semaphore (`cudaImportExternalMemory`, `cudaDestroyExternalMemory`), stream capture introspection (`cudaStreamIsCapturing`, `cudaStreamGetCaptureInfo_v2`), device/function attributes (`cudaFuncGetAttributes`, `cudaDeviceGetLimit`/`SetLimit`, `cudaDeviceGetCacheConfig`/`SetCacheConfig`), memset 2D/3D/Async variants.
@@ -158,7 +158,13 @@ python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate   # avoids PE
 pip install vgre
 vgre --version                 # the wheel installs a `vgre` command on PATH
 vgre generate --prompt "the "  # trains a tiny demo model and generates text
+vgre chat                       # download the pinned preset on first use, then chat
+vgre pull smollm2                # download the preset without starting chat
+vgre chat smollm2                # chat with the cached preset explicitly
 ```
+
+For a local GGUF, pass its actual existing filename to `vgre chat`; source sync
+installs the runtime but does not provide model weights.
 
 The wheels are compiled at the **universal x86-64 baseline**, so they load on any
 x86-64 CPU; the hot kernels (GEMM, ternary) then **detect the CPU at runtime**

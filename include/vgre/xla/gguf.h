@@ -9,15 +9,16 @@
 // width (Q4_0/Q4_1 ≈ 4.5 bits/weight, ~4.5 GB for an 8B model; the engine
 // dequantizes to f32 only when the op consuming it runs).
 //
-// Supported tensor types: F32, F16, and the block-quant formats Q8_0 / Q4_0 /
-// Q4_1 (the canonical ggml layouts). Other ggml types are listed but load()
-// returns false for them.
+// Supported tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q8_0, Q4_K, Q6_K, and
+// BitNet I2_S. Other ggml types are listed but load() returns false for them.
 #ifndef VGRE_XLA_GGUF_H
 #define VGRE_XLA_GGUF_H
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "vgre/xla/hlo.h"
@@ -50,6 +51,10 @@ public:
 
     // String metadata value (e.g. "general.architecture"); empty if absent/non-string.
     std::string metadataString(const std::string& key) const;
+    // Numeric scalar metadata; absent for missing, string, or array values.
+    std::optional<double> metadataNumber(const std::string& key) const;
+    // Array length for metadata such as tokenizer.ggml.tokens.
+    std::optional<uint64_t> metadataArrayLength(const std::string& key) const;
 
     // Materialize `name` into `out`. Default → row-major f32 Literal (dequantized).
     // keepNative=true keeps Q*_*/F16 tensors at native width (the engine dequants
@@ -67,6 +72,8 @@ private:
     uint32_t version_ = 0;
     std::vector<TensorInfo> tensors_;
     std::vector<std::pair<std::string, std::string>> meta_str_;  // string metadata only
+    std::vector<std::pair<std::string, double>> meta_num_;
+    std::vector<std::pair<std::string, uint64_t>> meta_array_len_;
 
     void* os_handle_ = nullptr;        // Windows mapping handle
     void* os_file_ = nullptr;          // Windows file handle

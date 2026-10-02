@@ -10,6 +10,7 @@
 //   Q8_0 [34 B/blk]: f16 d;          int8  qs[32]   →  x_i = d · qs[i]
 //   Q4_0 [18 B/blk]: f16 d;          uint8 qs[16]   →  lo/hi nibbles, x = d·(n-8)
 //   Q4_1 [20 B/blk]: f16 d; f16 m;   uint8 qs[16]   →  x = d·n + m   (n = nibble)
+//   Q5_0 [22 B/blk]: f16 d; uint32 qh; uint8 qs[16] → 5-bit signed values, x = d·(q-16)
 // In Q4_0/Q4_1 the 16 low nibbles are elements [0,16), the 16 high nibbles are
 // elements [16,32) within the block.
 #ifndef VGRE_XLA_QUANT_H
@@ -32,6 +33,7 @@ inline int quantBlockBytes(int ggml_type) {
         case 8:  return 34;    // Q8_0  (32 weights)
         case 2:  return 18;    // Q4_0  (32)
         case 3:  return 20;    // Q4_1  (32)
+        case 6:  return 22;    // Q5_0  (32)
         case 12: return 144;   // Q4_K  (256 weights / super-block)
         case 14: return 210;   // Q6_K  (256)
         default: return 0;     // not a supported block-quant type
@@ -88,6 +90,26 @@ inline void dequant_q4_1(const uint8_t* blk, int64_t n, float* out) {
             const int hi = qs[j] >> 4;
             out[b * kQK + j] = d * (float)lo + m;
             out[b * kQK + j + kQK / 2] = d * (float)hi + m;
+        }
+    }
+}
+
+inline void dequant_q5_0(const uint8_t* blk, int64_t n, float* out) {
+    for (int64_t b = 0; b < n / kQK; ++b) {
+        const uint8_t* p = blk + b * 22;
+        uint16_t dh;
+        uint32_t qh;
+        std::memcpy(&dh, p, 2);
+        std::memcpy(&qh, p + 2, 4);
+        const float d = f16_to_f32(dh);
+        const uint8_t* qs = p + 6;
+        for (int j = 0; j < kQK / 2; ++j) {
+            const int high0 = static_cast<int>((qh >> j) & 1u) << 4;
+            const int high1 = static_cast<int>((qh >> (j + kQK / 2)) & 1u) << 4;
+            const int q0 = (qs[j] & 0x0F) | high0;
+            const int q1 = (qs[j] >> 4) | high1;
+            out[b * kQK + j] = d * static_cast<float>(q0 - 16);
+            out[b * kQK + j + kQK / 2] = d * static_cast<float>(q1 - 16);
         }
     }
 }
@@ -158,6 +180,7 @@ inline bool dequantBlock(int ggml_type, const uint8_t* blk, int64_t n, float* ou
         case 8:  dequant_q8_0(blk, n, out); return true;
         case 2:  dequant_q4_0(blk, n, out); return true;
         case 3:  dequant_q4_1(blk, n, out); return true;
+        case 6:  dequant_q5_0(blk, n, out); return true;
         case 12: dequant_q4_k(blk, n, out); return true;
         case 14: dequant_q6_k(blk, n, out); return true;
         default: return false;

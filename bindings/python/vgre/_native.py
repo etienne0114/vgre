@@ -221,6 +221,8 @@ def _preload_siblings(path: str) -> None:
         for name in entries:
             if not (name.endswith((".so", ".dylib")) or ".so." in name):
                 continue
+            if name.startswith("libvgre"):
+                continue
             cand = os.path.realpath(os.path.join(d, name))
             if cand == main or cand in seen or not os.path.isfile(cand):
                 continue

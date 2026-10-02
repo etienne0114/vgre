@@ -2,17 +2,22 @@
 # vgre-connect-check — verify WAN/LAN connectivity to a VGRE master before starting a worker.
 #
 # Usage:
-#   vgre-connect-check <HOST:PORT>
-#   vgre-connect-check <HOST:PORT>
+#   vgre connect-check <HOST:PORT>
 #
 # Exit 0 when TCP port is open; exit 1 with actionable diagnostics otherwise.
 
 set -euo pipefail
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: vgre connect-check <HOST:PORT>"
+    echo "       export VGRE_CLUSTER_MASTER_ADDRESS=HOST:PORT && vgre connect-check"
+    exit 0
+fi
+
 ADDR="${1:-${VGRE_CLUSTER_MASTER_ADDRESS:-}}"
 if [[ -z "$ADDR" ]]; then
-    echo "Usage: vgre-connect-check <HOST:PORT>" >&2
-    echo "   or: export VGRE_CLUSTER_MASTER_ADDRESS=HOST:PORT && vgre-connect-check" >&2
+    echo "Usage: vgre connect-check <HOST:PORT>" >&2
+    echo "   or: export VGRE_CLUSTER_MASTER_ADDRESS=HOST:PORT && vgre connect-check" >&2
     exit 1
 fi
 

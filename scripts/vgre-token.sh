@@ -278,32 +278,32 @@ cmd_install() {
 cmd_help() {
     cat <<'HELP'
 
-vgre-token — VGRE Auth Token Manager
+vgre token — VGRE Auth Token Manager
 
 Usage:
-  vgre-token install               Install all VGRE CLI tools and add ~/.local/bin to PATH
-  vgre-token generate              Generate a new secure 64-hex token
-  vgre-token show                  Print the stored token value
-  vgre-token fingerprint           Print the SHA-256 fingerprint
-  vgre-token set <TOKEN>           Store a specific token (paste from another node)
-  vgre-token verify                Check env-var and file token match
-  vgre-token copy                  Print the scp command to share the token
-  vgre-token revoke                Delete the stored token
+  vgre token install               Install all VGRE CLI tools and add ~/.local/bin to PATH
+  vgre token generate              Generate a new secure 64-hex token
+  vgre token show                  Print the stored token value
+  vgre token fingerprint           Print the SHA-256 fingerprint
+  vgre token set <TOKEN>           Store a specific token (paste from another node)
+  vgre token verify                Check env-var and file token match
+  vgre token copy                  Print the scp command to share the token
+  vgre token revoke                Delete the stored token
 
 Token file:  ~/.vgre/token  (chmod 600)
 Env file:    ~/.vgre/env    (auto-sourced by new terminals after install)
 
 Quick start:
   # On master — generate once:
-  vgre-token generate
+  vgre token generate
 
   # On every worker — paste the token from the master:
-  vgre-token set <paste-token-here>
+  vgre token set <paste-token-here>
   # OR copy the file directly:
   scp master:~/.vgre/token ~/.vgre/token
 
   # Verify both match:
-  vgre-token fingerprint   # must be identical on master and worker
+  vgre token fingerprint   # must be identical on master and worker
 
 HELP
 }

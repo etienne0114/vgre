@@ -2,6 +2,8 @@
 
 #include "vgre/xla/gguf.h"
 #include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
+#include <optional>
+#include <limits>
 
 #include <cstring>
 
@@ -79,16 +81,49 @@ void skipValue(Cursor& c, uint32_t t) {
     c.skipBytes((uint64_t)b);
 }
 
+std::optional<double> readNumericValue(Cursor& c, uint32_t type) {
+    switch (type) {
+        case VT_U8: return static_cast<double>(c.read<uint8_t>());
+        case VT_I8: return static_cast<double>(c.read<int8_t>());
+        case VT_U16: return static_cast<double>(c.read<uint16_t>());
+        case VT_I16: return static_cast<double>(c.read<int16_t>());
+        case VT_U32: return static_cast<double>(c.read<uint32_t>());
+        case VT_I32: return static_cast<double>(c.read<int32_t>());
+        case VT_F32: return static_cast<double>(c.read<float>());
+        case VT_U64: return static_cast<double>(c.read<uint64_t>());
+        case VT_I64: return static_cast<double>(c.read<int64_t>());
+        case VT_F64: return c.read<double>();
+        case VT_BOOL: return static_cast<double>(c.read<uint8_t>() != 0);
+        default: return std::nullopt;
+    }
+}
+
 int64_t typeStorageBytes(int ggml_type, int64_t n) {
     switch (ggml_type) {
         case 0: return n * 4;                       // F32
         case 1: return n * 2;                       // F16
-        case 2: case 3: case 8: case 12: case 14:   // Q4_0/Q4_1/Q8_0/Q4_K/Q6_K
+        case 2: case 3: case 6: case 8: case 12: case 14: // Q4_0/Q4_1/Q5_0/Q8_0/Q4_K/Q6_K
             return quantStorageBytes(ggml_type, n);
         case 36: return i2sTensorBytes(n);          // I2_S (BitNet ternary): packed 2-bit + f32 scale
         default: return -1;                         // unsupported / unknown size
     }
 }
+
+#if defined(_WIN32)
+std::wstring utf8ToWidePath(const std::string& path) {
+    if (path.empty() || path.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        return {};
+    const int input_size = static_cast<int>(path.size());
+    const int output_size = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), input_size, nullptr, 0);
+    if (output_size <= 0) return {};
+    std::wstring wide_path(static_cast<size_t>(output_size), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), input_size,
+                            wide_path.data(), output_size) != output_size)
+        return {};
+    return wide_path;
+}
+#endif
 
 }  // namespace
 
@@ -100,7 +135,9 @@ std::unique_ptr<GGUF> GGUF::open(const std::string& path) {
     // a caller delete/replace this file while our mapping is still open,
     // matching POSIX unlink-while-mapped semantics instead of throwing
     // ERROR_SHARING_VIOLATION out of fs::remove().
-    HANDLE fh = CreateFileA(path.c_str(), GENERIC_READ,
+    const std::wstring wide_path = utf8ToWidePath(path);
+    if (wide_path.empty()) return nullptr;
+    HANDLE fh = CreateFileW(wide_path.c_str(), GENERIC_READ,
                             FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (fh == INVALID_HANDLE_VALUE) return nullptr;
@@ -144,10 +181,24 @@ std::unique_ptr<GGUF> GGUF::open(const std::string& path) {
         if (vt == VT_STRING) {
             std::string v = c.readString();
             g->meta_str_.emplace_back(key, v);
-        } else if (vt == VT_U32 && key == "general.alignment") {
-            alignment = c.read<uint32_t>();
+        } else if (vt == VT_ARRAY) {
+            const uint32_t element_type = c.read<uint32_t>();
+            const uint64_t count = c.read<uint64_t>();
+            if (key == "tokenizer.ggml.tokens")
+                g->meta_array_len_.emplace_back(key, count);
+            for (uint64_t j = 0; j < count && c.ok(); ++j)
+                skipValue(c, element_type);
         } else {
-            skipValue(c, vt);
+            auto value = readNumericValue(c, vt);
+            if (value.has_value()) {
+                if (key == "general.alignment" && vt == VT_U32) {
+                    alignment = static_cast<uint32_t>(*value);
+                } else {
+                    g->meta_num_.emplace_back(key, *value);
+                }
+            } else {
+                skipValue(c, vt);
+            }
         }
     }
     if (!c.ok() || alignment == 0) return nullptr;
@@ -214,6 +265,18 @@ std::string GGUF::metadataString(const std::string& key) const {
     return {};
 }
 
+std::optional<double> GGUF::metadataNumber(const std::string& key) const {
+    for (const auto& kv : meta_num_)
+        if (kv.first == key) return kv.second;
+    return std::nullopt;
+}
+
+std::optional<uint64_t> GGUF::metadataArrayLength(const std::string& key) const {
+    for (const auto& kv : meta_array_len_)
+        if (kv.first == key) return kv.second;
+    return std::nullopt;
+}
+
 bool GGUF::load(const std::string& name, Literal& out, bool keepNative) const {
     const TensorInfo* ti = info(name);
     if (!ti) return false;
@@ -255,7 +318,7 @@ bool GGUF::load(const std::string& name, Literal& out, bool keepNative) const {
                 out.data[(size_t)i] = f16_to_f32(h);
             }
             return true;
-        case 2: case 3: case 8: case 12: case 14:  // Q4_0/Q4_1/Q8_0/Q4_K/Q6_K
+        case 2: case 3: case 6: case 8: case 12: case 14: // Q4_0/Q4_1/Q5_0/Q8_0/Q4_K/Q6_K
             return dequantBlock(gt, src, n, out.data.data());
         case 36:  // I2_S (BitNet ternary): whole-tensor 2-bit packed + trailing f32 scale
             dequant_i2_s_tensor(src, n, out.data.data());

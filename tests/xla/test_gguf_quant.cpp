@@ -92,7 +92,7 @@ int main() {
         namespace fs = std::filesystem;
         fs::path path = fs::temp_directory_path() / "vgre_test.gguf";
 
-        // tensor data blob (tight offsets): w_f32[2,3]=24B, w_q8[32]=34B, w_q4[32]=18B
+        // tensor data blob: w_f32[2,3]=24B, w_q8[32]=34B, w_q4[32]=18B, w_q5[32]=22B
         std::vector<uint8_t> blob;
         for (float v : {1.f, 2.f, 3.f, 4.f, 5.f, 6.f}) f32b(blob, v);  // w_f32 @0
         u16(blob, 0x3800);                                             // w_q8 @24, d=0.5
@@ -103,11 +103,18 @@ int main() {
             auto blk = makeQ40Block(0x3C00, nib);
             blob.insert(blob.end(), blk.begin(), blk.end());
         }
+        std::vector<uint8_t> q5(22, 0);
+        q5[0] = 0x00; q5[1] = 0x3C;  // d = 1.0
+        const uint32_t qh = 0x00010001;  // high bit set for element 0 and element 16
+        std::memcpy(q5.data() + 2, &qh, sizeof(qh));
+        for (int j = 0; j < 16; ++j)
+            q5[6 + j] = static_cast<uint8_t>(j | ((15 - j) << 4));
+        blob.insert(blob.end(), q5.begin(), q5.end());
 
         std::vector<uint8_t> h;
         h.insert(h.end(), {'G', 'G', 'U', 'F'});
         u32(h, 3);          // version
-        u64(h, 3);          // tensor count
+        u64(h, 4);          // tensor count
         u64(h, 3);          // kv count
         // kv: string, alignment(u32), array<u32>
         gstr(h, "general.architecture"); u32(h, 8 /*STRING*/); gstr(h, "llama");
@@ -117,6 +124,7 @@ int main() {
         gstr(h, "w_f32"); u32(h, 2); u64(h, 3); u64(h, 2); u32(h, 0 /*F32*/);  u64(h, 0);
         gstr(h, "w_q8");  u32(h, 1); u64(h, 32);            u32(h, 8 /*Q8_0*/); u64(h, 24);
         gstr(h, "w_q4");  u32(h, 1); u64(h, 32);            u32(h, 2 /*Q4_0*/); u64(h, 58);
+        gstr(h, "w_q5");  u32(h, 1); u64(h, 32);            u32(h, 6 /*Q5_0*/); u64(h, 76);
         while (h.size() % 32 != 0) h.push_back(0);  // align data blob to 32
 
         {
@@ -129,7 +137,7 @@ int main() {
         CHECK(g != nullptr, "open synthesized GGUF");
         if (g) {
             CHECK(g->version() == 3, "GGUF version 3");
-            CHECK(g->names().size() == 3, "3 tensors listed");
+            CHECK(g->names().size() == 4, "4 tensors listed");
             CHECK(g->metadataString("general.architecture") == "llama", "string metadata");
             const auto* qi = g->info("w_q4");
             CHECK(qi && qi->ggml_type == 2 && qi->shape == std::vector<int64_t>{32}, "w_q4 info");
@@ -149,6 +157,13 @@ int main() {
             CHECK(nat.dtype == DType::Q4_0 && nat.storageBytes() == 18, "Q4_0 kept native (18 B)");
             Literal deq; CHECK(g->load("w_q4", deq), "load q4 dequant");
             CHECK(nat.toF32().data == deq.data, "native Q4_0 toF32 == dequant-on-load");
+
+            CHECK(g->load("w_q5", l), "load Q5_0 (dequant)");
+            CHECK(l.data.size() == 32 && l.data[0] == 0.0f && l.data[16] == 15.0f &&
+                  l.data[1] == -15.0f && l.data[31] == -16.0f,
+                  "Q5_0 high-bit planes and signed range dequantize correctly");
+            CHECK(quantBlockBytes(6) == 22 && quantStorageBytes(6, 32) == 22,
+                  "Q5_0 block geometry");
 
             CHECK(!g->load("nope", l), "missing tensor → false");
         }

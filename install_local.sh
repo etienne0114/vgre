@@ -625,7 +625,11 @@ vgre_ensure_cli_path
 ok "CLI tools installed → $BIN_DIR (run vgre token install to refresh)"
 
 # Model CLI (vgre generate / train / tokenize / info) into ~/.vgre/venv.
-vgre_setup_python_cli "$REPO_DIR/bindings/python" || true
+if ! vgre_setup_python_cli "$REPO_DIR/bindings/python" "$VGRE_LIB_DIR"; then
+    echo "ERROR: Python model CLI setup failed; the installation is incomplete." >&2
+    echo "       Install Python with venv and pip support, then re-run install_local.sh." >&2
+    exit 1
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""

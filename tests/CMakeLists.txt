@@ -1014,7 +1014,15 @@ set_tests_properties(XlaBf16Literal PROPERTIES TIMEOUT 30)
 add_executable(test_gguf_quant xla/test_gguf_quant.cpp)
 target_link_libraries(test_gguf_quant PRIVATE vgre)
 add_test(NAME XlaGgufQuant COMMAND test_gguf_quant)
+
+add_executable(test_gguf_metadata_c_api xla/test_gguf_metadata_c_api.cpp)
+target_link_libraries(test_gguf_metadata_c_api PRIVATE vgre)
+add_test(NAME XlaGgufMetadataCAPI COMMAND test_gguf_metadata_c_api)
+add_executable(test_gguf_c_api unit/test_gguf_c_api.c)
+target_link_libraries(test_gguf_c_api PRIVATE vgre)
+add_test(NAME XlaGgufCAPI COMMAND test_gguf_c_api)
 set_tests_properties(XlaGgufQuant PROPERTIES TIMEOUT 30)
+set_tests_properties(XlaGgufMetadataCAPI XlaGgufCAPI PROPERTIES TIMEOUT 30)
 
 # Dequant-inside-the-GEMM (L3): gemm_q == gemm_f32(dequant) without materializing
 # the full f32 weight.
@@ -2392,6 +2400,41 @@ elseif(Python3_FOUND)
     )
 endif()
 
+# GGUF auto-configuration: parse a real typed-metadata fixture, load its weights,
+# apply RoPE/norm settings, then run generation through the Python bindings.
+if(EXISTS "${VGRE_VENV_PYTHON}")
+    add_test(NAME PythonGgufAutoConfig
+        COMMAND "${VGRE_VENV_PYTHON}" ${CMAKE_SOURCE_DIR}/tests/python/test_gguf_auto_config.py)
+    set_tests_properties(PythonGgufAutoConfig PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
+elseif(Python3_FOUND)
+    add_test(NAME PythonGgufAutoConfig
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/python/test_gguf_auto_config.py)
+    set_tests_properties(PythonGgufAutoConfig PROPERTIES
+        ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
+        LABELS "python;e2e"
+        TIMEOUT 240
+        SKIP_RETURN_CODE 77
+    )
+endif()
+
+set(_vgre_cli_test_python "${VGRE_VENV_PYTHON}")
+if(NOT EXISTS "${_vgre_cli_test_python}")
+    set(_vgre_cli_test_python "${Python3_EXECUTABLE}")
+endif()
+if(UNIX AND _vgre_cli_test_python)
+    add_test(NAME VgreCliNativeLibrarySelection
+        COMMAND ${_vgre_cli_test_python}
+            ${CMAKE_SOURCE_DIR}/tests/python/test_vgre_cli_native_library_selection.py)
+    set_tests_properties(VgreCliNativeLibrarySelection PROPERTIES
+        LABELS "python;cli"
+        TIMEOUT 30)
+endif()
+
 # vgre.nn: build + train an MLP and a CNN from pure Python on the autograd C ABI.
 set(_vgre_nn_py "${VGRE_VENV_PYTHON}")
 if(NOT EXISTS "${_vgre_nn_py}")
@@ -2522,6 +2565,10 @@ if("PythonLmBindings" IN_LIST vgre_full_test_list)
     set_tests_properties(PythonLmBindings PROPERTIES
         ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python")
 endif()
+if("PythonGgufAutoConfig" IN_LIST vgre_full_test_list)
+    set_tests_properties(PythonGgufAutoConfig PROPERTIES
+        ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python")
+endif()
 if("PythonNn" IN_LIST vgre_full_test_list)
     set_tests_properties(PythonNn PROPERTIES
         ENVIRONMENT "VGRE_BENCHMARK=OFF;VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python")
@@ -2585,7 +2632,7 @@ if(_vgre_intpy)
              COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_pytorch.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(PyTorchIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
                          TIMEOUT 120
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")
@@ -2593,7 +2640,7 @@ if(_vgre_intpy)
              COMMAND ${_vgre_intpy} ${CMAKE_SOURCE_DIR}/tests/python/test_tensorflow.py
              WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
     set_tests_properties(TensorFlowIntegration PROPERTIES
-                         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+                         ENVIRONMENT "VGRE_IPC_MODE=OFF;LD_LIBRARY_PATH=${CMAKE_BINARY_DIR};DYLD_LIBRARY_PATH=${CMAKE_BINARY_DIR};VGRE_LIB_PATH=$<TARGET_FILE:vgre>;PYTHONPATH=${CMAKE_SOURCE_DIR}/bindings/python"
                          TIMEOUT 120
                          LABELS "python"
                          SKIP_REGULAR_EXPRESSION "ModuleNotFoundError|ImportError|No module named|SKIP:")

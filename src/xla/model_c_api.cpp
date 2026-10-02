@@ -74,6 +74,14 @@ vgre_lm* vgre_lm_create(int vocab, int n_layer, int d_model, int n_head,
                               dropout, tie_embeddings, seed, /*attn_bias=*/0);
 }
 
+int vgre_lm_set_rope_norm(vgre_lm* m, float rope_base, float norm_eps) {
+    if (!m) return 0;
+    try {
+        m->gpt->set_rope_norm(rope_base, norm_eps);
+        return 1;
+    } LM_CATCH(return 0)
+}
+
 void vgre_lm_free(vgre_lm* m) { delete m; }
 
 long long vgre_lm_num_params(const vgre_lm* m) {
@@ -82,6 +90,10 @@ long long vgre_lm_num_params(const vgre_lm* m) {
 
 void vgre_lm_set_bf16_inference(vgre_lm* m, int on) {
     if (m) m->gpt->set_bf16_inference(on != 0);
+}
+
+void vgre_lm_set_ternary_inference(vgre_lm* m, int on) {
+    if (m) m->gpt->set_ternary_inference(on != 0);
 }
 
 void vgre_lm_set_int8_inference(vgre_lm* m, int on) {

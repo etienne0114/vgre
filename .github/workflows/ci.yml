@@ -1,17 +1,15 @@
 name: CI
 
-# Track 1 (Phase 2): build + test on Linux, macOS and Windows so the
-# cross-platform #ifdef branches stop being unverified. Linux is the verified
-# baseline and is REQUIRED. macOS/Windows run informationally
-# (continue-on-error) while their platform issues are worked down; remove the
-# continue-on-error once each is green, then the README/PROJECT_STATUS may
-# honestly claim that platform as supported.
+# Build and test the native runtime on Linux, macOS, and Windows for every push
+# and pull request, with a scheduled nightly run on the default branch. Every
+# operating-system lane is required to pass.
 
 on:
-  # Public repo → GitHub Actions is free and unlimited, so CI runs on every push
-  # (any branch) and every PR to main. Manual runs stay available via the Actions
-  # tab (workflow_dispatch). ccache keeps rebuilds fast across runs.
+  # Run on every push, every PR to main, and once nightly on the default branch.
+  # Manual runs stay available via workflow_dispatch; ccache speeds rebuilds.
   workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
   push:
   pull_request:
     branches: [main]
@@ -43,7 +41,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build clang-18 llvm-18-dev libclang-18-dev \
             libomp-18-dev libsqlite3-dev liblapack-dev \
-            libkeyutils-dev libssl-dev zlib1g-dev ccache \
+            libkeyutils-dev libssl-dev zlib1g-dev ccache python3-pip \
             python3-numpy
           # Pin ccache's dir to the path the cache action saves/restores, so
           # cross-run caching actually kicks in (newer ccache defaults to
@@ -51,6 +49,11 @@ jobs:
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
           clang++ --version
           cmake --version
+
+      - name: Install Python package and integration-test dependencies
+        run: >
+          python3 -m pip install --break-system-packages --disable-pip-version-check
+          numpy pytest hypothesis psutil -e bindings/python
 
       # Cache the compiler object cache across runs so only changed TUs recompile.
       - name: ccache
@@ -70,21 +73,67 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Cache pretrained smoke model
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/vgre-models
+          key: pretrained-smollm2-q4km-09816acd
+
+      - name: Pretrained GGUF CLI smoke
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build:/usr/lib/llvm-18/lib
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/libvgre.so
+          VGRE_IPC_MODE: "OFF"
+          VGRE_MODEL_CACHE_DIR: ${{ runner.temp }}/vgre-models
+          PYTHONPATH: ${{ github.workspace }}/bindings/python
+        run: |
+          python3 -m vgre pull smollm2 --directory "${VGRE_MODEL_CACHE_DIR}/smollm2"
+          MODEL="${VGRE_MODEL_CACHE_DIR}/smollm2/SmolLM2-135M-Instruct-Q4_K_M.gguf"
+          GENERATED="$(python3 -m vgre generate --model "$MODEL" --prompt "One plus one is" --max-tokens 8 --temperature 0)"
+          test -n "$GENERATED"
+          CHAT_OUTPUT="$(printf 'What is one plus one?\n' | python3 -m vgre chat --max-tokens 8 --temperature 0)"
+          printf '%s\n' "$CHAT_OUTPUT" | grep -q '^Assistant:'
+
       - name: Test
         # Bounded parallelism + load awareness: the JIT tests each fork clang and
         # spin a worker pool, so an unbounded -j oversubscribes the runner and
         # times them out (Phase 2, Track 6). --test-load caps concurrent load.
         working-directory: build
-        # --repeat until-pass:2 retries a failed test once, to absorb the
-        # timing/port flakes some multi-process cluster + distributed tests show
-        # on the small, loaded CI runner (they are deterministic locally).
-        # TCPClusterSecurityHybrid is excluded: it drives a secure multi-process
-        # cluster handshake that deterministically hangs inside GitHub's sandboxed
-        # runner network (a 6 s internal deadline) though it passes on real
-        # machines / locally. Tracked for a CI-network-compatible rework.
+        # The job keeps parallelism bounded so JIT compilation and worker pools
+        # do not oversubscribe the runner. The security hybrid test is included
+        # with the rest of the suite so CI reports its result on real runners.
         run: >
           ctest --output-on-failure -j 2 --test-load 4 --timeout 300
-          --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
+
+      - name: Python GGUF and CLI integration
+        env:
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/libvgre.so
+          LD_LIBRARY_PATH: ${{ github.workspace }}/build:/usr/lib/llvm-18/lib
+          VGRE_IPC_MODE: "OFF"
+          PYTHONPATH: ${{ github.workspace }}/bindings/python
+        run: >
+          python3 -m pytest -q -rs
+          tests/python/test_auto_configuration_determinism.py
+          tests/python/test_auto_configuration_edge_cases.py
+          tests/python/test_cli_auto_configuration_integration.py
+          tests/python/test_cli_chat_command_integration.py
+          tests/python/test_cli_commands_integration.py
+          tests/python/test_cli_integration_test_summary.py
+          tests/python/test_cli_missing_functionality.py
+          tests/python/test_cross_language_type_preservation.py
+          tests/python/test_end_to_end_property_tests.py
+          tests/python/test_error_handling_consistency.py
+          tests/python/test_error_recovery_mechanisms.py
+          tests/python/test_existing_cli_auto_config.py
+          tests/python/test_gguf_auto_config.py
+          tests/python/test_gguf_metadata.py
+          tests/python/test_parameter_application_and_defaults.py
+          tests/python/test_parameter_precedence_rules.py
+          tests/python/test_performance_and_caching_efficiency.py
+          tests/python/test_performance_benchmarks.py
+          tests/python/test_python_bindings_error_handling.py
+          tests/python/test_q4k_model_loading.py
+          tests/python/test_quantization_format_handling.py
 
       - name: Upload test logs on failure
         if: failure()
@@ -100,8 +149,8 @@ jobs:
   # backends), and VGRE_ENABLE_OPENMP=OFF uses the in-tree work-stealing pool.
   # This lane installs NO llvm-*-dev / libclang / libomp — proving the minimal
   # dependency set actually builds and passes — and guards that path from silent
-  # regressions (previously it was only ever built by hand, never in CI). The
-  # JIT-only tests are gated out in CMake, so ctest runs a clean 305-test subset.
+  # regressions (previously it was only ever built by hand, never in CI). CMake
+  # gates only tests that require the disabled JIT backend.
   linux-llvm-free:
     name: linux-x86_64-llvm-free
     runs-on: ubuntu-24.04
@@ -114,7 +163,7 @@ jobs:
         # point is to prove the LLVM-free build needs none of them. clang-18 here
         # is only the C++ compiler (its libLLVM runtime dep is unused at
         # VGRE_ENABLE_JIT=OFF). sqlite3/lapack/keyutils/ssl/zlib are non-LLVM
-        # optional feature deps kept so the full 305-test subset stays green.
+        # optional feature deps keep the LLVM-free test coverage enabled.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -148,12 +197,10 @@ jobs:
 
       - name: Test
         working-directory: build_nollvm
-        # Same exclusion/retry policy as the LLVM lane. The suite is slower here
-        # (OpenMP off ⇒ serial inner loops), so the 45-min job budget matters; the
-        # per-test 300 s cap is unchanged (no single test approaches it locally).
+        # OpenMP off makes the suite slower through serial inner loops, so the
+        # 45-minute job budget matters; the per-test 300 s cap remains in place.
         run: >
           ctest --output-on-failure -j 2 --test-load 4 --timeout 300
-          --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
 
       - name: Upload test logs on failure
         if: failure()
@@ -162,13 +209,12 @@ jobs:
           name: linux-llvm-free-test-logs
           path: build_nollvm/Testing/Temporary/
 
-  # ── macOS: bring-up (informational until green) ──────────────────────────
+  # ── macOS: Apple Silicon native build and test ────────────────────────────
   macos:
     name: macos-arm64
     runs-on: macos-14
-    continue-on-error: true
-    # Bound the informational job so a stuck build/test can't run to GitHub's 6-hour
-    # per-job cap and drag the whole workflow to a 6 h "cancelled" (linux is ~6 min).
+    # Bound the job so a stuck build/test produces an actionable failure within
+    # the workflow's 45-minute budget.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -179,8 +225,8 @@ jobs:
         # of which VGRE uses against the LLVM-18 API. llvm@18 keeps the build green
         # until the code is made multi-LLVM-version compatible.
         run: |
-          brew install llvm@18 libomp ninja sqlite lapack || true
-          python3 -m pip install --break-system-packages numpy || python3 -m pip install numpy || true
+          brew install llvm@18 libomp ninja sqlite lapack
+          python3 -m pip install --break-system-packages --disable-pip-version-check numpy pytest hypothesis psutil -e bindings/python
           echo "LLVM_DIR=$(brew --prefix llvm@18)/lib/cmake/llvm" >> "$GITHUB_ENV"
           echo "$(brew --prefix llvm@18)/bin" >> "$GITHUB_PATH"
 
@@ -211,6 +257,27 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Cache pretrained smoke model
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/vgre-models
+          key: pretrained-smollm2-q4km-macos
+
+      - name: Pretrained GGUF CLI smoke
+        env:
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/build
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/libvgre.dylib
+          VGRE_IPC_MODE: "OFF"
+          VGRE_MODEL_CACHE_DIR: ${{ runner.temp }}/vgre-models
+          PYTHONPATH: ${{ github.workspace }}/bindings/python
+        run: |
+          python3 -m vgre pull smollm2 --directory "${VGRE_MODEL_CACHE_DIR}/smollm2"
+          MODEL="${VGRE_MODEL_CACHE_DIR}/smollm2/SmolLM2-135M-Instruct-Q4_K_M.gguf"
+          GENERATED="$(python3 -m vgre generate --model "$MODEL" --prompt "One plus one is" --max-tokens 8 --temperature 0)"
+          test -n "$GENERATED"
+          CHAT_OUTPUT="$(printf 'What is one plus one?\n' | python3 -m vgre chat --max-tokens 8 --temperature 0)"
+          printf '%s\n' "$CHAT_OUTPUT" | grep -q '^Assistant:'
+
       - name: Test
         working-directory: build
         # macOS runners are small (3 vCPU / ~7 GB). Each JIT test forks clang -O3
@@ -218,10 +285,40 @@ jobs:
         # and the heavier kernel compiles fail ("Failed to register kernel"). Run
         # serially on macOS — slower but stable — until the pool is right-sized.
         # VGRE_LOG_LEVEL=ERROR surfaces the JIT/parse error text (the logger
-        # defaults to NONE) so macOS bring-up failures are diagnosable from CI.
+        # defaults to NONE) so macOS failures are diagnosable from CI.
         env:
           VGRE_LOG_LEVEL: ERROR
-        run: ctest --output-on-failure -j 1 --timeout 300 --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
+        run: ctest --output-on-failure -j 1 --timeout 300
+
+      - name: Python GGUF and CLI integration
+        env:
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/libvgre.dylib
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/build
+          VGRE_IPC_MODE: "OFF"
+          PYTHONPATH: ${{ github.workspace }}/bindings/python
+        run: >
+          python3 -m pytest -q -rs
+          tests/python/test_auto_configuration_determinism.py
+          tests/python/test_auto_configuration_edge_cases.py
+          tests/python/test_cli_auto_configuration_integration.py
+          tests/python/test_cli_chat_command_integration.py
+          tests/python/test_cli_commands_integration.py
+          tests/python/test_cli_integration_test_summary.py
+          tests/python/test_cli_missing_functionality.py
+          tests/python/test_cross_language_type_preservation.py
+          tests/python/test_end_to_end_property_tests.py
+          tests/python/test_error_handling_consistency.py
+          tests/python/test_error_recovery_mechanisms.py
+          tests/python/test_existing_cli_auto_config.py
+          tests/python/test_gguf_auto_config.py
+          tests/python/test_gguf_metadata.py
+          tests/python/test_parameter_application_and_defaults.py
+          tests/python/test_parameter_precedence_rules.py
+          tests/python/test_performance_and_caching_efficiency.py
+          tests/python/test_performance_benchmarks.py
+          tests/python/test_python_bindings_error_handling.py
+          tests/python/test_q4k_model_loading.py
+          tests/python/test_quantization_format_handling.py
 
       - name: SSA AArch64 native execution (real Apple Silicon)
         working-directory: build
@@ -236,17 +333,21 @@ jobs:
         env:
           VGRE_LOG_LEVEL: ERROR
           VGRE_SSA_ARM_NATIVE: "1"
-        run: ctest --output-on-failure -j 1 --timeout 300 --repeat until-pass:2 -R 'SsaIr|SsaBackend|SsaArm64Enc'
+        run: ctest --output-on-failure -j 1 --timeout 300 -R 'SsaIr|SsaBackend|SsaArm64Enc'
 
-  # ── Windows: bring-up (informational until green) ────────────────────────
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-test-logs
+          path: build/Testing/Temporary/
+
+  # ── Windows: native build and test ───────────────────────────────────────
   windows:
     name: windows-x86_64
     runs-on: windows-2022
-    continue-on-error: true
-    # Windows has been hanging to GitHub's 6-hour per-job cap (which then cancels
-    # the whole run). Bound it: on a hang it now bails at 75 min and — being
-    # continue-on-error — leaves the workflow's conclusion to the required linux
-    # job. Generous enough for a cold LLVM-18 build (the ~500 MB tarball is cached).
+    # Bound the toolchain download and tests so a hang produces an actionable
+    # failed run rather than occupying a runner for GitHub's six-hour cap.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
@@ -270,7 +371,7 @@ jobs:
         shell: pwsh
         run: |
           choco install ninja sqlite -y --no-progress
-          python -m pip install numpy
+          python -m pip install --disable-pip-version-check numpy pytest hypothesis psutil -e bindings/python
           if (-not (Test-Path 'C:\llvm\bin\clang++.exe')) {
             $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz"
             curl.exe -L --retry 3 -o "$env:RUNNER_TEMP\llvm.tar.xz" $url
@@ -314,6 +415,66 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      - name: Cache pretrained smoke model
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/vgre-models
+          key: pretrained-smollm2-q4km-windows
+
+      - name: Pretrained GGUF CLI smoke
+        shell: pwsh
+        env:
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/vgre.dll
+          VGRE_IPC_MODE: "OFF"
+          VGRE_MODEL_CACHE_DIR: ${{ runner.temp }}/vgre-models
+          PYTHONPATH: ${{ github.workspace }}/bindings/python
+        run: |
+          python -m vgre pull smollm2 --directory "$env:VGRE_MODEL_CACHE_DIR/smollm2"
+          if ($LASTEXITCODE -ne 0) { throw "vgre pull failed with exit code $LASTEXITCODE" }
+          $modelPath = Join-Path $env:VGRE_MODEL_CACHE_DIR "smollm2/SmolLM2-135M-Instruct-Q4_K_M.gguf"
+          $generated = python -m vgre generate --model $modelPath --prompt "One plus one is" --max-tokens 8 --temperature 0
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($generated -join ""))) { throw "vgre generate failed or returned no text" }
+          $chatOutput = "What is one plus one?" | python -m vgre chat --max-tokens 8 --temperature 0
+          if ($LASTEXITCODE -ne 0 -or -not ($chatOutput -match '^Assistant:')) { throw "vgre chat failed or returned no assistant output" }
+
       - name: Test
+        env:
+          VGRE_LOG_LEVEL: ERROR
         working-directory: build
-        run: ctest --output-on-failure -j 2 --timeout 300 --repeat until-pass:2 -E 'TCPClusterSecurityHybrid'
+        run: ctest --output-on-failure -j 2 --timeout 300
+
+      - name: Python GGUF and CLI integration
+        env:
+          VGRE_LIB_PATH: ${{ github.workspace }}/build/vgre.dll
+          VGRE_IPC_MODE: "OFF"
+          PYTHONPATH: ${{ github.workspace }}/bindings/python
+        run: >
+          python -m pytest -q -rs
+          tests/python/test_auto_configuration_determinism.py
+          tests/python/test_auto_configuration_edge_cases.py
+          tests/python/test_cli_auto_configuration_integration.py
+          tests/python/test_cli_chat_command_integration.py
+          tests/python/test_cli_commands_integration.py
+          tests/python/test_cli_integration_test_summary.py
+          tests/python/test_cli_missing_functionality.py
+          tests/python/test_cross_language_type_preservation.py
+          tests/python/test_end_to_end_property_tests.py
+          tests/python/test_error_handling_consistency.py
+          tests/python/test_error_recovery_mechanisms.py
+          tests/python/test_existing_cli_auto_config.py
+          tests/python/test_gguf_auto_config.py
+          tests/python/test_gguf_metadata.py
+          tests/python/test_parameter_application_and_defaults.py
+          tests/python/test_parameter_precedence_rules.py
+          tests/python/test_performance_and_caching_efficiency.py
+          tests/python/test_performance_benchmarks.py
+          tests/python/test_python_bindings_error_handling.py
+          tests/python/test_q4k_model_loading.py
+          tests/python/test_quantization_format_handling.py
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-test-logs
+          path: build/Testing/Temporary/

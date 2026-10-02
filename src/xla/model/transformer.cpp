@@ -88,6 +88,14 @@ GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
         lm_head_ = initParam({D, V}, 0.02f, rng, params_);
 }
 
+void GPT::set_rope_norm(float rope_base, float norm_eps) {
+    if (!std::isfinite(rope_base) || rope_base <= 0.0f ||
+        !std::isfinite(norm_eps) || norm_eps <= 0.0f)
+        throw std::invalid_argument("RoPE base and normalization epsilon must be finite and positive");
+    cfg_.rope_base = rope_base;
+    cfg_.norm_eps = norm_eps;
+}
+
 Var GPT::forward(const std::vector<int>& ids) {
     if (fp32_dropped_)
         throw std::runtime_error("GPT::forward: model is serve-only (fp32 weights dropped)");

@@ -113,10 +113,34 @@ vgre_install_cli_symlinks() {
 # "externally managed" (PEP 668), so a venv is the only clean, sudo-free path.
 # Best-effort: prints guidance and returns non-zero rather than aborting.
 #   $1 = path to the Python package (…/bindings/python)
+#   $2 = directory containing the freshly-built libvgre shared libraries
 # Return: 0 ok · 2 venv module missing (caller may install python3-venv + retry)
 #         · 1 other failure
+vgre_copy_python_native_libraries() {
+    _native_dir="$1"
+    _pyenv="$2"
+    [ -d "$_native_dir" ] || return 1
+
+    _package_lib_dir=$("$_pyenv/bin/python" -c \
+        'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "vgre", "lib"))') || return 1
+    _package_dir=$(dirname "$_package_lib_dir")
+    [ -d "$_package_dir" ] || return 1
+    mkdir -p "$_package_lib_dir" || return 1
+
+    _copied_main=0
+    for _native_file in "$_native_dir"/libvgre*; do
+        [ -f "$_native_file" ] || [ -L "$_native_file" ] || continue
+        cp -P "$_native_file" "$_package_lib_dir/" || return 1
+        case "$(basename "$_native_file")" in
+            libvgre.so|libvgre.dylib) _copied_main=1 ;;
+        esac
+    done
+    [ "$_copied_main" -eq 1 ]
+}
+
 vgre_setup_python_cli() {
     _pkg_dir="$1"
+    _native_dir="${2:-}"
     _pyenv="${VGRE_VENV:-$HOME/.vgre/venv}"
     [ -d "$_pkg_dir" ] || return 1
 
@@ -137,12 +161,23 @@ vgre_setup_python_cli() {
     fi
 
     "$_pyenv/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
-    if "$_pyenv/bin/python" -m pip install --quiet "$_pkg_dir" >/dev/null 2>&1 \
-        && "$_pyenv/bin/python" -c 'import vgre' >/dev/null 2>&1; then
+    if ! "$_pyenv/bin/python" -m pip install --quiet "$_pkg_dir" >/dev/null 2>&1; then
+        printf '  [WARN] pip install failed (offline?). Retry:  %s/bin/pip install "%s"\n' "$_pyenv" "$_pkg_dir"
+        return 1
+    fi
+
+    if [ -n "$_native_dir" ] && ! vgre_copy_python_native_libraries "$_native_dir" "$_pyenv"; then
+        printf '  [WARN] could not sync native libraries from %s into the Python package\n' "$_native_dir"
+        return 1
+    fi
+
+    if "$_pyenv/bin/python" -c \
+        'from vgre import LanguageModel; model = LanguageModel(vocab=256, n_layer=1, d_model=8, n_head=1, d_ff=16, max_seq=8); model.close()' \
+        >/dev/null 2>&1; then
         printf '  [OK] vgre model CLI ready — try:  vgre generate --prompt "the "\n'
         return 0
     fi
-    printf '  [WARN] pip install failed (offline?). Retry:  %s/bin/pip install "%s"\n' "$_pyenv" "$_pkg_dir"
+    printf '  [WARN] model CLI native API check failed; re-run the source sync after rebuilding libvgre\n'
     return 1
 }
 

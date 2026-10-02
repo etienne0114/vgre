@@ -28,6 +28,33 @@ SCRIPT_DIR=$(cd "$(dirname "$_self")" && pwd)
 # vgre Python package (numpy-based). Overridable with VGRE_VENV.
 _VGRE_VENV_PY="${VGRE_VENV:-$HOME/.vgre/venv}/bin/python"
 
+# Source installs keep the current native library outside the Python package.
+# Prefer that library over the copy bundled in site-packages, which can lag
+# behind after a source sync and miss newly added C API symbols.
+_select_native_library() {
+    if [ -n "${VGRE_LIB_PATH:-}" ] && [ -f "$VGRE_LIB_PATH" ]; then
+        return
+    fi
+
+    case "$(uname -s 2>/dev/null || echo Linux)" in
+        Darwin) _native_name="libvgre.dylib" ;;
+        *) _native_name="libvgre.so" ;;
+    esac
+
+    _install_dir="${VGRE_INSTALL_DIR:-$HOME/.local/share/VGRE}"
+    for _candidate in \
+        "$_install_dir/lib/$_native_name" \
+        "$SCRIPT_DIR/../build/$_native_name" \
+        "$SCRIPT_DIR/../build/lib/$_native_name"; do
+        if [ -f "$_candidate" ]; then
+            export VGRE_LIB_PATH="$_candidate"
+            return
+        fi
+    done
+}
+
+_select_native_library
+
 # Echo the first interpreter that can actually `import vgre`, or return 1.
 # Priority: $VGRE_PYTHON → the managed venv → system python3/python.
 _python_with_vgre() {
@@ -74,6 +101,8 @@ Usage: vgre <command> [options]
 
 Model & runtime (Python package — set up by ./scripts/vgre_sync.sh):
   info                 show version, native backend, library path, platform
+  chat                 interactive chat with a model
+  pull                 download and configure a model from a repository
   generate             generate text (trains a tiny demo model if no --model)
   train                train a small language model on a text corpus
   tokenize             byte / BPE tokenization helpers
@@ -145,7 +174,7 @@ cmd="${1:-help}"
 case "$cmd" in
     -h|--help|help)        usage ;;
     -V|--version|version)  version ;;
-    info|generate|train|tokenize)   run_python_cli "$cmd" "$@" ;;
+    info|chat|pull|generate|train|tokenize)   run_python_cli "$cmd" "$@" ;;
     start)      run_sibling vgre-start "$@" ;;
     worker)     run_sibling vgre-worker "$@" ;;
     token)      run_sibling vgre-token "$@" ;;

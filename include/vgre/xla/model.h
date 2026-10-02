@@ -142,6 +142,8 @@ public:
     void set_batched_prefill(bool on) { batched_prefill_ = on; }
     bool batched_prefill() const { return batched_prefill_; }
 
+    void set_rope_norm(float rope_base, float norm_eps);
+
     // Free the fp32 master copies of the big weights after quantizing, so the
     // resident footprint actually drops to the bf16 (½×) / int8 (¼×) size.
     // Requires set_bf16_inference / set_int8_inference first. The model becomes

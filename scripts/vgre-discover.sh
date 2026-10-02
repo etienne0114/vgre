@@ -28,8 +28,10 @@ BUCKET_ID_FILE="${VGRE_DIR}/discovery_bucket"
 PORT="${VGRE_PORT:-7777}"
 KV_BASE="https://kvdb.io"
 
-mkdir -p "$VGRE_DIR"
-chmod 700 "$VGRE_DIR"
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" ]]; then
+    mkdir -p "$VGRE_DIR"
+    chmod 700 "$VGRE_DIR"
+fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -430,27 +432,27 @@ case "${1:-}" in
     --unregister)   cmd_unregister ;;
     --help|-h)
         cat <<'HELP'
-vgre-discover -- Detect real public IP and enable cross-LAN token-keyed cluster discovery
+vgre discover -- Detect real public IP and enable cross-LAN token-keyed cluster discovery
 
 Usage:
-  vgre-discover                  Show public IP + worker connection command
-  vgre-discover --set-master     Set VGRE_CLUSTER_ADVERTISED_ADDRESS for this session
-                                 (called automatically by vgre-start --master)
-  vgre-discover --register       Register master's IP in a token-keyed KV store
+  vgre discover                  Show public IP + worker connection command
+  vgre discover --set-master     Set VGRE_CLUSTER_ADVERTISED_ADDRESS for this session
+                                 (called automatically by vgre start --master)
+  vgre discover --register       Register master's IP in a token-keyed KV store
                                  Workers with the same token can find the master
                                  without knowing its IP. Prints BUCKET_ID to share.
-  vgre-discover --find [BUCKET]  Find master's IP using the local token + BUCKET_ID
+  vgre discover --find [BUCKET]  Find master's IP using the local token + BUCKET_ID
                                  Verifies token fingerprint before connecting.
-  vgre-discover --unregister     Remove registration from KV store
+  vgre discover --unregister     Remove registration from KV store
 
 Cross-LAN discovery flow (no manual IP sharing needed):
   # On master (run once, or after IP changes):
-  vgre-discover --register
+  vgre discover --register
   # Output: Bucket ID: aBcDeFgH  <- share with workers
 
   # On each worker (same token, any network):
-  vgre-discover --find aBcDeFgH
-  vgre-start --worker --master-address <printed address>
+  vgre discover --find aBcDeFgH
+  vgre start --worker --master-address <printed address>
 
 Environment:
   VGRE_DISCOVERY_BUCKET_ID   Override the kvdb.io bucket ID

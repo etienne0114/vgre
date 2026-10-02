@@ -28,12 +28,15 @@ VGRE_PUBLIC_API vgre_lm* vgre_lm_create_gqa(int vocab, int n_layer, int d_model,
                                             int max_seq, float dropout,
                                             int tie_embeddings, unsigned seed,
                                             int attn_bias);
+VGRE_PUBLIC_API int       vgre_lm_set_rope_norm(vgre_lm* m, float rope_base,
+                                                float norm_eps);
 VGRE_PUBLIC_API void      vgre_lm_free(vgre_lm* m);
 VGRE_PUBLIC_API long long vgre_lm_num_params(const vgre_lm* m);
 
 // Enable bf16-weight inference (half the matmul-weight footprint/bandwidth,
 // fp32 accumulation). Affects generate only; training stays fp32. on=0 disables.
 VGRE_PUBLIC_API void      vgre_lm_set_bf16_inference(vgre_lm* m, int on);
+VGRE_PUBLIC_API void      vgre_lm_set_ternary_inference(vgre_lm* m, int on);
 
 // Enable weight-only int8 inference (~4× smaller matmul weights, per-channel
 // scale, fp32 accumulation). Mutually exclusive with bf16. on=0 disables.
