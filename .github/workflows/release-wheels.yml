@@ -51,6 +51,9 @@ jobs:
           python-version: "3.12"
 
       - name: Verify Python package versions and release tag
+        # The version check uses a Python heredoc; Windows runners default to
+        # PowerShell, so select Bash explicitly for this cross-platform step.
+        shell: bash
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
