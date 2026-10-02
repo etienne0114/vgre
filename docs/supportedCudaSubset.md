@@ -281,7 +281,7 @@ in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 
 ## Test status of the two builds (2026-10-02)
 
-The latest hosted run [37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009)
+The latest hosted run [37042616142](https://github.com/etienne0114/vgre/actions/runs/37042616142)
 passed Linux with LLVM, the dedicated Linux LLVM-free build, macOS ARM64, and Windows x86-64.
 The Linux LLVM-free lane builds with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
 

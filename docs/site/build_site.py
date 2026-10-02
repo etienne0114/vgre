@@ -191,7 +191,7 @@ def page_index():
                   "Linux x86-64, the dedicated Linux LLVM-free lane, macOS (Apple Silicon), and Windows "
                   "(clang-cl). Hardware-only gaps (physical GPU PMU counters, Metal MPS, GPUDirect "
                   "RDMA) are listed in the <a href=\"faq.html\">FAQ &amp; Troubleshooting</a>. "
-                  "See <a href=\"https://github.com/etienne0114/vgre/actions/runs/37013670009\">the latest green CI run</a>."), "tip"),
+                  "See <a href=\"https://github.com/etienne0114/vgre/actions/runs/37042616142\">the latest green CI run</a>."), "tip"),
         h2("How VGRE compares"),
         p("For running <em>one</em> pretrained model as fast as possible, a specialized engine "
           "like llama.cpp is typically faster. VGRE's value is different: <strong>one "
@@ -213,7 +213,7 @@ def page_index():
 
 
 REL = "https://github.com/etienne0114/vgre/releases"
-DL = REL + "/download/v0.1.3"
+DL = REL + "/download/v0.1.4"
 
 
 def page_downloads():
@@ -233,23 +233,23 @@ def page_downloads():
              "vgre --version                 # version + native-backend status\n"
              "vgre generate --prompt \"the \"  # trains a tiny demo model and generates text"),
         callout(p("To update an existing environment, run <code>python -m pip install --upgrade vgre</code>. "
-                  "The latest published version is <strong>0.1.3</strong>. Main-branch CI does not publish "
+                  "The latest published version is <strong>0.1.4</strong>. Main-branch CI does not publish "
                   "to PyPI; a matching version tag triggers the release and publishing workflows."), "tip"),
         callout(p("On Windows, create the venv with <code>py -m venv %USERPROFILE%\\.venvs\\vgre</code> "
                   "and activate it with <code>%USERPROFILE%\\.venvs\\vgre\\Scripts\\activate</code>, "
                   "then <code>pip install vgre</code>."), "tip"),
-        h2("Platform wheels — v0.1.3"),
+        h2("Platform wheels — v0.1.4"),
         p("PyPI serves the correct one automatically; these are the direct downloads from the "
           "<a href=\"" + REL + "\">GitHub Release</a> if you need them:"),
         table(["Platform", "Wheel", "Runs on"], [
             ["🐧 Linux x86-64",
-             '<a href="' + DL + '/vgre-0.1.3-py3-none-manylinux_2_35_x86_64.whl"><code>manylinux_2_35_x86_64</code></a>',
+             '<a href="' + DL + '/vgre-0.1.4-py3-none-manylinux_2_35_x86_64.whl"><code>manylinux_2_35_x86_64</code></a>',
              "glibc ≥ 2.35 — Ubuntu 22.04+, Debian 12, RHEL/Rocky 9, Fedora 36+"],
             ["🍎 macOS (universal2)",
-             '<a href="' + DL + '/vgre-0.1.3-py3-none-macosx_11_0_universal2.whl"><code>macosx_11_0_universal2</code></a>',
+             '<a href="' + DL + '/vgre-0.1.4-py3-none-macosx_11_0_universal2.whl"><code>macosx_11_0_universal2</code></a>',
              "Apple Silicon <em>and</em> Intel Macs, macOS 11+"],
             ["🪟 Windows x86-64",
-             '<a href="' + DL + '/vgre-0.1.3-py3-none-win_amd64.whl"><code>win_amd64</code></a>',
+             '<a href="' + DL + '/vgre-0.1.4-py3-none-win_amd64.whl"><code>win_amd64</code></a>',
              "Windows 10/11 x86-64"],
         ], "cmd-table"),
         callout(p("The wheels are compiled at the <strong>universal x86-64 baseline</strong> (and a "
@@ -268,7 +268,7 @@ def page_downloads():
              "python"),
         h2("Container image (GHCR)"),
         p("A multi-arch (amd64/arm64) LLVM-free image is published on each tagged release:"),
-        code("docker run --rm ghcr.io/etienne0114/vgre:0.1.3 --version"),
+        code("docker run --rm ghcr.io/etienne0114/vgre:0.1.4 --version"),
         h2("Build from source"),
         p("Prefer to build your own? See the <a href=\"installation.html\">Installation</a> guide "
           "— including the zero-burden LLVM-free build and <code>bindings/python/build_wheel.sh</code> "
@@ -795,8 +795,7 @@ def page_cli():
         p("<code>pip install vgre</code> (from <a href=\"https://pypi.org/project/vgre/\">PyPI</a>) "
           "puts a <code>vgre</code> command on your PATH for the Python model commands and "
           "native-backend information — no source build needed. The current PyPI release is "
-          "0.1.3; the newer <code>chat</code> and <code>pull</code> commands are in source "
-          "version 0.1.4 and will be available from PyPI when that release is published. The "
+          "0.1.4 and includes the <code>chat</code> and <code>pull</code> commands. The "
           "cluster and node commands are added by a source install. Install into a virtual "
           "environment (PEP 668):"),
         code("python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
@@ -807,9 +806,9 @@ def page_cli():
              "<code>vgre version</code> · <code>vgre --version</code>"],
             ["<code>vgre info</code>", "Show native backend, library path, platform, and installed Python dependencies.",
              "<code>vgre info</code>"],
-            ["<code>vgre pull</code> <em>(source 0.1.4)</em>", "Download a supported pretrained model preset and its tokenizer into the local model cache (or a directory you choose).",
+            ["<code>vgre pull</code>", "Download a supported pretrained model preset and its tokenizer into the local model cache (or a directory you choose).",
              "<code>vgre pull smollm2</code> · <code>vgre pull smollm2 --directory ./models</code>"],
-            ["<code>vgre chat</code> <em>(source 0.1.4)</em>", "Start an interactive conversation with a local checkpoint or supported preset. The default preset is downloaded on first use.",
+            ["<code>vgre chat</code>", "Start an interactive conversation with a local checkpoint or supported preset. The default preset is downloaded on first use.",
              "<code>vgre chat</code> · <code>vgre chat ./model.gguf --max-tokens 128</code> · <code>--system-prompt \"Be concise.\"</code>"],
             ["<code>vgre generate</code>", "Generate text; trains a tiny demo model when no <code>--model</code> is given, so it works right after install.",
              "<code>vgre generate --prompt \"…\" --max-tokens 64</code> · <code>--model model.gguf</code> · <code>--temperature 0.8 --top-k 40</code>"],

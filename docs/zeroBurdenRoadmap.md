@@ -213,7 +213,7 @@ Mamba/SSM (no KV cache), speculative + multi-token decoding, int4/int8 KV cache,
 **Phase E — Packaging the zero-burden promise.**
 10. Single-command install that needs only a compiler; prebuilt wheels/binaries
     with baked stencils so end users compile nothing. Refresh the docs site. ✅
-    (v0.1.3 ships self-contained LLVM-free wheels for Linux/macOS/Windows through
+    (v0.1.4 ships self-contained LLVM-free wheels for Linux/macOS/Windows through
     PyPI and a universal2 macOS wheel; current release status is in `missingFeatures.md`.)
 
 **Phase F — Closing the performance gap to a real GPU (the next frontier).**

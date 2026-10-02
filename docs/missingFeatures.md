@@ -11,11 +11,10 @@ Everything already delivered is documented elsewhere (do not duplicate it here):
 - **Capabilities, test metrics, platform/CI status**: [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
 - **ML tracks (T1–T6)** — build steps + success criteria: [`implementationPlan.md`](implementationPlan.md)
 
-**Current baseline (2026-10-02):** [GitHub Actions run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009)
+**Current baseline (2026-10-02):** [GitHub Actions run 37042616142](https://github.com/etienne0114/vgre/actions/runs/37042616142)
 passed all four hosted jobs: Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64.
-PyPI currently serves **v0.1.3** for Linux, macOS universal2, and Windows. The source tree's
-Python package metadata is prepared as **v0.1.4**; it will appear on PyPI only after the matching
-`v0.1.4` tag runs the release workflow.
+PyPI serves **v0.1.4** for Linux, macOS universal2, and Windows. The [v0.1.4 release workflow](https://github.com/etienne0114/vgre/actions/runs/37045306062)
+built and smoke-tested each wheel, then published the GitHub Release and PyPI package.
 
 ---
 
@@ -25,18 +24,17 @@ Net-new or breadth work we can do without external hardware. (Items marked *corr
 already run on some tier and are bit-exact — what's left is a native path, a loader, or breadth.)
 
 ### 1.1 Packaging & distribution
-- *(Done — PyPI trusted publishing is configured and verified: [v0.1.3](https://pypi.org/project/vgre/0.1.3/)
+- *(Done — PyPI trusted publishing is configured and verified: [v0.1.4](https://pypi.org/project/vgre/0.1.4/)
   was uploaded by GitHub Actions using OIDC; see successful publish run
-  [36387210075](https://github.com/etienne0114/vgre/actions/runs/36387210075). No API token is stored.
+  [37045306062](https://github.com/etienne0114/vgre/actions/runs/37045306062). No API token is stored.
   Pushing a matching `vX.Y.Z` tag builds all platform wheels and publishes them. A release-tag
   version guard checks the Python package declarations and Linux/Windows source CLI versions, then
   checks the tag before wheel builds. Ordinary pushes to `main` run CI but do not publish a new
   version.)*
-- *(Done — the release-wheels matrix now builds a **macOS Intel (x86-64) wheel** on the `macos-13`
-  runner alongside the arm64 one, `build_wheel.sh` tags each by the host platform. The Docker
-  release now builds **amd64 and arm64 each on its own native runner** in parallel — no QEMU
-  emulation — then merges them into one multi-arch manifest. Both are validated by CI on the
-  next release tag.)*
+- *(Done — the release-wheels matrix builds a **macOS universal2 wheel** on `macos-14` for both
+  Apple Silicon and Intel, plus Linux x86-64 and Windows x86-64 wheels. The v0.1.4 release built
+  and smoke-tested all three. The Docker release builds **amd64 and arm64 each on its own native
+  runner** in parallel — no QEMU emulation — then merges them into one multi-arch manifest.)*
 
 ### 1.2 SSA / native codegen (Tier-2)
 - *(Done — native AArch64 codegen now covers the **full cooperative surface**: shared-memory /

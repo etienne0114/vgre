@@ -2,20 +2,20 @@
 
 **Last Updated**: 2026-10-02
 
-**Latest hosted verification**: ✅ [GitHub Actions run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
+**Latest hosted verification**: ✅ [GitHub Actions run 37042616142](https://github.com/etienne0114/vgre/actions/runs/37042616142) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
 
 - **Linux**: ✅ Full `ctest` suite passed in the latest hosted Linux x86-64 job.
 - **Linux, LLVM-free**: ✅ The dedicated `linux-x86_64-llvm-free` job passed with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
 - **macOS**: ✅ Apple Silicon build, CTest, Python integration, and SSA native-execution checks passed in the latest hosted job.
 - **Windows**: ✅ Windows x86-64 build, CTest, pretrained GGUF CLI smoke, and Python integration passed in the latest hosted job.
-- **PyPI**: Latest published package is 0.1.3. Package metadata is prepared as 0.1.4; a matching `v0.1.4` tag triggers the versioned release and PyPI publish jobs. Main-branch CI does not publish packages.
+- **PyPI**: Latest published package is [0.1.4](https://pypi.org/project/vgre/0.1.4/), with Linux, macOS universal2, and Windows wheels.
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
 **Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.
 
 > **Historical CI status (2026-09):** CI was restored on the public repository.
 > At that point some OS lanes were informational; since then the workflow was
 > updated so Linux, macOS, and Windows are required, and all four latest matrix
-> jobs (including Linux LLVM-free) passed run 37013670009.
+> jobs (including Linux LLVM-free) passed run 37042616142.
 
 > **LLVM is now optional (delivered):** kernel execution no longer requires LLVM —
 > a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter,

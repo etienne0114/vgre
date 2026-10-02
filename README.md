@@ -4,7 +4,7 @@
 
 📖 **Full documentation → [vgre.vercel.app](https://vgre.vercel.app/)** — installation, running CUDA apps, distributed clusters, the CLI tools, every environment variable, troubleshooting, and the API reference. The complete operator's guide now lives on the docs site (also mirrored on [GitHub Pages](https://etienne0114.github.io/vgre/)).
 
-> **Verification status (2026-10-02):** [GitHub Actions run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009) passed all four jobs: Linux, Linux LLVM-free, macOS, and Windows. The local Linux CTest suite also passed 410/410. This does not claim blanket API completeness or physical GPU execution.
+> **Verification status (2026-10-02):** [GitHub Actions run 37042616142](https://github.com/etienne0114/vgre/actions/runs/37042616142) passed all four jobs: Linux, Linux LLVM-free, macOS, and Windows. The local Linux CTest suite also passed 410/410. This does not claim blanket API completeness or physical GPU execution.
 
 ## What is VGRE?
 
@@ -34,10 +34,10 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 **cuDNN Coverage**: Major legacy ops + backward/training + Backend API attention routing implemented  
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
-**Current Verification**: Hosted run 37013670009 passed Linux, Linux LLVM-free, macOS, and Windows; local Linux CTest passed 410/410.
+**Current Verification**: Hosted run 37042616142 passed Linux, Linux LLVM-free, macOS, and Windows; local Linux CTest passed 410/410.
 **Cross-Platform**: ✅ Linux x86-64, macOS ARM64, and Windows x86-64 passed the latest hosted CI run.
-**Zero-burden build**: ✅ Linux LLVM-free lane passed run 37013670009 with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
-**PyPI**: Latest published version is 0.1.3. Main-branch CI does not publish packages; see the release workflow and Python package version before expecting `pip install --upgrade vgre` to pick up newer source changes.
+**Zero-burden build**: ✅ Linux LLVM-free lane passed run 37042616142 with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
+**PyPI**: Latest published version is 0.1.4, with Linux, macOS universal2, and Windows wheels. Main-branch CI does not publish packages; version tags trigger the release workflow.
 
 ### Platform Support
 - ✅ **Linux**: x86-64 CTest and the dedicated LLVM-free CTest lane passed the latest hosted run.
@@ -164,13 +164,11 @@ vgre generate --prompt "the "  # trains a tiny demo model and generates text
 To upgrade an existing environment, use `python -m pip install --upgrade vgre`.
 PyPI receives new builds from the versioned release workflow; a green main-branch
 CI run alone does not publish a new package. The latest published PyPI version is
-0.1.3; the source tree now prepares 0.1.4 for its matching release tag.
+0.1.4, with wheels for Linux, macOS universal2, and Windows.
 
-The source 0.1.4 CLI adds `vgre pull` and `vgre chat`. They are not included in
-the currently published 0.1.3 wheel; use a source install to run them before
-the 0.1.4 PyPI release is published.
+The 0.1.4 package includes the `vgre pull` and `vgre chat` CLI commands.
 
-When using the source 0.1.4 CLI with a local GGUF, pass its actual existing
+When using `vgre chat` with a local GGUF, pass its actual existing
 filename to `vgre chat`; source sync installs the runtime but does not provide
 model weights.
 
