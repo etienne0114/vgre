@@ -35,8 +35,10 @@ print(tok.decode(lm.generate(ids, n_new=120, temperature=0.7, top_k=50)))
 The matching HF `tokenizer.json` is still required because GGUF model loading
 does not yet implement every tokenizer format. Current auto-config support is
 limited to Llama and Qwen2 tensor layouts; architectures with fused QKV or other
-non-Llama layouts (including Phi-3) are not supported yet. The CLI can download
-the pinned SmolLM2 preset and use it directly:
+non-Llama layouts (including Phi-3) are not supported yet. The source 0.1.4 CLI
+can download the pinned SmolLM2 preset and use it directly. PyPI currently
+publishes 0.1.3, which predates these `chat` and `pull` commands; use the source
+install until the 0.1.4 wheel is published:
 
 ```bash
 vgre chat

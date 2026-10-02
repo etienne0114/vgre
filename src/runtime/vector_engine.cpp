@@ -56,8 +56,18 @@ static inline int __get_cpuid_count(unsigned leaf, unsigned subleaf,
 #if defined(__linux__) && defined(__x86_64__)
 #include "vgre/common/os_backend.h"
 #include <sys/syscall.h>  // SYS_arch_prctl — AMX tile-data state
+#include <unistd.h>
+#ifndef ARCH_GET_XCOMP_SUPP
+#define ARCH_GET_XCOMP_SUPP  0x1021
+#endif
+#ifndef ARCH_GET_XCOMP_PERM
+#define ARCH_GET_XCOMP_PERM  0x1022
+#endif
 #ifndef ARCH_REQ_XCOMP_PERM
 #define ARCH_REQ_XCOMP_PERM  0x1023
+#endif
+#ifndef XFEATURE_XTILECFG
+#define XFEATURE_XTILECFG   17
 #endif
 #ifndef XFEATURE_XTILEDATA
 #define XFEATURE_XTILEDATA   18
@@ -81,6 +91,48 @@ namespace runtime {
 
 namespace {
 enum class VecIsa { Scalar, Avx2, Avx512 };
+
+#if defined(__linux__) && defined(__x86_64__)
+bool enableLinuxAmxTileState() {
+    constexpr uint64_t tileConfig = uint64_t{1} << XFEATURE_XTILECFG;
+    constexpr uint64_t tileData = uint64_t{1} << XFEATURE_XTILEDATA;
+    constexpr uint64_t tileState = tileConfig | tileData;
+
+    uint64_t supported = 0;
+    if (syscall(SYS_arch_prctl, ARCH_GET_XCOMP_SUPP, &supported) != 0 ||
+        (supported & tileState) != tileState) {
+        return false;
+    }
+
+    uint64_t permitted = 0;
+    if (syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &permitted) != 0) {
+        return false;
+    }
+
+    // TILE_DATA is dynamically enabled per process. XCR0 alone is not proof
+    // that this process has permission; requesting component 18 enables the
+    // AMX tile configuration and data state together.
+    if ((permitted & tileState) != tileState) {
+        if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM,
+                    XFEATURE_XTILEDATA) != 0) {
+            return false;
+        }
+        permitted = 0;
+        if (syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &permitted) != 0) {
+            return false;
+        }
+    }
+    return (permitted & tileState) == tileState;
+}
+
+uint64_t readXcr0() {
+    uint32_t low = 0;
+    uint32_t high = 0;
+    __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
+    return (static_cast<uint64_t>(high) << 32) | low;
+}
+#endif
+
 VecIsa vecIsa() {
     static const VecIsa v = [] {
 #if defined(VGRE_VEC_X86)
@@ -106,12 +158,14 @@ VectorEngine::~VectorEngine() = default;
 void VectorEngine::detectCapabilities() {
     #if VGRE_VECENGINE_X86_64
     unsigned int eax, ebx, ecx, edx;
+    bool osXSAVE = false;
 
     if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
         caps_.hasSSE2 = (edx >> 26) & 1;
         caps_.hasSSE4 = (ecx >> 19) & 1;
         caps_.hasAVX  = (ecx >> 28) & 1;
         caps_.hasFMA  = (ecx >> 12) & 1;
+        osXSAVE = (ecx >> 27) & 1;
     }
 
     if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
@@ -128,36 +182,18 @@ void VectorEngine::detectCapabilities() {
     // Treat either VNNI variant as usable for INT8 acceleration
     if (caps_.hasAVXVNNI) caps_.hasVNNI = true;
 
-    // AMX requires both CPUID bits AND OS permission.
-    // Verify via XGETBV that the OS has enabled XTILECFG (bit 17) and
-    // XTILEDATA (bit 18) in XCR0, then request XTILEDATA via arch_prctl.
+    // AMX requires both CPUID bits, Linux process permission, and OS XCR0
+    // state. The Linux kernel can expose the XCR0 tile bits before the current
+    // process requests its dynamically allocated tile-data permission, so
+    // checking XCR0 first can dispatch into AMX and terminate with SIGILL.
     if (caps_.hasAMXTile && caps_.hasAMXBF16) {
 #if defined(__linux__)
-        // XGETBV: read XCR0 to confirm OS-granted tile state
-        uint64_t xcr0 = 0;
-        __asm__ volatile(
-            "xgetbv"
-            : "=A"(xcr0)   // EAX:EDX → xcr0 (64-bit)
-            : "c"(0)        // XCR index 0
-        );
-        bool osTileConfigOk = (xcr0 >> 17) & 1; // XTILECFG
-        bool osTileDataOk   = (xcr0 >> 18) & 1; // XTILEDATA
-
-        if (!osTileDataOk) {
-            // Ask the OS to enable XTILEDATA for this thread (and its children).
-            // Without this, the first AMX instruction raises SIGILL.
-            int rc = static_cast<int>(syscall(SYS_arch_prctl,
-                                               ARCH_REQ_XCOMP_PERM,
-                                               XFEATURE_XTILEDATA));
-            if (rc == 0) {
-                // Re-read XCR0 after enablement
-                __asm__ volatile("xgetbv" : "=A"(xcr0) : "c"(0));
-                osTileConfigOk = (xcr0 >> 17) & 1;
-                osTileDataOk   = (xcr0 >> 18) & 1;
-            }
-        }
-
-        caps_.amxEnabled = osTileConfigOk && osTileDataOk;
+        bool processPermission = enableLinuxAmxTileState();
+        // XGETBV is only legal after CPUID reports OSXSAVE.
+        uint64_t xcr0 = osXSAVE && processPermission ? readXcr0() : 0;
+        bool osTileConfigOk = (xcr0 >> XFEATURE_XTILECFG) & 1;
+        bool osTileDataOk   = (xcr0 >> XFEATURE_XTILEDATA) & 1;
+        caps_.amxEnabled = processPermission && osTileConfigOk && osTileDataOk;
         if (caps_.amxEnabled) {
             VGRE_LOG_INFO("VectorEngine", "Intel AMX tile state enabled via arch_prctl");
         } else {

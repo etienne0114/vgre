@@ -1072,7 +1072,7 @@ copy /Y "%SCRIPT_DIR%vgre-discover.bat"     "%TOKEN_SCRIPT_DIR%\vgre-discover.ba
 copy /Y "%SCRIPT_DIR%vgre-discover.ps1"     "%TOKEN_SCRIPT_DIR%\vgre-discover.ps1"     >nul 2>&1
 copy /Y "%SCRIPT_DIR%Setup-VGRECluster.ps1" "%TOKEN_SCRIPT_DIR%\Setup-VGRECluster.ps1" >nul 2>&1
 
-rem -- Model CLI (vgre generate / train / tokenize / info): install the Python
+rem -- Model CLI (vgre version / info / pull / chat / generate / train / tokenize): install the Python
 rem    package into %USERPROFILE%\.vgre\venv so the model subcommands work. --
 echo.
 echo === Setting up the vgre model CLI (Python) ===
@@ -1102,6 +1102,8 @@ echo.
 echo  MODEL CLI ^(CPU, no GPU^):
 echo    vgre --version                                   version + native backend
 echo    vgre generate --prompt "the "                    generate text
+echo    vgre pull smollm2                                download a supported model
+echo    vgre chat                                        interactive model chat
 echo    vgre train --corpus data.txt --out model.vgre    train a small LM
 echo.
 echo  START COMMANDS:

@@ -58,7 +58,10 @@ vgre - run CUDA and a local language model on the CPU (no GPU required).
 Usage: vgre <command> [options]
 
 Model & runtime (Python package - set up by the VGRE installer):
+  version, --version   print the VGRE version and native backend status
   info                 show version, native backend, library path, platform
+  pull                 download a supported model preset
+  chat                 chat interactively with a local model
   generate             generate text (trains a tiny demo model if no --model)
   train                train a small language model on a text corpus
   tokenize             byte / BPE tokenization helpers
@@ -72,7 +75,6 @@ Cluster & node (source install):
   dashboard            launch the Flutter monitoring dashboard
 
 Other:
-  version, --version   print the VGRE version and native backend status
   help,    --help      show this help
 
 Run 'vgre <command> --help' for a command's own options.
@@ -124,7 +126,7 @@ function Invoke-Sibling([string] $name, [string[]] $rest) {
 switch -Regex ($Command) {
     '^(-h|--help|help)$'       { Show-Usage; break }
     '^(-V|--version|version)$' { Show-Version; break }
-    '^(info|generate|train|tokenize)$' { Invoke-PythonCli $Command $Rest; break }
+    '^(info|pull|chat|generate|train|tokenize)$' { Invoke-PythonCli $Command $Rest; break }
     '^start$'     { Invoke-Sibling "vgre-start" $Rest; break }
     '^worker$'    { Invoke-Sibling "vgre-worker" $Rest; break }
     '^token$'     { Invoke-Sibling "vgre-token" $Rest; break }

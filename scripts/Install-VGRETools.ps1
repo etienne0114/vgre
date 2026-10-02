@@ -114,7 +114,7 @@ foreach ($dir in $dirsToAdd) {
 }
 Write-Host "[OK] Current session PATH updated — tools available NOW." -ForegroundColor Cyan
 
-# ── Model CLI (vgre generate / train / tokenize / info) ───────────────────────
+# ── Model CLI (vgre version / info / pull / chat / generate / train / tokenize) ──
 # Install the vgre Python package into %USERPROFILE%\.vgre\venv when a source
 # checkout is present, so the model subcommands work. Best-effort.
 $pkgDir = Join-Path (Split-Path -Parent $ScriptDir) "bindings\python"
@@ -142,6 +142,8 @@ Write-Host "Run these commands right now in this terminal:" -ForegroundColor Whi
 Write-Host ""
 Write-Host "  vgre --version             # show the VGRE version + native backend" -ForegroundColor Yellow
 Write-Host "  vgre generate --prompt hi  # generate text on the CPU (no GPU)" -ForegroundColor Yellow
+Write-Host "  vgre pull smollm2          # download a supported pretrained model" -ForegroundColor Yellow
+Write-Host "  vgre chat                  # chat with the default model (downloaded on first use)" -ForegroundColor Yellow
 Write-Host "  vgre token generate        # create a cluster auth token" -ForegroundColor Yellow
 Write-Host "  vgre token fingerprint     # verify SHA-256 matches on all nodes" -ForegroundColor Yellow
 Write-Host "  Setup-VGRECluster          # interactive cluster setup wizard" -ForegroundColor Yellow

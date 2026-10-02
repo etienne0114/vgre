@@ -108,7 +108,7 @@ vgre_install_cli_symlinks() {
     fi
 }
 
-# Install the vgre Python package (model CLI: generate / train / tokenize / info)
+# Install the vgre Python package (model CLI: version / info / pull / chat / generate / train / tokenize)
 # into a dedicated venv at ~/.vgre/venv. Debian/Ubuntu mark the system Python
 # "externally managed" (PEP 668), so a venv is the only clean, sudo-free path.
 # Best-effort: prints guidance and returns non-zero rather than aborting.
@@ -149,7 +149,7 @@ vgre_setup_python_cli() {
         if command -v "$_p" >/dev/null 2>&1; then _pybin="$_p"; break; fi
     done
     if [ -z "$_pybin" ]; then
-        printf '  [WARN] python3 not found — model subcommands (vgre generate/train) unavailable\n'
+        printf '  [WARN] python3 not found — model subcommands (vgre pull/chat/generate/train/tokenize) unavailable\n'
         return 1
     fi
 
@@ -174,7 +174,7 @@ vgre_setup_python_cli() {
     if "$_pyenv/bin/python" -c \
         'from vgre import LanguageModel; model = LanguageModel(vocab=256, n_layer=1, d_model=8, n_head=1, d_ff=16, max_seq=8); model.close()' \
         >/dev/null 2>&1; then
-        printf '  [OK] vgre model CLI ready — try:  vgre generate --prompt "the "\n'
+        printf '  [OK] vgre model CLI ready — try:  vgre chat  or  vgre pull smollm2\n'
         return 0
     fi
     printf '  [WARN] model CLI native API check failed; re-run the source sync after rebuilding libvgre\n'

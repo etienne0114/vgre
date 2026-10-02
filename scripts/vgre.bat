@@ -3,8 +3,8 @@
 :: Allows running  vgre <command>  from cmd.exe or any terminal that has
 :: %LOCALAPPDATA%\VGRE\scripts on PATH (set by the setup scripts).
 ::
-:: Usage:  vgre version | info | generate | train | tokenize
-::         vgre start | worker | token | discover | dashboard
+:: Usage:  vgre version/--version | info | pull | chat | generate | train | tokenize
+::         vgre start | worker | token | discover | connect-check | dashboard
 
 setlocal
 

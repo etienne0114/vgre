@@ -793,14 +793,24 @@ def page_cli():
 
         h2("The <code>vgre</code> command"),
         p("<code>pip install vgre</code> (from <a href=\"https://pypi.org/project/vgre/\">PyPI</a>) "
-          "puts a <code>vgre</code> command on your PATH for the model &amp; runtime tools — no "
-          "source build needed. Install into a virtual environment (PEP 668):"),
+          "puts a <code>vgre</code> command on your PATH for the Python model commands and "
+          "native-backend information — no source build needed. The current PyPI release is "
+          "0.1.3; the newer <code>chat</code> and <code>pull</code> commands are in source "
+          "version 0.1.4 and will be available from PyPI when that release is published. The "
+          "cluster and node commands are added by a source install. Install into a virtual "
+          "environment (PEP 668):"),
         code("python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate\n"
              "pip install vgre\n"
              "vgre --version"),
         table(["Command", "What it does", "Common usage"], [
-            ["<code>vgre --version</code>", "Print the version and native-backend status.",
-             "<code>vgre --version</code> · <code>vgre info</code> (library path, platform, numpy)"],
+            ["<code>vgre version</code> / <code>vgre --version</code>", "Print the version and native-backend status.",
+             "<code>vgre version</code> · <code>vgre --version</code>"],
+            ["<code>vgre info</code>", "Show native backend, library path, platform, and installed Python dependencies.",
+             "<code>vgre info</code>"],
+            ["<code>vgre pull</code> <em>(source 0.1.4)</em>", "Download a supported pretrained model preset and its tokenizer into the local model cache (or a directory you choose).",
+             "<code>vgre pull smollm2</code> · <code>vgre pull smollm2 --directory ./models</code>"],
+            ["<code>vgre chat</code> <em>(source 0.1.4)</em>", "Start an interactive conversation with a local checkpoint or supported preset. The default preset is downloaded on first use.",
+             "<code>vgre chat</code> · <code>vgre chat ./model.gguf --max-tokens 128</code> · <code>--system-prompt \"Be concise.\"</code>"],
             ["<code>vgre generate</code>", "Generate text; trains a tiny demo model when no <code>--model</code> is given, so it works right after install.",
              "<code>vgre generate --prompt \"…\" --max-tokens 64</code> · <code>--model model.gguf</code> · <code>--temperature 0.8 --top-k 40</code>"],
             ["<code>vgre train</code>", "Train a small in-tree language model on a text corpus and save a checkpoint (+ config sidecar).",
@@ -808,13 +818,13 @@ def page_cli():
             ["<code>vgre tokenize</code>", "Byte / BPE tokenizer helpers.",
              "<code>vgre tokenize --encode \"hi\"</code> · <code>--decode 104,105</code> · <code>--train corpus.txt --merges 512</code>"],
         ], "cmd-table"),
-        p("A source install also gets <code>vgre</code>, as a unified dispatcher — and sets up "
-          "the model CLI for you: <code>./scripts/vgre_sync.sh</code> (or "
+        p("A source install also gets <code>vgre</code> as a unified dispatcher and sets up "
+          "the Python model CLI for you: <code>./scripts/vgre_sync.sh</code> (or "
           "<code>install_local.sh</code>) installs the Python package into a managed venv at "
           "<code>~/.vgre/venv</code>, which the dispatcher finds automatically. The model "
-          "subcommands run that Python CLI, while <code>vgre start</code> / <code>worker</code> "
-          "/ <code>token</code> / <code>discover</code> / <code>dashboard</code> delegate to the "
-          "cluster tools below."),
+          "subcommands run that Python CLI, while <code>vgre start</code>, <code>worker</code>, "
+          "<code>token</code>, <code>discover</code>, <code>connect-check</code>, and "
+          "<code>dashboard</code> delegate to the cluster tools below."),
 
         h2("Cluster &amp; runtime"),
         p("A source install exposes these as <code>vgre</code> subcommands — the same "
@@ -905,7 +915,7 @@ def page_architecture():
         ul([
             "Real implementations only — no stubs, mocks, or placeholder math in shipped paths.",
             "From-scratch primitives (CUDA-C front-end, four execution tiers, tokenizer, vector index, crypto, collectives) to avoid vendor lock-in.",
-            "Warnings-as-errors, and a full test suite gating every change: Linux, Linux LLVM-free, macOS, and Windows all passed the <a href=\"https://github.com/etienne0114/vgre/actions/runs/37013670009\">latest hosted run</a>.",
+            "Warnings-as-errors, with the full test suite running in Linux, Linux LLVM-free, macOS, and Windows CI lanes. Check <a href=\"https://github.com/etienne0114/vgre/actions/workflows/ci.yml\">GitHub Actions</a> for the current status.",
         ]),
     ])
 
@@ -920,10 +930,11 @@ def page_faq():
           "closer with AVX-512. VGRE targets learning, CI, development, and moderate "
           "workloads — not latency-critical production inference."),
         h3("Which platforms are supported?"),
-        p("<strong>All three are CI-green.</strong> The full <code>ctest</code> suite passes on "
-          "<strong>Linux x86-64</strong> (including the dedicated LLVM-free lane), on "
-          "<strong>macOS</strong> (Apple Silicon, auto-detected Homebrew "
-          "<code>llvm@18</code>), and on <strong>Windows</strong> (clang-cl on windows-2022). Linux "
+        p("CI runs the full <code>ctest</code> suite on <strong>Linux x86-64</strong> "
+          "(including the dedicated LLVM-free lane), <strong>macOS</strong> (Apple Silicon, "
+          "auto-detected Homebrew <code>llvm@18</code>), and <strong>Windows</strong> "
+          "(clang-cl on windows-2022). <a href=\"https://github.com/etienne0114/vgre/actions/workflows/ci.yml\">"
+          "Check GitHub Actions for current results.</a> Linux "
           "ARM64 builds and tests via NEON. Prebuilt wheels ship for Linux, macOS (arm64) and "
           "Windows — see <a href=\"downloads.html\">Downloads</a>."),
         h3("macOS: OpenMP or JIT failures?"),

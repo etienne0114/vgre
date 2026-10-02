@@ -159,9 +159,6 @@ python3 -m venv ~/.venvs/vgre && source ~/.venvs/vgre/bin/activate   # avoids PE
 pip install vgre
 vgre --version                 # the wheel installs a `vgre` command on PATH
 vgre generate --prompt "the "  # trains a tiny demo model and generates text
-vgre chat                       # download the pinned preset on first use, then chat
-vgre pull smollm2                # download the preset without starting chat
-vgre chat smollm2                # chat with the cached preset explicitly
 ```
 
 To upgrade an existing environment, use `python -m pip install --upgrade vgre`.
@@ -169,8 +166,13 @@ PyPI receives new builds from the versioned release workflow; a green main-branc
 CI run alone does not publish a new package. The latest published PyPI version is
 0.1.3; the source tree now prepares 0.1.4 for its matching release tag.
 
-For a local GGUF, pass its actual existing filename to `vgre chat`; source sync
-installs the runtime but does not provide model weights.
+The source 0.1.4 CLI adds `vgre pull` and `vgre chat`. They are not included in
+the currently published 0.1.3 wheel; use a source install to run them before
+the 0.1.4 PyPI release is published.
+
+When using the source 0.1.4 CLI with a local GGUF, pass its actual existing
+filename to `vgre chat`; source sync installs the runtime but does not provide
+model weights.
 
 The wheels are compiled at the **universal x86-64 baseline**, so they load on any
 x86-64 CPU; the hot kernels (GEMM, ternary) then **detect the CPU at runtime**

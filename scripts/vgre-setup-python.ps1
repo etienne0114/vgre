@@ -1,7 +1,7 @@
 <#
     vgre-setup-python.ps1 — install the vgre Python model CLI into a venv.
 
-    The model subcommands (vgre generate / train / tokenize / info) run through
+    The model subcommands (vgre version / info / pull / chat / generate / train / tokenize) run through
     the vgre Python package (a numpy-based LM). This installs it into a
     dedicated virtualenv at %USERPROFILE%\.vgre\venv — which the vgre.ps1 /
     vgre.bat dispatcher then finds automatically — so the model CLI works
@@ -51,7 +51,7 @@ if (-not $PyExe) {
     }
 }
 if (-not $PyExe) {
-    Fail "python not found on PATH — install Python 3, then re-run. Model subcommands (vgre generate/train) will be unavailable."
+    Fail "python not found on PATH — install Python 3, then re-run. Model subcommands (vgre pull/chat/generate/train/tokenize) will be unavailable."
 }
 
 $VenvDir = Join-Path $env:USERPROFILE ".vgre\venv"
@@ -77,5 +77,5 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Installed, but 'import vgre' failed — model subcommands may not work."
 }
 
-Write-Host "  [OK] vgre model CLI ready — try:  vgre generate --prompt `"the `"" -ForegroundColor Green
+Write-Host "  [OK] vgre model CLI ready — try:  vgre chat  or  vgre pull smollm2" -ForegroundColor Green
 exit 0
