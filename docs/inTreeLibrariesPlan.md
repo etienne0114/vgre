@@ -57,13 +57,13 @@ the gap to a GPU (full analysis: [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) 
 - **fp16 / fp64 storage variants** (trivial via the same storage-templated driver).
 - **Mixed-precision training** (bf16 compute / fp32 master weights) + **gradient checkpointing**
   to fit 100M activations in RAM; **ZeRO-style optimizer-state sharding** for a cluster run.
-- **manylinux / cibuildwheel** redistributable wheels + **PyPI publish** (see `missingFeatures.md` §1.1).
+- **manylinux / PyPI distribution** are delivered: v0.1.3 has platform wheels on PyPI. The next source update is v0.1.4 and requires its matching release tag (see `missingFeatures.md` §1.1).
 
 ---
 
 ## Cross-cutting rules
 
-- Everything behind feature flags; `VGRE_MINIMAL` stays buildable; the full `ctest` suite never regresses (currently 399 with LLVM / 379 LLVM-free, 100% green).
+- Everything behind feature flags; `VGRE_MINIMAL` stays buildable; the full `ctest` suite never regresses. Latest hosted cross-platform verification: [run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009), all jobs green.
 - Each phase gated by correctness tests **and** a benchmark before the next begins.
 - No new external dependency may enter the default build — that is the whole point.
 

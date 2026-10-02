@@ -279,13 +279,17 @@ Grow this set test-first: add a kernel test under `tests/compiler/`, implement i
 in `src/compiler/frontend/{parser,codegen}.cpp` **and** the compiled tier
 (`compiled_kernel.cpp`), and verify both tiers against a reference.
 
-## Test status of the two builds (2026-09-24)
+## Test status of the two builds (2026-10-02)
+
+The latest hosted run [37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009)
+passed Linux with LLVM, the dedicated Linux LLVM-free build, macOS ARM64, and Windows x86-64.
+The Linux LLVM-free lane builds with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
 
 | Build | Result |
 |---|---|
-| `-DVGRE_ENABLE_JIT=ON` (default) | **399 / 399 pass** under full `-j` load — full LLVM JIT + from-scratch backends (interpreter / compiled-fiber / native x86-64 JIT / **Tier-2 SSA**). (The CPU-heavy fuzzers and the cross-block `CudaThreadfence` are marked `RUN_SERIAL` so they can't be starved by parallel-test contention.) |
-| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | **379 / 379 pass, 0 crashes** — VGRE built with **nothing but a C++17 compiler** (no LLVM, no OpenMP; the compiled-kernel + SSA tiers still parallelise CTAs via the in-tree thread pool). The whole from-scratch stack — interpreter, compiled-fiber, native x86-64 JIT, and the Tier-2 SSA backend (incl. native shared-memory + warp intrinsics) — is exercised here. |
-| `-DVGRE_ENABLE_JIT=OFF` (no LLVM, OpenMP on) | **379 / 379 pass, 0 crashes/aborts** |
+| `-DVGRE_ENABLE_JIT=ON` (default) | Full Linux CTest suite passed in the latest hosted run, exercising LLVM JIT and the from-scratch backends. |
+| **bare: `-DVGRE_ENABLE_JIT=OFF -DVGRE_ENABLE_OPENMP=OFF`** | The dedicated LLVM-free Linux CTest lane passed, exercising the from-scratch stack without LLVM or OpenMP. |
+| macOS ARM64 and Windows x86-64 | Full platform CTest jobs passed in the same hosted run. |
 
 The whole engine kernel path is routed through the from-scratch backends when
 LLVM is absent (`RuntimeEngine::registerKernel`/`launchKernel` +

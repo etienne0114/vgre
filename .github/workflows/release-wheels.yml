@@ -50,6 +50,43 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Verify Python package versions and release tag
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("bindings/python/pyproject.toml").read_text())
+          project_version = project["project"]["version"]
+          init_text = Path("bindings/python/vgre/__init__.py").read_text()
+          match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_text, re.MULTILINE)
+          module_version = match.group(1) if match else None
+          shell_text = Path("scripts/vgre.sh").read_text()
+          shell_match = re.search(r'^VGRE_VERSION="([^"\\]+)"', shell_text, re.MULTILINE)
+          powershell_text = Path("scripts/vgre.ps1").read_text()
+          powershell_match = re.search(r'^\$VgreVersion\s*=\s*"([^"\\]+)"', powershell_text, re.MULTILINE)
+          cli_versions = [shell_match.group(1) if shell_match else None,
+                          powershell_match.group(1) if powershell_match else None]
+          if not module_version or project_version != module_version or any(v != project_version for v in cli_versions):
+              raise SystemExit(
+                  f"Release version mismatch: pyproject={project_version}, "
+                  f"vgre.__version__={module_version}, source CLI versions={cli_versions}"
+              )
+          tag = os.environ["RELEASE_TAG"]
+          tag_version = tag.removeprefix("v")
+          if tag and project_version != tag_version:
+              raise SystemExit(
+                  f"Release tag {tag} must match Python package version {project_version}"
+              )
+          print(f"Python package versions agree: {project_version}")
+          if tag:
+              print(f"Release tag and Python package version match: {tag_version}")
+          PY
+
       # ── Linux: clang-18, LLVM-free (matches the linux-x86_64-llvm-free CI lane) ──
       # Built on ubuntu-22.04 (glibc 2.35). clang-18 isn't in 22.04's repos, so we
       # add the official LLVM apt channel — this keeps the compiler identical to the
@@ -174,12 +211,9 @@ jobs:
 
   # ── PyPI (trusted publishing — no API token) ─────────────────────────────────
   # Publishes on a version tag (vX.Y.Z) and on a manual run with publish_pypi=true.
-  # Requires a one-time PyPI-side setup: create a trusted publisher (a "pending
-  # publisher" for the not-yet-existing `vgre` project) pointing at this repo,
-  # workflow file `release-wheels.yml`, and the `pypi` environment
-  # (docs.pypi.org/trusted-publishers). This job runs independently of the GitHub
-  # Release job, so if the publisher isn't set up yet only this job fails — the
-  # Release still succeeds.
+  # PyPI trusted publishing is configured and verified (v0.1.3 was published
+  # by this job using OIDC). Matching version tags publish automatically; the
+  # workflow_dispatch input can also opt in to publishing. No API token is used.
   pypi:
     name: publish-pypi
     needs: build

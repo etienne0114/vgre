@@ -18,7 +18,7 @@ try:
 except ImportError:
     NATIVE_AVAILABLE = False
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __all__ = [
     "VirtualDevice", "Kernel", "Runtime",
     "DeviceArray", "ManagedArray", "Stream", "Graph",

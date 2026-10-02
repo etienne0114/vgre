@@ -60,9 +60,9 @@ cloud bill, no vendor lock-in."*
 
 ## Near-term blockers to revenue (from missingFeatures.md)
 
-- ~~CI is dead (GitHub Actions billing)~~ **Resolved (2026-09):** CI runs free on
-  the public repo on every push — Linux required-green, macOS green, Windows
-  full-suite green (informational). Win/macOS binaries are now CI-verified, so the
-  Pro tier is unblocked on that axis.
+- ~~CI is dead (GitHub Actions billing)~~ **Resolved:** the latest hosted run
+  [37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009)
+  passed all required Linux, macOS, and Windows jobs, including the Linux LLVM-free lane.
+  Win/macOS binaries are CI-verified, so the Pro tier is unblocked on that axis.
 - A physical multi-node demo run + one frontier checkpoint (Llama-3-8B int4, ~4.5 GB)
   would complete the flagship demo story; both are hardware/download-gated, not code-gated.

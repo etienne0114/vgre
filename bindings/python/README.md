@@ -13,6 +13,11 @@ vgre --version
 vgre generate --prompt "the "
 ```
 
+To update an existing environment, run `python -m pip install --upgrade vgre`.
+PyPI only receives new builds from the versioned release workflow; pushes to
+`main` run CI but do not publish a package. The current published release is
+0.1.3; source version 0.1.4 is prepared for the next matching release tag.
+
 ## Run a real pretrained model — fluent output, no training
 
 Load a supported Llama-family or Qwen2 GGUF checkpoint without hand-writing

@@ -1,6 +1,6 @@
 # VGRE — Missing Features & Next-Release Roadmap
 
-**Last Updated**: 2026-09-25
+**Last Updated**: 2026-10-02
 
 This file lists **only what is not yet done** — the targets for the next release and the
 items blocked on external hardware, accounts, or content. It is deliberately short.
@@ -11,10 +11,11 @@ Everything already delivered is documented elsewhere (do not duplicate it here):
 - **Capabilities, test metrics, platform/CI status**: [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
 - **ML tracks (T1–T6)** — build steps + success criteria: [`implementationPlan.md`](implementationPlan.md)
 
-**Current baseline (2026-09-26):** the full `ctest` suite is green on all three platforms in CI —
-**399/399 with LLVM, 379/379 in the LLVM-free build** on Linux x86-64, and the whole suite passes
-on macOS (Apple Silicon) and Windows (clang-cl). Released **v0.1.0** ships self-contained,
-LLVM-free wheels for Linux, macOS (arm64) and Windows.
+**Current baseline (2026-10-02):** [GitHub Actions run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009)
+passed all four hosted jobs: Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64.
+PyPI currently serves **v0.1.3** for Linux, macOS universal2, and Windows. The source tree's
+Python package metadata is prepared as **v0.1.4**; it will appear on PyPI only after the matching
+`v0.1.4` tag runs the release workflow.
 
 ---
 
@@ -24,11 +25,13 @@ Net-new or breadth work we can do without external hardware. (Items marked *corr
 already run on some tier and are bit-exact — what's left is a native path, a loader, or breadth.)
 
 ### 1.1 Packaging & distribution
-- *(Done — PyPI trusted publishing is configured. The workflow (`release-wheels.yml` → the opt-in
-  `pypi` job, `pypa/gh-action-pypi-publish` via OIDC, gated behind `publish_pypi=true`) is paired with
-  a PyPI pending publisher for `vgre` / `etienne0114` / `vgre` / `release-wheels.yml` / `pypi` and a
-  GitHub `pypi` environment restricted to `v*` tags. No API token is stored (OIDC). Publishing is a
-  manual **Release wheels** run with `publish_pypi=true`; the first upload creates the `vgre` project.)*
+- *(Done — PyPI trusted publishing is configured and verified: [v0.1.3](https://pypi.org/project/vgre/0.1.3/)
+  was uploaded by GitHub Actions using OIDC; see successful publish run
+  [36387210075](https://github.com/etienne0114/vgre/actions/runs/36387210075). No API token is stored.
+  Pushing a matching `vX.Y.Z` tag builds all platform wheels and publishes them. A release-tag
+  version guard checks the Python package declarations and Linux/Windows source CLI versions, then
+  checks the tag before wheel builds. Ordinary pushes to `main` run CI but do not publish a new
+  version.)*
 - *(Done — the release-wheels matrix now builds a **macOS Intel (x86-64) wheel** on the `macos-13`
   runner alongside the arm64 one, `build_wheel.sh` tags each by the host platform. The Docker
   release now builds **amd64 and arm64 each on its own native runner** in parallel — no QEMU

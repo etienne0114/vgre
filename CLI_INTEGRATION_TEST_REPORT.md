@@ -110,5 +110,27 @@ The affected tests now explicitly close native metadata readers before deleting
 their temporary files, and elapsed-time measurements use `time.perf_counter()`
 with a positive-duration check. The same Python integration selection used in CI
 passes locally on Linux (104 passed; two optional psutil measurements skipped
-because psutil is not installed locally). A new hosted run is needed to confirm
-the Windows result after these changes.
+because psutil is not installed locally). The latest hosted result is recorded
+below.
+
+## Latest hosted verification and PyPI status (2026-10-02)
+
+GitHub Actions run [37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009)
+on `ebfb464c` completed successfully. All four required jobs passed: Linux x86-64,
+Linux LLVM-free, macOS ARM64, and Windows x86-64. The jobs include the full CTest
+suite, platform Python integration checks, and the real pretrained GGUF CLI smoke;
+macOS also ran the SSA native-execution checks.
+
+The [latest PyPI release is v0.1.3](https://pypi.org/project/vgre/0.1.3/), published
+by the successful trusted-publishing job in [release run 36387210075](https://github.com/etienne0114/vgre/actions/runs/36387210075).
+Main-branch CI does not publish packages. The source package version is prepared as
+0.1.4; a matching `v0.1.4` tag runs the wheel build and PyPI publish workflow. The
+workflow checks that the Python package and source CLI version declarations agree,
+then rejects a release tag that does not match them.
+
+The scheduled Nightly run [36990241900](https://github.com/etienne0114/vgre/actions/runs/36990241900)
+failed its `Full test suite` step earlier that day on older commit `b712601c`; its
+benchmark steps were skipped and no diagnostic artifact was attached. The later
+cross-platform CI run above passed on `ebfb464c`. The Nightly log endpoint did not
+return the CTest failure details, so that earlier failure is recorded without
+guessing at its cause.

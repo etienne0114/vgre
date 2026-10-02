@@ -1,23 +1,26 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-09-20 (front-end/backend differential-fuzzing hardening; test counts reconciled)  
-**Build Status (Linux)**: ✅ full `ctest` suite passing (**399 tests** with LLVM, **379** in the LLVM-free build, 100% green under full `-j`) on x86-64 Linux — the required CI job  
-**Build Status (Linux, LLVM-free)**: ✅ **CI-guarded zero-burden path** — a dedicated `linux-x86_64-llvm-free` job builds with `VGRE_ENABLE_JIT=OFF` + `VGRE_ENABLE_OPENMP=OFF` and **no `llvm-*-dev`/`libclang`/`libomp` installed**, running the **358-test** JIT-free subset (the ~20 JIT-only tests are gated out in CMake). Proves the lightweight, no-toolchain build stays green on every push  
-**Build Status (macOS)**: ✅ **CI-green** on Apple Silicon (ARM64). Latest fix: the process-exit `recursive_mutex` abort (an `atexit` handler locking the `RuntimeEngine` singleton after its destruction — EINVAL on macOS libc++) resolved by a leaked, never-destroyed singleton  
-**Build Status (Windows)**: ✅ **CI-green** — builds and runs the full `ctest` suite on `windows-2022` (LLVM-18 tarball cached, clang-cl), confirmed on run 35325255176 (2026-09-18, Test step = success). The bring-up fixes: AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output. Still `continue-on-error` in the workflow (may be promoted to required after a few more consecutive green runs)  
+**Last Updated**: 2026-10-02
+
+**Latest hosted verification**: ✅ [GitHub Actions run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
+
+- **Linux**: ✅ Full `ctest` suite passed in the latest hosted Linux x86-64 job.
+- **Linux, LLVM-free**: ✅ The dedicated `linux-x86_64-llvm-free` job passed with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
+- **macOS**: ✅ Apple Silicon build, CTest, Python integration, and SSA native-execution checks passed in the latest hosted job.
+- **Windows**: ✅ Windows x86-64 build, CTest, pretrained GGUF CLI smoke, and Python integration passed in the latest hosted job.
+- **PyPI**: Latest published package is 0.1.3. Package metadata is prepared as 0.1.4; a matching `v0.1.4` tag triggers the versioned release and PyPI publish jobs. Main-branch CI does not publish packages.
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
 **Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.
 
-> **CI status corrected (2026-09):** the previous "GitHub Actions billing
-> blocker" is **resolved** — CI now runs free on the public repo on **every
-> push**, with Linux required and macOS/Windows informational
-> (`continue-on-error`) until fully green. The prior text below (billing failing
-> since 2026-06-22) is **historical and no longer true**.
+> **Historical CI status (2026-09):** CI was restored on the public repository.
+> At that point some OS lanes were informational; since then the workflow was
+> updated so Linux, macOS, and Windows are required, and all four latest matrix
+> jobs (including Linux LLVM-free) passed run 37013670009.
 
 > **LLVM is now optional (delivered):** kernel execution no longer requires LLVM —
 > a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter,
 > compiled-fiber tier, native x86-64 JIT, and an optional SSA optimizing backend),
-> and the full suite passes LLVM-free (379 tests, `VGRE_ENABLE_JIT=OFF`). See
+> and the full suite passes LLVM-free (`VGRE_ENABLE_JIT=OFF`). See
 > [`zeroBurdenRoadmap.md`](zeroBurdenRoadmap.md) for the plan and what remains.
 
 > **2026-07-03 macOS bring-up** (in-tree, not yet full CI-green):
@@ -49,10 +52,9 @@
 >   now run over the real TCP collective in CI-shaped tests
 >   (`PythonNnDistributedMultistep`, `PythonNnTensorParallel`).
 
-> **Correction (2026-06-10) — partly superseded (2026-09):** the CI/platform half
-> below is out of date. As of 2026-09 there **is** CI, and all three OSes run the
-> full `ctest` suite green (see the header): Linux required, macOS green, Windows
-> informational. The note is kept for history; the simplified-compute-path caveats
+> **Historical correction (2026-06-10):** the CI/platform half below is out of date.
+> The latest CI status is in the header: Linux, macOS, and Windows all pass the
+> full `ctest` suite, and each is a required lane. The simplified-compute-path caveats
 > it lists still stand where `missingFeatures.md` §1 marks them. Original text:
 > earlier revisions of this file claimed
 > "CI/CD-Ready", "validated across Linux, Windows, macOS", and "zero stubs".
@@ -78,8 +80,7 @@ VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime desi
 
 ### 1.1 Linux (x86-64) — canonical
 
-**Verified on Linux (x86-64).** The full `ctest` suite (399 tests with LLVM,
-379 in the LLVM-free build) passes on Linux, exercised with property-based
+**Verified on Linux (x86-64).** The full `ctest` suite passes on Linux, exercised with property-based
 exploration, differential fuzzing of the CUDA-C front-end against both execution
 tiers, ThreadSanitizer race analysis, and static-destruction verification.
 
@@ -89,9 +90,8 @@ tiers, ThreadSanitizer race analysis, and static-destruction verification.
 engine (`libvgre`, `libvgre_cudart`, examples, integration tests) compiles with
 Homebrew `llvm@18` auto-selected by CMake; JIT kernel compilation discovers Clang at
 runtime (`VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`). A prebuilt
-macOS-arm64 wheel ships with each release. (The CI job is `continue-on-error` in the
-workflow — informational — pending promotion to required, but it exercises and passes
-the whole suite on every push.)
+macOS-arm64 wheel ships with each release. The latest macOS CI job is required and
+passed the full suite plus Python integration and native SSA checks.
 
 **macOS-specific real implementations** (not stubs): UVM via `SIGSEGV`/`SIGBUS`,
 Keychain via `SecItemAdd`/`SecItemCopyMatching`, thermal via IOKit SMC,
@@ -104,11 +104,10 @@ PMU/CUPTI counters without physical GPU hardware.
 ### 1.3 Windows — CI-green
 
 **Windows builds and runs the full `ctest` suite in CI** (`windows-2022`,
-clang-cl, LLVM-18 tarball cached), confirmed 2026-09-18 (see the header). The
-bring-up fixes were AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency
+clang-cl, LLVM-18 tarball cached). The latest required Windows job also passed
+the pretrained GGUF CLI smoke and Python integration checks. Earlier bring-up
+fixes included AVX2 `rsqrt`/GEMM numerical accuracy, `vgre.dll` dependency
 loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output.
-The workflow keeps it `continue-on-error` (informational) pending a few more
-consecutive green runs before promotion to required.
 
 - **Linux core passes**: full regression + integration + platform suite green on x86-64.
 - **Mostly real compute, with documented exceptions**: nearly every path runs real
@@ -153,7 +152,7 @@ For the comprehensive, definitive list of boundary conditions (such as physical 
 The following components are fully implemented, verified via regression tests, and stable for production deployment:
 
 ### 3.1 Kernel Compilation & Execution
-- **From-scratch CUDA-C front-end + four-tier CPU backend (no LLVM required)**: an in-tree lexer/parser lowers kernels to an AST, then to the fastest of four bit-exact tiers — a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional own SSA optimizing backend (`VGRE_EXEC_BACKEND=interp|cp|ssa`). This is the default in the LLVM-free build (379 tests green).
+- **From-scratch CUDA-C front-end + four-tier CPU backend (no LLVM required)**: an in-tree lexer/parser lowers kernels to an AST, then to the fastest of four bit-exact tiers — a PTX interpreter, a compiled-closure tier with a cooperative fiber executor, a hand-emitted native x86-64 JIT, and an optional own SSA optimizing backend (`VGRE_EXEC_BACKEND=interp|cp|ssa`). This is the default in the LLVM-free build, which passes its dedicated hosted CI lane.
 - **LLVM JIT Compiler (optional, high-performance path)**: when LLVM dev libs are present, dynamically JITs PTX to native assembly via Clang and LLVM ORC JIT, optimized with `-O3 -march=native`.
 - **Persistent Disk Caching**: Stores JIT compilations in `~/.vgre/cache/` using an LRU cache with AST collision eviction and integrity check.
 - **Block Worker Pool**: Emulates GPU grid execution using a pre-warmed thread pool (1024-2048 threads) and sense-reversing barrier objects for `__syncthreads()`.
@@ -188,13 +187,11 @@ The following components are fully implemented, verified via regression tests, a
 
 ## 4. Test Suite Summary
 
-The VGRE test suite runs **378 CTest targets** (LLVM build) / **358** (LLVM-free
-build) covering memory management, compiler translation (incl. the from-scratch
+The VGRE test suite covers memory management, compiler translation (incl. the from-scratch
 CUDA-C front-end + eight differential fuzzers against both execution tiers),
-compute libraries, and clustering — 100% green under full `-j`. The per-area
-breakdown below is **historical/indicative** (it predates substantial growth); the
-authoritative current count is the total above, reproduced by the build commands
-in §5.
+compute libraries, and clustering. The latest hosted cross-platform verification
+is linked at the top of this document. The per-area breakdown below is
+**historical/indicative** and does not assert current test counts.
 
 | Suite | Focus | Result |
 |---|---|---|

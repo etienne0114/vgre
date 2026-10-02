@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$VgreVersion = "0.1.3"
+$VgreVersion = "0.1.4"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # The managed venv that the installers can populate with the vgre package.

@@ -4,7 +4,7 @@
 
 📖 **Full documentation → [vgre.vercel.app](https://vgre.vercel.app/)** — installation, running CUDA apps, distributed clusters, the CLI tools, every environment variable, troubleshooting, and the API reference. The complete operator's guide now lives on the docs site (also mirrored on [GitHub Pages](https://etienne0114.github.io/vgre/)).
 
-> **Verification status (2026-10-02):** Local x86-64 Linux build completed; all 410 CTest tests passed. The latest hosted GitHub run (2026-09-28) passed Windows and failed Linux and macOS. Updated required OS jobs, Nightly scheduling, and pretrained-model CLI checks are in the working tree and need a hosted run. This status does not claim blanket API completeness or physical GPU execution.
+> **Verification status (2026-10-02):** [GitHub Actions run 37013670009](https://github.com/etienne0114/vgre/actions/runs/37013670009) passed all four jobs: Linux, Linux LLVM-free, macOS, and Windows. The local Linux CTest suite also passed 410/410. This does not claim blanket API completeness or physical GPU execution.
 
 ## What is VGRE?
 
@@ -34,16 +34,17 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 **cuDNN Coverage**: Major legacy ops + backward/training + Backend API attention routing implemented  
 **NCCL Coverage**: ~95% (all major collectives + p2p)  
 **PTX ISA Coverage**: ~95% (~110+ of ~115 commonly-used instructions)  
-**Current Verification**: Local Linux CTest passed 410/410; hosted Linux and macOS failed in the last available run.
-**Cross-Platform**: Last hosted run: Windows passed; Linux and macOS failed. The current workflow makes all three OS jobs required; updated hosted verification is pending.
-**Zero-burden build**: A Linux LLVM-free workflow lane is configured (`VGRE_ENABLE_JIT=OFF`, `VGRE_ENABLE_OPENMP=OFF`); its current working-tree result is pending a hosted run.
+**Current Verification**: Hosted run 37013670009 passed Linux, Linux LLVM-free, macOS, and Windows; local Linux CTest passed 410/410.
+**Cross-Platform**: ✅ Linux x86-64, macOS ARM64, and Windows x86-64 passed the latest hosted CI run.
+**Zero-burden build**: ✅ Linux LLVM-free lane passed run 37013670009 with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
+**PyPI**: Latest published version is 0.1.3. Main-branch CI does not publish packages; see the release workflow and Python package version before expecting `pip install --upgrade vgre` to pick up newer source changes.
 
 ### Platform Support
-- ⚠️ **Linux**: The current working tree passed 410/410 CTest tests locally. The latest hosted Linux test step failed; an updated hosted run is pending.
-- ⚠️ **macOS**: Apple Silicon build/test support is configured; the latest hosted run failed. The exact failing test is unknown because its GitHub artifact log could not be retrieved from this environment. Current workflow changes need a fresh hosted run.
-- ⚠️ **Windows**: The latest hosted build and test job passed. Current workflow changes, including the pretrained CLI smoke, need a fresh hosted run. The clang/LLVM toolchain path is configured for `windows-2022`.
+- ✅ **Linux**: x86-64 CTest and the dedicated LLVM-free CTest lane passed the latest hosted run.
+- ✅ **macOS**: Apple Silicon build, full CTest, Python integration, and SSA native-execution checks passed the latest hosted run.
+- ✅ **Windows**: clang-cl build, CTest, pretrained CLI smoke, and Python integration passed the latest hosted run.
 
-> Local Linux verification is current for this working tree. GitHub Actions has not yet run the workflow edits; the latest hosted run is the one linked above. See `docs/missingFeatures.md` for hardware-only boundaries (Metal MPS, NVIDIA PMU/CUPTI, GPUDirect RDMA).
+> The latest hosted run is linked above. See `docs/missingFeatures.md` for hardware-only boundaries (Metal MPS, NVIDIA PMU/CUPTI, GPUDirect RDMA).
 
 ### What Works ✅
 - **CUDA Runtime API** (~101+ functions): memory alloc/free (`cudaMalloc`, `cudaFree`, `cudaMallocManaged`, `cudaMallocAsync`, `cudaMallocFromPoolAsync`, `cudaMallocPitch`, `cudaMallocArray`, `cudaMalloc3DArray`, `cudaMalloc3D`), stream create/destroy/query/sync/wait-event/add-callback/launch-host-func, events (create/record/query/sync/destroy/elapsed-time), error introspection (`cudaGetErrorName`/`GetErrorString`), symbol copies (`cudaMemcpyToSymbol`/`FromSymbol` sync+async), array allocation (1D/2D/3D via `TextureManager`), pointer introspection (`cudaPointerGetAttributes`), device queries, peer access, kernel launch (`cudaLaunchKernel`, `cudaLaunchCooperativeKernel`, `cudaLaunchKernelExC`), graph APIs (capture, instantiate, launch, clone, destroy, exec update, all 11 node types including kernel, memset, host, child, empty, event-record/wait, mem-alloc/free), texture/surface objects (`cudaCreateTextureObject`, `cudaDestroyTextureObject`, `cudaCreateSurfaceObject`, `cudaDestroySurfaceObject`, legacy `cudaBindTexture`/`cudaBindTextureToArray`/`cudaBindTexture2D`/`cudaBindSurfaceToArray`), external memory/semaphore (`cudaImportExternalMemory`, `cudaDestroyExternalMemory`), stream capture introspection (`cudaStreamIsCapturing`, `cudaStreamGetCaptureInfo_v2`), device/function attributes (`cudaFuncGetAttributes`, `cudaDeviceGetLimit`/`SetLimit`, `cudaDeviceGetCacheConfig`/`SetCacheConfig`), memset 2D/3D/Async variants.
@@ -81,7 +82,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 - ✅ **Four CPU execution tiers, bit-exact, fastest-first** — **Tier 0** PTX interpreter (guaranteed fallback); **Tier 1** compiled-closure backend with a **portable cooperative fiber executor** (POSIX ucontext + Win32 Fibers) that runs the whole cooperative surface (`__shared__`, `__syncthreads`, `__syncwarp`, warp shuffle/vote/reduce/match, `__syncthreads_{count,and,or}`, `__activemask`); **Tier 1b** native **x86-64 machine-code JIT** (hand-emitted, ~18–118× the compiled tier, differential-fuzzed bit-exact); **Tier 2** an **own SSA optimizing backend** (`VGRE_EXEC_BACKEND=ssa`).
 - ✅ **Tier-2 SSA backend (VGRE-IR)** — from-scratch SSA: AST→SSA (Braun et al. phi insertion) → const-fold / dominator-scoped GVN / LICM / DCE → **linear-scan register allocation** (GPR + XMM, loop-carried phis) → **native x86-64** emitter (+ **AArch64**, on by default — `VGRE_SSA_ARM_NATIVE=0` to opt out — encodings llvm-mc-verified and execution validated on Apple-Silicon CI). Feature-complete for the scalar + shared-memory + warp subset: full control flow (incl. `switch`), `__device__` inlining, local arrays, and — on x86-64/Linux as **native machine code** via ucontext fibers (`vgre_ssa_barrier`/`vgre_ssa_warp` + a block + per-warp selective-release scheduler), portable evaluator elsewhere — `__shared__`/`__syncthreads` **and the full sm_70+ warp-intrinsic surface** (`__shfl_*`, vote, `__reduce_*_sync`, `__match_{any,all}_sync`, `__syncwarp`, `__activemask`). Held bit-exact vs the interpreter/compiled tiers.
 - ✅ **Front-end feature growth on both from-scratch tiers** — the full **atomic set** (Add/Sub/Min/Max/Exch/And/Or/Xor/CAS), CUDA **built-in vector types** (`float4`/`int2`/`double3`/… + generalized struct load/store/ctor), **scalar texture/surface** fetches (`tex1D/2D/3D`, `tex1Dfetch`, `surf2D` read/write) via a shared `TextureManager`, and **function templates** (monomorphization: deduced/explicit/non-type/chained/pointer). Compiled tier == interpreter, bit-exact.
-- ✅ **LLVM made optional** — kernel execution no longer requires LLVM; the `VGRE_ENABLE_JIT=OFF` build runs the full 379-test suite green using only the from-scratch stack.
+- ✅ **LLVM made optional** — kernel execution no longer requires LLVM; the `VGRE_ENABLE_JIT=OFF` build passes its dedicated hosted CI lane using only the from-scratch stack.
 
 ### Recent Improvements (2026-07-03) 🎉
 - ✅ **macOS bring-up** — Dynamic Homebrew toolchain detection (`cmake/VGREPlatform.cmake`): auto-selects `llvm@18`, `libomp`, SDK, and libc++ rpath; no hardcoded `/opt/homebrew` paths. OpenMP uses `OpenMP::OpenMP_CXX` (fixes Apple Clang `-fopenmp`). Runtime JIT finds Clang via `VGRE_CLANG_PATH` → `llvm-config-18` → `brew --prefix llvm@18`.
@@ -162,6 +163,11 @@ vgre chat                       # download the pinned preset on first use, then 
 vgre pull smollm2                # download the preset without starting chat
 vgre chat smollm2                # chat with the cached preset explicitly
 ```
+
+To upgrade an existing environment, use `python -m pip install --upgrade vgre`.
+PyPI receives new builds from the versioned release workflow; a green main-branch
+CI run alone does not publish a new package. The latest published PyPI version is
+0.1.3; the source tree now prepares 0.1.4 for its matching release tag.
 
 For a local GGUF, pass its actual existing filename to `vgre chat`; source sync
 installs the runtime but does not provide model weights.
