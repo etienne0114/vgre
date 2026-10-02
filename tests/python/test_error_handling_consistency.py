@@ -136,6 +136,7 @@ class TestErrorHandlingConsistency:
                 test_path = f.name
 
         errors_caught = []
+        reader = None
 
         try:
             # Test GGUFMetadataReader (direct C API access)
@@ -182,6 +183,8 @@ class TestErrorHandlingConsistency:
                         f"Error message for {component} should indicate format issue: {message}"
 
         finally:
+            if reader is not None:
+                reader.close()
             if scenario_type != 'nonexistent_file' and os.path.exists(test_path):
                 os.unlink(test_path)
 
@@ -219,6 +222,7 @@ class TestErrorHandlingConsistency:
             # Test at different levels to ensure error information is preserved
             low_level_error = None
             high_level_error = None
+            reader = None
 
             # Low-level access (GGUFMetadataReader)
             try:
@@ -254,6 +258,8 @@ class TestErrorHandlingConsistency:
             ), f"Error information should be preserved: low='{low_level_error}', high='{high_level_error}'"
 
         finally:
+            if reader is not None:
+                reader.close()
             os.unlink(test_path)
 
     def test_concurrent_error_handling_consistency(self):
@@ -274,10 +280,14 @@ class TestErrorHandlingConsistency:
         errors = []
 
         def worker():
+            reader = None
             try:
                 reader = GGUFMetadataReader(test_path)
             except Exception as e:
                 errors.append((type(e), str(e)))
+            finally:
+                if reader is not None:
+                    reader.close()
 
         try:
             # Start multiple threads that will all fail
@@ -444,6 +454,7 @@ class TestErrorHandlingConsistency:
             try:
                 # Test that errors contain structured information
                 components_tested = []
+                reader = None
 
                 try:
                     reader = GGUFMetadataReader(test_path)
@@ -486,6 +497,8 @@ class TestErrorHandlingConsistency:
                             f"Parameter error should mention parameter issue: {error_message}"
 
             finally:
+                if reader is not None:
+                    reader.close()
                 if category != 'file_access' and os.path.exists(test_path):
                     os.unlink(test_path)
 

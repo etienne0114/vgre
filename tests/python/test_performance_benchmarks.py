@@ -193,6 +193,7 @@ class TestPerformanceBenchmarks:
                         initial_memory = process.memory_info().rss
 
                     start_time = time.perf_counter()
+                    reader = None
 
                     try:
                         reader = GGUFMetadataReader(temp_path)
@@ -207,6 +208,9 @@ class TestPerformanceBenchmarks:
                     except Exception as e:
                         print(f"    Iteration {iteration} failed: {e}")
                         success = False
+                    finally:
+                        if reader is not None:
+                            reader.close()
 
                     end_time = time.perf_counter()
                     elapsed = end_time - start_time
@@ -557,8 +561,8 @@ class TestPerformanceBenchmarks:
                 for iteration in range(5):
                     # 1. Direct metadata reader
                     start_time = time.perf_counter()
-                    reader = GGUFMetadataReader(temp_path)
-                    reader.get_block_count()
+                    with GGUFMetadataReader(temp_path) as reader:
+                        reader.get_block_count()
                     times['metadata_reader'].append(time.perf_counter() - start_time)
 
                     # 2. Auto-configurator

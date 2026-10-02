@@ -94,5 +94,21 @@ all three operating systems. The security integration test now supplies an
 isolated configured token and checks initialization results; production remains
 fail-closed. The targeted `TCPClusterSecurityHybrid` CTest and the complete
 local Linux CTest suite pass (410/410). Local socket tests were run with
-localhost socket access. A new hosted run is needed to verify these changes on
-the GitHub Linux, macOS, Windows, and LLVM-free runners.
+localhost socket access. The subsequent hosted run is recorded below.
+
+## Windows follow-up CI run (2026-10-02)
+
+Run [37010004494](https://github.com/etienne0114/vgre/actions/runs/37010004494)
+passed Linux x86_64, Linux LLVM-free, and macOS ARM64. Windows passed configure,
+build, CTest, and the real pretrained GGUF CLI smoke; its Python integration
+step had eight failures. Seven were test cleanup failures: the tests left
+`GGUFMetadataReader` handles open and then tried to unlink their mapped files,
+which Windows correctly denied. The other failure divided by a zero duration
+because cache performance tests measured short calls with `time.time()`.
+
+The affected tests now explicitly close native metadata readers before deleting
+their temporary files, and elapsed-time measurements use `time.perf_counter()`
+with a positive-duration check. The same Python integration selection used in CI
+passes locally on Linux (104 passed; two optional psutil measurements skipped
+because psutil is not installed locally). A new hosted run is needed to confirm
+the Windows result after these changes.

@@ -173,6 +173,7 @@ class TestCrossLanguageTypePreservation:
             f.flush()
             temp_path = f.name
 
+        reader = None
         try:
             # Test through Python bindings
             reader = GGUFMetadataReader(temp_path)
@@ -203,6 +204,8 @@ class TestCrossLanguageTypePreservation:
                 assert -2**31 <= result <= 2**31 - 1, f"Result {result} outside int32 range for {key}"
 
         finally:
+            if reader is not None:
+                reader.close()
             os.unlink(temp_path)
 
     @given(gguf_metadata_values())
@@ -231,6 +234,7 @@ class TestCrossLanguageTypePreservation:
             f.flush()
             temp_path = f.name
 
+        reader = None
         try:
             # Test through Python bindings
             reader = GGUFMetadataReader(temp_path)
@@ -265,6 +269,8 @@ class TestCrossLanguageTypePreservation:
                         f"Absolute error {absolute_error} > {abs_tolerance} for {key}: expected {expected_value}, got {result}"
 
         finally:
+            if reader is not None:
+                reader.close()
             os.unlink(temp_path)
 
     @given(corrupted_values())
@@ -289,6 +295,7 @@ class TestCrossLanguageTypePreservation:
             f.flush()
             temp_path = f.name
 
+        reader = None
         try:
             reader = GGUFMetadataReader(temp_path)
 
@@ -304,6 +311,8 @@ class TestCrossLanguageTypePreservation:
             # (though the specific error message format may vary)
 
         finally:
+            if reader is not None:
+                reader.close()
             os.unlink(temp_path)
 
     def test_c_api_direct_interface(self):

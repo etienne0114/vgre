@@ -167,9 +167,10 @@ class TestPerformanceAndCachingEfficiency:
             f.flush()
             temp_path = f.name
 
+        reader = None
         try:
             # Test GGUFMetadataReader performance
-            start_time = time.time()
+            start_time = time.perf_counter()
             reader = GGUFMetadataReader(temp_path)
 
             # Extract all parameters
@@ -181,7 +182,7 @@ class TestPerformanceAndCachingEfficiency:
             rope_freq_base = reader.get_rope_freq_base()
             norm_eps = reader.get_norm_eps()
 
-            extraction_time = time.time() - start_time
+            extraction_time = time.perf_counter() - start_time
 
             note(f"Metadata extraction took {extraction_time:.4f} seconds")
 
@@ -190,10 +191,11 @@ class TestPerformanceAndCachingEfficiency:
                 f"Metadata extraction took {extraction_time:.4f}s, should be < 1.0s"
 
             # Test ModelAutoConfigurator performance
-            start_time = time.time()
+            reader.close()
+            start_time = time.perf_counter()
             configurator = ModelAutoConfigurator()
             config = configurator.auto_configure(temp_path)
-            config_time = time.time() - start_time
+            config_time = time.perf_counter() - start_time
 
             note(f"Auto-configuration took {config_time:.4f} seconds")
 
@@ -202,6 +204,8 @@ class TestPerformanceAndCachingEfficiency:
                 f"Auto-configuration took {config_time:.4f}s, should be < 2.0s"
 
         finally:
+            if reader is not None:
+                reader.close()
             os.unlink(temp_path)
 
     @given(cache_test_scenarios())
@@ -249,9 +253,9 @@ class TestPerformanceAndCachingEfficiency:
 
                 test_file = test_files[file_index]
 
-                start_time = time.time()
+                start_time = time.perf_counter()
                 config = configurator.auto_configure(test_file)
-                access_time = time.time() - start_time
+                access_time = time.perf_counter() - start_time
 
                 access_times.append((access_round, file_index, access_time))
                 note(f"Access {access_round}: file {file_index} took {access_time:.4f}s")
@@ -266,6 +270,8 @@ class TestPerformanceAndCachingEfficiency:
                     avg_later_time = sum(later_accesses) / len(later_accesses)
 
                     # Cache should provide some speedup (at least 10% faster)
+                    assert first_access_time > 0.0, \
+                        "High-resolution timer returned zero for the first cache access"
                     cache_speedup = (first_access_time - avg_later_time) / first_access_time
                     note(f"Cache speedup: {cache_speedup:.2%}")
 
@@ -423,9 +429,9 @@ class TestPerformanceAndCachingEfficiency:
                     configurator = ModelAutoConfigurator()
 
                     for i in range(3):  # Multiple accesses per thread
-                        start_time = time.time()
+                        start_time = time.perf_counter()
                         config = configurator.auto_configure(temp_path)
-                        access_time = time.time() - start_time
+                        access_time = time.perf_counter() - start_time
 
                         results.append((worker_id, i, access_time, config))
                         time.sleep(0.01)  # Small delay
@@ -512,9 +518,9 @@ class TestPerformanceAndCachingEfficiency:
 
             # Access files again - should still work efficiently
             for test_file in test_files:
-                start_time = time.time()
+                start_time = time.perf_counter()
                 config = configurator.auto_configure(test_file)
-                access_time = time.time() - start_time
+                access_time = time.perf_counter() - start_time
 
                 assert access_time < 2.0, \
                     f"Cached access should be fast: {access_time:.4f}s"
