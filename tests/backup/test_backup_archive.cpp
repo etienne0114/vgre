@@ -113,13 +113,25 @@ int main() {
         // Corrupt one object file.
         fs::path victim;
         for (const auto& de : fs::directory_iterator(fs::path(dir) / "objects")) { victim = de.path(); break; }
-        { std::fstream f(victim, std::ios::in | std::ios::out | std::ios::binary);
-          f.seekp(30); char c = 'X'; f.write(&c, 1); }
+        bool corruptionWritten = false;
+        {
+            std::fstream f(victim, std::ios::in | std::ios::out | std::ios::binary);
+            char ivByte = 0;
+            if (f && f.read(&ivByte, 1)) {
+                // Flip a bit so the mutation is guaranteed; writing a fixed
+                // byte can accidentally leave the random IV/ciphertext intact.
+                ivByte ^= 0x01;
+                f.seekp(0);
+                f.write(&ivByte, 1);
+                f.flush();
+                corruptionWritten = static_cast<bool>(f);
+            }
+        }
         std::unique_ptr<BackupArchive> ar;
         BackupArchive::open(dir, key.data(), ar);
         bool anyFail = ar->verifySnapshot(s1) != VGREResult::SUCCESS ||
                        ar->verifySnapshot(s2) != VGREResult::SUCCESS;
-        check("corruption detected by verify", anyFail);
+        check("corruption detected by verify", corruptionWritten && anyFail);
     }
 
     // ── 8. replication export → independent archive restores identically ─
