@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 
 using vgre::compiler::PTXTranslator;
@@ -85,6 +86,36 @@ int main() {
         check("st.global has no literal '[' brackets", c.find('[') == std::string::npos);
     }
 
+    // Constraint operands must become valid C++ expressions, including named
+    // operands and nested expressions in the C++ operand list.
+    {
+        const std::string translated = PTXTranslator::translate(
+            "asm volatile(\"add.s32 %[sum], %[left], %[right];\" "
+            ": [sum] \"=r\"(result) : [left] \"r\"(lhs + offset), "
+            "[right] \"r\"(rhs));");
+        check("named inline PTX operands resolve to constrained C++ expressions",
+              contains(translated, "(result) = (lhs + offset) + (rhs);") &&
+              translated.find('%') == std::string::npos);
+
+        bool rejectsMissingOperand = false;
+        try {
+            (void)PTXTranslator::translate(
+                "asm(\"add.s32 %0, %1, %2;\" : \"=r\"(result) : \"r\"(lhs));");
+        } catch (const std::runtime_error&) {
+            rejectsMissingOperand = true;
+        }
+        check("inline PTX with an unmatched operand index fails explicitly",
+              rejectsMissingOperand);
+
+        bool rejectsPredicate = false;
+        try {
+            (void)PTXTranslator::translate("asm(\"@p add.s32 %0, %1, %2;\");");
+        } catch (const std::runtime_error&) {
+            rejectsPredicate = true;
+        }
+        check("predicated PTX is rejected instead of dropped", rejectsPredicate);
+    }
+
     // (3) Carry-chain numerical correctness. Emulate a 64-bit add as two 32-bit
     //     limbs using the EXACT expressions the translator emits for
     //     add.cc.u32 / addc.u32, and compare to a real 64-bit add.
@@ -145,14 +176,20 @@ int main() {
             "asm volatile("
             "\"mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
             "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\" "
-            ": \"=f\"(d0),\"=f\"(d1),\"=f\"(d2),\"=f\"(d3));";
+            ": \"=f\"(d0),\"=f\"(d1),\"=f\"(d2),\"=f\"(d3) "
+            ": \"f\"(a0),\"f\"(a1),\"f\"(a2),\"f\"(a3),"
+            "\"f\"(b0),\"f\"(b1),\"f\"(c0),\"f\"(c1),\"f\"(c2),\"f\"(c3));";
         std::string c = PTXTranslator::translate(src);
         check("mma.sync emits the warp-collective f16 helper",
               contains(c, "vgre_mma_m16n8k16_f32_f16("));
-        // All 14 register tokens must appear individually (flattened, not braces).
+        // All output/input operands must be substituted and flattened, not left
+        // as PTX percent placeholders or grouped braces.
         bool all14 = true;
-        for (int i = 0; i <= 13; ++i) all14 = all14 && contains(c, "%" + std::to_string(i));
-        check("mma.sync flattens all 14 brace-grouped operands", all14);
+        const char* operands[] = {"d0","d1","d2","d3","a0","a1","a2","a3",
+                                  "b0","b1","c0","c1","c2","c3"};
+        for (const char* operand : operands) all14 = all14 && contains(c, operand);
+        check("mma.sync substitutes all 14 constrained operands", all14 &&
+              c.find("%0") == std::string::npos);
         check("mma.sync leaves no brace-grouped operands ({%)", c.find("{%") == std::string::npos);
     }
 
@@ -316,7 +353,7 @@ int main() {
             ": \"=l\"(d) : \"l\"(a), \"r\"(rank));");
         check("mapa.shared::cluster -> vgre_jit_mapa_shared_cluster (DSMEM)",
               contains(mapa, "vgre_jit_mapa_shared_cluster(") &&
-              contains(mapa, "%1") && contains(mapa, "%2"));
+              contains(mapa, "(a)") && contains(mapa, "(rank)"));
     }
 
     // (10) Blackwell tcgen05 TMEM data path (P3-7): alloc writes a TMEM address to
@@ -340,7 +377,8 @@ int main() {
             "asm volatile(\"tcgen05.ld.sync.aligned.32x32b.x2.b32 {%0,%1}, [%2];\" "
             ": \"=r\"(r0),\"=r\"(r1) : \"r\"(taddr));");
         check("tcgen05.ld -> vgre_jit_tcgen05_ld reads the TMEM fragment",
-              contains(ld, "vgre_jit_tcgen05_ld(") && contains(ld, "%0") && contains(ld, "%1"));
+              contains(ld, "vgre_jit_tcgen05_ld(") && contains(ld, "r0") &&
+              contains(ld, "r1") && contains(ld, "(taddr)"));
     }
 
     printf("\n%d / %d passed\n", g_pass, g_total);

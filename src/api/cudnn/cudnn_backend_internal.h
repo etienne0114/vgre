@@ -262,7 +262,14 @@ enum cudnnBackendAttributeName_t {
     // Generates per-channel sum ΣX and sum-of-squares ΣX² for use by BN_FINALIZE.
     CUDNN_ATTR_OPERATION_GENSTATS_XDESC       = 810, // input tensor ID
     CUDNN_ATTR_OPERATION_GENSTATS_SUMDESC     = 811, // ΣX output tensor ID  [1,C,1,1]
-    CUDNN_ATTR_OPERATION_GENSTATS_SQ_SUM_DESC = 812  // ΣX² output tensor ID [1,C,1,1]
+    CUDNN_ATTR_OPERATION_GENSTATS_SQ_SUM_DESC = 812, // ΣX² output tensor ID [1,C,1,1]
+
+    // SIGNAL operation attributes (CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR).
+    CUDNN_ATTR_OPERATION_SIGNAL_MODE          = 820, // 0=set, 1=wait
+    CUDNN_ATTR_OPERATION_SIGNAL_FLAGDESC      = 821, // scalar int64 flag tensor ID
+    CUDNN_ATTR_OPERATION_SIGNAL_VALUE         = 822, // int64 value to set or wait for
+    CUDNN_ATTR_OPERATION_SIGNAL_XDESC          = 823, // pass-through input tensor ID
+    CUDNN_ATTR_OPERATION_SIGNAL_YDESC          = 824  // optional pass-through output tensor ID
 };
 
 struct BackendNode {

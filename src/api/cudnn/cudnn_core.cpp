@@ -127,15 +127,27 @@ cudnnStatus_t cudnnGetPooling2dForwardOutputDim(
 
 // ── Activation descriptors ────────────────────────────────────────────────────
 cudnnStatus_t cudnnCreateActivationDescriptor(cudnnActivationDescriptor_t* d) {
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
     *d = new ActDesc{}; return CUDNN_STATUS_SUCCESS;
 }
 cudnnStatus_t cudnnDestroyActivationDescriptor(cudnnActivationDescriptor_t d) {
     delete (ActDesc*)d; return CUDNN_STATUS_SUCCESS;
 }
 cudnnStatus_t cudnnSetActivationDescriptor(cudnnActivationDescriptor_t d,
-    cudnnActivationMode_t mode, cudnnNanPropagation_t, double coeff)
+    cudnnActivationMode_t mode, cudnnNanPropagation_t nanOpt, double coeff)
 {
-    auto* a=(ActDesc*)d; a->mode=mode; a->coeff=coeff; return CUDNN_STATUS_SUCCESS;
+    if (!d) return CUDNN_STATUS_INVALID_VALUE;
+    if (!isSupportedActivationMode(mode) || !isSupportedNanPropagation(nanOpt))
+        return CUDNN_STATUS_BAD_PARAM;
+    if ((mode == CUDNN_ACTIVATION_RELU || mode == CUDNN_ACTIVATION_CLIPPED_RELU) &&
+        (!std::isfinite(coeff) || coeff < 0.0))
+        return CUDNN_STATUS_BAD_PARAM;
+    auto* a=(ActDesc*)d;
+    a->mode=mode;
+    a->nanOpt=nanOpt;
+    a->coeff=coeff;
+    a->initialized=true;
+    return CUDNN_STATUS_SUCCESS;
 }
 
 // ── Dropout descriptors ───────────────────────────────────────────────────────

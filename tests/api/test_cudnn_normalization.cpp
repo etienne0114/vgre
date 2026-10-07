@@ -24,8 +24,8 @@ enum cudnnDataType_t     { CUDNN_DATA_FLOAT = 0 };
 enum cudnnTensorFormat_t { CUDNN_TENSOR_NCHW = 0 };
 enum cudnnNormMode_t     { CUDNN_NORM_PER_ACTIVATION = 0, CUDNN_NORM_PER_CHANNEL = 1 };
 enum cudnnNormAlgo_t     { CUDNN_NORM_ALGO_STANDARD = 0 };
-enum cudnnNormOps_t      { CUDNN_NORM_OPS_NORM = 0, CUDNN_NORM_OPS_NORM_ACTIVATION = 1 };
-enum cudnnActivationMode_t { CUDNN_ACTIVATION_RELU = 1 };
+enum cudnnNormOps_t      { CUDNN_NORM_OPS_NORM = 0, CUDNN_NORM_OPS_NORM_ACTIVATION = 1, CUDNN_NORM_OPS_NORM_ADD_ACTIVATION = 2 };
+enum cudnnActivationMode_t { CUDNN_ACTIVATION_RELU = 1, CUDNN_ACTIVATION_GELU = 7 };
 enum cudnnNanPropagation_t { CUDNN_NOT_PROPAGATE_NAN = 0 };
 
 cudnnStatus_t cudnnCreateActivationDescriptor(cudnnActivationDescriptor_t *d);
@@ -412,12 +412,39 @@ int test_fused_bn_relu_inference() {
         max_diff = std::fmax(max_diff, std::fabs(fused[i] - ref[i]));
     if (max_diff >= 1e-4f) FAIL("max |fused - ref| = " << max_diff << " >= 1e-4");
 
+    // Residual add is applied after normalization and before the exact GELU.
+    std::vector<float> z(total), residual_ref(total), residual_output(x);
+    for (int i = 0; i < total; ++i) z[i] = (i % 9 - 4) * 0.125f;
+    cudnnSetActivationDescriptor(actDesc, CUDNN_ACTIVATION_GELU, CUDNN_NOT_PROPAGATE_NAN, 0.0);
+    for (int n = 0; n < N; ++n)
+        for (int c = 0; c < C; ++c)
+            for (int hw = 0; hw < HW; ++hw) {
+                int idx = (n * C + c) * HW + hw;
+                float xhat = (x[idx] - mean[c]) / std::sqrt(var[c] + eps);
+                float preactivation = scale[c] * xhat + bias[c] + z[idx];
+                residual_ref[idx] = 0.5f * preactivation *
+                    (1.f + std::erf(preactivation * 0.70710678118654752440f));
+            }
+    st = cudnnNormalizationForwardInference(
+        h, CUDNN_NORM_PER_CHANNEL, CUDNN_NORM_OPS_NORM_ADD_ACTIVATION,
+        CUDNN_NORM_ALGO_STANDARD, &alpha, &beta,
+        xDesc, residual_output.data(),
+        scDesc, scale.data(), bias.data(),
+        scDesc, mean.data(), var.data(),
+        eps, xDesc, z.data(), actDesc,
+        yDesc, residual_output.data(), nullptr, 0);
+    if (st != CUDNN_STATUS_SUCCESS) FAIL("fused normalization + residual + GELU returned " << st);
+    max_diff = 0.f;
+    for (int i = 0; i < total; ++i)
+        max_diff = std::fmax(max_diff, std::fabs(residual_output[i] - residual_ref[i]));
+    if (max_diff >= 2e-6f) FAIL("fused residual GELU max difference=" << max_diff);
+
     cudnnDestroyActivationDescriptor(actDesc);
     cudnnDestroyTensorDescriptor(xDesc);
     cudnnDestroyTensorDescriptor(yDesc);
     cudnnDestroyTensorDescriptor(scDesc);
     cudnnDestroy(h);
-    PASS("Fused BN+ReLU inference (4×4×4×4, max_diff=" << max_diff << ")");
+    PASS("Fused BN+ReLU and normalization+residual+GELU inference");
     return 0;
 }
 

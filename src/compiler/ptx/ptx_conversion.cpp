@@ -22,9 +22,12 @@ static std::string tcgen05_mma_emit(const std::vector<std::string>& o,
 // tcgen05.ld.sync.aligned.<shape>.xN.b32 {r0..r_{N-1}}, [taddr]  — load N words
 // from TMEM into the register list. o[0]={regs}, o[1]=taddr (brackets stripped).
 static std::string tcgen05_ld_emit(const std::vector<std::string>& o, int n) {
-    if (o.size() < 2) return "/* tcgen05.ld: bad operands */";
+    if (o.size() < 2)
+        throw std::runtime_error("tcgen05.ld requires destination and address operands");
     auto regs = splitOperands(o[0].size() >= 2 && o[0].front() == '{'
                               ? o[0].substr(1, o[0].size() - 2) : o[0]);
+    if (static_cast<int>(regs.size()) != n)
+        throw std::runtime_error("tcgen05.ld register count does not match its xN modifier");
     std::string out = "{ uint32_t _tl[" + std::to_string(n) + "]; "
                       "vgre_jit_tcgen05_ld(_tl,(uint32_t)(" + o[1] + "),1," + std::to_string(n) + ");";
     for (int i = 0; i < n && i < static_cast<int>(regs.size()); ++i)
@@ -35,9 +38,12 @@ static std::string tcgen05_ld_emit(const std::vector<std::string>& o, int n) {
 // tcgen05.st.sync.aligned.<shape>.xN.b32 [taddr], {r0..r_{N-1}}  — store N words
 // from the register list into TMEM. o[0]=taddr, o[1]={regs}.
 static std::string tcgen05_st_emit(const std::vector<std::string>& o, int n) {
-    if (o.size() < 2) return "/* tcgen05.st: bad operands */";
+    if (o.size() < 2)
+        throw std::runtime_error("tcgen05.st requires address and source operands");
     auto regs = splitOperands(o[1].size() >= 2 && o[1].front() == '{'
                               ? o[1].substr(1, o[1].size() - 2) : o[1]);
+    if (static_cast<int>(regs.size()) != n)
+        throw std::runtime_error("tcgen05.st register count does not match its xN modifier");
     std::string out = "{ uint32_t _ts[" + std::to_string(n) + "] = {";
     for (int i = 0; i < n; ++i) { out += (i < (int)regs.size() ? regs[i] : "0"); if (i + 1 < n) out += ","; }
     out += "}; vgre_jit_tcgen05_st((uint32_t)(" + o[0] + "),_ts,1," + std::to_string(n) + "); }";
@@ -87,25 +93,62 @@ static std::string float_to_float_convert(const std::vector<std::string>& o,
            o[1] + "),vgre_cuda::FloatRounding::" + rounding + ");";
 }
 
+static std::string integer_to_float_convert(const std::vector<std::string>& o,
+                                            const char* destination,
+                                            const char* source,
+                                            const char* rounding) {
+    if (o.size() < 2)
+        throw std::runtime_error("integer-to-floating-point cvt needs destination and source");
+    const char* converter = std::string(destination) == "float"
+        ? "cvt_integer_to_f32" : "cvt_integer_to_f64";
+    return o[0] + " = vgre_ptx_conversion::" + converter + "((" + source + ")(" +
+           o[1] + "),vgre_cuda::FloatRounding::" + rounding + ");";
+}
+
+static std::string integer_to_integer_convert(const std::vector<std::string>& o,
+                                              const char* destination,
+                                              unsigned sourceBits,
+                                              bool sourceSigned) {
+    if (o.size() < 2)
+        throw std::runtime_error("integer-to-integer cvt needs destination and source");
+    return o[0] + " = vgre_ptx_conversion::cvt_integer_to_integer<" + destination + "," +
+           std::to_string(sourceBits) + "," + (sourceSigned ? "true" : "false") +
+           ">(" + o[1] + ");";
+}
+
 #define VGRE_CVT_F2I(KEY, DST, SRC, MODE) \
     {KEY, [](auto& o){ return float_to_integer_convert(o, DST, SRC, MODE); }}
+#define VGRE_CVT_F2I_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE) \
+    VGRE_CVT_F2I("cvt.rni." PTX_TYPE "." SOURCE_TYPE, CPP_TYPE, CPP_SOURCE_TYPE, "NearestEven"), \
+    VGRE_CVT_F2I("cvt.rzi." PTX_TYPE "." SOURCE_TYPE, CPP_TYPE, CPP_SOURCE_TYPE, "TowardZero"), \
+    VGRE_CVT_F2I("cvt.rmi." PTX_TYPE "." SOURCE_TYPE, CPP_TYPE, CPP_SOURCE_TYPE, "Downward"), \
+    VGRE_CVT_F2I("cvt.rpi." PTX_TYPE "." SOURCE_TYPE, CPP_TYPE, CPP_SOURCE_TYPE, "Upward")
 #define VGRE_CVT_F2I_TYPE(PTX_TYPE, CPP_TYPE) \
-    VGRE_CVT_F2I("cvt.rni." PTX_TYPE ".f32", CPP_TYPE, "float", "NearestEven"), \
-    VGRE_CVT_F2I("cvt.rzi." PTX_TYPE ".f32", CPP_TYPE, "float", "TowardZero"), \
-    VGRE_CVT_F2I("cvt.rmi." PTX_TYPE ".f32", CPP_TYPE, "float", "Downward"), \
-    VGRE_CVT_F2I("cvt.rpi." PTX_TYPE ".f32", CPP_TYPE, "float", "Upward"), \
-    VGRE_CVT_F2I("cvt.rni." PTX_TYPE ".f64", CPP_TYPE, "double", "NearestEven"), \
-    VGRE_CVT_F2I("cvt.rzi." PTX_TYPE ".f64", CPP_TYPE, "double", "TowardZero"), \
-    VGRE_CVT_F2I("cvt.rmi." PTX_TYPE ".f64", CPP_TYPE, "double", "Downward"), \
-    VGRE_CVT_F2I("cvt.rpi." PTX_TYPE ".f64", CPP_TYPE, "double", "Upward"), \
-    VGRE_CVT_F2I("cvt.rn." PTX_TYPE ".f32", CPP_TYPE, "float", "NearestEven"), \
-    VGRE_CVT_F2I("cvt.rz." PTX_TYPE ".f32", CPP_TYPE, "float", "TowardZero"), \
-    VGRE_CVT_F2I("cvt.rm." PTX_TYPE ".f32", CPP_TYPE, "float", "Downward"), \
-    VGRE_CVT_F2I("cvt.rp." PTX_TYPE ".f32", CPP_TYPE, "float", "Upward"), \
-    VGRE_CVT_F2I("cvt.rn." PTX_TYPE ".f64", CPP_TYPE, "double", "NearestEven"), \
-    VGRE_CVT_F2I("cvt.rz." PTX_TYPE ".f64", CPP_TYPE, "double", "TowardZero"), \
-    VGRE_CVT_F2I("cvt.rm." PTX_TYPE ".f64", CPP_TYPE, "double", "Downward"), \
-    VGRE_CVT_F2I("cvt.rp." PTX_TYPE ".f64", CPP_TYPE, "double", "Upward")
+    VGRE_CVT_F2I_ROUNDED(PTX_TYPE, CPP_TYPE, "f16", "float"), \
+    VGRE_CVT_F2I_ROUNDED(PTX_TYPE, CPP_TYPE, "bf16", "float"), \
+    VGRE_CVT_F2I_ROUNDED(PTX_TYPE, CPP_TYPE, "f32", "float"), \
+    VGRE_CVT_F2I_ROUNDED(PTX_TYPE, CPP_TYPE, "f64", "double")
+#define VGRE_CVT_I2F_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE, ROUNDING, MODE) \
+    {"cvt." ROUNDING "." PTX_TYPE "." SOURCE_TYPE, [](auto& o){ \
+        return integer_to_float_convert(o, CPP_TYPE, CPP_SOURCE_TYPE, MODE); }}
+#define VGRE_CVT_I2F_TYPE(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE) \
+    VGRE_CVT_I2F_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE, "rn", "NearestEven"), \
+    VGRE_CVT_I2F_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE, "rna", "NearestAway"), \
+    VGRE_CVT_I2F_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE, "rz", "TowardZero"), \
+    VGRE_CVT_I2F_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE, "rm", "Downward"), \
+    VGRE_CVT_I2F_ROUNDED(PTX_TYPE, CPP_TYPE, SOURCE_TYPE, CPP_SOURCE_TYPE, "rp", "Upward")
+#define VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, SOURCE_PTX, SOURCE_BITS, SOURCE_SIGNED) \
+    {"cvt." DEST_PTX "." SOURCE_PTX, [](auto& o){ \
+        return integer_to_integer_convert(o, DEST_CPP, SOURCE_BITS, SOURCE_SIGNED); }}
+#define VGRE_CVT_I2I_DEST(DEST_PTX, DEST_CPP) \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "s8", 8, true), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "u8", 8, false), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "s16", 16, true), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "u16", 16, false), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "s32", 32, true), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "u32", 32, false), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "s64", 64, true), \
+    VGRE_CVT_I2I_ENTRY(DEST_PTX, DEST_CPP, "u64", 64, false)
 
 static std::string fp8x2_convert_emit(const std::vector<std::string>& o,
                                       bool e4m3, bool roundTowardZero = false,
@@ -125,6 +168,16 @@ static std::string fp8x2_convert_emit(const std::vector<std::string>& o,
 
 const TranslateMap& getConversionMap() {
     static const TranslateMap kMap = {
+        // Integer-to-integer conversions use PTX source-width interpretation,
+        // then truncate or extend to each signed/unsigned destination width.
+        VGRE_CVT_I2I_DEST("s8", "std::int8_t"),
+        VGRE_CVT_I2I_DEST("u8", "std::uint8_t"),
+        VGRE_CVT_I2I_DEST("s16", "std::int16_t"),
+        VGRE_CVT_I2I_DEST("u16", "std::uint16_t"),
+        VGRE_CVT_I2I_DEST("s32", "int"),
+        VGRE_CVT_I2I_DEST("u32", "unsigned"),
+        VGRE_CVT_I2I_DEST("s64", "long long"),
+        VGRE_CVT_I2I_DEST("u64", "unsigned long long"),
         // FP32 → TF32 bit-format conversions. The output remains a b32
         // register containing the rounded TF32 value used by mma.sync.
         {"cvt.rn.tf32.f32", [](auto& o){ return tf32_convert(o, "rn"); }},
@@ -146,31 +199,45 @@ const TranslateMap& getConversionMap() {
         {"cvt.rn.satfinite.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", true, true, true); }},
         {"cvt.rz.satfinite.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", true, true, true); }},
         // Float-to-integer conversion rounds according to the PTX integer
-        // rounding modifier, then clamps to the destination range. Keep legacy
-        // spellings accepted by older toolchains and the current .rni/.rzi/
-        // .rmi/.rpi forms on the same defined, cross-platform helper path.
+        // rounding modifier, then clamps to the destination range. f16/bf16
+        // sources widen exactly to f32 before conversion; all forms use the
+        // shared helper for defined NaN and range behavior.
+        VGRE_CVT_F2I_TYPE("s8", "std::int8_t"),
+        VGRE_CVT_F2I_TYPE("u8", "std::uint8_t"),
+        VGRE_CVT_F2I_TYPE("s16", "std::int16_t"),
+        VGRE_CVT_F2I_TYPE("u16", "std::uint16_t"),
         VGRE_CVT_F2I_TYPE("s32", "int"),
         VGRE_CVT_F2I_TYPE("u32", "unsigned"),
         VGRE_CVT_F2I_TYPE("s64", "long long"),
         VGRE_CVT_F2I_TYPE("u64", "unsigned long long"),
-        VGRE_CVT_F2I("cvt.s32.f32", "int", "float", "TowardZero"),
-        VGRE_CVT_F2I("cvt.u32.f32", "unsigned", "float", "TowardZero"),
-        VGRE_CVT_F2I("cvt.s32.f64", "int", "double", "TowardZero"),
-        VGRE_CVT_F2I("cvt.u32.f64", "unsigned", "double", "TowardZero"),
-        VGRE_CVT_F2I("cvt.s64.f32", "long long", "float", "TowardZero"),
-        VGRE_CVT_F2I("cvt.u64.f32", "unsigned long long", "float", "TowardZero"),
-        VGRE_CVT_F2I("cvt.s64.f64", "long long", "double", "TowardZero"),
-        VGRE_CVT_F2I("cvt.u64.f64", "unsigned long long", "double", "TowardZero"),
-        // s32 → f32 (round-nearest is default for integer→float)
-        {"cvt.rn.f32.s32", [](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        {"cvt.rn.f32.u32", [](auto& o){ return o[0]+" = (float)(unsigned)("+o[1]+");"; }},
-        // s32 → f64
-        {"cvt.rn.f64.s32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rn.f64.u32", [](auto& o){ return o[0]+" = (double)(unsigned)("+o[1]+");"; }},
+        // cvt.sat limits the rounded result to the integer destination range.
+        VGRE_CVT_F2I("cvt.rzi.sat.u8.f32", "std::uint8_t", "float", "TowardZero"),
+        // Integer-to-float uses exact significand rounding for every PTX
+        // integer width; host casts would inherit the process rounding mode.
+        VGRE_CVT_I2F_TYPE("f32", "float", "s8", "std::int8_t"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "u8", "std::uint8_t"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "s16", "std::int16_t"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "u16", "std::uint16_t"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "s32", "int"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "u32", "unsigned"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "s64", "long long"),
+        VGRE_CVT_I2F_TYPE("f32", "float", "u64", "unsigned long long"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "s8", "std::int8_t"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "u8", "std::uint8_t"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "s16", "std::int16_t"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "u16", "std::uint16_t"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "s32", "int"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "u32", "unsigned"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "s64", "long long"),
+        VGRE_CVT_I2F_TYPE("f64", "double", "u64", "unsigned long long"),
         // f32 → f16. Keep the PTX rounding mode explicit.
         {"cvt.rn.f16.f32", [](auto& o){ return float_to_half_convert(o, "NearestEven"); }},
+        {"cvt.rna.f16.f32", [](auto& o){ return float_to_half_convert(o, "NearestAway"); }},
         {"cvt.rz.f16.f32", [](auto& o){ return float_to_half_convert(o, "TowardZero"); }},
-        {"cvt.rn.f32.f16", [](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
+        {"cvt.rm.f16.f32", [](auto& o){ return float_to_half_convert(o, "Downward"); }},
+        {"cvt.rp.f16.f32", [](auto& o){ return float_to_half_convert(o, "Upward"); }},
+        // Widening f16 -> f32 is exact and takes no rounding modifier.
+        {"cvt.f32.f16", [](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
         // f64 → f32 uses explicit IEEE rounding; f32 → f64 is exact for every
         // finite source, so its directed rounding forms are ordinary widening.
         {"cvt.rn.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "NearestEven"); }},
@@ -178,23 +245,13 @@ const TranslateMap& getConversionMap() {
         {"cvt.rz.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "TowardZero"); }},
         {"cvt.rm.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "Downward"); }},
         {"cvt.rp.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "Upward"); }},
-        {"cvt.rz.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rm.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rp.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        // s64 / u64 ↔ float
-        {"cvt.rn.f32.s64", [](auto& o){ return o[0]+" = (float)(long long)("+o[1]+");"; }},
-        {"cvt.rn.f32.u64", [](auto& o){ return o[0]+" = (float)(unsigned long long)("+o[1]+");"; }},
-        {"cvt.rn.f64.s64", [](auto& o){ return o[0]+" = (double)(long long)("+o[1]+");"; }},
-        {"cvt.rn.f64.u64", [](auto& o){ return o[0]+" = (double)(unsigned long long)("+o[1]+");"; }},
-        {"cvt.rn.s64.f32", [](auto& o){ return o[0]+" = (long long)("+o[1]+");"; }},
-        {"cvt.rn.u64.f32", [](auto& o){ return o[0]+" = (unsigned long long)("+o[1]+");"; }},
-        {"cvt.rn.s64.f64", [](auto& o){ return o[0]+" = (long long)("+o[1]+");"; }},
-        {"cvt.rn.u64.f64", [](auto& o){ return o[0]+" = (unsigned long long)("+o[1]+");"; }},
+        // Widening f32 -> f64 is exact; PTX forbids a rounding modifier here.
+        {"cvt.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
         // saturating conversions
         {"cvt.sat.f32.f32",[](auto& o){
             return o[0]+" = vgre_ptx_conversion::cvt_sat_f32((float)("+o[1]+"));";
         }},
-        {"cvt.sat.f16.f32",[](auto& o){
+        {"cvt.rn.sat.f16.f32",[](auto& o){
             return o[0]+" = vgre_ptx_conversion::cvt_sat_f32_to_f16((float)("+o[1]+"));";
         }},
         // ── sqrt.rn.f32 (missing from core map) ────────────────────────────
@@ -494,7 +551,12 @@ const TranslateMap& getConversionMap() {
 }
 
 #undef VGRE_CVT_F2I_TYPE
+#undef VGRE_CVT_F2I_ROUNDED
 #undef VGRE_CVT_F2I
+#undef VGRE_CVT_I2F_TYPE
+#undef VGRE_CVT_I2F_ROUNDED
+#undef VGRE_CVT_I2I_DEST
+#undef VGRE_CVT_I2I_ENTRY
 
 } // namespace compiler
 } // namespace vgre

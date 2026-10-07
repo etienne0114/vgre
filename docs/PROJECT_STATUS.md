@@ -2,7 +2,7 @@
 
 **Last Updated**: 2026-10-07
 
-**Latest hosted verification**: ✅ [GitHub Actions run 37042616142](https://github.com/etienne0114/vgre/actions/runs/37042616142) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
+**Latest hosted verification**: ✅ [GitHub Actions run 37652962427](https://github.com/etienne0114/vgre/actions/runs/37652962427) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
 
 - **Linux**: ✅ Full `ctest` suite passed in the latest hosted Linux x86-64 job.
 - **Linux, LLVM-free**: ✅ The dedicated `linux-x86_64-llvm-free` job passed with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
@@ -37,12 +37,59 @@ from both f32 and f64 sources. Conversion clamps to the destination range and fo
 PTX NaN results without relying on undefined out-of-range C++ casts. The user reports
 this follow-on passed CI across the platform matrix.
 
-**2026-10-07 floating narrowing follow-on (current workspace):** The shared `__half`
-codec now handles ties-to-even and subnormal rounding correctly; PTX f32-to-f16
-`.rn` and `.rz` use explicit modes. f64-to-f32 conversions now round with explicit
-IEEE modes, and widening f32-to-f64 no longer rounds the input to an integer first.
-Floating `.sat` conversions map NaN to positive zero. Clang C++17 syntax checks pass;
-runtime tests and hosted CI for this follow-on remain pending.
+**2026-10-07 PTX conversion baseline (CI-green):** The shared `__half` codec handles
+ties-to-even and subnormal rounding; f32-to-f16 `.rn`/`.rz` and f64-to-f32 rounding
+use explicit modes. Floating `.sat` maps NaN to positive zero. Commit `ba960d5e`
+passed the hosted four-lane CI matrix.
+
+**Current PTX integer-conversion follow-on (workspace):** Float-to-integer
+conversion entries now cover signed/unsigned 8-, 16-, 32-, and 64-bit destinations
+from f16, bf16, f32, and f64, with explicit rounding and defined range clamping.
+The `cvt.rzi.sat.u8.f32` path no longer adds 0.5 or casts NaN out of range. Integer-to-
+f32/f64 conversions now cover all four integer widths and signednesses, with
+software significand rounding for the explicit `.rn`, `.rna`, `.rz`, `.rm`, and
+`.rp` PTX forms. Integer-to-integer conversions now cover all signed and
+unsigned 8-, 16-, 32-, and 64-bit source/destination pairs, with explicit
+source-width interpretation and destination truncation/extension. The generated
+JIT translation unit now includes the shared conversion helpers it emits calls
+to. FP32-to-FP16 narrowing supports all five explicit floating-point rounding
+modes, and exact FP16-to-FP32 / FP32-to-FP64 widening uses PTX spellings without
+rounding modifiers. Clang C++17 syntax checks and focused local `PTXTranslate`,
+`CudaHalf`, `CudaFuzzCast`, and `CudaFuzzToInt` tests pass. Those tests do not
+exhaustively execute every new source/destination-width pair; hosted CI remains
+pending.
+
+**Current cuDNN backend audit (workspace):** The backend `SIGNAL` descriptor used
+to return success without applying its operation. It now performs release/acquire
+atomic flag SET/WAIT, validates the scalar int64 flag descriptor, and copies an
+optional contiguous pass-through tensor before signaling (or after waiting).
+Unknown pointwise modes now return `CUDNN_STATUS_NOT_SUPPORTED` instead of silently
+acting as identity. Pointwise GELU uses the exact erf form for `GELU_FWD`, retaining
+the tanh approximation only under the explicit approximate mode; invalid-domain
+division, log, sqrt, reciprocal, and remainder now follow IEEE floating-point results.
+The targeted `CudnnBackendV8` regression passes locally, including asynchronous
+WAIT/SET, pass-through, and exact GELU checks; hosted platform CI remains pending.
+
+**Current cuDNN activation follow-on (workspace):** direct activation forward and
+backward now use exact erf-based GELU and its analytical derivative. Activation
+descriptors must be initialized with valid mode and NaN-propagation enums; invalid
+modes no longer fall through to identity or a unit gradient. NaNs honor the
+descriptor setting, ReLU honors its configured upper bound, and unsupported tensor dtypes return `CUDNN_STATUS_NOT_SUPPORTED`
+instead of being read as `float`. Identity is kept for fused operations and rejected
+by the direct activation entry points. The plain INT8 activation path is limited to
+ReLU and clipped ReLU and applies the documented alpha/beta blend with saturating
+rounding; other INT8 activation modes return `NOT_SUPPORTED`. Fused normalization now applies an optional
+residual before activation, and fused batch-normalization forward uses the common
+activation implementation. Batch-normalization backward explicitly rejects modes
+whose derivative cannot be recovered from the API's saved output. Local
+`ExactGELUActivation`, `CUDNNActivationBackward`, `CudnnBackendV8`, and
+`CudnnNormalization` tests pass; hosted CI remains pending.
+
+**Current PTX translator follow-on (workspace):** Inline assembly output/input
+constraints now bind numbered and named operands into translated C++, and the parser
+consumes balanced nested constraint expressions. Predicated PTX and malformed
+operand lists now fail explicitly instead of becoming comments or partial generated
+code. `PTXTranslate` passes locally; hosted CI remains pending.
 
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
 **Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.

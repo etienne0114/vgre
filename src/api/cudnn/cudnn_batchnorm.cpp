@@ -368,6 +368,15 @@ cudnnStatus_t cudnnBatchNormalizationForwardTrainingEx(
     void* /*workspace*/, size_t /*workSpaceSizeInBytes*/,
     void* /*reserveSpace*/, size_t /*reserveSpaceSizeInBytes*/)
 {
+    if (bnOps != CUDNN_BATCHNORM_OPS_BN &&
+        bnOps != CUDNN_BATCHNORM_OPS_BN_ACTIVATION &&
+        bnOps != CUDNN_BATCHNORM_OPS_BN_ADD_ACTIVATION)
+        return CUDNN_STATUS_BAD_PARAM;
+    if (bnOps != CUDNN_BATCHNORM_OPS_BN) {
+        if (!activationDesc) return CUDNN_STATUS_INVALID_VALUE;
+        if (!isValidActivationDescriptor(*static_cast<ActDesc*>(activationDesc)))
+            return CUDNN_STATUS_BAD_PARAM;
+    }
     // Step 1: run standard BN forward (computes y = BN(x), saves stats).
     cudnnStatus_t s = cudnnBatchNormalizationForwardTraining(
         handle, mode, alpha, beta,
@@ -392,25 +401,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardTrainingEx(
     if (bnOps >= 1 && activationDesc) {
         auto* act = static_cast<ActDesc*>(activationDesc);
         for (int i = 0; i < total; ++i) {
-            float v = yf[i];
-            switch (act->mode) {
-                case CUDNN_ACTIVATION_RELU:
-                    yf[i] = v > 0.f ? v : 0.f;
-                    break;
-                case CUDNN_ACTIVATION_TANH:
-                    yf[i] = std::tanh(v);
-                    break;
-                case CUDNN_ACTIVATION_SIGMOID:
-                    yf[i] = 1.f / (1.f + std::exp(-v));
-                    break;
-                case CUDNN_ACTIVATION_CLIPPED_RELU:
-                    yf[i] = std::max(0.f, std::min(v, static_cast<float>(act->coeff)));
-                    break;
-                case CUDNN_ACTIVATION_ELU:
-                    yf[i] = v >= 0.f ? v : static_cast<float>(act->coeff) * (std::exp(v) - 1.f);
-                    break;
-                default: break; // IDENTITY — no-op
-            }
+            yf[i] = applyActivation(yf[i], *act);
         }
     }
     return CUDNN_STATUS_SUCCESS;
@@ -441,6 +432,28 @@ cudnnStatus_t cudnnBatchNormalizationBackwardEx(
     void* /*workspace*/, size_t /*workSpaceSizeInBytes*/,
     void* /*reserveSpace*/, size_t /*reserveSpaceSizeInBytes*/)
 {
+    if (bnOps != CUDNN_BATCHNORM_OPS_BN &&
+        bnOps != CUDNN_BATCHNORM_OPS_BN_ACTIVATION &&
+        bnOps != CUDNN_BATCHNORM_OPS_BN_ADD_ACTIVATION)
+        return CUDNN_STATUS_BAD_PARAM;
+    if (bnOps != CUDNN_BATCHNORM_OPS_BN) {
+        if (!activationDesc) return CUDNN_STATUS_INVALID_VALUE;
+        const auto* act = static_cast<const ActDesc*>(activationDesc);
+        if (!isValidActivationDescriptor(*act)) return CUDNN_STATUS_BAD_PARAM;
+        switch (act->mode) {
+        case CUDNN_ACTIVATION_RELU:
+        case CUDNN_ACTIVATION_SIGMOID:
+        case CUDNN_ACTIVATION_TANH:
+        case CUDNN_ACTIVATION_CLIPPED_RELU:
+        case CUDNN_ACTIVATION_ELU:
+        case CUDNN_ACTIVATION_IDENTITY:
+            break;
+        default:
+            // The API only supplies the post-activation output here. Swish,
+            // GELU, Mish, and SELU derivatives require the pre-activation value.
+            return CUDNN_STATUS_NOT_SUPPORTED;
+        }
+    }
     auto* td = static_cast<TensorDesc*>(xDesc);
     int total = td->n * td->c * td->h * td->w;
 
@@ -465,8 +478,11 @@ cudnnStatus_t cudnnBatchNormalizationBackwardEx(
                     d_bn_storage[i] = g * v * (1.f - v); break;
                 case CUDNN_ACTIVATION_ELU:
                     d_bn_storage[i] = v >= 0.f ? g : g * (v + static_cast<float>(act->coeff)); break;
-                default:
+                case CUDNN_ACTIVATION_CLIPPED_RELU:
+                    d_bn_storage[i] = (v > 0.f && v < static_cast<float>(act->coeff)) ? g : 0.f; break;
+                case CUDNN_ACTIVATION_IDENTITY:
                     d_bn_storage[i] = g; break;
+                default: return CUDNN_STATUS_NOT_SUPPORTED;
             }
         }
         d_bn = d_bn_storage.data();

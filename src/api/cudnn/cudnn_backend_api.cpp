@@ -12,6 +12,12 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <thread>
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 // ── Global backend state ─────────────────────────────────────────────────────
 // Definitions of the extern symbols declared in cudnn_backend_internal.h
@@ -65,6 +71,151 @@ static uint64_t readBackendAttributeElement(const uint8_t *base, size_t elemSize
 
 static void writeBackendAttributeElement(uint8_t *base, size_t elemSize, uint64_t value) {
     memcpy(base, &value, std::min(elemSize, sizeof(value)));
+}
+
+static int64_t loadSignalFlagAcquire(const int64_t *flag) {
+#if defined(_MSC_VER)
+    auto *address = reinterpret_cast<volatile long long *>(
+        const_cast<int64_t *>(flag));
+    return static_cast<int64_t>(_InterlockedCompareExchange64(address, 0, 0));
+#else
+    return __atomic_load_n(flag, __ATOMIC_ACQUIRE);
+#endif
+}
+
+static void storeSignalFlagRelease(int64_t *flag, int64_t value) {
+#if defined(_MSC_VER)
+    auto *address = reinterpret_cast<volatile long long *>(flag);
+    _InterlockedExchange64(address, static_cast<long long>(value));
+#else
+    __atomic_store_n(flag, value, __ATOMIC_RELEASE);
+#endif
+}
+
+static bool getTensorElementCount(uintptr_t tensorId, size_t *elementCount) {
+    const auto *dims = getAttrVec(getNode(tensorId), CUDNN_ATTR_TENSOR_DIMENSIONS);
+    if (!dims || dims->empty() || !elementCount) return false;
+
+    size_t count = 1;
+    for (uint64_t rawDim : *dims) {
+        if (rawDim > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return false;
+        }
+        const int64_t dim = static_cast<int64_t>(rawDim);
+        if (dim <= 0 || static_cast<uint64_t>(dim) >
+                            std::numeric_limits<size_t>::max() / count) {
+            return false;
+        }
+        count *= static_cast<size_t>(dim);
+    }
+    *elementCount = count;
+    return true;
+}
+
+static size_t backendTensorDataTypeSize(cudnnDataType_t dtype) {
+    switch (dtype) {
+    case CUDNN_DATA_FLOAT: return sizeof(float);
+    case CUDNN_DATA_DOUBLE: return sizeof(double);
+    case CUDNN_DATA_HALF:
+    case CUDNN_DATA_BFLOAT16: return 2;
+    case CUDNN_DATA_INT8:
+    case CUDNN_DATA_UINT8: return 1;
+    case CUDNN_DATA_INT32: return sizeof(int32_t);
+    case CUDNN_DATA_INT64: return sizeof(int64_t);
+    case CUDNN_DATA_INT8x4:
+    case CUDNN_DATA_UINT8x4: return 4;
+    case CUDNN_DATA_INT8x32: return 32;
+    default: return 0;
+    }
+}
+
+static bool isContiguousTensor(uintptr_t tensorId) {
+    const BackendNode *node = getNode(tensorId);
+    const auto *dims = getAttrVec(node, CUDNN_ATTR_TENSOR_DIMENSIONS);
+    const auto *strides = getAttrVec(node, CUDNN_ATTR_TENSOR_STRIDES);
+    if (!dims || dims->empty()) return false;
+    if (!strides) return true;
+    if (strides->size() != dims->size()) return false;
+
+    size_t expectedStride = 1;
+    for (size_t i = dims->size(); i-- > 0;) {
+        if ((*dims)[i] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+            (*strides)[i] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return false;
+        }
+        const int64_t dim = static_cast<int64_t>((*dims)[i]);
+        const int64_t stride = static_cast<int64_t>((*strides)[i]);
+        if (dim <= 0 || stride < 0 ||
+            static_cast<uint64_t>(stride) != expectedStride ||
+            static_cast<uint64_t>(dim) >
+                std::numeric_limits<size_t>::max() / expectedStride) {
+            return false;
+        }
+        expectedStride *= static_cast<size_t>(dim);
+    }
+    return true;
+}
+
+static bool readSignalValue(const BackendNode *node, int64_t *value) {
+    const auto *values = getAttrVec(node, CUDNN_ATTR_OPERATION_SIGNAL_VALUE);
+    if (!values || values->empty() || !value) return false;
+    std::memcpy(value, &(*values)[0], sizeof(*value));
+    return true;
+}
+
+static TensorDesc buildTensorDesc(uintptr_t nodeId);
+
+static cudnnStatus_t copySignalTensor(uintptr_t xId, uintptr_t yId,
+                                     const std::unordered_map<uintptr_t, void*> &dataPtrs) {
+    auto xIt = dataPtrs.find(xId);
+    auto yIt = dataPtrs.find(yId);
+    if (xIt == dataPtrs.end() || yIt == dataPtrs.end() ||
+        !xIt->second || !yIt->second) {
+        return CUDNN_STATUS_INVALID_VALUE;
+    }
+
+    const BackendNode *xNode = getNode(xId);
+    const BackendNode *yNode = getNode(yId);
+    const auto *xDims = getAttrVec(xNode, CUDNN_ATTR_TENSOR_DIMENSIONS);
+    const auto *yDims = getAttrVec(yNode, CUDNN_ATTR_TENSOR_DIMENSIONS);
+    if (!xDims || !yDims || *xDims != *yDims ||
+        buildTensorDesc(xId).dtype != buildTensorDesc(yId).dtype) {
+        return CUDNN_STATUS_INVALID_VALUE;
+    }
+    if (!isContiguousTensor(xId) || !isContiguousTensor(yId)) {
+        return CUDNN_STATUS_NOT_SUPPORTED;
+    }
+
+    size_t count = 0;
+    const size_t elementSize = backendTensorDataTypeSize(buildTensorDesc(xId).dtype);
+    if (!elementSize || !getTensorElementCount(xId, &count) ||
+        count > std::numeric_limits<size_t>::max() / elementSize) {
+        return CUDNN_STATUS_INVALID_VALUE;
+    }
+    std::memmove(yIt->second, xIt->second, count * elementSize);
+    return CUDNN_STATUS_SUCCESS;
+}
+
+static float exactGelu(float x) {
+    if (std::isnan(x)) return x;
+    if (x == -std::numeric_limits<float>::infinity()) return 0.0f;
+    if (x == std::numeric_limits<float>::infinity()) return x;
+    constexpr float invSqrtTwo = 0.7071067811865475f;
+    return x < 0.0f
+        ? 0.5f * x * std::erfc(-x * invSqrtTwo)
+        : 0.5f * x * (1.0f + std::erf(x * invSqrtTwo));
+}
+
+static float exactGeluDerivative(float x) {
+    if (std::isnan(x)) return x;
+    if (x == -std::numeric_limits<float>::infinity()) return 0.0f;
+    if (x == std::numeric_limits<float>::infinity()) return 1.0f;
+    constexpr float invSqrtTwo = 0.7071067811865475f;
+    constexpr float invSqrtTwoPi = 0.3989422804014327f;
+    const float cdf = x < 0.0f
+        ? 0.5f * std::erfc(-x * invSqrtTwo)
+        : 0.5f * (1.0f + std::erf(x * invSqrtTwo));
+    return cdf + x * invSqrtTwoPi * std::exp(-0.5f * x * x);
 }
 
 static TensorDesc buildTensorDesc(uintptr_t nodeId) {
@@ -1403,7 +1554,49 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             break;
         }
         case CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR: {
-            // Signal is a synchronization barrier; no-op in single-threaded CPU emulation
+            const uintptr_t flagId = getAttrUint64(
+                opNode, CUDNN_ATTR_OPERATION_SIGNAL_FLAGDESC);
+            const uintptr_t xId = getAttrUint64(
+                opNode, CUDNN_ATTR_OPERATION_SIGNAL_XDESC);
+            const uintptr_t yId = getAttrUint64(
+                opNode, CUDNN_ATTR_OPERATION_SIGNAL_YDESC);
+            const int mode = static_cast<int>(getAttrUint64(
+                opNode, CUDNN_ATTR_OPERATION_SIGNAL_MODE, 2));
+            const auto *modeValues = getAttrVec(
+                opNode, CUDNN_ATTR_OPERATION_SIGNAL_MODE);
+            int64_t signalValue = 0;
+            const BackendNode *flagNode = getNode(flagId);
+            auto flagIt = dataPtrs.find(flagId);
+            if (!flagId || !xId || !getNode(xId) || !flagNode ||
+                buildTensorDesc(flagId).dtype != CUDNN_DATA_INT64 ||
+                !modeValues || modeValues->empty() ||
+                !readSignalValue(opNode, &signalValue) ||
+                (mode != 0 && mode != 1) || flagIt == dataPtrs.end() ||
+                !flagIt->second ||
+                reinterpret_cast<uintptr_t>(flagIt->second) % alignof(int64_t) != 0) {
+                return CUDNN_STATUS_INVALID_VALUE;
+            }
+            size_t flagCount = 0;
+            if (!getTensorElementCount(flagId, &flagCount) || flagCount != 1) {
+                return CUDNN_STATUS_INVALID_VALUE;
+            }
+
+            auto *flag = static_cast<int64_t *>(flagIt->second);
+            if (mode == 0) {
+                if (yId) {
+                    cudnnStatus_t copyStatus = copySignalTensor(xId, yId, dataPtrs);
+                    if (copyStatus != CUDNN_STATUS_SUCCESS) return copyStatus;
+                }
+                storeSignalFlagRelease(flag, signalValue);
+            } else {
+                while (loadSignalFlagAcquire(flag) != signalValue) {
+                    std::this_thread::yield();
+                }
+                if (yId) {
+                    cudnnStatus_t copyStatus = copySignalTensor(xId, yId, dataPtrs);
+                    if (copyStatus != CUDNN_STATUS_SUCCESS) return copyStatus;
+                }
+            }
             break;
         }
         case CUDNN_BACKEND_OPERATION_GEN_STATS_DESCRIPTOR: {
@@ -1749,35 +1942,55 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
             for (size_t i = 0; i < nelems; ++i) {
                 float x = X[i] * alpha1;
                 float b = B ? B[i] * alpha2 : 0.0f;
-                float y = x;
+                float y = 0.0f;
                 switch (mode) {
                 case CUDNN_POINTWISE_ADD:        y = x + b; break;
                 case CUDNN_POINTWISE_MUL:        y = x * b; break;
                 case CUDNN_POINTWISE_MIN:        y = x < b ? x : b; break;
                 case CUDNN_POINTWISE_MAX:        y = x > b ? x : b; break;
-                case CUDNN_POINTWISE_DIV:        y = b != 0.f ? x / b : 0.f; break;
-                case CUDNN_POINTWISE_SQRT:       y = std::sqrt(x > 0.f ? x : 0.f); break;
+                case CUDNN_POINTWISE_DIV:        y = x / b; break;
+                case CUDNN_POINTWISE_SQRT:       y = std::sqrt(x); break;
                 case CUDNN_POINTWISE_EXP:        y = std::exp(x); break;
-                case CUDNN_POINTWISE_LOG:        y = x > 0.f ? std::log(x) : -1e30f; break;
+                case CUDNN_POINTWISE_LOG:        y = std::log(x); break;
                 case CUDNN_POINTWISE_NEG:        y = -x; break;
                 case CUDNN_POINTWISE_ABS:        y = std::abs(x); break;
                 case CUDNN_POINTWISE_CEIL:       y = std::ceil(x); break;
                 case CUDNN_POINTWISE_FLOOR:      y = std::floor(x); break;
-                case CUDNN_POINTWISE_RECIPROCAL: y = x != 0.f ? 1.f / x : 0.f; break;
+                case CUDNN_POINTWISE_RECIPROCAL: y = 1.f / x; break;
                 case CUDNN_POINTWISE_ERF:        y = std::erf(x); break;
-                case CUDNN_POINTWISE_RSQRT:      y = x > 0.f ? 1.f / std::sqrt(x) : 0.f; break;
+                case CUDNN_POINTWISE_RSQRT:      y = 1.f / std::sqrt(x); break;
                 case CUDNN_POINTWISE_SIN:        y = std::sin(x); break;
                 case CUDNN_POINTWISE_COS:        y = std::cos(x); break;
                 case CUDNN_POINTWISE_TAN:        y = std::tan(x); break;
+                case CUDNN_POINTWISE_IDENTITY:   y = x; break;
                 case CUDNN_POINTWISE_RELU_FWD:   y = x > 0.f ? x : 0.f; break;
                 case CUDNN_POINTWISE_TANH_FWD:   y = std::tanh(x); break;
-                case CUDNN_POINTWISE_SIGMOID_FWD:y = 1.f / (1.f + std::exp(-x)); break;
-                case CUDNN_POINTWISE_ELU_FWD:    y = x > 0.f ? x : std::exp(x) - 1.f; break;
-                case CUDNN_POINTWISE_SWISH_FWD:  y = x / (1.f + std::exp(-x)); break;
-                case CUDNN_POINTWISE_SOFTPLUS_FWD:y = std::log1p(std::exp(x)); break;
+                case CUDNN_POINTWISE_SIGMOID_FWD: {
+                    if (x >= 0.f) {
+                        float e = std::exp(-x);
+                        y = 1.f / (1.f + e);
+                    } else {
+                        float e = std::exp(x);
+                        y = e / (1.f + e);
+                    }
+                    break;
+                }
+                case CUDNN_POINTWISE_ELU_FWD:    y = x > 0.f ? x : std::expm1(x); break;
+                case CUDNN_POINTWISE_SWISH_FWD: {
+                    float sig = x >= 0.f ? 1.f / (1.f + std::exp(-x))
+                                         : std::exp(x) / (1.f + std::exp(x));
+                    y = x * sig;
+                    break;
+                }
+                case CUDNN_POINTWISE_SOFTPLUS_FWD:
+                    y = std::max(x, 0.f) + std::log1p(std::exp(-std::abs(x)));
+                    break;
                 case CUDNN_POINTWISE_GELU_FWD:
+                    y = exactGelu(x);
+                    break;
                 case CUDNN_POINTWISE_GELU_APPROX_TANH_FWD: {
-                    // GELU: x * Φ(x) ≈ 0.5*x*(1+tanh(√(2/π)*(x+0.044715*x³)))
+                    // Explicit approximate mode: x * Φ(x) ≈
+                    // 0.5*x*(1+tanh(√(2/π)*(x+0.044715*x³))).
                     float t = 0.7978845608f * (x + 0.044715f * x * x * x);
                     y = 0.5f * x * (1.f + std::tanh(t));
                     break;
@@ -1786,19 +1999,28 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                 case CUDNN_POINTWISE_TANH_BWD:   y = x * (1.f - b * b); break;
                 case CUDNN_POINTWISE_SIGMOID_BWD:y = x * b * (1.f - b); break;
                 case CUDNN_POINTWISE_ELU_BWD:    y = x * (b >= 0.f ? 1.f : b + 1.f); break;
-                case CUDNN_POINTWISE_GELU_BWD:
+                case CUDNN_POINTWISE_GELU_BWD: {
+                    y = x * exactGeluDerivative(b);
+                    break;
+                }
                 case CUDNN_POINTWISE_GELU_APPROX_TANH_BWD: {
                     float t = 0.7978845608f * (b + 0.044715f * b * b * b);
                     float th = std::tanh(t); float sech2 = 1.f - th * th;
                     float dgelu = 0.5f * (1.f + th) + 0.5f * b * sech2 * 0.7978845608f * (1.f + 3.f * 0.044715f * b * b);
                     y = x * dgelu; break;
                 }
-                case CUDNN_POINTWISE_SOFTPLUS_BWD:y = x / (1.f + std::exp(-b)); break;
+                case CUDNN_POINTWISE_SOFTPLUS_BWD: {
+                    float sig = b >= 0.f ? 1.f / (1.f + std::exp(-b))
+                                         : std::exp(b) / (1.f + std::exp(b));
+                    y = x * sig;
+                    break;
+                }
                 case CUDNN_POINTWISE_SWISH_BWD: {
-                    float sig = 1.f / (1.f + std::exp(-b));
+                    float sig = b >= 0.f ? 1.f / (1.f + std::exp(-b))
+                                         : std::exp(b) / (1.f + std::exp(b));
                     y = x * (sig + b * sig * (1.f - sig)); break;
                 }
-                case CUDNN_POINTWISE_MOD:        y = b != 0.f ? std::fmod(x, b) : 0.f; break;
+                case CUDNN_POINTWISE_MOD:        y = std::fmod(x, b); break;
                 case CUDNN_POINTWISE_ADD_SQUARE:  y = x + b * b; break;
                 case CUDNN_POINTWISE_POW:        y = std::pow(x, b); break;
                 case CUDNN_POINTWISE_CMP_EQ:     y = (x == b) ? 1.f : 0.f; break;
@@ -1810,7 +2032,11 @@ cudnnStatus_t cudnnBackendExecute(cudnnHandle_t handle, void* plan, void* varian
                 case CUDNN_POINTWISE_LOGICAL_AND:y = (x != 0.f && b != 0.f) ? 1.f : 0.f; break;
                 case CUDNN_POINTWISE_LOGICAL_OR: y = (x != 0.f || b != 0.f) ? 1.f : 0.f; break;
                 case CUDNN_POINTWISE_LOGICAL_NOT:y = (x == 0.f) ? 1.f : 0.f; break;
-                default: y = x; break;  // IDENTITY and unknown
+                default:
+                    // Unknown pointwise modes must never silently degrade to an
+                    // identity operation; that would produce plausible but wrong
+                    // output while claiming successful execution.
+                    return CUDNN_STATUS_NOT_SUPPORTED;
                 }
                 Y[i] = y;
             }

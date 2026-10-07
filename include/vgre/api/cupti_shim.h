@@ -197,7 +197,7 @@ CUptiResult cuptiMetricGetValue(CUdevice device,
                                 uint64_t timeDuration,
                                 CUpti_MetricValue* metricValue);
 
-// ── Event group API (stub — metrics only) ────────────────────────────────────
+// ── Event group API (VGRE software-proxy counters) ────────────────────────────
 CUptiResult cuptiEventGroupCreate(CUcontext context,
                                   CUpti_EventGroupHandle* eventGroup,
                                   uint32_t flags);

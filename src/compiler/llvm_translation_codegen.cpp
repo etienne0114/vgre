@@ -312,6 +312,7 @@ std::string LLVMTranslationEngine::generateWrapperSource(const KernelIR &ir) {
                 "' (usesSyncthreads=" + (ir.usesSyncthreads ? "true" : "false") + 
                 ", usesSharedMem=" + (ir.usesSharedMem ? "true" : "false") + ")");
   oss << "#include \"vgre/compiler/cpu_cuda_env.h\"\n\n";
+  oss << "#include \"vgre/compiler/ptx_conversion.h\"\n\n";
   oss << "#include <thread>\n";
   oss << "#include <vector>\n";
   oss << "#include <cstring>\n";

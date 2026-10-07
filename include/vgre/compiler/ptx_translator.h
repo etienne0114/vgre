@@ -8,8 +8,8 @@ namespace compiler {
 
 // Scans kernel source for inline PTX assembly blocks (asm("...") or
 // __asm("...")) and replaces each block with equivalent C++ code.
-// Unsupported instructions are replaced with a no-op comment so that
-// compilation succeeds even for kernels with complex PTX.
+// Operands are bound from GCC-style output/input constraints. Unsupported
+// instructions and predicated PTX fail translation instead of becoming no-ops.
 class PTXTranslator {
 public:
     // Replace inline PTX in-place. Returns the transformed source.

@@ -98,7 +98,8 @@ static inline AsmConstraints parseConstraints(const std::string& cs) {
 // defined once.
 [[maybe_unused]] static std::string tma_store_emit(
         const std::vector<std::string>& o, int rank) {
-    if (o.size() < 2) return "/* cp.async.bulk.tensor store: bad operands */";
+    if (o.size() < 2)
+        throw std::runtime_error("cp.async.bulk.tensor store requires descriptor and source operands");
     const std::string& s = o[0];
     const auto comma = s.find(',');
     const std::string tmap = (comma == std::string::npos) ? s : trim(s.substr(0, comma));

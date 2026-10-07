@@ -69,7 +69,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 - Python bindings (`vgre_c_api` via ctypes), NumPy-compatible
 - Cooperative groups (`thread_block`, `thread_block_tile`, `grid_group`, `multi_grid_group`) + CUB fallback headers
 - cuBLAS: Level-1/2/3 real and complex C/Z routines, Hermitian variants, batched GEMM, `GemmEx`, pointer/atomics modes, logger
-- cuDNN: conv, pool, activation, softmax, BN, dropout, RNN, attention, CTC loss, LRN, divisive norm, tensor ops, INT8 packed layouts, Backend API routing including SDPA attention
+- cuDNN: conv, pool, activation (including exact GELU), softmax, BN, dropout, RNN, attention, CTC loss, LRN, divisive norm, tensor ops, INT8 packed layouts, Backend API routing including SDPA attention
 - NCCL: AllReduce, Broadcast, Reduce, AllGather, ReduceScatter, Send, Recv, AllToAll, Gather, Scatter, TCP multi-node and optional RDMA/RoCE bulk path
 - cuFFT: O(n log n) 1D/2D/3D transforms (C2C, R2C, C2R, Z2Z, D2Z, Z2D), FP16 C16C/R16C/C16R, strided batched `PlanMany`, optional FFTW3
 - cuRAND: XORWOW, MRG32k3a, MTGP32, MT19937, Sobol generators with per-handle locking

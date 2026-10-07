@@ -1,4 +1,4 @@
-// QUEUE-73: Fast GELU via degree-7 Horner polynomial (Chebyshev minimax on [−4,4]).
+// Exact erf-based GELU forward/backward behavior and descriptor validation.
 // Tests:
 //   1. Forward matches tanhf-based reference within tolerance (|x| < 3).
 //   2. Saturation: GELU(x) → x for x ≫ 0 and → 0 for x ≪ 0.
@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <limits>
+#include <cstdint>
 
 #define PASS(msg) std::cout << "[PASS] " << msg << "\n"
 #define FAIL(msg) do { std::cerr << "[FAIL] " << msg << "\n"; return 1; } while(0)
@@ -40,6 +42,7 @@ extern "C" {
 }
 
 static constexpr int CUDNN_ACTIVATION_GELU = 7;
+static constexpr int CUDNN_ACTIVATION_RELU = 1;
 
 // Helper: run one scalar value through the GELU forward shim.
 static float gelu_fwd(float x) {
@@ -77,18 +80,15 @@ static float gelu_bwd(float x) {
 
 // Reference GELU via exact tanhf (Hendrycks & Gimpel 2016).
 static float gelu_ref(float x) {
-    static constexpr float kA = 0.7978845608f;
-    static constexpr float kB = 0.044715f;
-    float inner = kA * (x + kB * x * x * x);
-    return 0.5f * x * (1.f + tanhf(inner));
+    if (std::isinf(x)) return x > 0.f ? x : 0.f;
+    static constexpr float kInvSqrt2 = 0.70710678118654752440f;
+    return 0.5f * x * (1.f + std::erf(x * kInvSqrt2));
 }
 
-// ── 1. Forward accuracy vs tanhf reference ───────────────────────────────────
+// ── 1. Forward accuracy vs the defining erf formula ─────────────────────────
 int test_forward_accuracy() {
-    // Test points in [-3, 3] where both polynomial and tanhf are well-behaved.
-    // Tolerance 6e-2: Chebyshev degree-7 max |err| on this range ≈ 5%.
-    const float abs_tol = 6e-2f;
-    float xs[] = {-3.f,-2.5f,-2.f,-1.5f,-1.f,-0.5f,0.f,0.5f,1.f,1.5f,2.f,2.5f,3.f};
+    const float abs_tol = 2e-6f;
+    float xs[] = {-5.f,-3.f,-2.5f,-2.f,-1.5f,-1.f,-0.5f,0.f,0.5f,1.f,1.5f,2.f,2.5f,3.f,5.f};
     for (float x : xs) {
         float got = gelu_fwd(x);
         float ref = gelu_ref(x);
@@ -97,28 +97,25 @@ int test_forward_accuracy() {
                  " got=" + std::to_string(got) +
                  " ref=" + std::to_string(ref));
     }
-    PASS("forward accuracy vs tanhf reference (|x|≤3, tol=6e-2)");
+    PASS("forward accuracy vs exact erf GELU (|x|≤5, tol=2e-6)");
     return 0;
 }
 
 // ── 2. Saturation: GELU(x)→x (x≫0) and →0 (x≪0) ────────────────────────────
 int test_saturation() {
-    // For |x| ≥ 4, |inner| ≥ 4 → polynomial bypassed, t = ±1 exactly.
     float large_pos[] = {4.f, 5.f, 10.f, 50.f, 100.f};
     for (float x : large_pos) {
         float y = gelu_fwd(x);
-        // GELU(x) = 0.5*x*(1+1) = x when t=1
-        if (!NEAR(y, x, 1e-4f))
+        if (!NEAR(y, gelu_ref(x), 2e-6f))
             FAIL("saturation+ x=" + std::to_string(x) + " got=" + std::to_string(y));
     }
     float large_neg[] = {-4.f, -5.f, -10.f, -50.f, -100.f};
     for (float x : large_neg) {
         float y = gelu_fwd(x);
-        // GELU(x) = 0.5*x*(1-1) = 0 when t=-1
-        if (!NEAR(y, 0.f, 1e-4f))
+        if (!NEAR(y, gelu_ref(x), 2e-6f))
             FAIL("saturation- x=" + std::to_string(x) + " got=" + std::to_string(y));
     }
-    PASS("saturation: GELU→x (x≫0), GELU→0 (x≪0)");
+    PASS("large-magnitude GELU agrees with exact erf reference");
     return 0;
 }
 
@@ -186,18 +183,116 @@ int test_large_inputs() {
                  " got=" + std::to_string(y) +
                  " expected≈" + std::to_string(expected));
     }
-    PASS("large inputs |x|≤100: finite and correct (QUEUE-73)");
+    PASS("large inputs |x|≤100: finite and correct");
+    return 0;
+}
+
+int test_nan_and_descriptor_contract() {
+    constexpr int kSuccess = 0;
+    constexpr int kBadParam = 3;
+    constexpr int kNotSupported = 9;
+    cudnnActivationDescriptor_t act{};
+    cudnnTensorDescriptor_t td{};
+    if (cudnnCreateActivationDescriptor(&act) != kSuccess ||
+        cudnnCreateTensorDescriptor(&td) != kSuccess)
+        FAIL("descriptor creation failed");
+    cudnnSetTensor4dDescriptor(td, 0, 0, 1, 1, 1, 1);
+
+    const float alpha = 1.f, beta = 0.f;
+    float y = 7.f;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    if (cudnnActivationForward(nullptr, act, &alpha, td, &nan, &beta, td, &y) != kBadParam ||
+        y != 7.f)
+        FAIL("uninitialized activation descriptor was accepted");
+
+    if (cudnnSetActivationDescriptor(act, 5, 0, 0.0) != kSuccess ||
+        cudnnActivationForward(nullptr, act, &alpha, td, &nan, &beta, td, &y) != kNotSupported)
+        FAIL("identity mode was accepted by direct activation API");
+    if (cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_GELU, 1, 0.0) != kSuccess)
+        FAIL("valid GELU descriptor rejected");
+    if (cudnnActivationForward(nullptr, act, &alpha, td, &nan, &beta, td, &y) != kSuccess ||
+        !std::isnan(y))
+        FAIL("propagating NaN mode did not preserve NaN");
+    const float dy = 1.f;
+    float dx = 0.f;
+    if (cudnnActivationBackward(nullptr, act, &alpha, td, &nan, td, &dy,
+                                td, &nan, &beta, td, &dx) != kSuccess ||
+        !std::isnan(dx))
+        FAIL("propagating NaN mode did not preserve NaN in backward");
+
+    if (cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_GELU, 0, 0.0) != kSuccess)
+        FAIL("valid non-propagating GELU descriptor rejected");
+    y = nan;
+    if (cudnnActivationForward(nullptr, act, &alpha, td, &nan, &beta, td, &y) != kSuccess ||
+        y != 0.f)
+        FAIL("non-propagating mode did not suppress NaN input");
+    dx = nan;
+    if (cudnnActivationBackward(nullptr, act, &alpha, td, &y, td, &dy,
+                                td, &nan, &beta, td, &dx) != kSuccess ||
+        dx != 0.f)
+        FAIL("non-propagating mode did not suppress NaN in backward");
+
+    if (cudnnSetActivationDescriptor(act, 999, 0, 0.0) != kBadParam ||
+        cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_GELU, 999, 0.0) != kBadParam)
+        FAIL("invalid activation or NaN mode was accepted");
+
+    cudnnSetTensor4dDescriptor(td, 0, 0, 1, 1, 1, 1);
+    const float reluInput = 3.f;
+    float reluOutput = 0.f;
+    if (cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU, 0, 2.0) != kSuccess ||
+        cudnnActivationForward(nullptr, act, &alpha, td, &reluInput, &beta, td,
+                               &reluOutput) != kSuccess || reluOutput != 2.f)
+        FAIL("ReLU descriptor upper bound was not applied");
+    const float reluDy = 1.f;
+    float reluDx = 1.f;
+    if (cudnnActivationBackward(nullptr, act, &alpha, td, &reluOutput, td, &reluDy,
+                                td, &reluInput, &beta, td, &reluDx) != kSuccess ||
+        reluDx != 0.f)
+        FAIL("capped ReLU derivative did not become zero above the cap");
+    if (cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU, 0, 0.0) != kSuccess ||
+        cudnnActivationForward(nullptr, act, &alpha, td, &reluInput, &beta, td,
+                               &reluOutput) != kSuccess || reluOutput != reluInput)
+        FAIL("zero ReLU coefficient did not preserve the unbounded ReLU mode");
+
+    cudnnSetTensor4dDescriptor(td, 0, 3, 1, 1, 1, 2); // CUDNN_DATA_INT8
+    cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU, 0, 0.0);
+    const float int8Alpha = 0.5f, int8Beta = 0.25f;
+    int8_t int8Input[] = {-4, 4};
+    int8_t int8Output[] = {8, -8};
+    if (cudnnActivationForward(nullptr, act, &int8Alpha, td, int8Input,
+                               &int8Beta, td, int8Output) != kSuccess ||
+        int8Output[0] != 2 || int8Output[1] != 0)
+        FAIL("INT8 ReLU did not apply alpha/beta and saturating rounding");
+    int8_t int8Dy[] = {5, 6};
+    int8_t int8Dx[] = {4, 4};
+    if (cudnnActivationBackward(nullptr, act, &int8Alpha, td, int8Output,
+                                td, int8Dy, td, int8Input, &int8Beta,
+                                td, int8Dx) != kSuccess ||
+        int8Dx[0] != 1 || int8Dx[1] != 4)
+        FAIL("INT8 ReLU backward did not apply alpha/beta");
+    cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_GELU, 0, 0.0);
+
+    cudnnSetTensor4dDescriptor(td, 0, 2, 1, 1, 1, 1); // CUDNN_DATA_HALF
+    y = 19.f;
+    if (cudnnActivationForward(nullptr, act, &alpha, td, &nan, &beta, td, &y) != kNotSupported ||
+        y != 19.f)
+        FAIL("unsupported dtype was not rejected before touching output");
+
+    cudnnDestroyTensorDescriptor(td);
+    cudnnDestroyActivationDescriptor(act);
+    PASS("NaN modes, enum validation and unsupported dtype status");
     return 0;
 }
 
 int main() {
-    std::cout << "=== Fast GELU Horner-7 tests (QUEUE-73) ===\n";
+    std::cout << "=== Exact GELU and activation contract tests ===\n";
     int fails = 0;
     fails += test_forward_accuracy();
     fails += test_saturation();
     fails += test_gelu_properties();
     fails += test_gradient_consistency();
     fails += test_large_inputs();
-    if (fails == 0) std::cout << "All QUEUE-73 GELU Horner-7 tests passed.\n";
+    fails += test_nan_and_descriptor_contract();
+    if (fails == 0) std::cout << "All exact GELU and activation contract tests passed.\n";
     return fails;
 }

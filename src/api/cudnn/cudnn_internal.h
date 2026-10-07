@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <limits>
 #include <algorithm>
 #include <vector>
 #include <random>
@@ -129,6 +130,28 @@ enum cudnnNanPropagation_t {
     CUDNN_PROPAGATE_NAN = 1
 };
 
+static inline bool isSupportedActivationMode(cudnnActivationMode_t mode) {
+    switch (mode) {
+    case CUDNN_ACTIVATION_SIGMOID:
+    case CUDNN_ACTIVATION_RELU:
+    case CUDNN_ACTIVATION_TANH:
+    case CUDNN_ACTIVATION_CLIPPED_RELU:
+    case CUDNN_ACTIVATION_ELU:
+    case CUDNN_ACTIVATION_IDENTITY:
+    case CUDNN_ACTIVATION_SWISH:
+    case CUDNN_ACTIVATION_GELU:
+    case CUDNN_ACTIVATION_SELU:
+    case CUDNN_ACTIVATION_MISH:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static inline bool isSupportedNanPropagation(cudnnNanPropagation_t mode) {
+    return mode == CUDNN_NOT_PROPAGATE_NAN || mode == CUDNN_PROPAGATE_NAN;
+}
+
 // ── INT8 quantization helpers ─────────────────────────────────────────────────
 static inline float vgre_dequant_i8(int8_t v, float scale) {
     return static_cast<float>(v) * scale;
@@ -138,6 +161,11 @@ static inline int8_t vgre_quant_f32_to_i8(float v, float inv_scale) {
     if (q >  127.f) q =  127.f;
     if (q < -128.f) q = -128.f;
     return static_cast<int8_t>(std::round(q));
+}
+static inline int8_t vgre_round_sat_i8(float value) {
+    if (std::isnan(value)) return 0;
+    value = std::min(std::max(value, -128.0f), 127.0f);
+    return static_cast<int8_t>(std::round(value));
 }
 
 // ── Descriptor structs ────────────────────────────────────────────────────────
@@ -162,9 +190,16 @@ struct PoolDesc {
     int win_h, win_w, pad_h, pad_w, str_h, str_w;
 };
 struct ActDesc {
-    cudnnActivationMode_t mode;
-    double coeff;
+    cudnnActivationMode_t mode = static_cast<cudnnActivationMode_t>(-1);
+    cudnnNanPropagation_t nanOpt = CUDNN_NOT_PROPAGATE_NAN;
+    double coeff = 0.0;
+    bool initialized = false;
 };
+
+static inline bool isValidActivationDescriptor(const ActDesc& act) {
+    return act.initialized && isSupportedActivationMode(act.mode) &&
+           isSupportedNanPropagation(act.nanOpt);
+}
 struct DropoutDesc {
     float dropout;
     unsigned long long seed;
@@ -190,36 +225,22 @@ struct LRNDesc {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static inline float applyActivation(float x, const ActDesc& act) {
+    if (std::isnan(x))
+        return act.nanOpt == CUDNN_PROPAGATE_NAN ? x : 0.0f;
     switch (act.mode) {
-    case CUDNN_ACTIVATION_RELU:         return x > 0.f ? x : 0.f;
+    case CUDNN_ACTIVATION_RELU:
+        return x > 0.f ? (act.coeff > 0.0 ? std::min(x, static_cast<float>(act.coeff)) : x) : 0.f;
     case CUDNN_ACTIVATION_SIGMOID:      return 1.f / (1.f + expf(-x));
     case CUDNN_ACTIVATION_TANH:         return tanhf(x);
     case CUDNN_ACTIVATION_CLIPPED_RELU: return std::min(std::max(x, 0.f), (float)act.coeff);
     case CUDNN_ACTIVATION_ELU:          return x > 0.f ? x : (float)(act.coeff * (expf(x) - 1.f));
+    case CUDNN_ACTIVATION_IDENTITY:     return x;
     case CUDNN_ACTIVATION_SWISH:        return x / (1.f + expf(-x));
     case CUDNN_ACTIVATION_GELU: {
-        // Fast GELU via degree-7 Horner polynomial; Hendrycks & Gimpel 2016.
-        // inner = √(2/π)·(x + 0.044715·x³); tanh(inner) ≈ Horner7 on |inner|<4.
-        // Coefficients: Chebyshev minimax on [−4,4], not Taylor (Taylor diverges for
-        // |inner|>π/2≈1.57). For |inner|≥4: tanh≈±1 → GELU→x or 0.
-        static constexpr float kA  = 0.7978845608f;  // √(2/π)
-        static constexpr float kB  = 0.044715f;
-        // Chebyshev minimax degree-7 coefficients for tanh(u) on [−4,4]:
-        static constexpr float kH1 =  0.924533f;
-        static constexpr float kH3 = -0.152054f;
-        static constexpr float kH5 =  0.012711f;
-        static constexpr float kH7 = -0.000368f;
-        float inner = kA * (x + kB * (x * x * x));
-        float t;
-        if (inner >= 4.0f)       t =  1.0f;
-        else if (inner <= -4.0f) t = -1.0f;
-        else {
-            float u2 = inner * inner;
-            // Horner: u·(kH1 + u²·(kH3 + u²·(kH5 + u²·kH7)))  O(log U) → O(1) ops
-            t = inner * (kH1 + u2 * (kH3 + u2 * (kH5 + u2 * kH7)));
-            t = (t >  1.0f) ?  1.0f : (t < -1.0f) ? -1.0f : t;
-        }
-        return 0.5f * x * (1.0f + t);
+        // GELU(x) = x Φ(x) = x/2 · (1 + erf(x/√2)).
+        if (std::isinf(x)) return x > 0.f ? x : 0.0f;
+        static constexpr float kInvSqrt2 = 0.70710678118654752440f;
+        return 0.5f * x * (1.0f + std::erf(x * kInvSqrt2));
     }
     case CUDNN_ACTIVATION_SELU: {
         static constexpr float kAlpha = 1.6732632423543772f;
@@ -230,7 +251,7 @@ static inline float applyActivation(float x, const ActDesc& act) {
         float sp = (x > 20.f) ? x : logf(1.f + expf(x));
         return x * tanhf(sp);
     }
-    default: return x;
+    default: return std::numeric_limits<float>::quiet_NaN();
     }
 }
 
@@ -561,8 +582,12 @@ inline void cpuWinograd4x4_3x3(
 
 // Activation backward derivative helper
 static inline float applyActivationDerivative(float x, float y, const ActDesc& act) {
+    if (std::isnan(x) || std::isnan(y))
+        return act.nanOpt == CUDNN_PROPAGATE_NAN
+            ? std::numeric_limits<float>::quiet_NaN() : 0.0f;
     switch (act.mode) {
-    case CUDNN_ACTIVATION_RELU:         return x > 0.f ? 1.f : 0.f;
+    case CUDNN_ACTIVATION_RELU:
+        return x > 0.f && (act.coeff <= 0.0 || x < static_cast<float>(act.coeff)) ? 1.f : 0.f;
     case CUDNN_ACTIVATION_SIGMOID: {
         float s = y; return s * (1.f - s);
     }
@@ -573,42 +598,19 @@ static inline float applyActivationDerivative(float x, float y, const ActDesc& a
     case CUDNN_ACTIVATION_ELU: {
         return x > 0.f ? 1.f : (float)(act.coeff * expf(x));
     }
+    case CUDNN_ACTIVATION_IDENTITY:     return 1.f;
     case CUDNN_ACTIVATION_SWISH: {
         float sig = 1.f / (1.f + expf(-x));
         return sig + x * sig * (1.f - sig);
     }
     case CUDNN_ACTIVATION_GELU: {
-        // Derivative must use ACTUAL polynomial derivative dp/du, NOT 1−t².
-        // (1−t² is only exact for mathematical tanh; our t is a polynomial.)
-        // For |inner|≥4: t=±1, polynomial derivative=0 → grad=1 or 0 correctly.
-        static constexpr float kA  = 0.7978845608f;
-        static constexpr float kB  = 0.044715f;
-        static constexpr float kH1 =  0.924533f;
-        static constexpr float kH3 = -0.152054f;
-        static constexpr float kH5 =  0.012711f;
-        static constexpr float kH7 = -0.000368f;
-        float inner = kA * (x + kB * (x * x * x));
-        float t;
-        float dpdu;
-        if (inner >= 4.0f) {
-            t = 1.0f; dpdu = 0.0f;
-        } else if (inner <= -4.0f) {
-            t = -1.0f; dpdu = 0.0f;
-        } else {
-            float u2 = inner * inner;
-            float t_raw = inner * (kH1 + u2 * (kH3 + u2 * (kH5 + u2 * kH7)));
-            if (t_raw >= 1.0f) {
-                t = 1.0f; dpdu = 0.0f;
-            } else if (t_raw <= -1.0f) {
-                t = -1.0f; dpdu = 0.0f;
-            } else {
-                t = t_raw;
-                // p'(u) = kH1 + u²·(3·kH3 + u²·(5·kH5 + u²·7·kH7))  O(1) Horner
-                dpdu = kH1 + u2 * (3.0f*kH3 + u2 * (5.0f*kH5 + u2 * 7.0f*kH7));
-            }
-        }
-        float inner_prime = kA * (1.0f + 3.0f * kB * x * x);
-        return 0.5f * (1.0f + t) + 0.5f * x * dpdu * inner_prime;
+        // d/dx [x Φ(x)] = Φ(x) + x φ(x), where φ is the standard normal PDF.
+        if (std::isinf(x)) return x > 0.f ? 1.0f : 0.0f;
+        static constexpr float kInvSqrt2 = 0.70710678118654752440f;
+        static constexpr float kInvSqrt2Pi = 0.39894228040143267794f;
+        const float cdf = 0.5f * (1.0f + std::erf(x * kInvSqrt2));
+        const float pdf = kInvSqrt2Pi * std::exp(-0.5f * x * x);
+        return cdf + x * pdf;
     }
     case CUDNN_ACTIVATION_SELU: {
         static constexpr float kAlpha = 1.6732632423543772f;
@@ -622,7 +624,7 @@ static inline float applyActivationDerivative(float x, float y, const ActDesc& a
         float sech2 = 1.f - tsp * tsp;
         return tsp + x * sech2 * sig;
     }
-    default: return 1.f;
+    default: return std::numeric_limits<float>::quiet_NaN();
     }
 }
 

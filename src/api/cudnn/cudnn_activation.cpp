@@ -10,22 +10,34 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t 
     const void* alpha, cudnnTensorDescriptor_t xDesc, const void* x,
     const void* beta,  cudnnTensorDescriptor_t yDesc, void* y)
 {
-    if (!xDesc || !yDesc || !x || !y || !alpha || !beta) return CUDNN_STATUS_INVALID_VALUE;
+    if (!actDesc || !xDesc || !yDesc || !x || !y || !alpha || !beta)
+        return CUDNN_STATUS_INVALID_VALUE;
     auto* tx=(TensorDesc*)xDesc; auto* ty=(TensorDesc*)yDesc; auto* act=(ActDesc*)actDesc;
+    if (!isValidActivationDescriptor(*act))
+        return CUDNN_STATUS_BAD_PARAM;
+    if (act->mode == CUDNN_ACTIVATION_IDENTITY) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (tx->n != ty->n || tx->c != ty->c || tx->h != ty->h || tx->w != ty->w ||
+        tx->dtype != ty->dtype)
+        return CUDNN_STATUS_INVALID_VALUE;
+    if (tx->dtype != CUDNN_DATA_FLOAT && tx->dtype != CUDNN_DATA_INT8)
+        return CUDNN_STATUS_NOT_SUPPORTED;
     int Nx = tx->n*tx->c*tx->h*tx->w;
     int Ny = ty->n*ty->c*ty->h*ty->w;
-    if (Nx != Ny) return CUDNN_STATUS_INVALID_VALUE;
+    if (Nx <= 0 || Nx != Ny) return CUDNN_STATUS_INVALID_VALUE;
     float a=*(const float*)alpha, b=*(const float*)beta;
     const float* xf=(const float*)x; float* yf=(float*)y;
 
-    bool isInt8 = (tx->dtype == CUDNN_DATA_INT8 || tx->dtype == CUDNN_DATA_INT8x4 ||
-                   tx->dtype == CUDNN_DATA_INT8x32);
+    const bool isInt8 = tx->dtype == CUDNN_DATA_INT8;
+    if (isInt8 && act->mode != CUDNN_ACTIVATION_RELU &&
+        act->mode != CUDNN_ACTIVATION_CLIPPED_RELU)
+        return CUDNN_STATUS_NOT_SUPPORTED;
+    if (isInt8 && (!std::isfinite(a) || !std::isfinite(b)))
+        return CUDNN_STATUS_BAD_PARAM;
     std::vector<float> xFloat;
     if (isInt8) {
-        float scale = (a > 1e-8f) ? a : (1.f / 128.f);
         xFloat.resize(Nx);
         const int8_t* xi = (const int8_t*)x;
-        for (int i = 0; i < Nx; ++i) xFloat[i] = vgre_dequant_i8(xi[i], scale);
+        for (int i = 0; i < Nx; ++i) xFloat[i] = static_cast<float>(xi[i]);
         xf = xFloat.data();
     }
 
@@ -37,17 +49,15 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t, cudnnActivationDescriptor_t 
         tmp[i] = applyActivation(xf[i], *act);
 
     if (isInt8) {
-        float outScale = (a > 1e-8f) ? a : (1.f / 128.f);
-        float invOutScale = 1.f / outScale;
         int8_t* yi = (int8_t*)y;
         for (int i = 0; i < Nx; ++i)
-            yi[i] = vgre_quant_f32_to_i8(tmp[i], invOutScale);
+            yi[i] = vgre_round_sat_i8(a * tmp[i] + (b == 0.f ? 0.f : b * yi[i]));
     } else {
         #ifdef _OPENMP
         #pragma omp parallel for if (Nx > 1024)
         #endif
         for (int i = 0; i < Nx; ++i)
-            yf[i] = a * tmp[i] + b * yf[i];
+            yf[i] = a * tmp[i] + (b == 0.f ? 0.f : b * yf[i]);
     }
     return CUDNN_STATUS_SUCCESS;
 }
@@ -58,34 +68,47 @@ cudnnStatus_t cudnnActivationBackward(cudnnHandle_t, cudnnActivationDescriptor_t
     cudnnTensorDescriptor_t xDesc, const void* x,
     const void* beta, cudnnTensorDescriptor_t dxDesc, void* dx)
 {
-    if (!xDesc || !yDesc || !dyDesc || !dxDesc || !x || !y || !dy || !dx || !alpha || !beta)
+    if (!actDesc || !xDesc || !yDesc || !dyDesc || !dxDesc || !x || !y || !dy || !dx || !alpha || !beta)
         return CUDNN_STATUS_INVALID_VALUE;
 
     auto* tx=(TensorDesc*)xDesc; auto* ty=(TensorDesc*)yDesc; auto* tdy=(TensorDesc*)dyDesc; auto* tdx=(TensorDesc*)dxDesc;
     auto* act=(ActDesc*)actDesc;
+    if (!isValidActivationDescriptor(*act))
+        return CUDNN_STATUS_BAD_PARAM;
+    if (act->mode == CUDNN_ACTIVATION_IDENTITY) return CUDNN_STATUS_NOT_SUPPORTED;
+    if (tx->n != ty->n || tx->c != ty->c || tx->h != ty->h || tx->w != ty->w ||
+        tx->n != tdy->n || tx->c != tdy->c || tx->h != tdy->h || tx->w != tdy->w ||
+        tx->n != tdx->n || tx->c != tdx->c || tx->h != tdx->h || tx->w != tdx->w ||
+        tx->dtype != ty->dtype || tx->dtype != tdy->dtype || tx->dtype != tdx->dtype)
+        return CUDNN_STATUS_INVALID_VALUE;
+    if (tx->dtype != CUDNN_DATA_FLOAT && tx->dtype != CUDNN_DATA_INT8)
+        return CUDNN_STATUS_NOT_SUPPORTED;
     int Nx = tx->n*tx->c*tx->h*tx->w;
     int Ny = ty->n*ty->c*ty->h*ty->w;
     int Nd = tdy->n*tdy->c*tdy->h*tdy->w;
     int Ndx = tdx->n*tdx->c*tdx->h*tdx->w;
-    if (Nx != Ny || Nx != Nd || Nx != Ndx) return CUDNN_STATUS_INVALID_VALUE;
+    if (Nx <= 0 || Nx != Ny || Nx != Nd || Nx != Ndx) return CUDNN_STATUS_INVALID_VALUE;
 
     float a = *(const float*)alpha, b = *(const float*)beta;
     const float* xf = (const float*)x; const float* yf = (const float*)y;
     const float* dyf = (const float*)dy; float* dxf = (float*)dx;
 
-    bool isInt8 = (tx->dtype == CUDNN_DATA_INT8 || tx->dtype == CUDNN_DATA_INT8x4 ||
-                   tx->dtype == CUDNN_DATA_INT8x32);
+    const bool isInt8 = tx->dtype == CUDNN_DATA_INT8;
+    if (isInt8 && act->mode != CUDNN_ACTIVATION_RELU &&
+        act->mode != CUDNN_ACTIVATION_CLIPPED_RELU)
+        return CUDNN_STATUS_NOT_SUPPORTED;
+    if (isInt8 && (!std::isfinite(a) || !std::isfinite(b)))
+        return CUDNN_STATUS_BAD_PARAM;
     std::vector<float> xFloat, yFloat, dyFloat;
     if (isInt8) {
-        float scale = (a > 1e-8f) ? a : (1.f / 128.f);
         xFloat.resize(Nx); yFloat.resize(Nx); dyFloat.resize(Nx);
         const int8_t* xi = (const int8_t*)x;
         const int8_t* yi = (const int8_t*)y;
         const int8_t* dyi = (const int8_t*)dy;
         for (int i = 0; i < Nx; ++i) {
-            xFloat[i] = vgre_dequant_i8(xi[i], scale);
-            yFloat[i] = vgre_dequant_i8(yi[i], scale);
-            dyFloat[i] = vgre_dequant_i8(dyi[i], scale);
+            xFloat[i] = static_cast<float>(xi[i]);
+            yFloat[i] = static_cast<float>(yi[i]);
+            dyFloat[i] = static_cast<float>(dyi[i]);
         }
         xf = xFloat.data(); yf = yFloat.data(); dyf = dyFloat.data();
     }
@@ -97,14 +120,12 @@ cudnnStatus_t cudnnActivationBackward(cudnnHandle_t, cudnnActivationDescriptor_t
     }
 
     if (isInt8) {
-        float outScale = (a > 1e-8f) ? a : (1.f / 128.f);
-        float invOutScale = 1.f / outScale;
         int8_t* dxi = (int8_t*)dx;
         for (int i = 0; i < Nx; ++i)
-            dxi[i] = vgre_quant_f32_to_i8(dxTmp[i], invOutScale);
+            dxi[i] = vgre_round_sat_i8(dxTmp[i] + (b == 0.f ? 0.f : b * dxi[i]));
     } else {
         for (int i = 0; i < Nx; ++i)
-            dxf[i] = dxTmp[i] + b * dxf[i];
+            dxf[i] = dxTmp[i] + (b == 0.f ? 0.f : b * dxf[i]);
     }
     return CUDNN_STATUS_SUCCESS;
 }

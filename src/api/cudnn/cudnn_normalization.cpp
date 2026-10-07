@@ -25,14 +25,38 @@ cudnnStatus_t cudnnNormalizationForwardInference(
     const cudnnTensorDescriptor_t normMeanVarDesc,
     const void *estimatedMean, const void *estimatedVariance,
     double epsilon,
-    const cudnnTensorDescriptor_t /*zDesc*/, const void * /*z*/,
+    const cudnnTensorDescriptor_t zDesc, const void *z,
     const cudnnActivationDescriptor_t actDesc,
     const cudnnTensorDescriptor_t yDesc, void *y,
     void * /*workspace*/, size_t /*workspaceSizeInBytes*/)
 {
-    if (!xDesc || !yDesc || !x || !y || !normScale || !normBias)
+    if (!xDesc || !yDesc || !x || !y || !normScale || !normBias || !alpha || !beta)
         return CUDNN_STATUS_INVALID_VALUE;
+    if (mode != CUDNN_NORM_PER_ACTIVATION && mode != CUDNN_NORM_PER_CHANNEL &&
+        mode != CUDNN_NORM_RMS_LAYER)
+        return CUDNN_STATUS_BAD_PARAM;
+    if (normOps != CUDNN_NORM_OPS_NORM && normOps != CUDNN_NORM_OPS_NORM_ACTIVATION &&
+        normOps != CUDNN_NORM_OPS_NORM_ADD_ACTIVATION)
+        return CUDNN_STATUS_BAD_PARAM;
+    if (!std::isfinite(epsilon) || epsilon < 0.0) return CUDNN_STATUS_BAD_PARAM;
+    const bool requestsActivation = normOps == CUDNN_NORM_OPS_NORM_ACTIVATION ||
+                                    normOps == CUDNN_NORM_OPS_NORM_ADD_ACTIVATION;
+    if (requestsActivation && !actDesc) return CUDNN_STATUS_INVALID_VALUE;
     auto *t = reinterpret_cast<TensorDesc*>(xDesc);
+    auto *out = reinterpret_cast<TensorDesc*>(yDesc);
+    if (t->n <= 0 || t->c <= 0 || t->h <= 0 || t->w <= 0)
+        return CUDNN_STATUS_INVALID_VALUE;
+    if (t->n != out->n || t->c != out->c || t->h != out->h || t->w != out->w ||
+        t->dtype != out->dtype)
+        return CUDNN_STATUS_INVALID_VALUE;
+    if (t->dtype != CUDNN_DATA_FLOAT) return CUDNN_STATUS_NOT_SUPPORTED;
+    if ((zDesc == nullptr) != (z == nullptr)) return CUDNN_STATUS_INVALID_VALUE;
+    if (zDesc) {
+        const auto *zt = reinterpret_cast<const TensorDesc*>(zDesc);
+        if (zt->n != t->n || zt->c != t->c || zt->h != t->h || zt->w != t->w ||
+            zt->dtype != t->dtype)
+            return CUDNN_STATUS_INVALID_VALUE;
+    }
     int N = t->n, C = t->c, HW = t->h * t->w;
     float a = *(const float*)alpha, b_scale = *(const float*)beta;
     const float *xf = static_cast<const float*>(x);
@@ -42,9 +66,13 @@ cudnnStatus_t cudnnNormalizationForwardInference(
     const float *mu = static_cast<const float*>(estimatedMean);
     const float *va = static_cast<const float*>(estimatedVariance);
 
-    // Decode the activation descriptor (null → identity / no activation)
+    // The descriptor is required whenever the selected operation includes activation.
     const ActDesc *act = static_cast<const ActDesc*>(actDesc);
-    const bool fuse_act = (normOps == CUDNN_NORM_OPS_NORM_ACTIVATION) && (act != nullptr);
+    if (requestsActivation && !isValidActivationDescriptor(*act))
+        return CUDNN_STATUS_BAD_PARAM;
+    const bool fuse_act = requestsActivation;
+    const float *zf = (normOps == CUDNN_NORM_OPS_NORM_ADD_ACTIVATION && z)
+        ? static_cast<const float*>(z) : nullptr;
 
     if (mode == CUDNN_NORM_PER_CHANNEL) {
         // Fused BN+ReLU: single pass O(N·C·H·W), no intermediate buffer
@@ -57,9 +85,9 @@ cudnnStatus_t cudnnNormalizationForwardInference(
             int idx = (n * C + c) * HW + hw;
             float xhat = (xf[idx] - mu[c]) / std::sqrt(va[c] + static_cast<float>(epsilon));
             float yval = sc[c] * xhat + bi[c];
-            // ReLU fusion: single pass, no intermediate buffer
+            if (zf) yval += zf[idx];
             if (fuse_act) yval = applyActivation(yval, *act);
-            yf[idx] = a * yval + b_scale * yf[idx];
+            yf[idx] = a * yval + (b_scale == 0.f ? 0.f : b_scale * yf[idx]);
         }
     } else if (mode == CUDNN_NORM_RMS_LAYER) {
         // RMSNorm inference: y[i] = x[i] / rms * scale[i]
@@ -88,8 +116,10 @@ cudnnStatus_t cudnnNormalizationForwardInference(
             float inv_rms = 1.0f / rms;
             for (int i = 0; i < D; ++i) {
                 float yval = xn[i] * inv_rms * sc[i];
+                const int idx = n * D + i;
+                if (zf) yval += zf[idx];
                 if (fuse_act) yval = applyActivation(yval, *act);
-                yn[i] = a * yval + b_scale * yn[i];
+                yn[i] = a * yval + (b_scale == 0.f ? 0.f : b_scale * yn[i]);
             }
         }
     } else {
@@ -109,12 +139,14 @@ cudnnStatus_t cudnnNormalizationForwardInference(
             for (int i = 0; i < D; ++i) {
                 float xhat = (xn[i] - mean_n) * inv_std;
                 float yval = sc[i] * xhat + bi[i];
+                const int idx = n * D + i;
+                if (zf) yval += zf[idx];
                 if (fuse_act) yval = applyActivation(yval, *act);
-                yn[i] = a * yval + b_scale * yn[i];
+                yn[i] = a * yval + (b_scale == 0.f ? 0.f : b_scale * yn[i]);
             }
         }
     }
-    (void)normScaleBiasDesc; (void)normMeanVarDesc; (void)yDesc;
+    (void)normScaleBiasDesc; (void)normMeanVarDesc;
     return CUDNN_STATUS_SUCCESS;
 }
 

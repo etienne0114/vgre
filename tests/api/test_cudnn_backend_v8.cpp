@@ -11,6 +11,10 @@
 #include <cstring>
 #include <vector>
 #include <cstdint>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <limits>
 
 // ── cuDNN status / handle stubs ───────────────────────────────────────────────
 extern "C" {
@@ -27,7 +31,7 @@ typedef void*          cudnnActivationDescriptor_t;
 #define CUDNN_STATUS_INVALID_VALUE 8
 #define CUDNN_STATUS_NOT_SUPPORTED 9
 
-enum cudnnDataType_t      { CUDNN_DATA_FLOAT = 0 };
+enum cudnnDataType_t      { CUDNN_DATA_FLOAT = 0, CUDNN_DATA_INT64 = 10 };
 enum cudnnTensorFormat_t  { CUDNN_TENSOR_NCHW = 0 };
 enum cudnnNanPropagation_t{ CUDNN_NOT_PROPAGATE_NAN = 0 };
 enum cudnnActivationMode_t{ CUDNN_ACTIVATION_RELU = 1 };
@@ -56,6 +60,8 @@ enum cudnnBackendDescriptorType_t {
     CUDNN_BACKEND_OPERATION_POOLING_FORWARD_DESCRIPTOR     = 4,
     CUDNN_BACKEND_OPERATION_MATMUL_DESCRIPTOR              = 8,
     CUDNN_BACKEND_OPERATION_BN_FINALIZE_STATISTICS_DESCRIPTOR = 11,
+    CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR              = 16,
+    CUDNN_BACKEND_POINTWISE_DESCRIPTOR                     = 22,
     CUDNN_BACKEND_TENSOR_DESCRIPTOR      = 20,
     CUDNN_BACKEND_CONVOLUTION_DESCRIPTOR = 21,
     CUDNN_BACKEND_ENGINECFG_DESCRIPTOR   = 24,
@@ -63,10 +69,12 @@ enum cudnnBackendDescriptorType_t {
     CUDNN_BACKEND_MATMUL_DESCRIPTOR      = 26,
     CUDNN_BACKEND_OPERATIONSET_DESCRIPTOR= 27,
     CUDNN_BACKEND_HANDLE_DESCRIPTOR      = 28,
-    CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR= 33
+    CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR= 33,
+    CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR = 37
 };
 
 enum cudnnBackendAttributeName_t {
+    CUDNN_ATTR_POINTWISE_MODE                      = 0,
     CUDNN_ATTR_TENSOR_DIMENSIONS                    = 30,
     CUDNN_ATTR_TENSOR_DATA_TYPE                     = 32,
     CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS             = 13,
@@ -98,7 +106,17 @@ enum cudnnBackendAttributeName_t {
     CUDNN_ATTR_ENGINECFG_ENGINE                     = 120,
     CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG         = 131,
     CUDNN_ATTR_ENGINE_OPERATION_GRAPH               = 500,
-    CUDNN_ATTR_OPERATIONSET_OPS                     = 501
+    CUDNN_ATTR_OPERATIONSET_OPS                     = 501,
+    CUDNN_ATTR_OPERATION_SIGNAL_MODE                 = 820,
+    CUDNN_ATTR_OPERATION_SIGNAL_FLAGDESC             = 821,
+    CUDNN_ATTR_OPERATION_SIGNAL_VALUE                = 822,
+    CUDNN_ATTR_OPERATION_SIGNAL_XDESC                = 823,
+    CUDNN_ATTR_OPERATION_SIGNAL_YDESC                = 824,
+    CUDNN_ATTR_OPERATION_POINTWISE_XDESC             = 600,
+    CUDNN_ATTR_OPERATION_POINTWISE_YDESC             = 602,
+    CUDNN_ATTR_OPERATION_POINTWISE_PW_DESCRIPTOR     = 603,
+    CUDNN_ATTR_OPERATION_POINTWISE_ALPHA1            = 604,
+    CUDNN_ATTR_OPERATION_POINTWISE_ALPHA2            = 605
 };
 
 cudnnStatus_t cudnnBackendCreateDescriptor(cudnnBackendDescriptorType_t, void**);
@@ -128,9 +146,9 @@ static bool setDims(void* desc, cudnnBackendAttributeName_t attr,
            == CUDNN_STATUS_SUCCESS;
 }
 
-static bool setUint64(void* desc, cudnnBackendAttributeName_t attr, uint64_t val)
+static bool setInt64(void* desc, cudnnBackendAttributeName_t attr, int64_t val)
 {
-    return cudnnBackendSetAttribute(desc, attr, kAttrUint64, 1, &val)
+    return cudnnBackendSetAttribute(desc, attr, kAttrInt64, 1, &val)
            == CUDNN_STATUS_SUCCESS;
 }
 
@@ -381,6 +399,147 @@ static bool testBNFinalize(cudnnHandle_t h, int& pass, int& total)
     return false;
 }
 
+static bool testSignalSetWait(cudnnHandle_t h, int& pass, int& total)
+{
+    int64_t flag = 0;
+    const std::vector<float> input = {1.25f, -2.5f, 3.75f, 4.0f};
+    std::vector<float> output(input.size(), 0.0f);
+
+    void *flagDesc = nullptr, *xDesc = nullptr, *yDesc = nullptr;
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_TENSOR_DESCRIPTOR, &flagDesc);
+    setDims(flagDesc, CUDNN_ATTR_TENSOR_DIMENSIONS, {1, 1, 1, 1});
+    { uint64_t dtype = CUDNN_DATA_INT64;
+      cudnnBackendSetAttribute(flagDesc, CUDNN_ATTR_TENSOR_DATA_TYPE,
+                               kAttrInt64, 1, &dtype); }
+    cudnnBackendFinalize(flagDesc);
+
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_TENSOR_DESCRIPTOR, &xDesc);
+    setDims(xDesc, CUDNN_ATTR_TENSOR_DIMENSIONS, {1, 1, 1, 4});
+    cudnnBackendFinalize(xDesc);
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_TENSOR_DESCRIPTOR, &yDesc);
+    setDims(yDesc, CUDNN_ATTR_TENSOR_DIMENSIONS, {1, 1, 1, 4});
+    cudnnBackendFinalize(yDesc);
+
+    void *setOp = nullptr, *waitOp = nullptr;
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR, &setOp);
+    setInt64(setOp, CUDNN_ATTR_OPERATION_SIGNAL_MODE, 0);
+    setHandle(setOp, CUDNN_ATTR_OPERATION_SIGNAL_FLAGDESC, flagDesc);
+    setInt64(setOp, CUDNN_ATTR_OPERATION_SIGNAL_VALUE, 91);
+    setHandle(setOp, CUDNN_ATTR_OPERATION_SIGNAL_XDESC, xDesc);
+    setHandle(setOp, CUDNN_ATTR_OPERATION_SIGNAL_YDESC, yDesc);
+    cudnnBackendFinalize(setOp);
+
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATION_SIGNAL_DESCRIPTOR, &waitOp);
+    setInt64(waitOp, CUDNN_ATTR_OPERATION_SIGNAL_MODE, 1);
+    setHandle(waitOp, CUDNN_ATTR_OPERATION_SIGNAL_FLAGDESC, flagDesc);
+    setInt64(waitOp, CUDNN_ATTR_OPERATION_SIGNAL_VALUE, 91);
+    setHandle(waitOp, CUDNN_ATTR_OPERATION_SIGNAL_XDESC, xDesc);
+    cudnnBackendFinalize(waitOp);
+
+    void *setOps = nullptr, *waitOps = nullptr;
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATIONSET_DESCRIPTOR, &setOps);
+    { uint64_t opId = reinterpret_cast<uintptr_t>(setOp);
+      cudnnBackendSetAttribute(setOps, CUDNN_ATTR_OPERATIONSET_OPS,
+                               kAttrHandle, 1, &opId); }
+    cudnnBackendFinalize(setOps);
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATIONSET_DESCRIPTOR, &waitOps);
+    { uint64_t opId = reinterpret_cast<uintptr_t>(waitOp);
+      cudnnBackendSetAttribute(waitOps, CUDNN_ATTR_OPERATIONSET_OPS,
+                               kAttrHandle, 1, &opId); }
+    cudnnBackendFinalize(waitOps);
+
+    void *setPlan = buildPlan(h, setOps);
+    void *waitPlan = buildPlan(h, waitOps);
+    void *setPack = buildVariantPack({flagDesc, xDesc, yDesc},
+                                     {&flag, const_cast<float*>(input.data()), output.data()});
+    void *waitPack = buildVariantPack({flagDesc}, {&flag});
+
+    ++total;
+    cudnnStatus_t waitStatus = CUDNN_STATUS_INVALID_VALUE;
+    std::atomic<bool> waitDone{false};
+    std::thread waiter([&] {
+        waitStatus = cudnnBackendExecute(h, waitPlan, waitPack);
+        waitDone.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const bool waitedForValue = !waitDone.load(std::memory_order_acquire);
+    const cudnnStatus_t setStatus = cudnnBackendExecute(h, setPlan, setPack);
+    waiter.join();
+
+    bool ok = waitedForValue && setStatus == CUDNN_STATUS_SUCCESS &&
+              waitStatus == CUDNN_STATUS_SUCCESS && flag == 91;
+    for (size_t i = 0; ok && i < input.size(); ++i)
+        ok = output[i] == input[i];
+
+    if (ok) {
+        ++pass;
+        std::cout << "  PASS SignalSetWait (atomic flag + pass-through)\n";
+    } else {
+        std::cout << "  FAIL SignalSetWait: set=" << setStatus
+                  << " wait=" << waitStatus << " flag=" << flag << "\n";
+    }
+    return ok;
+}
+
+static bool testPointwiseExactGelu(cudnnHandle_t h, int& pass, int& total)
+{
+    const float invSqrtTwo = 0.7071067811865475f;
+    const std::vector<float> x = {
+        -std::numeric_limits<float>::infinity(), -4.0f, -0.5f,
+        0.5f, 4.0f, std::numeric_limits<float>::infinity()};
+    std::vector<float> y(x.size(), 0.0f);
+    void *xDesc = nullptr, *yDesc = nullptr, *pwDesc = nullptr, *op = nullptr;
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_TENSOR_DESCRIPTOR, &xDesc);
+    setDims(xDesc, CUDNN_ATTR_TENSOR_DIMENSIONS, {1, 1, 1, 6});
+    cudnnBackendFinalize(xDesc);
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_TENSOR_DESCRIPTOR, &yDesc);
+    setDims(yDesc, CUDNN_ATTR_TENSOR_DIMENSIONS, {1, 1, 1, 6});
+    cudnnBackendFinalize(yDesc);
+
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_POINTWISE_DESCRIPTOR, &pwDesc);
+    setInt64(pwDesc, CUDNN_ATTR_POINTWISE_MODE, 9); // CUDNN_POINTWISE_GELU_FWD
+    cudnnBackendFinalize(pwDesc);
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR, &op);
+    setHandle(op, CUDNN_ATTR_OPERATION_POINTWISE_XDESC, xDesc);
+    setHandle(op, CUDNN_ATTR_OPERATION_POINTWISE_YDESC, yDesc);
+    setHandle(op, CUDNN_ATTR_OPERATION_POINTWISE_PW_DESCRIPTOR, pwDesc);
+    setFloat(op, CUDNN_ATTR_OPERATION_POINTWISE_ALPHA1, 1.0f);
+    setFloat(op, CUDNN_ATTR_OPERATION_POINTWISE_ALPHA2, 1.0f);
+    cudnnBackendFinalize(op);
+
+    void* opSet = nullptr;
+    cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATIONSET_DESCRIPTOR, &opSet);
+    { uint64_t opId = reinterpret_cast<uintptr_t>(op);
+      cudnnBackendSetAttribute(opSet, CUDNN_ATTR_OPERATIONSET_OPS,
+                               kAttrHandle, 1, &opId); }
+    cudnnBackendFinalize(opSet);
+    void* plan = buildPlan(h, opSet);
+    void* vp = buildVariantPack({xDesc, yDesc},
+                                {const_cast<float*>(x.data()), y.data()});
+
+    ++total;
+    const cudnnStatus_t status = cudnnBackendExecute(h, plan, vp);
+    bool ok = status == CUDNN_STATUS_SUCCESS;
+    for (size_t i = 0; ok && i < x.size(); ++i) {
+        if (std::isinf(x[i])) {
+            ok = x[i] < 0.0f ? y[i] == 0.0f :
+                 std::isinf(y[i]) && y[i] > 0.0f;
+            continue;
+        }
+        const float reference = 0.5f * x[i] * std::erfc(-x[i] * invSqrtTwo);
+        ok = std::abs(y[i] - reference) <= 2e-6f;
+    }
+    if (ok) {
+        ++pass;
+        std::cout << "  PASS PointwiseGelu (exact erf form)\n";
+    } else {
+        std::cout << "  FAIL PointwiseGelu: execute returned " << status << " values=";
+        for (float value : y) std::cout << value << ',';
+        std::cout << "\n";
+    }
+    return ok;
+}
+
 static bool testPoolingForward(cudnnHandle_t h, int& pass, int& total)
 {
     // Max pooling: 1×1×4×4 → 1×1×2×2 with 2×2 window, stride 2
@@ -527,6 +686,8 @@ int main()
     testConvForward(h, pass, total);
     testActivationForward(h, pass, total);
     testBNFinalize(h, pass, total);
+    testSignalSetWait(h, pass, total);
+    testPointwiseExactGelu(h, pass, total);
     testPoolingForward(h, pass, total);
     testMatmul(h, pass, total);
 

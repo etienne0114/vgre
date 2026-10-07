@@ -83,9 +83,10 @@ static uint8_t extractRs1(uint64_t instr) { return static_cast<uint8_t>((instr >
 static uint8_t extractRs2(uint64_t instr) { return static_cast<uint8_t>((instr >> 16) & 0xFF); }
 static uint8_t extractRs3(uint64_t instr) { return static_cast<uint8_t>((instr >> 24) & 0xFF); }
 
-// Decode a single SM80/SM90 instruction to PTX text.
-// Returns empty string for NOP or unknown (comment only for unknown).
-static std::string decodeInstruction(uint64_t instr) {
+// Decode a single supported SM80/SM90 instruction to PTX text.
+// NOP is recognized and emits no text; unsupported opcodes set `supported` false.
+static std::string decodeInstruction(uint64_t instr, bool& supported) {
+    supported = true;
     uint32_t op = extractOpcode(instr);
     uint8_t rd  = extractRd(instr);
     uint8_t rs1 = extractRs1(instr);
@@ -588,12 +589,9 @@ static std::string decodeInstruction(uint64_t instr) {
         return s;
     }
 
-    default: {
-        // Unknown opcode: emit as a comment, no real instruction
-        snprintf(buf, sizeof(buf),
-                 "    // SASS_UNKNOWN_OP_%x", op);
-        return buf;
-    }
+    default:
+        supported = false;
+        return "";
     }
 }
 
@@ -665,17 +663,14 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
         }
     }
 
-    if (textSections.empty() && kernelNames.empty()) {
-        // No named kernel sections — synthesize a generic kernel name
-        kernelNames.push_back("sass_decoded_kernel");
-        // Return minimal valid PTX stub since we have no instructions to decode
-        return ".version 8.0\n.target sm_90\n.address_size 64\n\n"
-               ".visible .entry sass_decoded_kernel(\n"
-               "    .param .u64 param0,\n    .param .u64 param1\n)\n"
-               "{\n    .reg .u64 %rd<64>;\n"
-               "    ld.param.u64 %rd0, [param0];\n"
-               "    ld.param.u64 %rd1, [param1];\n"
-               "    ret;\n}\n";
+    if (textSections.empty()) return "";
+
+    // A kernel with metadata but no code cannot be translated. Never synthesize
+    // a successful no-op entry for it.
+    for (const auto& kname : kernelNames) {
+        const bool hasText = std::any_of(textSections.begin(), textSections.end(),
+            [&](const TextSection& section) { return section.name == kname; });
+        if (!hasText) return "";
     }
 
     // Build PTX output
@@ -686,6 +681,7 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
 
     // Emit one PTX kernel per decoded .text.* section
     for (const auto& ts : textSections) {
+        if (ts.sz % (4 * sizeof(uint64_t)) != 0) return "";
         ptx << "\n.visible .entry " << ts.name << "(\n";
         ptx << "    .param .u64 param0,\n";
         ptx << "    .param .u64 param1\n";
@@ -803,7 +799,9 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
             if (branchTargets.count(static_cast<uint32_t>(instrIdx)))
                 ptx << "LABEL_" << instrIdx << ":\n";
 
-            std::string decoded = decodeInstruction(instr);
+            bool supported = false;
+            std::string decoded = decodeInstruction(instr, supported);
+            if (!supported) return "";
             if (!decoded.empty()) {
                 ptx << decoded << "\n";
                 ++instrCount;
@@ -816,27 +814,10 @@ std::string decodeSassToPtx(const uint8_t* data, size_t size) {
                 ptx << "LABEL_" << tgt << ":\n";
 
         if (instrCount == 0) {
-            ptx << "    // No decodeable SASS instructions found\n";
+            ptx << "    // SASS section contains no non-NOP instructions\n";
         }
 
         ptx << "\n    ret;\n}\n";
-    }
-
-    // Emit stubs for kernels found only in .nv.info.* (no .text.*)
-    for (const auto& kname : kernelNames) {
-        bool hasText = false;
-        for (const auto& ts : textSections)
-            if (ts.name == kname) { hasText = true; break; }
-        if (hasText) continue;
-
-        ptx << "\n.visible .entry " << kname << "(\n";
-        ptx << "    .param .u64 param0,\n";
-        ptx << "    .param .u64 param1\n";
-        ptx << ")\n{\n";
-        ptx << "    .reg .u64 %rd<64>;\n";
-        ptx << "    ld.param.u64 %rd0, [param0];\n";
-        ptx << "    ld.param.u64 %rd1, [param1];\n";
-        ptx << "    ret;\n}\n";
     }
 
     std::string result = ptx.str();

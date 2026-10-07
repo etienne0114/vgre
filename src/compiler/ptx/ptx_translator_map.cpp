@@ -83,7 +83,8 @@ static std::string wgmma_emit_collective(const std::vector<std::string>& o,
 // to the real strided box load (OOB zero-fill via the existing helpers); the
 // mbarrier is satisfied synchronously since the copy completes in-line.
 static std::string tma_cluster_load_emit(const std::vector<std::string>& o, int rank) {
-    if (o.size() < 2) return "/* cp.async.bulk.tensor: bad operands */";
+    if (o.size() < 2)
+        throw std::runtime_error("cp.async.bulk.tensor load requires destination and descriptor operands");
     const std::string& s = o[1];
     const auto comma = s.find(',');
     const std::string tmap = (comma == std::string::npos) ? s : trim(s.substr(0, comma));
@@ -102,8 +103,11 @@ static std::string tma_cluster_load_emit(const std::vector<std::string>& o, int 
 // PTX: ldmatrix.sync.aligned.m8n8.xN.shared.b16  {r0[,r1[,r2[,r3]]]}, [addr]
 // After splitOperands: o[0] = "{r0,...}", o[1] = "[addr]"
 static std::string ldmatrix_emit(const std::vector<std::string>& o, int n) {
-    if (o.size() < 2) return "/* ldmatrix: bad operands */";
+    if (o.size() < 2)
+        throw std::runtime_error("ldmatrix requires destination and address operands");
     auto regs = splitRegs(stripDelimiters(o[0]));
+    if (static_cast<int>(regs.size()) != n)
+        throw std::runtime_error("ldmatrix register count does not match its xN modifier");
     std::string addr = stripDelimiters(o[1]);
     std::string out = "{ const uint32_t* _ldm = reinterpret_cast<const uint32_t*>("
                       + addr + ");";
@@ -117,9 +121,12 @@ static std::string ldmatrix_emit(const std::vector<std::string>& o, int n) {
 // PTX: stmatrix.sync.aligned.m8n8.xN.shared.b16  [addr], {r0[,r1[,r2[,r3]]]}
 // After splitOperands: o[0] = "[addr]", o[1] = "{r0,...}"
 static std::string stmatrix_emit(const std::vector<std::string>& o, int n) {
-    if (o.size() < 2) return "/* stmatrix: bad operands */";
+    if (o.size() < 2)
+        throw std::runtime_error("stmatrix requires address and source operands");
     std::string addr = stripDelimiters(o[0]);
     auto regs = splitRegs(stripDelimiters(o[1]));
+    if (static_cast<int>(regs.size()) != n)
+        throw std::runtime_error("stmatrix register count does not match its xN modifier");
     std::string out = "{ uint32_t* _stm = reinterpret_cast<uint32_t*>(" + addr + ");";
     for (int i = 0; i < n && i < static_cast<int>(regs.size()); ++i)
         out += " _stm[" + std::to_string(i) + "] = " + regs[i] + ";";
@@ -478,8 +485,6 @@ const TranslateMap& getMap() {
         {"mov.u32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"mov.s32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"mov.f32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
-        {"cvt.rn.f32.s32",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        {"cvt.rn.f32.u32",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
         // ── Bit counting ─────────────────────────────────────────────────────
         {"popc.b32", [](auto& o){ return o[0]+" = __builtin_popcount("+o[1]+");"; }},
         {"clz.b32",  [](auto& o){ return o[0]+" = __builtin_clz("+o[1]+");"; }},
@@ -609,18 +614,6 @@ const TranslateMap& getMap() {
             return o[0]+" = __shfl_xor_sync((unsigned)"+o[4]+", "+o[1]+", "+o[2]+", "+o[3]+");";
         }},
         // ── Convert (more variants) ────────────────────────────────────────
-        {"cvt.rn.f32.f16",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        {"cvt.rn.f64.f32",[](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rn.f64.s32",[](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rn.f64.u32",[](auto& o){ return o[0]+" = (double)(unsigned)("+o[1]+");"; }},
-        {"cvt.u32.s32",   [](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
-        {"cvt.s32.u32",   [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
-        {"cvt.u64.u32",   [](auto& o){ return o[0]+" = (unsigned long long)(unsigned)("+o[1]+");"; }},
-        {"cvt.u64.s32",   [](auto& o){ return o[0]+" = (unsigned long long)(int)("+o[1]+");"; }},
-        {"cvt.s64.s32",   [](auto& o){ return o[0]+" = (long long)("+o[1]+");"; }},
-        {"cvt.sat.u8.f32",[](auto& o){
-            return o[0]+" = (unsigned char)(("+o[1]+"<0.f?0.f:("+o[1]+">255.f?255.f:"+o[1]+"))+0.5f);";
-        }},
         // ── Move — extra variants ──────────────────────────────────────────
         {"mov.f64",   [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"mov.u64",   [](auto& o){ return o[0]+" = (unsigned long long)("+o[1]+");"; }},

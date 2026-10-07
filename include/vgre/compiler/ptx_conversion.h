@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 
@@ -11,6 +12,153 @@
 namespace vgre_ptx_conversion {
 
 enum class IntegerRounding { NearestEven, TowardZero, Downward, Upward };
+
+// PTX integer conversions first interpret the source at its declared width,
+// then extend or chop to the destination width. Build the destination bit
+// pattern with unsigned arithmetic so narrowing to a signed type never relies
+// on implementation-defined C++ conversions.
+template <typename Destination, unsigned SourceBits, bool SourceSigned,
+          typename SourceValue>
+inline Destination cvt_integer_to_integer(SourceValue value) {
+    static_assert(std::is_integral<Destination>::value &&
+                  !std::is_same<Destination, bool>::value,
+                  "PTX integer conversion destination must be a non-bool integer");
+    static_assert(std::is_integral<SourceValue>::value &&
+                  !std::is_same<SourceValue, bool>::value,
+                  "PTX integer conversion source must be a non-bool integer");
+    static_assert(SourceBits > 0 && SourceBits <= 64,
+                  "PTX integer source width must be between 1 and 64 bits");
+
+    using UnsignedDestination = typename std::make_unsigned<Destination>::type;
+    static_assert(std::numeric_limits<UnsignedDestination>::digits ==
+                  sizeof(Destination) * 8,
+                  "PTX integer conversion requires 8-bit bytes and no padding bits");
+
+    uint64_t sourceBits = static_cast<uint64_t>(value);
+    if constexpr (SourceBits < 64)
+        sourceBits &= (uint64_t(1) << SourceBits) - 1;
+
+    const bool negativeSource = SourceSigned &&
+        ((sourceBits & (uint64_t(1) << (SourceBits - 1))) != 0);
+    UnsignedDestination destinationBits;
+    if (negativeSource) {
+        uint64_t magnitude = ~sourceBits + 1;
+        if constexpr (SourceBits < 64)
+            magnitude &= (uint64_t(1) << SourceBits) - 1;
+        destinationBits = static_cast<UnsignedDestination>(
+            UnsignedDestination(0) - static_cast<UnsignedDestination>(magnitude));
+    } else {
+        destinationBits = static_cast<UnsignedDestination>(sourceBits);
+    }
+
+    if constexpr (!std::numeric_limits<Destination>::is_signed) {
+        return static_cast<Destination>(destinationBits);
+    } else {
+        constexpr int kDestinationBits =
+            std::numeric_limits<UnsignedDestination>::digits;
+        const UnsignedDestination signBit =
+            UnsignedDestination(1) << (kDestinationBits - 1);
+        if ((destinationBits & signBit) == 0)
+            return static_cast<Destination>(destinationBits);
+        const UnsignedDestination magnitude =
+            UnsignedDestination(0) - destinationBits;
+        if (magnitude == signBit)
+            return std::numeric_limits<Destination>::lowest();
+        return static_cast<Destination>(-static_cast<Destination>(magnitude));
+    }
+}
+
+struct RoundedIntegerSignificand {
+    uint64_t significand;
+    int exponent;
+    bool negative;
+};
+
+template <typename Integer>
+inline RoundedIntegerSignificand round_integer_significand(
+        Integer value, unsigned precision, vgre_cuda::FloatRounding rounding) {
+    static_assert(std::is_integral<Integer>::value,
+                  "PTX integer-to-float source must be integral");
+    using Unsigned = typename std::make_unsigned<Integer>::type;
+    const bool negative = std::numeric_limits<Integer>::is_signed && value < 0;
+    const Unsigned raw = static_cast<Unsigned>(value);
+    const uint64_t magnitude = static_cast<uint64_t>(
+        negative ? static_cast<Unsigned>(Unsigned(0) - raw) : raw);
+    if (magnitude == 0) return {0, 0, false};
+
+    unsigned bitCount = 0;
+    for (uint64_t remaining = magnitude; remaining != 0; remaining >>= 1)
+        ++bitCount;
+    int exponent = static_cast<int>(bitCount) - 1;
+    uint64_t significand;
+    if (bitCount <= precision) {
+        significand = magnitude << (precision - bitCount);
+    } else {
+        const unsigned discardedBits = bitCount - precision;
+        significand = magnitude >> discardedBits;
+        const uint64_t remainderMask = (uint64_t(1) << discardedBits) - 1;
+        const uint64_t remainder = magnitude & remainderMask;
+        const uint64_t halfway = uint64_t(1) << (discardedBits - 1);
+        bool increment = false;
+        switch (rounding) {
+            case vgre_cuda::FloatRounding::NearestEven:
+                increment = remainder > halfway ||
+                    (remainder == halfway && (significand & 1u) != 0);
+                break;
+            case vgre_cuda::FloatRounding::NearestAway:
+                increment = remainder >= halfway;
+                break;
+            case vgre_cuda::FloatRounding::TowardZero:
+                break;
+            case vgre_cuda::FloatRounding::Downward:
+                increment = negative && remainder != 0;
+                break;
+            case vgre_cuda::FloatRounding::Upward:
+                increment = !negative && remainder != 0;
+                break;
+        }
+        significand += static_cast<uint64_t>(increment);
+        if (significand == (uint64_t(1) << precision)) {
+            significand >>= 1;
+            ++exponent;
+        }
+    }
+    return {significand, exponent, negative};
+}
+
+template <typename Integer>
+inline float cvt_integer_to_f32(Integer value,
+                               vgre_cuda::FloatRounding rounding) {
+    constexpr unsigned kPrecision = 24;
+    const RoundedIntegerSignificand rounded =
+        round_integer_significand(value, kPrecision, rounding);
+    if (rounded.significand == 0) return 0.0f;
+    const uint32_t sign = rounded.negative ? 0x80000000u : 0u;
+    const uint32_t exponent = static_cast<uint32_t>(rounded.exponent + 127);
+    const uint32_t fraction = static_cast<uint32_t>(
+        rounded.significand - (uint64_t(1) << (kPrecision - 1)));
+    const uint32_t bits = sign | (exponent << 23) | fraction;
+    float result;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+template <typename Integer>
+inline double cvt_integer_to_f64(Integer value,
+                                vgre_cuda::FloatRounding rounding) {
+    constexpr unsigned kPrecision = 53;
+    const RoundedIntegerSignificand rounded =
+        round_integer_significand(value, kPrecision, rounding);
+    if (rounded.significand == 0) return 0.0;
+    const uint64_t sign = rounded.negative ? 0x8000000000000000ull : 0ull;
+    const uint64_t exponent = static_cast<uint64_t>(rounded.exponent + 1023);
+    const uint64_t fraction =
+        rounded.significand - (uint64_t(1) << (kPrecision - 1));
+    const uint64_t bits = sign | (exponent << 52) | fraction;
+    double result;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
 
 inline double round_float_to_integer(double value, IntegerRounding rounding) {
     switch (rounding) {

@@ -30,6 +30,11 @@ using cudaTextureDesc    = vgre::api::CUDAInterceptor::cudaTextureDesc;
 using cudaTextureObject_t = vgre::api::CUDAInterceptor::cudaTextureObject_t;
 using cudaSurfaceObject_t = vgre::api::CUDAInterceptor::cudaSurfaceObject_t;
 
+namespace {
+std::mutex g_surfaceResourceDescMutex;
+std::unordered_map<cudaSurfaceObject_t, cudaResourceDesc> g_surfaceResourceDescs;
+}
+
 // ── CUDA texture/surface object types already defined via using above ─────────
 
 // ── P1.20: Texture object introspection ───────────────────────────────────────
@@ -54,26 +59,12 @@ extern "C" cudaError_t cudaGetTextureObjectResourceDesc(
     if (!pResDesc) return cudaErrorInvalidValue;
     auto &tm = vgre::core::TextureManager::instance();
     // Retrieve the texture object from the manager to reconstruct the resource desc.
-    // TextureManager stores TextureObject which has data, width, height, depth,
-    // elementSize.  We map this back to cudaResourceDesc.
-    // TextureId == texObject (they are the same handle).
+    // TextureManager does not preserve enough of the original CUDA resource
+    // descriptor to reconstruct it without inventing fields.
     vgre::core::TextureId tid = static_cast<vgre::core::TextureId>(texObject);
-
-    // Use tex1D(0) as a sanity probe — if the id is invalid it will fail.
-    // Better: query via a dedicated accessor.
-    const void *data = tm.getCudaArrayData(tid);
-    if (!data) {
-        // Try as a regular texture (non-cudaArray).  We store textures and
-        // cudaArrays in the same table; getCudaArrayData covers both.
-        // If not found, the handle is invalid.
-        return cudaErrorInvalidValue;
-    }
-
-    memset(pResDesc, 0, sizeof(*pResDesc));
-    // resType == cudaResourceTypeLinear = 2
-    pResDesc->resType = 2;
-    pResDesc->res.devPtr = const_cast<void *>(data);
-    return cudaSuccess;
+    vgre::core::TextureManager::TextureInfo info;
+    if (!tm.getTextureInfo(tid, info)) return cudaErrorInvalidValue;
+    return cudaErrorNotSupported;
 }
 
 extern "C" cudaError_t cudaGetTextureObjectTextureDesc(
@@ -82,23 +73,9 @@ extern "C" cudaError_t cudaGetTextureObjectTextureDesc(
     auto &tm = vgre::core::TextureManager::instance();
     vgre::core::TextureId tid = static_cast<vgre::core::TextureId>(texObject);
 
-    // Validate by checking the backing data exists.
-    if (!tm.getCudaArrayData(tid))
-        return cudaErrorInvalidValue;
-
-    memset(pTexDesc, 0, sizeof(*pTexDesc));
-    // filterMode: 0 = point, 1 = linear
-    pTexDesc->filterMode         = 1;
-    pTexDesc->normalizedCoords   = 0;
-    pTexDesc->addressMode[0]     = 0;  // cudaAddressModeWrap
-    pTexDesc->addressMode[1]     = 0;
-    pTexDesc->addressMode[2]     = 0;
-    pTexDesc->maxAnisotropy      = 1;
-    pTexDesc->mipmapFilterMode   = 0;
-    pTexDesc->mipmapLevelBias    = 0.0f;
-    pTexDesc->minMipmapLevelClamp = 0.0f;
-    pTexDesc->maxMipmapLevelClamp = 0.0f;
-    return cudaSuccess;
+    vgre::core::TextureManager::TextureInfo info;
+    if (!tm.getTextureInfo(tid, info)) return cudaErrorInvalidValue;
+    return cudaErrorNotSupported;
 }
 
 extern "C" cudaError_t cudaGetTextureObjectResourceViewDesc(
@@ -107,11 +84,9 @@ extern "C" cudaError_t cudaGetTextureObjectResourceViewDesc(
     if (!pResViewDesc) return cudaErrorInvalidValue;
     auto &tm = vgre::core::TextureManager::instance();
     vgre::core::TextureId tid = static_cast<vgre::core::TextureId>(texObject);
-    if (!tm.getCudaArrayData(tid)) return cudaErrorInvalidValue;
-
-    memset(pResViewDesc, 0, sizeof(*pResViewDesc));
-    pResViewDesc->format = CUDAInterceptor::CU_RES_VIEW_FORMAT_FLOAT_32X1;
-    return cudaSuccess;
+    vgre::core::TextureManager::TextureInfo info;
+    if (!tm.getTextureInfo(tid, info)) return cudaErrorInvalidValue;
+    return cudaErrorNotSupported;
 }
 
 // ── Surface object APIs ───────────────────────────────────────────────────────
@@ -120,26 +95,30 @@ extern "C" cudaError_t cudaCreateSurfaceObject(
         cudaSurfaceObject_t *pSurfObject,
         const cudaResourceDesc *pResDesc) {
     if (!pSurfObject || !pResDesc) return cudaErrorInvalidValue;
-    return CUDAInterceptor::instance().createSurfaceObject(pSurfObject, pResDesc);
+    cudaError_t status = CUDAInterceptor::instance().createSurfaceObject(pSurfObject, pResDesc);
+    if (status == cudaSuccess) {
+        std::lock_guard<std::mutex> lock(g_surfaceResourceDescMutex);
+        g_surfaceResourceDescs[*pSurfObject] = *pResDesc;
+    }
+    return status;
 }
 
 extern "C" cudaError_t cudaDestroySurfaceObject(cudaSurfaceObject_t surfObject) {
-    return CUDAInterceptor::instance().destroySurfaceObject(surfObject);
+    cudaError_t status = CUDAInterceptor::instance().destroySurfaceObject(surfObject);
+    if (status == cudaSuccess) {
+        std::lock_guard<std::mutex> lock(g_surfaceResourceDescMutex);
+        g_surfaceResourceDescs.erase(surfObject);
+    }
+    return status;
 }
 
 extern "C" cudaError_t cudaGetSurfaceObjectResourceDesc(
         cudaResourceDesc *pResDesc, cudaSurfaceObject_t surfObject) {
     if (!pResDesc) return cudaErrorInvalidValue;
-    // Surface objects use the same handle space as texture objects in VGRE.
-    auto &tm = vgre::core::TextureManager::instance();
-    vgre::core::SurfaceId sid = static_cast<vgre::core::SurfaceId>(surfObject);
-
-    memset(pResDesc, 0, sizeof(*pResDesc));
-    pResDesc->resType = 2;  // cudaResourceTypeLinear
-    // Surface objects' backing memory is tracked by TextureManager.
-    // We use getCudaArrayData which works for the surface as well.
-    const void *d = tm.getCudaArrayData(static_cast<vgre::core::TextureId>(sid));
-    pResDesc->res.devPtr = const_cast<void *>(d);
+    std::lock_guard<std::mutex> lock(g_surfaceResourceDescMutex);
+    const auto it = g_surfaceResourceDescs.find(surfObject);
+    if (it == g_surfaceResourceDescs.end()) return cudaErrorInvalidValue;
+    *pResDesc = it->second;
     return cudaSuccess;
 }
 

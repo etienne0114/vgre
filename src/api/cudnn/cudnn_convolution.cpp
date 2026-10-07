@@ -460,6 +460,7 @@ cudnnStatus_t cudnnConvolutionBiasActivationForward(
     auto* cv  = (ConvDesc*)convDesc;
     auto* yt  = (TensorDesc*)yDesc;
     auto* act = activationDesc ? (ActDesc*)activationDesc : nullptr;
+    if (act && !isValidActivationDescriptor(*act)) return CUDNN_STATUS_BAD_PARAM;
 
     // Step 1: compute conv(x, w) → tmp
     int ySize = yt->n * yt->c * yt->h * yt->w;

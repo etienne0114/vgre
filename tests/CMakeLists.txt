@@ -575,10 +575,10 @@ add_executable(test_auth_rate_limit unit/test_auth_rate_limit.cpp)
 target_link_libraries(test_auth_rate_limit PRIVATE vgre)
 add_test(NAME AuthRateLimit COMMAND test_auth_rate_limit)
 
-# QUEUE-73: Fast GELU via degree-7 Horner polynomial (Chebyshev minimax)
-add_executable(test_gelu_horner unit/test_gelu_horner.cpp)
-target_link_libraries(test_gelu_horner PRIVATE vgre)
-add_test(NAME FastGELUHorner7 COMMAND test_gelu_horner)
+# Exact erf-based GELU forward/backward and activation descriptor behavior.
+add_executable(test_cudnn_gelu_exact unit/test_cudnn_gelu_exact.cpp)
+target_link_libraries(test_cudnn_gelu_exact PRIVATE vgre)
+add_test(NAME ExactGELUActivation COMMAND test_cudnn_gelu_exact)
 
 # Min-segment tree stream dependency tracker (QUEUE-07)
 add_executable(test_stream_dep_tracker unit/test_stream_dep_tracker.cpp)
