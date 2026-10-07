@@ -1,6 +1,6 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-10-02
+**Last Updated**: 2026-10-07
 
 **Latest hosted verification**: ✅ [GitHub Actions run 37042616142](https://github.com/etienne0114/vgre/actions/runs/37042616142) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
 
@@ -9,6 +9,18 @@
 - **macOS**: ✅ Apple Silicon build, CTest, Python integration, and SSA native-execution checks passed in the latest hosted job.
 - **Windows**: ✅ Windows x86-64 build, CTest, pretrained GGUF CLI smoke, and Python integration passed in the latest hosted job.
 - **PyPI**: Latest published package is [0.1.4](https://pypi.org/project/vgre/0.1.4/), with Linux, macOS universal2, and Windows wheels.
+
+**Unreleased local math verification (2026-10-07):** INT8/BF16 GEMM edge cases and the
+PTX MMA fragment emulation were hardened. Linux `MatMulAMX` and `TensorCoreMMA` CTest
+cases pass; the portable scalar build also passes `MatMulAMX`. The PTX translator
+test passes 23/23 checks. The focused six-test regression set passes. The full local
+410-test CTest run was stopped at test 78 after `IdentityMetricsJwt` could not start
+its loopback HTTP server; tests after that point were not run. These working-tree
+changes have not yet run in hosted Windows or macOS CI. `VGRE_CACHE_DIR` now overrides
+the kernel AST cache directory on all platforms, and stale-cache eviction handles
+read-only directories without throwing; the CUDA Graph integration test passes against
+the default read-only cache path.
+
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
 **Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.
 
@@ -61,9 +73,15 @@
 > That was inaccurate at the time. The then-truth: the build and tests ran on **Linux only**;
 > Windows/macOS code was compile-guarded but **unverified** (there was no CI). A
 > handful of compute paths are deliberately **simplified** (Flash Attention
-> recomputes K/V, NCCL ring uses a barrier-per-round model, WMMA is a flat
-> dot-product — see `docs/missingFeatures.md` §1). This file now tracks the real
+> recomputes K/V and NCCL ring uses a barrier-per-round model; the earlier WMMA flat
+> dot-product caveat is detailed below). This file now tracks the real
 > path to production rather than asserting it.
+
+> **2026-10-07 math correction:** The register-based `mma.sync` helpers for FP8
+> `m16n8k32`, INT4 `m8n8k32`, binary `m8n8k128`, and FP64 `m8n8k4` now reconstruct
+> complete per-warp tiles from the PTX fragments. Other tensor-core shapes still
+> need ISA-by-ISA differential coverage; do not treat the earlier flat-dot note as
+> a blanket description of every WMMA path.
 
 VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime designed to execute unmodified CUDA, cuBLAS, cuDNN, cuSPARSE, cuSolver, cuRAND, and NCCL workloads on standard x86-64 and ARM64 CPU architectures. It intercepts GPU API calls at load time and runs them on host hardware using an LLVM-18 JIT compilation pipeline and a thread-safe parallel execution model.
 
@@ -111,10 +129,10 @@ loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output.
 
 - **Linux core passes**: full regression + integration + platform suite green on x86-64.
 - **Mostly real compute, with documented exceptions**: nearly every path runs real
-  CPU math (AVX/ARM64 SIMD + OpenBLAS/LAPACK). The exceptions are the simplified
-  paths in `docs/missingFeatures.md` §1 (Flash Attention K/V recompute, NCCL
-  barrier-per-round ring, WMMA flat dot-product, etc.) and the documented
-  hardware-boundary proxies (CUPTI PMU counters).
+  CPU math (AVX/ARM64 SIMD + OpenBLAS/LAPACK). Known software approximations include
+  Flash Attention K/V recomputation and the NCCL barrier-per-round ring; other
+  tensor-core shapes still need ISA-by-ISA audit. Hardware-boundary proxies include
+  CUPTI PMU counters.
 - **Teardown stability**: thread lifecycles, socket listeners, and memory heaps are
   managed deterministically; the JIT-worker static-destruction crash is fixed.
 - **Known test caveat**: under `ctest -j`, heavy clang/JIT tests can intermittently

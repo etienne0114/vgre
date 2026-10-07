@@ -21,7 +21,8 @@ public:
     
     /**
      * Initialize cache with specified directory
-     * @param cacheDir Directory to store cache files (default: ~/.vgre/cache)
+     * @param cacheDir Directory to store cache files; an explicit argument takes
+     *        precedence over VGRE_CACHE_DIR and the platform default.
      * @return SUCCESS if cache initialized
      */
     VGREResult initialize(const std::string& cacheDir = "");

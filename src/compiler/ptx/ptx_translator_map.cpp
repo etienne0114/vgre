@@ -191,19 +191,21 @@ const TranslateMap& getMap() {
         // FlashAttention, CUTLASS 3.x, and Triton-generated PTX.
         // Emulated via the existing AVX-512 WMMA path from wmma_emulation.h.
         // Operand notation: D (out), A, B, C (in) — all fragmented across a warp.
-        // In VGRE's serial CPU model, we treat each fragment as a complete tile.
-        // Operands flatten to D{0..3}, A{..}, B{..}, C{0..3}. The helpers are
-        // warp-collective (wmma_emulation.h): each lane deposits its fragment,
-        // barriers, the full tile GEMM is reconstructed, then this lane's 4
-        // outputs are scattered back — bit-faithful to the PTX fragment layout.
+        // Operands flatten in PTX order to D, A, B, C. The helpers are
+        // warp-collective: each lane deposits its actual fragment, synchronizes,
+        // reconstructs the complete tile, and writes back only its output
+        // registers using the PTX fragment layout.
         {"mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32", [](auto& o){
             return mma_emit(o, "vgre_mma_m16n8k16_f32_f16", 14);   // 4d+4a+2b+4c
         }},
         {"mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32", [](auto& o){
             return mma_emit(o, "vgre_mma_m16n8k8_tf32", 14);       // 4d+4a+2b+4c
         }},
-        {"mma.sync.aligned.m8n8k4.row.col.f64", [](auto& o){
-            return "vgre_mma_m8n8k4_f64("+o[0]+","+o[1]+","+o[2]+","+o[3]+");";
+        {"mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64", [](auto& o){
+            return mma_emit(o, "vgre_mma_m8n8k4_f64", 6);       // 2d+1a+1b+2c
+        }},
+        {"mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64.rn", [](auto& o){
+            return mma_emit(o, "vgre_mma_m8n8k4_f64", 6);       // 2d+1a+1b+2c
         }},
         // BF16 variants (used by Hopper/Ampere BF16 GEMMs)
         {"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32", [](auto& o){
@@ -215,33 +217,19 @@ const TranslateMap& getMap() {
         }},
         // INT4 mma (s4×s4 → s32 accumulate, m8n8k32, satfinite)  — 4.1.15
         {"mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32", [](auto& o){
-            // o[0..1]=d0,d1; o[2]=a0; o[3]=b0; o[4..5]=c0,c1
-            return "vgre_mma_m8n8k32_s4("+o[0]+","+o[1]+","
-                   +o[2]+","
-                   +o[3]+","
-                   +o[4]+","+o[5]+");";
+            return mma_emit(o, "vgre_mma_m8n8k32_s4", 6);       // 2d+1a+1b+2c
         }},
         // INT4 mma (u4×u4 → s32 accumulate, m8n8k32, satfinite)  — 4.1.15
         {"mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32", [](auto& o){
-            return "vgre_mma_m8n8k32_u4("+o[0]+","+o[1]+","
-                   +o[2]+","
-                   +o[3]+","
-                   +o[4]+","+o[5]+");";
+            return mma_emit(o, "vgre_mma_m8n8k32_u4", 6);       // 2d+1a+1b+2c
         }},
         // Binary mma AND+POPC (b1×b1 → s32, m8n8k128)  — 4.1.15
         {"mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.and.popc", [](auto& o){
-            // o[0..1]=d; o[2..5]=a0-a3; o[6..9]=b0-b3; o[10..11]=c0,c1
-            return "vgre_mma_m8n8k128_b1_and("+o[0]+","+o[1]+","
-                   +o[2]+","+o[3]+","+o[4]+","+o[5]+","
-                   +o[6]+","+o[7]+","+o[8]+","+o[9]+","
-                   +o[10]+","+o[11]+");";
+            return mma_emit(o, "vgre_mma_m8n8k128_b1_and", 6);  // 2d+1a+1b+2c
         }},
         // Binary mma XOR+POPC (b1×b1 → s32, m8n8k128)  — 4.1.15
         {"mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.xor.popc", [](auto& o){
-            return "vgre_mma_m8n8k128_b1_xor("+o[0]+","+o[1]+","
-                   +o[2]+","+o[3]+","+o[4]+","+o[5]+","
-                   +o[6]+","+o[7]+","+o[8]+","+o[9]+","
-                   +o[10]+","+o[11]+");";
+            return mma_emit(o, "vgre_mma_m8n8k128_b1_xor", 6);  // 2d+1a+1b+2c
         }},
         // ── FP8 mma.sync.aligned (Ada/Hopper FP8 tensor cores) ──────────────
         // PTX: mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32

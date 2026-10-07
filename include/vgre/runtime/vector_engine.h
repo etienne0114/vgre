@@ -106,14 +106,17 @@ public:
 
     // ── Matrix multiply (AMX / VNNI accelerated, Phase 12-B) ──────────────
     // INT8 GEMM: C = A × B, row-major, signed INT8 inputs → INT32 output.
-    // Uses AVX-VNNI on Alder Lake+, AMX-INT8 on Sapphire Rapids+,
-    // falls back to AVX2 INT16 widening or scalar.
-    // Requires ENABLE_VGRE_AMX at compile time; scalar fallback always present.
+    // A zero K dimension writes a zero output; accumulation is modulo 2^32.
+    // Uses AVX-VNNI when available,
+    // falls back to AVX2 widening or scalar. (AMX INT8 is not implemented.)
+    // ENABLE_VGRE_AMX gates acceleration; the exact scalar implementation is
+    // always available on every supported host.
     void matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
                     int M, int N, int K);
 
     // BF16 GEMM: C = A × B, row-major, BF16 inputs → FP32 output.
-    // Uses AMX-BF16 on Sapphire Rapids+, falls back to AVX2 FP32 or scalar.
+    // A zero K dimension writes a zero output. Uses AMX-BF16 when available,
+    // falls back to AVX2 FP32 or scalar.
     void matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
                     int M, int N, int K);
 

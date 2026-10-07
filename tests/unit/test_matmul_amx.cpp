@@ -11,10 +11,11 @@
 #include "vgre/runtime/vector_engine.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <utility>
 #include <vector>
 #include <cmath>
 #include <random>
@@ -22,27 +23,31 @@
 using VE = vgre::runtime::VectorEngine;
 using vgre_bf16 = vgre::runtime::vgre_bf16;
 
+static int g_failures = 0;
+
 // ── Reference implementations ───────────────────────────────────────────────
 
 static void ref_matmul_int8(const int8_t* A, const int8_t* B,
                               int32_t* C, int M, int N, int K) {
     for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n) {
-        int32_t acc = 0;
+        uint32_t acc = 0;
         for (int k = 0; k < K; ++k)
-            acc += static_cast<int32_t>(A[m*K+k]) * static_cast<int32_t>(B[k*N+n]);
-        C[m*N+n] = acc;
+            acc += static_cast<uint32_t>(static_cast<int32_t>(A[m*K+k])) *
+                   static_cast<uint32_t>(static_cast<int32_t>(B[k*N+n]));
+        std::memcpy(&C[m*N+n], &acc, sizeof(acc));
     }
 }
 
 static void ref_matmul_bf16(const vgre_bf16* A, const vgre_bf16* B,
-                              float* C, int M, int N, int K) {
+                              double* C, int M, int N, int K) {
     using vgre::runtime::bf16_to_fp32;
     for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n) {
-        float acc = 0.f;
+        double acc = 0.0;
         for (int k = 0; k < K; ++k)
-            acc += bf16_to_fp32(A[m*K+k]) * bf16_to_fp32(B[k*N+n]);
+            acc += static_cast<double>(bf16_to_fp32(A[m*K+k])) *
+                   static_cast<double>(bf16_to_fp32(B[k*N+n]));
         C[m*N+n] = acc;
     }
 }
@@ -65,7 +70,8 @@ static void test_int8_correctness(int M, int N, int K, std::mt19937& rng) {
             std::cerr << "[FAIL] matMulInt8 " << M << "x" << N << "x" << K
                       << " mismatch at [" << (i/N) << "," << (i%N) << "]: "
                       << "ref=" << Cref[i] << " got=" << Cfast[i] << "\n";
-            assert(false);
+            ++g_failures;
+            return;
         }
     }
 }
@@ -82,21 +88,27 @@ static void test_bf16_correctness(int M, int N, int K, std::mt19937& rng) {
     for (auto& v : A) v = fp32_to_bf16(dist(rng));
     for (auto& v : B) v = fp32_to_bf16(dist(rng));
 
-    std::vector<float> Cref(M * N, 0.f), Cfast(M * N, 0.f);
+    std::vector<double> Cref(M * N, 0.0);
+    std::vector<float> Cfast(M * N, 0.f);
     ref_matmul_bf16(A.data(), B.data(), Cref.data(), M, N, K);
     VE::instance().matMulBF16(A.data(), B.data(), Cfast.data(), M, N, K);
 
-    // BF16 has 7 mantissa bits — allow relative error ≤ 0.5% per accumulation
-    const float tol = 0.005f * K;
     for (int i = 0; i < M * N; ++i) {
-        float diff = std::fabs(Cref[i] - Cfast[i]);
-        float scale = std::max(1e-6f, std::fabs(Cref[i]));
-        if (diff / scale > tol) {
+        const int m = i / N, n = i % N;
+        double absProducts = 0.0;
+        for (int k = 0; k < K; ++k)
+            absProducts += std::fabs(
+                static_cast<double>(bf16_to_fp32(A[m*K+k])) *
+                static_cast<double>(bf16_to_fp32(B[k*N+n])));
+        const double bound = 4.0 * K * std::numeric_limits<float>::epsilon() * absProducts + 2e-7;
+        const double diff = std::fabs(Cref[i] - static_cast<double>(Cfast[i]));
+        if (diff > bound) {
             std::cerr << "[FAIL] matMulBF16 " << M << "x" << N << "x" << K
                       << " mismatch at [" << (i/N) << "," << (i%N) << "]: "
                       << "ref=" << Cref[i] << " got=" << Cfast[i]
-                      << " rel_err=" << (diff/scale) << "\n";
-            assert(false);
+                      << " abs_err=" << diff << " bound=" << bound << "\n";
+            ++g_failures;
+            return;
         }
     }
 }
@@ -173,10 +185,53 @@ int main() {
         std::vector<int32_t> Cref(M*N), Cfast(M*N);
         ref_matmul_int8(A.data(), B.data(), Cref.data(), M, N, K);
         VE::instance().matMulInt8(A.data(), B.data(), Cfast.data(), M, N, K);
-        for (int i = 0; i < M*N; ++i)
-            assert(Cref[i] == Cfast[i]);
+        for (int i = 0; i < M*N; ++i) {
+            if (Cref[i] != Cfast[i]) {
+                std::cerr << "[FAIL] matMulInt8 all-negative case at ["
+                          << (i / N) << "," << (i % N) << "]\n";
+                ++g_failures;
+                break;
+            }
+        }
     }
     std::cout << "  [PASS] all-negative INT8 values\n";
+
+    // INT32 accumulation overflow must have identical modulo-2^32 behavior in
+    // the scalar, AVX2, and VNNI implementations. This also exercises the VNNI
+    // bias correction beyond signed 32-bit range and a one-element K tail.
+    {
+        constexpr int K = 140001;
+        for (const auto& values : {std::pair<int8_t, int8_t>{127, 127},
+                                   {-128, -128}, {-128, 127}, {127, -128}}) {
+            std::vector<int8_t> A(K, values.first), B(K, values.second);
+            int32_t expected = 0, actual = 0;
+            ref_matmul_int8(A.data(), B.data(), &expected, 1, 1, K);
+            VE::instance().matMulInt8(A.data(), B.data(), &actual, 1, 1, K);
+            if (actual != expected) {
+                std::cerr << "[FAIL] matMulInt8 overflow for inputs "
+                          << static_cast<int>(values.first) << "*"
+                          << static_cast<int>(values.second) << ": expected "
+                          << expected << " got " << actual << "\n";
+                ++g_failures;
+            }
+        }
+    }
+    std::cout << "  [PASS] INT8 modulo-2^32 accumulation overflow\n";
+
+    // A zero-width contraction is a zero matrix and must not read A or B.
+    {
+        int32_t C[6];
+        std::fill(C, C + 6, 17);
+        VE::instance().matMulInt8(nullptr, nullptr, C, 2, 3, 0);
+        for (int32_t value : C) {
+            if (value != 0) {
+                std::cerr << "[FAIL] matMulInt8 K=0 must zero the output\n";
+                ++g_failures;
+                break;
+            }
+        }
+    }
+    std::cout << "  [PASS] INT8 zero-contraction output\n";
 
     // ── BF16 correctness ───────────────────────────────────────────────────
     std::cout << "\n[BF16] Correctness tests:\n";
@@ -186,7 +241,21 @@ int main() {
     }
     test_bf16_correctness(1, 16, 16, rng);
     test_bf16_correctness(4, 7, 12, rng);
-    std::cout << "  [PASS] BF16 shapes with ≤0.5%×K relative error\n";
+    std::cout << "  [PASS] BF16 dot products within the FP32 rounding bound\n";
+
+    {
+        float C[6];
+        std::fill(C, C + 6, 17.f);
+        VE::instance().matMulBF16(nullptr, nullptr, C, 2, 3, 0);
+        for (float value : C) {
+            if (value != 0.f) {
+                std::cerr << "[FAIL] matMulBF16 K=0 must zero the output\n";
+                ++g_failures;
+                break;
+            }
+        }
+    }
+    std::cout << "  [PASS] BF16 zero-contraction output\n";
 
     // ── Performance ────────────────────────────────────────────────────────
     std::cout << "\n[BENCH] INT8 GEMM throughput:\n";
@@ -199,6 +268,11 @@ int main() {
     if (!caps.hasAVXVNNI && !caps.hasAMX)
         std::cout << "\n[INFO] Neither AVX-VNNI nor AMX detected — scalar fallback active\n";
 
+    if (g_failures != 0) {
+        std::cerr << "\nPhase 12-B matmul tests failed: " << g_failures
+                  << " failure(s)\n";
+        return 1;
+    }
     std::cout << "\nAll Phase 12-B matmul tests passed!\n";
     return 0;
 }

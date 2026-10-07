@@ -1,6 +1,6 @@
 # VGRE — Missing Features & Next-Release Roadmap
 
-**Last Updated**: 2026-10-02
+**Last Updated**: 2026-10-07
 
 This file lists **only what is not yet done** — the targets for the next release and the
 items blocked on external hardware, accounts, or content. It is deliberately short.
@@ -89,6 +89,9 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 |-------|------|--------|
 | **T3** Speculative decoding | — (complete) | throughput optimization — all delivered: greedy + sampler-exact linear speculative decode, SpecInfer/Medusa-style tree verification (distribution-exact), KV rollback, prompt-lookup drafter, **and early-exit self-speculative decoding** (draft with the first E layers, verify with the full model via the batched path — lossless, output == greedy; `SampleConfig::early_exit_draft`) |
 | **T4** State-space models | — (complete) | single-state selective scan, depthwise conv1d, the Mamba-3 MIMO matrix-state scan, a full Mamba-1 model + safetensors loader (`mamba.h`/`mamba_loader.cpp`), **and a verified end-to-end run of a real checkpoint** — `tools/mamba_run` loads the open **`state-spaces/mamba-130m-hf`** (130M params, 24 layers) and its logits match an independent NumPy Mamba-1 forward at **cosine sim 1.0** (identical argmax, 10/10 top-10, max abs diff 2e-4) |
+
+### 1.6 Math and tensor-core coverage
+- **Remaining:** add ISA-by-ISA differential coverage for tensor-core MMA shapes not yet exercised by the complete-fragment tests. The working-tree implementation covers FP8 `m16n8k32`, INT4 `m8n8k32`, binary `m8n8k128`, FP64 `m8n8k4`, and signed INT8 `m16n8k32`; Linux tests pass, but the new changes have not yet run in hosted Windows or macOS CI.
 
 ---
 

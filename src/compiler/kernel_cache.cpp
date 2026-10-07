@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 #if defined(_MSC_VER)
 #  pragma warning(push)
 #  pragma warning(disable: 4244 4267 4100 4127 4624)
@@ -36,30 +37,36 @@ VGREResult KernelCache::initialize(const std::string& cacheDir) {
     if (!cacheDir.empty()) {
         cacheDir_ = cacheDir;
     } else {
-        // Use default cache directory: ~/.vgre/cache
+        // A caller-supplied directory takes precedence over platform defaults
+        // on every OS. This also lets CI and read-only deployments keep cache
+        // writes outside the user's home directory.
+        const char* configuredCache = vgre_get_config("VGRE_CACHE_DIR");
+        if (configuredCache && configuredCache[0] != '\0') {
+            cacheDir_ = configuredCache;
+        } else {
+            // Use the platform default cache directory.
 #ifdef _WIN32
-        char path[MAX_PATH];
-        if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PROFILE, NULL, 0, path))) {
-            cacheDir_ = std::string(path) + "\\.vgre\\cache";
-        } else {
-            cacheDir_ = vgre::os::get_temp_dir() + "\\vgre_cache";
-        }
-#else
-        const char* home = vgre_get_config("HOME");
-        if (!home) {
-            struct passwd* pw = getpwuid(getuid());
-            if (pw) {
-                home = pw->pw_dir;
+            char path[MAX_PATH];
+            if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PROFILE, NULL, 0, path))) {
+                cacheDir_ = std::string(path) + "\\.vgre\\cache";
+            } else {
+                cacheDir_ = vgre::os::get_temp_dir() + "\\vgre_cache";
             }
-        }
-        if (home) {
-            cacheDir_ = std::string(home) + "/.vgre/cache";
-        } else {
-            // Configurable cache directory via VGRE_CACHE_DIR
-            const char* e = vgre_get_config("VGRE_CACHE_DIR");
-            cacheDir_ = e ? e : (vgre::os::get_temp_dir() + "/vgre_cache");
-        }
+#else
+            const char* home = vgre_get_config("HOME");
+            if (!home) {
+                struct passwd* pw = getpwuid(getuid());
+                if (pw) {
+                    home = pw->pw_dir;
+                }
+            }
+            if (home) {
+                cacheDir_ = std::string(home) + "/.vgre/cache";
+            } else {
+                cacheDir_ = vgre::os::get_temp_dir() + "/vgre_cache";
+            }
 #endif
+        }
     }
     
     // Create cache directory if it doesn't exist
@@ -203,8 +210,14 @@ void KernelCache::evictAST(const std::string& sourceHash) {
     }
     // Remove from disk
     std::string cachePath = getCacheFilePath(sourceHash);
-    std::filesystem::remove(cachePath);
-    VGRE_LOG_INFO("KernelCache", "Evicted stale AST for hash: " + sourceHash.substr(0, 8));
+    std::error_code removeError;
+    std::filesystem::remove(cachePath, removeError);
+    if (removeError) {
+        VGRE_LOG_WARN("KernelCache", "Could not remove stale AST cache entry '" +
+                      cachePath + "': " + removeError.message());
+    } else {
+        VGRE_LOG_INFO("KernelCache", "Evicted stale AST for hash: " + sourceHash.substr(0, 8));
+    }
 }
 
 void KernelCache::clear() {
@@ -285,7 +298,12 @@ bool KernelCache::getKernelIR(const std::string& sourceHash, const std::string& 
                       (hashMismatch ? "stored hash='" + storedSourceHash.substr(0,8) +
                                      "' vs expected='" + sourceHash.substr(0,8) + "'" : ""));
         file.close();
-        std::filesystem::remove(cachePath);
+        std::error_code removeError;
+        std::filesystem::remove(cachePath, removeError);
+        if (removeError) {
+            VGRE_LOG_WARN("KernelCache", "Could not remove corrupt cache entry '" +
+                          cachePath + "': " + removeError.message());
+        }
         return false;
     }
     outIr.name   = name;

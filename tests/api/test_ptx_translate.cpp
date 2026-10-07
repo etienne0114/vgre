@@ -121,6 +121,35 @@ int main() {
         check("mma.sync leaves no brace-grouped operands ({%)", c.find("{%") == std::string::npos);
     }
 
+    // m8 tensor-core shapes use one A register and one B register per lane,
+    // plus two accumulator registers. The translator must pass the six actual
+    // PTX operands in order; widening these fragments into extra registers
+    // changes the operation rather than emulating it.
+    {
+        const char* const bodies[] = {
+            "mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32 {%0,%1}, {%2}, {%3}, {%4,%5};",
+            "mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32 {%0,%1}, {%2}, {%3}, {%4,%5};",
+            "mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.and.popc {%0,%1}, {%2}, {%3}, {%4,%5};",
+            "mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.xor.popc {%0,%1}, {%2}, {%3}, {%4,%5};",
+            "mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 {%0,%1}, {%2}, {%3}, {%4,%5};"
+        };
+        const char* const helpers[] = {
+            "vgre_mma_m8n8k32_s4(", "vgre_mma_m8n8k32_u4(",
+            "vgre_mma_m8n8k128_b1_and(", "vgre_mma_m8n8k128_b1_xor(",
+            "vgre_mma_m8n8k4_f64("
+        };
+        bool ok = true;
+        for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
+            std::string translated = PTXTranslator::translate(
+                std::string("asm volatile(\"") + bodies[i] + "\" : );");
+            ok = ok && contains(translated, helpers[i]);
+            for (int reg = 0; reg < 6; ++reg)
+                ok = ok && contains(translated, "%" + std::to_string(reg));
+            ok = ok && translated.find("%6") == std::string::npos;
+        }
+        check("m8 integer and f64 mma.sync mappings preserve the six PTX fragment operands", ok);
+    }
+
     // (6) Hopper wgmma with a REAL distributed accumulator ({d0..d31}, descA,
     //     descB) must route to the warp-group-collective helper (Track P3-4),
     //     packing the 32 (=N/2 for n64) accumulator registers.

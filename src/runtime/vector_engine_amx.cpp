@@ -57,6 +57,14 @@ static constexpr int kAmxKT = 32;   // inner dimension per tile step
 namespace vgre {
 namespace runtime {
 
+// INT8 GEMM accumulates modulo 2^32. Convert the resulting bit pattern without
+// relying on an out-of-range unsigned-to-signed conversion.
+static int32_t int32_from_bits(uint32_t bits) {
+    int32_t value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers shared by multiple kernels
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,9 +90,9 @@ static void transpose_int8(const int8_t* B, int8_t* BT, int K, int N) {
 // an AVX2 kernel. (Not referenced off the VGRE_AMX_X86 path.)
 #if defined(VGRE_AMX_X86)
 __attribute__((target("avx2")))
-static void compute_bt_rowsums(const int8_t* BT, int32_t* sums, int N, int K) {
+static void compute_bt_rowsums(const int8_t* BT, uint32_t* sums, int N, int K) {
     for (int n = 0; n < N; ++n) {
-        int32_t s = 0;
+        uint32_t s = 0;
         const int8_t* row = BT + n * K;
         int k = 0;
         __m256i acc = _mm256_setzero_si256();
@@ -102,8 +110,9 @@ static void compute_bt_rowsums(const int8_t* BT, int32_t* sums, int N, int K) {
                                       _mm256_extracti128_si256(acc, 1));
         s128 = _mm_add_epi32(s128, _mm_srli_si128(s128, 8));
         s128 = _mm_add_epi32(s128, _mm_srli_si128(s128, 4));
-        s += _mm_cvtsi128_si32(s128);
-        for (; k < K; ++k) s += static_cast<int32_t>(row[k]);
+        s += static_cast<uint32_t>(_mm_cvtsi128_si32(s128));
+        for (; k < K; ++k)
+            s += static_cast<uint32_t>(static_cast<int32_t>(row[k]));
         sums[n] = s;
     }
 }
@@ -127,7 +136,7 @@ __attribute__((target("avx2,avxvnni")))
 static void gemm_int8_avxvnni(
         const int8_t* __restrict A,
         const int8_t* __restrict BT,      // B transposed: N×K
-        const int32_t* __restrict btSums, // per-row sums of BT
+        const uint32_t* __restrict btSums, // per-row sums of BT modulo 2^32
         int32_t* __restrict C,
         int M, int N, int K) {
 
@@ -158,9 +167,9 @@ static void gemm_int8_avxvnni(
                 // Each group of 4 bytes = {BT[n+j][k], BT[n+j][k+1], BT[n+j][k+2], BT[n+j][k+3]}
                 // Loaded as a single int32 (4 consecutive bytes, matching the VNNI encoding).
                 const int8_t* bt0 = BT + (n + 0) * K + k;
-                const int8_t* bt1 = BT + (n + 1) * K + k;
-                const int8_t* bt2 = BT + (n + 2) * K + k;
-                const int8_t* bt3 = BT + (n + 3) * K + k;
+                const int8_t* bt1 = (n + 1 < N) ? BT + (n + 1) * K + k : bt0;
+                const int8_t* bt2 = (n + 2 < N) ? BT + (n + 2) * K + k : bt0;
+                const int8_t* bt3 = (n + 3 < N) ? BT + (n + 3) * K + k : bt0;
                 const int8_t* bt4 = (n + 4 < N) ? BT + (n + 4) * K + k : bt0;
                 const int8_t* bt5 = (n + 5 < N) ? BT + (n + 5) * K + k : bt0;
                 const int8_t* bt6 = (n + 6 < N) ? BT + (n + 6) * K + k : bt0;
@@ -182,20 +191,23 @@ static void gemm_int8_avxvnni(
             }
 
             // Scalar cleanup for K not divisible by 4
-            int32_t tail[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            uint32_t tail[8] = {0, 0, 0, 0, 0, 0, 0, 0};
             for (; k < K; ++k) {
                 const uint8_t av = static_cast<uint8_t>(rowA[k] + 128);
                 for (int j = 0; j < nLen; ++j)
-                    tail[j] += static_cast<int32_t>(av) *
-                                static_cast<int32_t>(BT[(n + j) * K + k]);
+                    tail[j] += static_cast<uint32_t>(av) *
+                        static_cast<uint32_t>(static_cast<int32_t>(BT[(n + j) * K + k]));
             }
 
             // Store and apply bias correction:
             //   actual dot = vnni_result - 128 * sum(BT_row[n+j]) + tail
             int32_t res[8];
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(res), acc);
-            for (int j = 0; j < nLen; ++j)
-                C[m * N + n + j] = res[j] - 128 * btSums[n + j] + tail[j];
+            for (int j = 0; j < nLen; ++j) {
+                const uint32_t corrected = static_cast<uint32_t>(res[j]) -
+                    uint32_t{128} * btSums[n + j] + tail[j];
+                C[m * N + n + j] = int32_from_bits(corrected);
+            }
         }
     }
 }
@@ -249,12 +261,12 @@ static void gemm_int8_avx2(
                     _mm256_extracti128_si256(acc[j], 1));
                 s = _mm_add_epi32(s, _mm_srli_si128(s, 8));
                 s = _mm_add_epi32(s, _mm_srli_si128(s, 4));
-                int32_t val = _mm_cvtsi128_si32(s);
+                uint32_t val = static_cast<uint32_t>(_mm_cvtsi128_si32(s));
                 // Scalar tail
                 for (int kk = k; kk < K; ++kk)
-                    val += static_cast<int32_t>(rowA[kk]) *
-                           static_cast<int32_t>(BT[(n+j)*K + kk]);
-                C[m * N + n + j] = val;
+                    val += static_cast<uint32_t>(static_cast<int32_t>(rowA[kk])) *
+                           static_cast<uint32_t>(static_cast<int32_t>(BT[(n+j)*K + kk]));
+                C[m * N + n + j] = int32_from_bits(val);
             }
         }
     }
@@ -417,10 +429,11 @@ static void gemm_bf16_avx2(const vgre_bf16* A, const vgre_bf16* B,
 
 void VectorEngine::matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
                                int M, int N, int K) {
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    if (M <= 0 || N <= 0 || K < 0) return;
 
     // Zero the output
     memset(C, 0, static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(int32_t));
+    if (K == 0) return;
 
     // Pre-transpose B → BT (N×K) so each output column's K-values are contiguous
     std::vector<int8_t> BT(static_cast<size_t>(N) * static_cast<size_t>(K));
@@ -429,7 +442,7 @@ void VectorEngine::matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
 #if defined(VGRE_AMX_X86)
     if (caps_.hasAVXVNNI) {
         // Compute B^T row sums for the +128 bias correction
-        std::vector<int32_t> btSums(static_cast<size_t>(N));
+        std::vector<uint32_t> btSums(static_cast<size_t>(N));
         compute_bt_rowsums(BT.data(), btSums.data(), N, K);
         gemm_int8_avxvnni(A, BT.data(), btSums.data(), C, M, N, K);
         VGRE_LOG_DEBUG("VectorEngine", "matMulInt8: AVX-VNNI path ("
@@ -446,18 +459,20 @@ void VectorEngine::matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
     // Scalar fallback
     for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n) {
-        int32_t acc = 0;
+        uint32_t acc = 0;
         for (int k = 0; k < K; ++k)
-            acc += static_cast<int32_t>(A[m*K+k]) * static_cast<int32_t>(B[k*N+n]);
-        C[m*N+n] = acc;
+            acc += static_cast<uint32_t>(static_cast<int32_t>(A[m*K+k])) *
+                   static_cast<uint32_t>(static_cast<int32_t>(B[k*N+n]));
+        C[m*N+n] = int32_from_bits(acc);
     }
 }
 
 void VectorEngine::matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
                                int M, int N, int K) {
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    if (M <= 0 || N <= 0 || K < 0) return;
 
     memset(C, 0, static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float));
+    if (K == 0) return;
 
     // The AMX tile kernel configures one fixed tile shape (16×16×32) and does NOT
     // reconfigure for partial edge tiles, so it is only correct — and only avoids
@@ -500,30 +515,39 @@ void VectorEngine::matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
 
 #else // !ENABLE_VGRE_AMX
 
-// Scalar-only stubs when the feature flag is OFF.
+// Portable scalar implementation when the acceleration feature is OFF.
 #include "vgre/runtime/vector_engine.h"
 #include <cstring>
 
 namespace vgre {
 namespace runtime {
 
+static int32_t int32_from_bits_scalar(uint32_t bits) {
+    int32_t value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 void VectorEngine::matMulInt8(const int8_t* A, const int8_t* B, int32_t* C,
                                int M, int N, int K) {
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    if (M <= 0 || N <= 0 || K < 0) return;
     memset(C, 0, static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(int32_t));
+    if (K == 0) return;
     for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n) {
-        int32_t acc = 0;
+        uint32_t acc = 0;
         for (int k = 0; k < K; ++k)
-            acc += static_cast<int32_t>(A[m*K+k]) * static_cast<int32_t>(B[k*N+n]);
-        C[m*N+n] = acc;
+            acc += static_cast<uint32_t>(static_cast<int32_t>(A[m*K+k])) *
+                   static_cast<uint32_t>(static_cast<int32_t>(B[k*N+n]));
+        C[m*N+n] = int32_from_bits_scalar(acc);
     }
 }
 
 void VectorEngine::matMulBF16(const vgre_bf16* A, const vgre_bf16* B, float* C,
                                int M, int N, int K) {
-    if (M <= 0 || N <= 0 || K <= 0) return;
+    if (M <= 0 || N <= 0 || K < 0) return;
     memset(C, 0, static_cast<size_t>(M) * static_cast<size_t>(N) * sizeof(float));
+    if (K == 0) return;
     for (int m = 0; m < M; ++m)
     for (int n = 0; n < N; ++n) {
         float acc = 0.f;

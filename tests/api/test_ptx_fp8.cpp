@@ -262,6 +262,79 @@ int main() {
     check("cuModuleLoadData: cvt.rn.f32.e5m2", r == CUDA_SUCCESS);
     if (mod) { cuModuleUnload(mod); mod = nullptr; }
 
+    // These low-level shapes use one A and one B register per lane, with two
+    // accumulator registers. Loading each module compiles the generated helper
+    // call and catches PTX operand-count or C++ signature mismatches.
+    static const char kPtxM8S4[] =
+        ".version 8.0\n.target sm_75\n.address_size 64\n"
+        ".visible .entry test_m8_s4(.param .u64 out_ptr) {\n"
+        " .reg .u64 %ptr; .reg .b32 %a, %b; .reg .s32 %d<2>, %c<2>;\n"
+        " ld.param.u64 %ptr, [out_ptr];\n"
+        " mov.b32 %a, 0x88888888; mov.b32 %b, 0x77777777;\n"
+        " mov.s32 %c0, 0; mov.s32 %c1, 0;\n"
+        " mma.sync.aligned.m8n8k32.row.col.satfinite.s32.s4.s4.s32 "
+        "{%d0,%d1}, {%a}, {%b}, {%c0,%c1};\n"
+        " st.global.s32 [%ptr], %d0; ret;\n}\n";
+    r = loadPtx(kPtxM8S4, &mod);
+    check("cuModuleLoadData: full-fragment m8n8k32 signed INT4 MMA", r == CUDA_SUCCESS);
+    if (mod) { cuModuleUnload(mod); mod = nullptr; }
+
+    static const char kPtxM8U4[] =
+        ".version 8.0\n.target sm_75\n.address_size 64\n"
+        ".visible .entry test_m8_u4(.param .u64 out_ptr) {\n"
+        " .reg .u64 %ptr; .reg .b32 %a, %b; .reg .s32 %d<2>, %c<2>;\n"
+        " ld.param.u64 %ptr, [out_ptr];\n"
+        " mov.b32 %a, 0xffffffff; mov.b32 %b, 0xffffffff;\n"
+        " mov.s32 %c0, 0; mov.s32 %c1, 0;\n"
+        " mma.sync.aligned.m8n8k32.row.col.satfinite.s32.u4.u4.s32 "
+        "{%d0,%d1}, {%a}, {%b}, {%c0,%c1};\n"
+        " st.global.s32 [%ptr], %d0; ret;\n}\n";
+    r = loadPtx(kPtxM8U4, &mod);
+    check("cuModuleLoadData: full-fragment m8n8k32 unsigned INT4 MMA", r == CUDA_SUCCESS);
+    if (mod) { cuModuleUnload(mod); mod = nullptr; }
+
+    static const char kPtxM8B1And[] =
+        ".version 8.0\n.target sm_75\n.address_size 64\n"
+        ".visible .entry test_m8_b1_and(.param .u64 out_ptr) {\n"
+        " .reg .u64 %ptr; .reg .b32 %a, %b; .reg .s32 %d<2>, %c<2>;\n"
+        " ld.param.u64 %ptr, [out_ptr];\n"
+        " mov.b32 %a, 0xffffffff; mov.b32 %b, 0x55555555;\n"
+        " mov.s32 %c0, 0; mov.s32 %c1, 0;\n"
+        " mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.and.popc "
+        "{%d0,%d1}, {%a}, {%b}, {%c0,%c1};\n"
+        " st.global.s32 [%ptr], %d0; ret;\n}\n";
+    r = loadPtx(kPtxM8B1And, &mod);
+    check("cuModuleLoadData: full-fragment m8n8k128 AND+POPC MMA", r == CUDA_SUCCESS);
+    if (mod) { cuModuleUnload(mod); mod = nullptr; }
+
+    static const char kPtxM8B1Xor[] =
+        ".version 8.0\n.target sm_75\n.address_size 64\n"
+        ".visible .entry test_m8_b1_xor(.param .u64 out_ptr) {\n"
+        " .reg .u64 %ptr; .reg .b32 %a, %b; .reg .s32 %d<2>, %c<2>;\n"
+        " ld.param.u64 %ptr, [out_ptr];\n"
+        " mov.b32 %a, 0xffffffff; mov.b32 %b, 0x55555555;\n"
+        " mov.s32 %c0, 0; mov.s32 %c1, 0;\n"
+        " mma.sync.aligned.m8n8k128.row.col.s32.b1.b1.s32.xor.popc "
+        "{%d0,%d1}, {%a}, {%b}, {%c0,%c1};\n"
+        " st.global.s32 [%ptr], %d0; ret;\n}\n";
+    r = loadPtx(kPtxM8B1Xor, &mod);
+    check("cuModuleLoadData: full-fragment m8n8k128 XOR+POPC MMA", r == CUDA_SUCCESS);
+    if (mod) { cuModuleUnload(mod); mod = nullptr; }
+
+    static const char kPtxM8F64[] =
+        ".version 8.0\n.target sm_70\n.address_size 64\n"
+        ".visible .entry test_m8_f64(.param .u64 out_ptr) {\n"
+        " .reg .u64 %ptr; .reg .f64 %a, %b, %d<2>, %c<2>;\n"
+        " ld.param.u64 %ptr, [out_ptr];\n"
+        " mov.f64 %a, 2.0; mov.f64 %b, 3.0;\n"
+        " mov.f64 %c0, 1.0; mov.f64 %c1, 1.0;\n"
+        " mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 "
+        "{%d0,%d1}, {%a}, {%b}, {%c0,%c1};\n"
+        " st.global.f64 [%ptr], %d0; ret;\n}\n";
+    r = loadPtx(kPtxM8F64, &mod);
+    check("cuModuleLoadData: full-fragment m8n8k4 FP64 MMA", r == CUDA_SUCCESS);
+    if (mod) { cuModuleUnload(mod); mod = nullptr; }
+
     // ── Summary ───────────────────────────────────────────────────────────────
     std::cout << "\n--- FP8 PTX Translation: " << g_pass << "/" << g_total << " passed ---\n";
     if (g_pass != g_total) {
