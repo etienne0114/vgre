@@ -20,7 +20,8 @@ Windows CI jobs are green.
 round-toward-zero, ReLU, separate `.satfinite` behavior, and PTX packed-source ordering.
 Exhaustive byte and midpoint checks pass, along with `PTXTranslate` (31/31),
 `PTXFp8Translation` (14/14), `TensorMemoryTcgen05` (23/23), `TensorCoreMMA` (14/14),
-and `WgmmaWarpGroup` (7/7). These follow-on changes have not yet run in hosted CI.
+and `WgmmaWarpGroup` (7/7). The follow-on subsequently passed hosted CI across the
+Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64 lanes.
 Linux `MatMulAMX` and the portable scalar `MatMulAMX` checks passed in the prior local
 verification. The full local 410-test CTest run was
 stopped at test 78 after `IdentityMetricsJwt` could not start its loopback HTTP server;
@@ -28,6 +29,20 @@ tests after that point were not run. `VGRE_CACHE_DIR` now overrides
 the kernel AST cache directory on all platforms, and stale-cache eviction handles
 read-only directories without throwing; the CUDA Graph integration test passes against
 the default read-only cache path.
+
+**2026-10-07 PTX integer-conversion follow-on (CI-green):** The inline PTX
+translator now emits explicit nearest-even, toward-zero, downward, and upward
+float-to-integer conversions for signed and unsigned 32-bit and 64-bit destinations
+from both f32 and f64 sources. Conversion clamps to the destination range and follows
+PTX NaN results without relying on undefined out-of-range C++ casts. The user reports
+this follow-on passed CI across the platform matrix.
+
+**2026-10-07 floating narrowing follow-on (current workspace):** The shared `__half`
+codec now handles ties-to-even and subnormal rounding correctly; PTX f32-to-f16
+`.rn` and `.rz` use explicit modes. f64-to-f32 conversions now round with explicit
+IEEE modes, and widening f32-to-f64 no longer rounds the input to an integer first.
+Floating `.sat` conversions map NaN to positive zero. Clang C++17 syntax checks pass;
+runtime tests and hosted CI for this follow-on remain pending.
 
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
 **Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.

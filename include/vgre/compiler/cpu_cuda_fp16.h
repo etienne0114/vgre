@@ -10,43 +10,101 @@
 
 namespace vgre_cuda {
 
+enum class FloatRounding { NearestEven, NearestAway, TowardZero, Downward, Upward };
+
+inline uint32_t round_half_significand(double scaled, bool negative,
+                                       FloatRounding rounding) {
+    const double lower = std::floor(scaled);
+    const double fraction = scaled - lower;
+    bool increment = false;
+    switch (rounding) {
+        case FloatRounding::NearestEven:
+            increment = fraction > 0.5 || (fraction == 0.5 &&
+                         (static_cast<uint32_t>(lower) & 1u) != 0);
+            break;
+        case FloatRounding::NearestAway:
+            increment = fraction >= 0.5;
+            break;
+        case FloatRounding::TowardZero:
+            break;
+        case FloatRounding::Downward:
+            increment = negative && fraction != 0.0;
+            break;
+        case FloatRounding::Upward:
+            increment = !negative && fraction != 0.0;
+            break;
+    }
+    return static_cast<uint32_t>(lower) + static_cast<uint32_t>(increment);
+}
+
+// IEEE binary32 -> binary16 conversion with an explicit rounding direction.
+// Scaling by powers of two keeps every binary32 input exactly representable in
+// the wider double intermediate, including subnormal and midpoint cases.
+inline uint16_t f32_to_f16_bits(float value, FloatRounding rounding) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+    const uint32_t exponent = (bits >> 23) & 0xFFu;
+    const uint32_t fraction = bits & 0x7FFFFFu;
+
+    if (exponent == 0xFFu) {
+        if (fraction == 0) return static_cast<uint16_t>(sign | 0x7C00u);
+        uint16_t payload = static_cast<uint16_t>(fraction >> 13);
+        payload = static_cast<uint16_t>(payload | 0x0200u); // quiet NaN
+        return static_cast<uint16_t>(sign | 0x7C00u | payload);
+    }
+
+    const double magnitude = std::fabs(static_cast<double>(value));
+    if (magnitude == 0.0) return sign;
+
+    constexpr double kMaxFinite = 65504.0;
+    constexpr double kOverflowMidpoint = 65520.0;
+    if (magnitude > kMaxFinite) {
+        bool toInfinity = false;
+        switch (rounding) {
+            case FloatRounding::NearestEven:
+            case FloatRounding::NearestAway:
+                toInfinity = magnitude >= kOverflowMidpoint;
+                break;
+            case FloatRounding::TowardZero:
+                break;
+            case FloatRounding::Downward:
+                toInfinity = sign != 0;
+                break;
+            case FloatRounding::Upward:
+                toInfinity = sign == 0;
+                break;
+        }
+        if (toInfinity) return static_cast<uint16_t>(sign | 0x7C00u);
+        return static_cast<uint16_t>(sign | 0x7BFFu);
+    }
+
+    if (magnitude < 0x1p-14) {
+        const uint32_t subnormal = round_half_significand(
+            std::ldexp(magnitude, 24), sign != 0, rounding);
+        return static_cast<uint16_t>(sign | subnormal);
+    }
+
+    const int exponent2 = std::ilogb(magnitude);
+    uint32_t significand = round_half_significand(
+        std::ldexp(magnitude, 10 - exponent2), sign != 0, rounding);
+    int outputExponent = exponent2;
+    if (significand == 0x800u) {
+        significand = 0x400u;
+        ++outputExponent;
+    }
+    if (outputExponent > 15) return static_cast<uint16_t>(sign | 0x7C00u);
+    const uint16_t exponent16 = static_cast<uint16_t>(outputExponent + 15);
+    const uint16_t mantissa16 = static_cast<uint16_t>(significand - 0x400u);
+    return static_cast<uint16_t>(sign | (exponent16 << 10) | mantissa16);
+}
+
 struct __half {
     uint16_t __x;
 
     __half() = default;
 
-    __half(float f) {
-        uint32_t fi;
-        memcpy(&fi, &f, 4);
-        uint16_t sign  = (fi >> 31) & 0x1u;
-        int32_t  exp32 = ((fi >> 23) & 0xFF) - 127;  // unbiased exponent
-        uint32_t mant  = fi & 0x7FFFFFu;              // 23-bit mantissa
-
-        uint16_t exp16, mant16;
-        if (exp32 >= 16) {
-            // Overflow → infinity
-            exp16  = 0x1F;
-            mant16 = 0;
-        } else if (exp32 >= -14) {
-            // Normalized range
-            exp16  = static_cast<uint16_t>(exp32 + 15);
-            // Round-to-nearest-even: shift 23-bit mantissa to 10-bit
-            uint32_t shifted = mant + 0x1000u;  // round bit + guard bits
-            if (shifted & 0x800000u) { ++exp16; shifted = 0; }
-            mant16 = static_cast<uint16_t>(shifted >> 13);
-        } else if (exp32 >= -24) {
-            // Denormalized: place mantissa at correct position
-            int shift = -exp32 - 14 + 13;
-            uint32_t m = (mant | 0x800000u);  // add implicit leading 1
-            mant16 = static_cast<uint16_t>(m >> shift);
-            exp16  = 0;
-        } else {
-            // Underflow → zero (signed)
-            exp16  = 0;
-            mant16 = 0;
-        }
-        __x = static_cast<uint16_t>((sign << 15) | (exp16 << 10) | mant16);
-    }
+    __half(float f) : __x(f32_to_f16_bits(f, FloatRounding::NearestEven)) {}
 
     operator float() const {
         uint32_t sign  = (__x >> 15) & 0x1u;

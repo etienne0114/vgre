@@ -480,7 +480,6 @@ const TranslateMap& getMap() {
         {"mov.f32",  [](auto& o){ return o[0]+" = "+o[1]+";"; }},
         {"cvt.rn.f32.s32",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
         {"cvt.rn.f32.u32",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        {"cvt.rz.s32.f32",[](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
         // ── Bit counting ─────────────────────────────────────────────────────
         {"popc.b32", [](auto& o){ return o[0]+" = __builtin_popcount("+o[1]+");"; }},
         {"clz.b32",  [](auto& o){ return o[0]+" = __builtin_clz("+o[1]+");"; }},
@@ -611,14 +610,9 @@ const TranslateMap& getMap() {
         }},
         // ── Convert (more variants) ────────────────────────────────────────
         {"cvt.rn.f32.f16",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        {"cvt.rn.f16.f32",[](auto& o){ return o[0]+" = (__half)("+o[1]+");"; }},
         {"cvt.rn.f64.f32",[](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rn.f32.f64",[](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
         {"cvt.rn.f64.s32",[](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
         {"cvt.rn.f64.u32",[](auto& o){ return o[0]+" = (double)(unsigned)("+o[1]+");"; }},
-        {"cvt.rz.s32.f64",[](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
-        {"cvt.rn.u32.f32",[](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
-        {"cvt.s32.f32",   [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
         {"cvt.u32.s32",   [](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
         {"cvt.s32.u32",   [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
         {"cvt.u64.u32",   [](auto& o){ return o[0]+" = (unsigned long long)(unsigned)("+o[1]+");"; }},

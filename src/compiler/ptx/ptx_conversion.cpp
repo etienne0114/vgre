@@ -60,6 +60,53 @@ static std::string tf32_convert(const std::vector<std::string>& o,
            (positiveZeroOnly ? "true" : "false") + ");";
 }
 
+static std::string float_to_integer_convert(const std::vector<std::string>& o,
+                                            const char* destination,
+                                            const char* source,
+                                            const char* rounding) {
+    if (o.size() < 2)
+        throw std::runtime_error("float-to-integer cvt needs destination and source");
+    return o[0] + " = vgre_ptx_conversion::cvt_float_to_integer<" + destination + ">((" +
+           source + ")(" + o[1] + "),vgre_ptx_conversion::IntegerRounding::" + rounding + ");";
+}
+
+static std::string float_to_half_convert(const std::vector<std::string>& o,
+                                         const char* rounding) {
+    if (o.size() < 2)
+        throw std::runtime_error("f32-to-f16 cvt needs destination and source");
+    return o[0] + " = vgre_ptx_conversion::cvt_f32_to_f16((float)(" + o[1] +
+           "),vgre_cuda::FloatRounding::" + rounding + ");";
+}
+
+static std::string float_to_float_convert(const std::vector<std::string>& o,
+                                          const char* source,
+                                          const char* rounding) {
+    if (o.size() < 2)
+        throw std::runtime_error("floating-point cvt needs destination and source");
+    return o[0] + " = vgre_ptx_conversion::cvt_f64_to_f32((" + source + ")(" +
+           o[1] + "),vgre_cuda::FloatRounding::" + rounding + ");";
+}
+
+#define VGRE_CVT_F2I(KEY, DST, SRC, MODE) \
+    {KEY, [](auto& o){ return float_to_integer_convert(o, DST, SRC, MODE); }}
+#define VGRE_CVT_F2I_TYPE(PTX_TYPE, CPP_TYPE) \
+    VGRE_CVT_F2I("cvt.rni." PTX_TYPE ".f32", CPP_TYPE, "float", "NearestEven"), \
+    VGRE_CVT_F2I("cvt.rzi." PTX_TYPE ".f32", CPP_TYPE, "float", "TowardZero"), \
+    VGRE_CVT_F2I("cvt.rmi." PTX_TYPE ".f32", CPP_TYPE, "float", "Downward"), \
+    VGRE_CVT_F2I("cvt.rpi." PTX_TYPE ".f32", CPP_TYPE, "float", "Upward"), \
+    VGRE_CVT_F2I("cvt.rni." PTX_TYPE ".f64", CPP_TYPE, "double", "NearestEven"), \
+    VGRE_CVT_F2I("cvt.rzi." PTX_TYPE ".f64", CPP_TYPE, "double", "TowardZero"), \
+    VGRE_CVT_F2I("cvt.rmi." PTX_TYPE ".f64", CPP_TYPE, "double", "Downward"), \
+    VGRE_CVT_F2I("cvt.rpi." PTX_TYPE ".f64", CPP_TYPE, "double", "Upward"), \
+    VGRE_CVT_F2I("cvt.rn." PTX_TYPE ".f32", CPP_TYPE, "float", "NearestEven"), \
+    VGRE_CVT_F2I("cvt.rz." PTX_TYPE ".f32", CPP_TYPE, "float", "TowardZero"), \
+    VGRE_CVT_F2I("cvt.rm." PTX_TYPE ".f32", CPP_TYPE, "float", "Downward"), \
+    VGRE_CVT_F2I("cvt.rp." PTX_TYPE ".f32", CPP_TYPE, "float", "Upward"), \
+    VGRE_CVT_F2I("cvt.rn." PTX_TYPE ".f64", CPP_TYPE, "double", "NearestEven"), \
+    VGRE_CVT_F2I("cvt.rz." PTX_TYPE ".f64", CPP_TYPE, "double", "TowardZero"), \
+    VGRE_CVT_F2I("cvt.rm." PTX_TYPE ".f64", CPP_TYPE, "double", "Downward"), \
+    VGRE_CVT_F2I("cvt.rp." PTX_TYPE ".f64", CPP_TYPE, "double", "Upward")
+
 static std::string fp8x2_convert_emit(const std::vector<std::string>& o,
                                       bool e4m3, bool roundTowardZero = false,
                                       bool relu = false) {
@@ -98,45 +145,42 @@ const TranslateMap& getConversionMap() {
         {"cvt.rz.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", false, true, true); }},
         {"cvt.rn.satfinite.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", true, true, true); }},
         {"cvt.rz.satfinite.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", true, true, true); }},
-        // ── Missing cvt.* variants (float ↔ integer, signed/unsigned) ────────
-        // f32 → s32
-        {"cvt.rn.s32.f32", [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
-        {"cvt.rz.s32.f32", [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
-        {"cvt.rm.s32.f32", [](auto& o){ return o[0]+" = (int)__builtin_floorf("+o[1]+");"; }},
-        {"cvt.rp.s32.f32", [](auto& o){ return o[0]+" = (int)__builtin_ceilf("+o[1]+");"; }},
-        // f32 → u32
-        {"cvt.rn.u32.f32", [](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
-        {"cvt.rz.u32.f32", [](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
-        {"cvt.rm.u32.f32", [](auto& o){ return o[0]+" = (unsigned)__builtin_floorf("+o[1]+");"; }},
-        {"cvt.rp.u32.f32", [](auto& o){ return o[0]+" = (unsigned)__builtin_ceilf("+o[1]+");"; }},
-        // f64 → s32
-        {"cvt.rn.s32.f64", [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
-        {"cvt.rz.s32.f64", [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},
-        {"cvt.rm.s32.f64", [](auto& o){ return o[0]+" = (int)__builtin_floor("+o[1]+");"; }},
-        {"cvt.rp.s32.f64", [](auto& o){ return o[0]+" = (int)__builtin_ceil("+o[1]+");"; }},
-        // f64 → u32
-        {"cvt.rn.u32.f64", [](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
-        {"cvt.rz.u32.f64", [](auto& o){ return o[0]+" = (unsigned)("+o[1]+");"; }},
-        {"cvt.rm.u32.f64", [](auto& o){ return o[0]+" = (unsigned)__builtin_floor("+o[1]+");"; }},
-        {"cvt.rp.u32.f64", [](auto& o){ return o[0]+" = (unsigned)__builtin_ceil("+o[1]+");"; }},
+        // Float-to-integer conversion rounds according to the PTX integer
+        // rounding modifier, then clamps to the destination range. Keep legacy
+        // spellings accepted by older toolchains and the current .rni/.rzi/
+        // .rmi/.rpi forms on the same defined, cross-platform helper path.
+        VGRE_CVT_F2I_TYPE("s32", "int"),
+        VGRE_CVT_F2I_TYPE("u32", "unsigned"),
+        VGRE_CVT_F2I_TYPE("s64", "long long"),
+        VGRE_CVT_F2I_TYPE("u64", "unsigned long long"),
+        VGRE_CVT_F2I("cvt.s32.f32", "int", "float", "TowardZero"),
+        VGRE_CVT_F2I("cvt.u32.f32", "unsigned", "float", "TowardZero"),
+        VGRE_CVT_F2I("cvt.s32.f64", "int", "double", "TowardZero"),
+        VGRE_CVT_F2I("cvt.u32.f64", "unsigned", "double", "TowardZero"),
+        VGRE_CVT_F2I("cvt.s64.f32", "long long", "float", "TowardZero"),
+        VGRE_CVT_F2I("cvt.u64.f32", "unsigned long long", "float", "TowardZero"),
+        VGRE_CVT_F2I("cvt.s64.f64", "long long", "double", "TowardZero"),
+        VGRE_CVT_F2I("cvt.u64.f64", "unsigned long long", "double", "TowardZero"),
         // s32 → f32 (round-nearest is default for integer→float)
         {"cvt.rn.f32.s32", [](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
         {"cvt.rn.f32.u32", [](auto& o){ return o[0]+" = (float)(unsigned)("+o[1]+");"; }},
         // s32 → f64
         {"cvt.rn.f64.s32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
         {"cvt.rn.f64.u32", [](auto& o){ return o[0]+" = (double)(unsigned)("+o[1]+");"; }},
-        // f32 → f16 / f16 → f32 (already have some; add more rounding modes)
-        {"cvt.rn.f16.f32", [](auto& o){ return o[0]+" = (__half)("+o[1]+");"; }},
-        {"cvt.rz.f16.f32", [](auto& o){ return o[0]+" = (__half)("+o[1]+");"; }},
+        // f32 → f16. Keep the PTX rounding mode explicit.
+        {"cvt.rn.f16.f32", [](auto& o){ return float_to_half_convert(o, "NearestEven"); }},
+        {"cvt.rz.f16.f32", [](auto& o){ return float_to_half_convert(o, "TowardZero"); }},
         {"cvt.rn.f32.f16", [](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        // f64 → f32 (already have rn; add others)
-        {"cvt.rz.f32.f64", [](auto& o){ return o[0]+" = (float)("+o[1]+");"; }},
-        {"cvt.rm.f32.f64", [](auto& o){ return o[0]+" = (float)__builtin_floor("+o[1]+");"; }},
-        {"cvt.rp.f32.f64", [](auto& o){ return o[0]+" = (float)__builtin_ceil("+o[1]+");"; }},
-        // f32 → f64 (already have rn)
+        // f64 → f32 uses explicit IEEE rounding; f32 → f64 is exact for every
+        // finite source, so its directed rounding forms are ordinary widening.
+        {"cvt.rn.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "NearestEven"); }},
+        {"cvt.rna.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "NearestAway"); }},
+        {"cvt.rz.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "TowardZero"); }},
+        {"cvt.rm.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "Downward"); }},
+        {"cvt.rp.f32.f64", [](auto& o){ return float_to_float_convert(o, "double", "Upward"); }},
         {"cvt.rz.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
-        {"cvt.rm.f64.f32", [](auto& o){ return o[0]+" = (double)__builtin_floorf("+o[1]+");"; }},
-        {"cvt.rp.f64.f32", [](auto& o){ return o[0]+" = (double)__builtin_ceilf("+o[1]+");"; }},
+        {"cvt.rm.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
+        {"cvt.rp.f64.f32", [](auto& o){ return o[0]+" = (double)("+o[1]+");"; }},
         // s64 / u64 ↔ float
         {"cvt.rn.f32.s64", [](auto& o){ return o[0]+" = (float)(long long)("+o[1]+");"; }},
         {"cvt.rn.f32.u64", [](auto& o){ return o[0]+" = (float)(unsigned long long)("+o[1]+");"; }},
@@ -147,8 +191,12 @@ const TranslateMap& getConversionMap() {
         {"cvt.rn.s64.f64", [](auto& o){ return o[0]+" = (long long)("+o[1]+");"; }},
         {"cvt.rn.u64.f64", [](auto& o){ return o[0]+" = (unsigned long long)("+o[1]+");"; }},
         // saturating conversions
-        {"cvt.sat.f32.f32",[](auto& o){ return o[0]+" = ("+o[1]+"<0.f?0.f:("+o[1]+">1.f?1.f:"+o[1]+"));"; }},
-        {"cvt.sat.f16.f32",[](auto& o){ return o[0]+" = (__half)("+o[1]+"<0.f?0.f:("+o[1]+">1.f?1.f:"+o[1]+"));"; }},
+        {"cvt.sat.f32.f32",[](auto& o){
+            return o[0]+" = vgre_ptx_conversion::cvt_sat_f32((float)("+o[1]+"));";
+        }},
+        {"cvt.sat.f16.f32",[](auto& o){
+            return o[0]+" = vgre_ptx_conversion::cvt_sat_f32_to_f16((float)("+o[1]+"));";
+        }},
         // ── sqrt.rn.f32 (missing from core map) ────────────────────────────
         {"sqrt.rn.f32", [](auto& o){ return o[0]+" = __builtin_sqrtf("+o[1]+");"; }},
         {"sqrt.rz.f32", [](auto& o){ return o[0]+" = __builtin_sqrtf("+o[1]+");"; }},
@@ -444,6 +492,9 @@ const TranslateMap& getConversionMap() {
     };
     return kMap;
 }
+
+#undef VGRE_CVT_F2I_TYPE
+#undef VGRE_CVT_F2I
 
 } // namespace compiler
 } // namespace vgre

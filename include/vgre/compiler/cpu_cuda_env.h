@@ -7,6 +7,7 @@
 #include "vgre/common/types.h"
 #include "cpu_cuda_intrinsics.h"
 #include "cpu_cuda_fp16.h"
+#include "ptx_conversion.h"
 #include "cpu_cuda_warp.h"
 #include "wmma_emulation.h"
 
