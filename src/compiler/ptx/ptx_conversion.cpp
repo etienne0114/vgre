@@ -60,6 +60,22 @@ static std::string tf32_convert(const std::vector<std::string>& o,
            (positiveZeroOnly ? "true" : "false") + ");";
 }
 
+static std::string fp8x2_convert_emit(const std::vector<std::string>& o,
+                                      bool e4m3, bool roundTowardZero = false,
+                                      bool relu = false) {
+    if (o.size() < 3)
+        throw std::runtime_error("packed FP8 conversion needs destination and two sources");
+    const char* encoder = e4m3 ? "vgre_f32_to_fp8e4m3_satfinite"
+                               : "vgre_f32_to_fp8e5m2_satfinite";
+    const std::string flags = std::string(",") +
+                              (roundTowardZero ? "true" : "false") + "," +
+                              (relu ? "true" : "false") + ")";
+    // PTX spells the operands d,b,a. It stores b in the low byte and a in the
+    // high byte, so keep the textual operand order while building the result.
+    return o[0] + " = (unsigned)" + encoder + "((float)(" + o[1] + ")" + flags +
+           " | ((unsigned)" + encoder + "((float)(" + o[2] + ")" + flags + "<<8;";
+}
+
 const TranslateMap& getConversionMap() {
     static const TranslateMap kMap = {
         // FP32 → TF32 bit-format conversions. The output remains a b32
@@ -387,41 +403,43 @@ const TranslateMap& getConversionMap() {
         {"cvt.rn.e5m2.f32", [](auto& o){
             return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2((float)("+o[1]+"));";
         }},
-        // Saturating variants (same semantics; satfinite clamps to FP8 range, same as our impl)
+        // Saturating variants clamp both formats to their largest finite value.
         {"cvt.rn.satfinite.e4m3.f32", [](auto& o){
-            return o[0]+" = (unsigned)vgre_f32_to_fp8e4m3((float)("+o[1]+"));";
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e4m3_satfinite((float)("+o[1]+"));";
         }},
         {"cvt.rn.satfinite.e5m2.f32", [](auto& o){
-            return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2((float)("+o[1]+"));";
+            return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2_satfinite((float)("+o[1]+"));";
         }},
-        // Packed: f32×2 → e4m3x2 (two FP8 bytes packed into one uint32)
+        // PTX 9.4 adds round-toward-zero conversions to packed FP8, and both
+        // packed formats support ReLU on conversion.
+        {"cvt.rz.satfinite.e4m3x2.f32", [](auto& o){ return fp8x2_convert_emit(o, true, true); }},
+        {"cvt.rz.satfinite.e5m2x2.f32", [](auto& o){ return fp8x2_convert_emit(o, false, true); }},
+        {"cvt.rn.relu.satfinite.e4m3x2.f32", [](auto& o){ return fp8x2_convert_emit(o, true, false, true); }},
+        {"cvt.rn.relu.satfinite.e5m2x2.f32", [](auto& o){ return fp8x2_convert_emit(o, false, false, true); }},
+        {"cvt.rz.relu.satfinite.e4m3x2.f32", [](auto& o){ return fp8x2_convert_emit(o, true, true, true); }},
+        {"cvt.rz.relu.satfinite.e5m2x2.f32", [](auto& o){ return fp8x2_convert_emit(o, false, true, true); }},
+        // Packed: f32×2 → e4m3x2. PTX orders sources as b, a; source a goes
+        // in the upper byte and source b in the lower byte.
         // PTX syntax: cvt.rn.satfinite.e4m3x2.f32 d, b, a
-        //   d[7:0]  = f32_to_e4m3(a)   (first source = low byte)
-        //   d[15:8] = f32_to_e4m3(b)   (second source = high byte)
+        //   d[7:0]  = f32_to_e4m3(b)
+        //   d[15:8] = f32_to_e4m3(a)
         {"cvt.rn.satfinite.e4m3x2.f32", [](auto& o){
-            auto a = o.size() > 2 ? o[2] : o[1];
-            auto b = o.size() > 1 ? o[1] : o[1];
-            return o[0]+" = (unsigned)vgre_f32_to_fp8e4m3((float)("+a+"))"
-                   " | ((unsigned)vgre_f32_to_fp8e4m3((float)("+b+")))<<8;";
+            return fp8x2_convert_emit(o, true);
         }},
         {"cvt.rn.satfinite.e5m2x2.f32", [](auto& o){
-            auto a = o.size() > 2 ? o[2] : o[1];
-            auto b = o.size() > 1 ? o[1] : o[1];
-            return o[0]+" = (unsigned)vgre_f32_to_fp8e5m2((float)("+a+"))"
-                   " | ((unsigned)vgre_f32_to_fp8e5m2((float)("+b+")))<<8;";
+            return fp8x2_convert_emit(o, false);
         }},
-        // Packed: e4m3x2 → f32×2 (unpack to two float variables)
-        // PTX syntax: cvt.rn.f32x2.e4m3x2 {fa, fb}, d
-        //   fa = e4m3_to_f32(d[7:0]), fb = e4m3_to_f32(d[15:8])
+        // Packed: e4m3x2 → f32×2. The first destination corresponds to the
+        // upper source byte, matching PTX's two-value packing order.
         {"cvt.rn.f32x2.e4m3x2", [](auto& o){
             if (o.size() < 3) return std::string("/* cvt.rn.f32x2.e4m3x2 */");
-            return o[0]+" = vgre_fp8e4m3_to_f32((uint8_t)((unsigned)("+o[2]+")&0xFFu));"
-                   " "+o[1]+" = vgre_fp8e4m3_to_f32((uint8_t)(((unsigned)("+o[2]+")>>8)&0xFFu));";
+            return o[0]+" = vgre_fp8e4m3_to_f32((uint8_t)(((unsigned)("+o[2]+")>>8)&0xFFu));"
+                   " "+o[1]+" = vgre_fp8e4m3_to_f32((uint8_t)((unsigned)("+o[2]+")&0xFFu));";
         }},
         {"cvt.rn.f32x2.e5m2x2", [](auto& o){
             if (o.size() < 3) return std::string("/* cvt.rn.f32x2.e5m2x2 */");
-            return o[0]+" = vgre_fp8e5m2_to_f32((uint8_t)((unsigned)("+o[2]+")&0xFFu));"
-                   " "+o[1]+" = vgre_fp8e5m2_to_f32((uint8_t)(((unsigned)("+o[2]+")>>8)&0xFFu));";
+            return o[0]+" = vgre_fp8e5m2_to_f32((uint8_t)(((unsigned)("+o[2]+")>>8)&0xFFu));"
+                   " "+o[1]+" = vgre_fp8e5m2_to_f32((uint8_t)((unsigned)("+o[2]+")&0xFFu));";
         }},
     };
     return kMap;

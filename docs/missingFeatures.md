@@ -91,8 +91,9 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 | **T4** State-space models | — (complete) | single-state selective scan, depthwise conv1d, the Mamba-3 MIMO matrix-state scan, a full Mamba-1 model + safetensors loader (`mamba.h`/`mamba_loader.cpp`), **and a verified end-to-end run of a real checkpoint** — `tools/mamba_run` loads the open **`state-spaces/mamba-130m-hf`** (130M params, 24 layers) and its logits match an independent NumPy Mamba-1 forward at **cosine sim 1.0** (identical argmax, 10/10 top-10, max abs diff 2e-4) |
 
 ### 1.6 Math and tensor-core coverage
-- **Remaining:** run the expanded tensor-core regression tests in hosted CI on Linux, macOS, and Windows. The current working tree adds full-fragment references for FP16/BF16 `mma.sync.m16n8k16`, TF32 `mma.sync.m16n8k8` and its FP32 conversion modes, FP16/TF32 WGMMA, and every currently mapped tcgen05 dispatcher shape/type (BF16, FP16, TF32, and FP8). Existing complete-fragment tests cover FP8 `mma.sync.m16n8k32`, INT4 `m8n8k32`, binary `m8n8k128`, FP64 `m8n8k4`, and signed INT8 `m16n8k32`. These changes are local and are not part of the latest hosted run yet.
-- **Remaining:** broaden coverage beyond the explicitly mapped PTX shapes and formats. Unsupported MMA variants remain unsupported; the current tests establish correctness only for the translator entries listed in `src/compiler/ptx/ptx_translator_map.cpp` and `src/compiler/ptx/ptx_conversion.cpp`.
+- The complete-fragment reference coverage for FP16/BF16/TF32/FP8 `mma.sync`, FP16/TF32 WGMMA, and all currently mapped tcgen05 shapes is in commit `2857b114`; the latest reported Linux, Linux LLVM-free, macOS, and Windows CI jobs are green.
+- **Current follow-on:** FP8 E4M3/E5M2 narrowing now implements round-to-nearest-even and round-toward-zero, ReLU and finite-saturation modes, and PTX source-to-byte order for packed conversions. Exhaustive byte/midpoint checks plus PTX, TMEM, and FP8 translation tests pass locally; this follow-on still needs hosted CI.
+- **Remaining:** broaden coverage beyond explicitly mapped PTX shapes and formats. Unsupported MMA variants remain unsupported; current tests establish correctness only for translator entries listed in `src/compiler/ptx/ptx_translator_map.cpp` and `src/compiler/ptx/ptx_conversion.cpp`.
 
 ---
 

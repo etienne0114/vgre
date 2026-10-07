@@ -10,17 +10,21 @@
 - **Windows**: ✅ Windows x86-64 build, CTest, pretrained GGUF CLI smoke, and Python integration passed in the latest hosted job.
 - **PyPI**: Latest published package is [0.1.4](https://pypi.org/project/vgre/0.1.4/), with Linux, macOS universal2, and Windows wheels.
 
-**Unreleased local math verification (2026-10-07):** INT8/BF16 GEMM edge cases and the
-PTX MMA fragment emulation were hardened. The current working tree adds complete-fragment
+**2026-10-07 math verification:** Commit `2857b114` contains the expanded full-fragment
 FP16/BF16/TF32 `mma.sync` references, TF32 conversion tests, FP16/TF32 WGMMA references,
-all mapped tcgen05 BF16/FP16/TF32/FP8 shape/type dispatch checks, and a guard test for
-the FP16 WGMMA `m64n128k16` output bound. The five focused CTest cases pass locally:
-`TensorCoreMMA`, `PTXTranslate`, `PTXFp8Translation`, `WgmmaWarpGroup`, and
-`TensorMemoryTcgen05`. Linux `MatMulAMX` and the portable scalar `MatMulAMX` checks also
-passed in the prior local verification. These uncommitted math changes have not yet run
-in hosted CI. The full local 410-test CTest run was stopped at test 78 after
-`IdentityMetricsJwt` could not start its loopback HTTP server; tests after that point
-were not run. `VGRE_CACHE_DIR` now overrides
+all mapped tcgen05 BF16/FP16/TF32/FP8 shape/type dispatch checks, and the FP16 WGMMA
+`m64n128k16` output-bound guard. The latest reported Linux, Linux LLVM-free, macOS, and
+Windows CI jobs are green.
+
+**Local FP8 follow-on (2026-10-07):** E4M3/E5M2 conversion now implements round-to-nearest-even,
+round-toward-zero, ReLU, separate `.satfinite` behavior, and PTX packed-source ordering.
+Exhaustive byte and midpoint checks pass, along with `PTXTranslate` (31/31),
+`PTXFp8Translation` (14/14), `TensorMemoryTcgen05` (23/23), `TensorCoreMMA` (14/14),
+and `WgmmaWarpGroup` (7/7). These follow-on changes have not yet run in hosted CI.
+Linux `MatMulAMX` and the portable scalar `MatMulAMX` checks passed in the prior local
+verification. The full local 410-test CTest run was
+stopped at test 78 after `IdentityMetricsJwt` could not start its loopback HTTP server;
+tests after that point were not run. `VGRE_CACHE_DIR` now overrides
 the kernel AST cache directory on all platforms, and stale-cache eviction handles
 read-only directories without throwing; the CUDA Graph integration test passes against
 the default read-only cache path.

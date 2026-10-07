@@ -1452,111 +1452,155 @@ namespace detail {
 
 // ── E4M3 byte → float ────────────────────────────────────────────────────────
 inline float fp8e4m3_to_f32(uint8_t b) {
-    uint8_t sign = (b >> 7) & 1u;
-    uint8_t exp4 = (b >> 3) & 0x0Fu;
-    uint8_t mant = b & 0x07u;
+    const uint32_t sign = static_cast<uint32_t>(b & 0x80u) << 24;
+    const uint32_t exp4 = (b >> 3) & 0x0Fu;
+    const uint32_t mant = b & 0x07u;
+    uint32_t bits = sign;
     if (exp4 == 0x0Fu && mant == 0x07u) {
-        // NaN encoding (S1111111)
-        uint32_t nan = 0x7FC00000u | (static_cast<uint32_t>(sign) << 31);
-        float f; memcpy(&f, &nan, 4); return f;
+        bits |= 0x7FC00000u;
+    } else if (exp4 == 0) {
+        if (mant != 0) {
+            uint32_t normalized = mant;
+            int shifts = 0;
+            while ((normalized & 0x08u) == 0) {
+                normalized <<= 1;
+                ++shifts;
+            }
+            const uint32_t floatExp = static_cast<uint32_t>(-6 - shifts + 127);
+            bits |= (floatExp << 23) | ((normalized & 0x07u) << 20);
+        }
+    } else {
+        bits |= (static_cast<uint32_t>(static_cast<int>(exp4) - 7 + 127) << 23) |
+                (mant << 20);
     }
     float value;
-    if (exp4 == 0) {
-        // Denormal: value = (-1)^sign × 2^(-6) × (mant/8)
-        value = static_cast<float>(mant) * (1.0f / 8.0f) * (1.0f / 64.0f);
-    } else {
-        // Normal: value = (-1)^sign × 2^(exp4-7) × (1 + mant/8)
-        int e = static_cast<int>(exp4) - 7;
-        value = (1.0f + static_cast<float>(mant) * (1.0f / 8.0f))
-                * std::ldexp(1.0f, e);
-    }
-    return sign ? -value : value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 // ── E5M2 byte → float ────────────────────────────────────────────────────────
 inline float fp8e5m2_to_f32(uint8_t b) {
-    uint8_t sign = (b >> 7) & 1u;
-    uint8_t exp5 = (b >> 2) & 0x1Fu;
-    uint8_t mant = b & 0x03u;
+    const uint32_t sign = static_cast<uint32_t>(b & 0x80u) << 24;
+    const uint32_t exp5 = (b >> 2) & 0x1Fu;
+    const uint32_t mant = b & 0x03u;
+    uint32_t bits = sign;
     if (exp5 == 0x1Fu) {
         if (mant == 0) {
-            // Infinity
-            uint32_t inf = 0x7F800000u | (static_cast<uint32_t>(sign) << 31);
-            float f; memcpy(&f, &inf, 4); return f;
+            bits |= 0x7F800000u;
         } else {
-            // NaN
-            uint32_t nan = 0x7FC00000u | (static_cast<uint32_t>(sign) << 31);
-            float f; memcpy(&f, &nan, 4); return f;
+            bits |= 0x7FC00000u;
         }
+    } else if (exp5 == 0) {
+        if (mant != 0) {
+            uint32_t normalized = mant;
+            int shifts = 0;
+            while ((normalized & 0x04u) == 0) {
+                normalized <<= 1;
+                ++shifts;
+            }
+            const uint32_t floatExp = static_cast<uint32_t>(-14 - shifts + 127);
+            bits |= (floatExp << 23) | ((normalized & 0x03u) << 21);
+        }
+    } else {
+        bits |= (static_cast<uint32_t>(static_cast<int>(exp5) - 15 + 127) << 23) |
+                (mant << 21);
     }
     float value;
-    if (exp5 == 0) {
-        // Denormal: value = (-1)^sign × 2^(-14) × (mant/4)
-        value = static_cast<float>(mant) * (1.0f / 4.0f) * std::ldexp(1.0f, -14);
-    } else {
-        // Normal: value = (-1)^sign × 2^(exp5-15) × (1 + mant/4)
-        int e = static_cast<int>(exp5) - 15;
-        value = (1.0f + static_cast<float>(mant) * (1.0f / 4.0f))
-                * std::ldexp(1.0f, e);
-    }
-    return sign ? -value : value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
-// ── float → E4M3 byte ────────────────────────────────────────────────────────
+inline uint32_t fp8_round_shift(uint32_t value, unsigned shift, bool roundTowardZero) {
+    if (shift == 0) return value;
+    if (shift > 24) return 0;
+    if (roundTowardZero) return value >> shift;
+    const uint32_t truncated = value >> shift;
+    const uint32_t remainder = value & ((1u << shift) - 1u);
+    const uint32_t halfway = 1u << (shift - 1u);
+    return truncated + ((remainder > halfway ||
+                         (remainder == halfway && (truncated & 1u))) ? 1u : 0u);
+}
+
+// Convert a finite binary32 value by rounding its significand directly. This
+// avoids intermediate scaling (and its tie / underflow ambiguities) and keeps
+// the result independent of the host's current floating-point rounding mode.
+inline uint8_t f32_to_fp8(float f, unsigned exponentBits, unsigned mantissaBits,
+                          int bias, bool satfinite, bool roundTowardZero = false,
+                          bool relu = false) {
+    uint32_t bits;
+    memcpy(&bits, &f, sizeof(bits));
+    const uint8_t sign = static_cast<uint8_t>((bits >> 24) & 0x80u);
+    const uint32_t magnitude = bits & 0x7FFFFFFFu;
+    const uint32_t sourceExp = (magnitude >> 23) & 0xFFu;
+    const uint32_t sourceMant = magnitude & 0x7FFFFFu;
+    const uint32_t exponentMask = (1u << exponentBits) - 1u;
+    const uint32_t maxTargetExp = exponentBits == 4 ? exponentMask : exponentMask - 1u;
+    const uint32_t maxTargetMant = (1u << mantissaBits) - (exponentBits == 4 ? 2u : 1u);
+    const uint8_t maxFinite = static_cast<uint8_t>((maxTargetExp << mantissaBits) |
+                                                   maxTargetMant);
+
+    if (sourceExp == 0xFFu && sourceMant != 0) return 0x7Fu;
+    if (relu && sign != 0 && magnitude != 0) return 0;
+    if (sourceExp == 0xFFu) {
+        if (satfinite || exponentBits == 4)
+            return static_cast<uint8_t>(sign | maxFinite);
+        return static_cast<uint8_t>(sign | (exponentMask << mantissaBits));
+    }
+    // Every binary32 subnormal is far below the minimum FP8 subnormal.
+    if (sourceExp == 0) return sign;
+
+    const int unbiasedExp = static_cast<int>(sourceExp) - 127;
+    int targetExp = unbiasedExp + bias;
+    const uint32_t significand = 0x800000u | sourceMant;
+    uint32_t rounded;
+    if (targetExp <= 0) {
+        const unsigned shift = static_cast<unsigned>(24 - targetExp -
+                                                     static_cast<int>(mantissaBits));
+        rounded = fp8_round_shift(significand, shift, roundTowardZero);
+        if (rounded >= (1u << mantissaBits))
+            return static_cast<uint8_t>(sign | (1u << mantissaBits));
+        return static_cast<uint8_t>(sign | rounded);
+    }
+
+    rounded = fp8_round_shift(significand, 23u - mantissaBits, roundTowardZero);
+    if (rounded >= (1u << (mantissaBits + 1u))) {
+        rounded >>= 1;
+        ++targetExp;
+    }
+    uint32_t targetMant = rounded & ((1u << mantissaBits) - 1u);
+
+    if (exponentBits == 4) {
+        // E4M3FN reserves only the all-ones mantissa in the top exponent for
+        // NaN; its largest finite value is 448 (code 0x7e).
+        if (targetExp > static_cast<int>(maxTargetExp) ||
+            (targetExp == static_cast<int>(maxTargetExp) && targetMant > maxTargetMant))
+            return static_cast<uint8_t>(sign | maxFinite);
+    } else if (targetExp >= static_cast<int>(exponentMask)) {
+        if (satfinite) return static_cast<uint8_t>(sign | maxFinite);
+        return static_cast<uint8_t>(sign | (exponentMask << mantissaBits));
+    }
+
+    return static_cast<uint8_t>(sign | (static_cast<uint32_t>(targetExp) << mantissaBits) |
+                                targetMant);
+}
+
+// ── float → E4M3/E5M2 byte ──────────────────────────────────────────────────
 inline uint8_t f32_to_fp8e4m3(float f) {
-    if (std::isnan(f)) return 0x7Fu; // canonical NaN (positive, S=0,e=0xF,m=0x7)
-    uint32_t bits; memcpy(&bits, &f, 4);
-    uint8_t sign = static_cast<uint8_t>((bits >> 31) & 1u);
-    int exp32 = static_cast<int>((bits >> 23) & 0xFFu) - 127;
-    uint32_t mant32 = bits & 0x7FFFFFu;
-
-    if (std::isinf(f)) {
-        // Map Inf to max finite E4M3 value (no Inf encoding)
-        return static_cast<uint8_t>((sign << 7) | 0x7E); // S1111110 = ±448.0
-    }
-
-    // Clamp to E4M3 range ±448.0
-    if (exp32 > 8) {
-        return static_cast<uint8_t>((sign << 7) | 0x7E);
-    }
-
-    int e4 = exp32 + 7;
-    uint8_t m3;
-    if (e4 <= 0) {
-        // Denormal: 2^(-6) × (m/8), so value = |f| / 2^(-6) / (1/8)
-        float scaled = std::fabs(f) * 512.0f; // 2^9 = 2^(6+3)
-        m3 = static_cast<uint8_t>(static_cast<int>(scaled + 0.5f) & 0x07u);
-        e4 = 0;
-    } else {
-        m3 = static_cast<uint8_t>((mant32 >> 20) & 0x07u); // top 3 mantissa bits
-    }
-    return static_cast<uint8_t>((sign << 7) | (static_cast<uint8_t>(e4 & 0x0F) << 3) | m3);
+    return f32_to_fp8(f, 4, 3, 7, true);
 }
 
-// ── float → E5M2 byte ────────────────────────────────────────────────────────
 inline uint8_t f32_to_fp8e5m2(float f) {
-    if (std::isnan(f)) return 0x7Fu;
-    if (std::isinf(f)) {
-        return static_cast<uint8_t>(f > 0 ? 0x7C : 0xFC); // ±Inf
-    }
-    uint32_t bits; memcpy(&bits, &f, 4);
-    uint8_t sign = static_cast<uint8_t>((bits >> 31) & 1u);
-    int exp32 = static_cast<int>((bits >> 23) & 0xFFu) - 127;
-    uint32_t mant32 = bits & 0x7FFFFFu;
+    return f32_to_fp8(f, 5, 2, 15, false);
+}
 
-    int e5 = exp32 + 15;
-    uint8_t m2;
-    if (e5 <= 0) {
-        float scaled = std::fabs(f) * (1 << 16); // 2^(14+2)
-        m2 = static_cast<uint8_t>(static_cast<int>(scaled + 0.5f) & 0x03u);
-        e5 = 0;
-    } else if (e5 >= 0x1F) {
-        // Overflow → ±Inf
-        return static_cast<uint8_t>((sign << 7) | 0x7Cu);
-    } else {
-        m2 = static_cast<uint8_t>((mant32 >> 21) & 0x03u); // top 2 mantissa bits
-    }
-    return static_cast<uint8_t>((sign << 7) | (static_cast<uint8_t>(e5 & 0x1F) << 2) | m2);
+inline uint8_t f32_to_fp8e4m3_satfinite(float f, bool roundTowardZero = false,
+                                       bool relu = false) {
+    return f32_to_fp8(f, 4, 3, 7, true, roundTowardZero, relu);
+}
+
+inline uint8_t f32_to_fp8e5m2_satfinite(float f, bool roundTowardZero = false,
+                                       bool relu = false) {
+    return f32_to_fp8(f, 5, 2, 15, true, roundTowardZero, relu);
 }
 
 // ── Generic FP8 GEMM kernel (M×N×K, K-tile of 32 bytes) ─────────────────────
@@ -1688,6 +1732,14 @@ inline float vgre_fp8e4m3_to_f32(uint8_t b)  { return detail::fp8e4m3_to_f32(b);
 inline float vgre_fp8e5m2_to_f32(uint8_t b)  { return detail::fp8e5m2_to_f32(b); }
 inline uint8_t vgre_f32_to_fp8e4m3(float f)  { return detail::f32_to_fp8e4m3(f); }
 inline uint8_t vgre_f32_to_fp8e5m2(float f)  { return detail::f32_to_fp8e5m2(f); }
+inline uint8_t vgre_f32_to_fp8e4m3_satfinite(float f, bool roundTowardZero = false,
+                                             bool relu = false) {
+    return detail::f32_to_fp8e4m3_satfinite(f, roundTowardZero, relu);
+}
+inline uint8_t vgre_f32_to_fp8e5m2_satfinite(float f, bool roundTowardZero = false,
+                                             bool relu = false) {
+    return detail::f32_to_fp8e5m2_satfinite(f, roundTowardZero, relu);
+}
 
 // ── register-based FP8 mma helpers (Ampere/Ada mma.sync.aligned) ─────────────
 // The four packed A registers and two packed B registers are distributed across

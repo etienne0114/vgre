@@ -28,6 +28,41 @@ static bool contains(const std::string &h, const std::string &n) {
 int main() {
     printf("=== PTX Inline-Asm Translation (Track 12) ===\n");
 
+    // Packed FP8 conversion follows PTX's lane ordering: d[7:0] receives the
+    // second source operand b, while d[15:8] receives the first source a.
+    {
+        const std::string e4 = PTXTranslator::translate(
+            "asm volatile(\"cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\");");
+        const size_t e4Low = e4.find("vgre_f32_to_fp8e4m3_satfinite((float)(%1),false,false)");
+        const size_t e4High = e4.find("vgre_f32_to_fp8e4m3_satfinite((float)(%2),false,false)");
+        const size_t e4Shift = e4.find("<<8");
+        check("packed E4M3 stores PTX source b in the low byte and source a high",
+              e4Low != std::string::npos && e4High != std::string::npos &&
+              e4Low < e4High && e4High < e4Shift);
+
+        const std::string e5 = PTXTranslator::translate(
+            "asm volatile(\"cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;\");");
+        const size_t e5Low = e5.find("vgre_f32_to_fp8e5m2_satfinite((float)(%1),false,false)");
+        const size_t e5High = e5.find("vgre_f32_to_fp8e5m2_satfinite((float)(%2),false,false)");
+        const size_t e5Shift = e5.find("<<8");
+        check("packed E5M2 uses finite saturation and preserves PTX source order",
+              e5Low != std::string::npos && e5High != std::string::npos &&
+              e5Low < e5High && e5High < e5Shift);
+
+        const std::string rz = PTXTranslator::translate(
+            "asm volatile(\"cvt.rz.satfinite.e4m3x2.f32 %0, %1, %2;\");");
+        check("packed FP8 round-toward-zero selects truncating conversion",
+              contains(rz, "vgre_f32_to_fp8e4m3_satfinite((float)(%1),true,false)"));
+        const std::string relu = PTXTranslator::translate(
+            "asm volatile(\"cvt.rn.relu.satfinite.e5m2x2.f32 %0, %1, %2;\");");
+        check("packed FP8 ReLU selects the NaN-preserving ReLU conversion",
+              contains(relu, "vgre_f32_to_fp8e5m2_satfinite((float)(%1),false,true)"));
+        const std::string rzRelu = PTXTranslator::translate(
+            "asm volatile(\"cvt.rz.relu.satfinite.e4m3x2.f32 %0, %1, %2;\");");
+        check("packed FP8 supports combined round-toward-zero and ReLU",
+              contains(rzRelu, "vgre_f32_to_fp8e4m3_satfinite((float)(%1),true,true)"));
+    }
+
     // (1) Memory addressing: load with a byte offset.
     {
         std::string src =
