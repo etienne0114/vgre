@@ -20,6 +20,14 @@
 
 using namespace vgre::tmem;
 
+extern "C" {
+uint32_t vgre_jit_tmem_alloc(int nCols);
+void vgre_jit_tmem_dealloc(uint32_t addr, int nCols);
+void vgre_jit_tcgen05_ld(uint32_t* dst, uint32_t addr, int lanes, int wordsPerLane);
+void vgre_jit_tcgen05_mma(uint32_t addr, uint64_t descA, uint64_t descB,
+                          int M, int N, int K, int kind, int accumulate);
+}
+
 static int g_pass = 0, g_total = 0;
 static void check(const char* name, bool ok) {
     ++g_total;
@@ -33,6 +41,106 @@ static uint16_t f32_to_bf16(float f) {           // round-to-nearest-even
 }
 static float bf16_to_f32(uint16_t v) {
     uint32_t f = (uint32_t)v << 16; float r; std::memcpy(&r, &f, 4); return r;
+}
+static uint16_t f32_to_f16(float f) { return vgre_cuda::__half(f).__x; }
+static float f16_to_f32(uint16_t v) {
+    vgre_cuda::__half h; h.__x = v; return static_cast<float>(h);
+}
+
+using Fp8EncodeFn = uint8_t (*)(float);
+using Fp8DecodeFn = float (*)(uint8_t);
+
+static bool run_tcgen05_fp8_case(const char* name, int M, int N, int kind,
+                                 Fp8EncodeFn encodeA, Fp8EncodeFn encodeB,
+                                 Fp8DecodeFn decodeA, Fp8DecodeFn decodeB) {
+    constexpr int K = 32;
+    std::mt19937 rng(static_cast<uint32_t>(M * 65537 + N * 257 + kind));
+    std::uniform_real_distribution<float> dist(-1.75f, 1.75f);
+    std::vector<uint8_t> A(static_cast<size_t>(M) * K), B(static_cast<size_t>(K) * N);
+    for (auto& x : A) x = encodeA(dist(rng));
+    for (auto& x : B) x = encodeB(dist(rng));
+
+    std::vector<float> out(static_cast<size_t>(M) * N, 0.0f);
+    const uint32_t acc = vgre_jit_tmem_alloc(N);
+    vgre_jit_tcgen05_mma(acc, vgre_make_wgmma_desc(A.data()),
+                         vgre_make_wgmma_desc(B.data()), M, N, K, kind, 0);
+    vgre_jit_tcgen05_ld(reinterpret_cast<uint32_t*>(out.data()), acc, M, N);
+    vgre_jit_tmem_dealloc(acc, N);
+
+    double maxErr = 0.0;
+    for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            float ref = 0.0f;
+            for (int k = 0; k < K; ++k)
+                ref += decodeA(A[static_cast<size_t>(m) * K + k]) *
+                       decodeB(B[static_cast<size_t>(k) * N + n]);
+            maxErr = std::max(maxErr,
+                static_cast<double>(std::fabs(out[static_cast<size_t>(m) * N + n] - ref)));
+        }
+    std::printf("  [info] %s (%dx%dx%d) max abs err = %.2e\n", name, M, N, K, maxErr);
+    return maxErr < 1e-3;
+}
+
+using Encode16Fn = uint16_t (*)(float);
+using Decode16Fn = float (*)(uint16_t);
+
+static bool run_tcgen05_16bit_case(const char* name, int M, int N, int kind,
+                                   Encode16Fn encode, Decode16Fn decode) {
+    constexpr int K = 16;
+    std::mt19937 rng(static_cast<uint32_t>(M * 65537 + N * 257 + kind));
+    std::normal_distribution<float> dist(0.0f, 0.5f);
+    std::vector<uint16_t> A(static_cast<size_t>(M) * K), B(static_cast<size_t>(K) * N);
+    for (auto& x : A) x = encode(dist(rng));
+    for (auto& x : B) x = encode(dist(rng));
+
+    std::vector<float> out(static_cast<size_t>(M) * N, 0.0f);
+    const uint32_t acc = vgre_jit_tmem_alloc(N);
+    vgre_jit_tcgen05_mma(acc, vgre_make_wgmma_desc(A.data()),
+                         vgre_make_wgmma_desc(B.data()), M, N, K, kind, 0);
+    vgre_jit_tcgen05_ld(reinterpret_cast<uint32_t*>(out.data()), acc, M, N);
+    vgre_jit_tmem_dealloc(acc, N);
+
+    double maxErr = 0.0;
+    for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            float ref = 0.0f;
+            for (int k = 0; k < K; ++k)
+                ref += decode(A[static_cast<size_t>(m) * K + k]) *
+                       decode(B[static_cast<size_t>(k) * N + n]);
+            maxErr = std::max(maxErr,
+                static_cast<double>(std::fabs(out[static_cast<size_t>(m) * N + n] - ref)));
+        }
+    std::printf("  [info] %s (%dx%dx%d) max abs err = %.2e\n", name, M, N, K, maxErr);
+    return maxErr < 1e-2;
+}
+
+static bool run_tcgen05_tf32_case() {
+    constexpr int M = 64, N = 256, K = 8;
+    std::vector<float> A(static_cast<size_t>(M) * K), B(static_cast<size_t>(K) * N);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k)
+            A[m * K + k] = static_cast<float>(((m * 17 + k * 11) % 129) - 64) / 8.0f;
+    for (int k = 0; k < K; ++k)
+        for (int n = 0; n < N; ++n)
+            B[k * N + n] = static_cast<float>(((k * 23 + n * 7) % 97) - 48) / 8.0f;
+
+    std::vector<float> out(static_cast<size_t>(M) * N, 0.0f);
+    const uint32_t acc = vgre_jit_tmem_alloc(N);
+    vgre_jit_tcgen05_mma(acc, vgre_make_wgmma_desc(A.data()),
+                         vgre_make_wgmma_desc(B.data()), M, N, K, 2, 0);
+    vgre_jit_tcgen05_ld(reinterpret_cast<uint32_t*>(out.data()), acc, M, N);
+    vgre_jit_tmem_dealloc(acc, N);
+
+    double maxErr = 0.0;
+    for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            float ref = 0.0f;
+            for (int k = 0; k < K; ++k) ref += A[m * K + k] * B[k * N + n];
+            maxErr = std::max(maxErr,
+                static_cast<double>(std::fabs(out[static_cast<size_t>(m) * N + n] - ref)));
+        }
+    std::printf("  [info] TF32 m64n256k8 max abs err = %.2e\n", maxErr);
+    return maxErr < 1e-3;
 }
 
 int main() {
@@ -155,6 +263,54 @@ int main() {
         printf("  [info] tcgen05 FP8(E4M3) GEMM via TMEM max abs err = %.2e\n", maxErr);
         check("tcgen05 FP8 E4M3 GEMM through TMEM == reference", maxErr < 1e-3);
     }
+
+    // Exercise every FP8 shape/type branch in the tcgen05 JIT dispatcher, from
+    // matrix descriptors through TMEM loadback, against an independent GEMM.
+    check("tcgen05 dispatch E4M3 m64n256k32 through TMEM",
+          run_tcgen05_fp8_case("E4M3 m64n256", 64, 256, 3,
+              vgre_f32_to_fp8e4m3, vgre_f32_to_fp8e4m3,
+              vgre_fp8e4m3_to_f32, vgre_fp8e4m3_to_f32));
+    check("tcgen05 dispatch E4M3 m64n128k32 through TMEM",
+          run_tcgen05_fp8_case("E4M3 m64n128", 64, 128, 3,
+              vgre_f32_to_fp8e4m3, vgre_f32_to_fp8e4m3,
+              vgre_fp8e4m3_to_f32, vgre_fp8e4m3_to_f32));
+    check("tcgen05 dispatch E4M3 m64n64k32 through TMEM",
+          run_tcgen05_fp8_case("E4M3 m64n64", 64, 64, 3,
+              vgre_f32_to_fp8e4m3, vgre_f32_to_fp8e4m3,
+              vgre_fp8e4m3_to_f32, vgre_fp8e4m3_to_f32));
+    check("tcgen05 dispatch E5M2 m64n256k32 through TMEM",
+          run_tcgen05_fp8_case("E5M2 m64n256", 64, 256, 4,
+              vgre_f32_to_fp8e5m2, vgre_f32_to_fp8e5m2,
+              vgre_fp8e5m2_to_f32, vgre_fp8e5m2_to_f32));
+    check("tcgen05 dispatch E5M2 m64n128k32 through TMEM",
+          run_tcgen05_fp8_case("E5M2 m64n128", 64, 128, 4,
+              vgre_f32_to_fp8e5m2, vgre_f32_to_fp8e5m2,
+              vgre_fp8e5m2_to_f32, vgre_fp8e5m2_to_f32));
+    check("tcgen05 dispatch mixed E4M3×E5M2 m64n256k32 through TMEM",
+          run_tcgen05_fp8_case("E4M3xE5M2 m64n256", 64, 256, 5,
+              vgre_f32_to_fp8e4m3, vgre_f32_to_fp8e5m2,
+              vgre_fp8e4m3_to_f32, vgre_fp8e5m2_to_f32));
+    check("tcgen05 dispatch mixed E4M3×E5M2 m64n128k32 through TMEM",
+          run_tcgen05_fp8_case("E4M3xE5M2 m64n128", 64, 128, 5,
+              vgre_f32_to_fp8e4m3, vgre_f32_to_fp8e5m2,
+              vgre_fp8e4m3_to_f32, vgre_fp8e5m2_to_f32));
+    check("tcgen05 dispatch E4M3 m128n256k32 through TMEM",
+          run_tcgen05_fp8_case("E4M3 m128n256", 128, 256, 3,
+              vgre_f32_to_fp8e4m3, vgre_f32_to_fp8e4m3,
+              vgre_fp8e4m3_to_f32, vgre_fp8e4m3_to_f32));
+    check("tcgen05 dispatch BF16 m64n256k16 through TMEM",
+          run_tcgen05_16bit_case("BF16 m64n256", 64, 256, 0, f32_to_bf16, bf16_to_f32));
+    check("tcgen05 dispatch BF16 m64n128k16 through TMEM",
+          run_tcgen05_16bit_case("BF16 m64n128", 64, 128, 0, f32_to_bf16, bf16_to_f32));
+    check("tcgen05 dispatch BF16 m64n64k16 through TMEM",
+          run_tcgen05_16bit_case("BF16 m64n64", 64, 64, 0, f32_to_bf16, bf16_to_f32));
+    check("tcgen05 dispatch BF16 m128n256k16 through TMEM",
+          run_tcgen05_16bit_case("BF16 m128n256", 128, 256, 0, f32_to_bf16, bf16_to_f32));
+    check("tcgen05 dispatch FP16 m64n256k16 through TMEM",
+          run_tcgen05_16bit_case("FP16 m64n256", 64, 256, 1, f32_to_f16, f16_to_f32));
+    check("tcgen05 dispatch FP16 m64n128k16 through TMEM",
+          run_tcgen05_16bit_case("FP16 m64n128", 64, 128, 1, f32_to_f16, f16_to_f32));
+    check("tcgen05 dispatch TF32 m64n256k8 through TMEM", run_tcgen05_tf32_case());
 
     printf("\n%d / %d passed\n", g_pass, g_total);
     return (g_pass == g_total) ? 0 : 1;

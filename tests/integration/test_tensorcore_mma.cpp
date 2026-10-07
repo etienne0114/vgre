@@ -41,7 +41,13 @@ static void check(const char *name, bool ok) {
 }
 
 static inline uint16_t f16bits(float f) { return vgre_cuda::__half(f).__x; }
-static inline float    f16val (float f) { return float(vgre_cuda::__half(f)); }
+static inline float f16_from_bits(uint16_t bits) {
+    vgre_cuda::__half h;
+    h.__x = bits;
+    return static_cast<float>(h);
+}
+static inline uint16_t bf16bits(float f) { return vgre::runtime::fp32_to_bf16(f); }
+static inline float bf16val(uint16_t bits) { return vgre::runtime::bf16_to_fp32(bits); }
 static inline uint32_t pack2(uint16_t lo, uint16_t hi) {
     return (uint32_t)lo | ((uint32_t)hi << 16);
 }
@@ -56,12 +62,18 @@ static inline uint32_t pack4fp8(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
 // Shared block scratch: two warps × 32 lanes × 16 u32 slots per lane.
 static uint32_t g_mma_scratch[64 * 16];
 
-// ── m16n8k16 f16·f16→f32 ─────────────────────────────────────────────────────
-struct F16Job {
+// ── m16n8k16 f16/bf16·f16/bf16→f32 ──────────────────────────────────────────
+using M16MmaFn = void (*)(float&, float&, float&, float&,
+                          unsigned, unsigned, unsigned, unsigned,
+                          unsigned, unsigned, float, float, float, float);
+using Encode16Fn = uint16_t (*)(float);
+using Decode16Fn = float (*)(uint16_t);
+struct M16Job {
     const uint32_t *Areg, *Breg; const float *Creg; float *Dreg;  // [32×..]
+    M16MmaFn mma;
 };
-static void f16_lane(int tid, void *arg) {
-    auto *j = static_cast<F16Job *>(arg);
+static void m16_lane(int tid, void *arg) {
+    auto *j = static_cast<M16Job *>(arg);
     *vgre_jit_get_mma_buffer() = g_mma_scratch;
     *vgre_jit_get_threadIdx()  = vgre::dim3((uint32_t)tid, 0, 0);
     *vgre_jit_get_blockDim()   = vgre::dim3(32, 1, 1);
@@ -69,40 +81,41 @@ static void f16_lane(int tid, void *arg) {
     const uint32_t *B = j->Breg + tid * 2;
     const float    *C = j->Creg + tid * 4;
     float d0, d1, d2, d3;
-    vgre_mma_m16n8k16_f32_f16(d0, d1, d2, d3, A[0], A[1], A[2], A[3], B[0], B[1],
-                              C[0], C[1], C[2], C[3]);
+    j->mma(d0, d1, d2, d3, A[0], A[1], A[2], A[3], B[0], B[1],
+           C[0], C[1], C[2], C[3]);
     float *D = j->Dreg + tid * 4;
     D[0] = d0; D[1] = d1; D[2] = d2; D[3] = d3;
 }
 
-static bool runF16() {
+static bool runM16(const char* name, Encode16Fn encode, Decode16Fn decode, M16MmaFn mma) {
     const int M = 16, N = 8, K = 16;
-    std::mt19937 rng(20260611);
+    std::mt19937 rng(name[0] == 'b' ? 20261008 : 20260611);
     std::normal_distribution<float> nd(0.0f, 1.0f);
-    std::vector<float> A(M * K), B(K * N), C(M * N);
-    for (auto &x : A) x = f16val(nd(rng));
-    for (auto &x : B) x = f16val(nd(rng));
+    std::vector<uint16_t> A(M * K), B(K * N);
+    std::vector<float> C(M * N);
+    for (auto &x : A) x = encode(nd(rng));
+    for (auto &x : B) x = encode(nd(rng));
     for (auto &x : C) x = nd(rng);
 
     std::vector<uint32_t> Areg(32 * 4), Breg(32 * 2);
     std::vector<float>    Creg(32 * 4), Dreg(32 * 4, 0.0f);
     for (int lane = 0; lane < 32; ++lane) {
         int g = lane >> 2, t = lane & 3;
-        auto Ab = [&](int m, int k){ return f16bits(A[m * K + k]); };
+        auto Ab = [&](int m, int k){ return A[m * K + k]; };
         Areg[lane*4+0] = pack2(Ab(g,   2*t+0), Ab(g,   2*t+1));
         Areg[lane*4+1] = pack2(Ab(g+8, 2*t+0), Ab(g+8, 2*t+1));
         Areg[lane*4+2] = pack2(Ab(g,   2*t+8), Ab(g,   2*t+9));
         Areg[lane*4+3] = pack2(Ab(g+8, 2*t+8), Ab(g+8, 2*t+9));
-        auto Bb = [&](int k, int n){ return f16bits(B[k * N + n]); };
+        auto Bb = [&](int k, int n){ return B[k * N + n]; };
         Breg[lane*2+0] = pack2(Bb(2*t+0, g), Bb(2*t+1, g));
         Breg[lane*2+1] = pack2(Bb(2*t+8, g), Bb(2*t+9, g));
         Creg[lane*4+0] = C[(g)   * N + 2*t+0]; Creg[lane*4+1] = C[(g)   * N + 2*t+1];
         Creg[lane*4+2] = C[(g+8) * N + 2*t+0]; Creg[lane*4+3] = C[(g+8) * N + 2*t+1];
     }
 
-    F16Job job{Areg.data(), Breg.data(), Creg.data(), Dreg.data()};
+    M16Job job{Areg.data(), Breg.data(), Creg.data(), Dreg.data(), mma};
     std::memset(g_mma_scratch, 0, sizeof(g_mma_scratch));
-    vgre_jit_block_dispatch(32, f16_lane, &job);
+    vgre_jit_block_dispatch(32, m16_lane, &job);
 
     std::vector<float> D(M * N, 0.0f);
     for (int lane = 0; lane < 32; ++lane) {
@@ -110,17 +123,148 @@ static bool runF16() {
         D[(g)   * N + 2*t+0] = Dreg[lane*4+0]; D[(g)   * N + 2*t+1] = Dreg[lane*4+1];
         D[(g+8) * N + 2*t+0] = Dreg[lane*4+2]; D[(g+8) * N + 2*t+1] = Dreg[lane*4+3];
     }
-    double maxErr = 0.0; int at = 0;
+    double maxErr = 0.0; int at = 0; bool withinBound = true;
     for (int m = 0; m < M; ++m)
         for (int n = 0; n < N; ++n) {
-            float ref = C[m * N + n];
-            for (int kk = 0; kk < K; ++kk) ref += f16val(A[m*K+kk]) * f16val(B[kk*N+n]);
-            double e = std::fabs(D[m * N + n] - ref);
+            double ref = C[m * N + n], absProducts = 0.0;
+            for (int kk = 0; kk < K; ++kk) {
+                const double product = static_cast<double>(decode(A[m*K+kk])) * decode(B[kk*N+n]);
+                ref += product;
+                absProducts += std::fabs(product);
+            }
+            const double e = std::fabs(static_cast<double>(D[m * N + n]) - ref);
             if (e > maxErr) { maxErr = e; at = m * N + n; }
+            const double bound = 4.0 * K * std::numeric_limits<float>::epsilon() * absProducts + 2e-6;
+            if (e > bound) withinBound = false;
         }
-    printf("  [info] m16n8k16.f16 max abs err vs A*B+C = %.2e at (%d,%d): D=%.4f\n",
-           maxErr, at / N, at % N, D[at]);
-    return maxErr < 1e-2;
+    printf("  [info] m16n8k16.%s max abs err vs independent matrix reference = %.2e at (%d,%d)\n",
+           name, maxErr, at / N, at % N);
+    return withinBound;
+}
+
+static bool runF16() {
+    return runM16("f16", f16bits, f16_from_bits, vgre_mma_m16n8k16_f32_f16);
+}
+
+static bool runBF16() {
+    return runM16("bf16", bf16bits, bf16val, vgre_mma_m16n8k16_f32_bf16);
+}
+
+// ── m16n8k8 TF32·TF32→FP32 ──────────────────────────────────────────────────
+struct Tf32Job {
+    const uint32_t* Areg;
+    const uint32_t* Breg;
+    const float* Creg;
+    float* Dreg;
+};
+
+static uint32_t float_bits(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static void tf32_lane(int tid, void* arg) {
+    auto* job = static_cast<Tf32Job*>(arg);
+    *vgre_jit_get_mma_buffer() = g_mma_scratch;
+    *vgre_jit_get_threadIdx() = vgre::dim3(static_cast<uint32_t>(tid), 0, 0);
+    *vgre_jit_get_blockDim() = vgre::dim3(32, 1, 1);
+    const uint32_t* a = job->Areg + tid * 4;
+    const uint32_t* b = job->Breg + tid * 2;
+    const float* c = job->Creg + tid * 4;
+    float d0, d1, d2, d3;
+    vgre_mma_m16n8k8_tf32(d0, d1, d2, d3, a[0], a[1], a[2], a[3], b[0], b[1],
+                          c[0], c[1], c[2], c[3]);
+    float* d = job->Dreg + tid * 4;
+    d[0] = d0; d[1] = d1; d[2] = d2; d[3] = d3;
+}
+
+static bool runTF32() {
+    constexpr int M = 16, N = 8, K = 8;
+    // These values have at most eight significant binary digits, so each is
+    // exactly representable as TF32. This isolates the fragment map and MMA.
+    std::vector<float> A(M * K), B(K * N), C(M * N);
+    for (int m = 0; m < M; ++m)
+        for (int k = 0; k < K; ++k)
+            A[m*K+k] = static_cast<float>(((m * 17 + k * 11) % 129) - 64) / 8.0f;
+    for (int k = 0; k < K; ++k)
+        for (int n = 0; n < N; ++n)
+            B[k*N+n] = static_cast<float>(((k * 23 + n * 7) % 97) - 48) / 8.0f;
+    std::mt19937 rng(20261009);
+    std::uniform_real_distribution<float> cd(-2.0f, 2.0f);
+    for (auto& value : C) value = cd(rng);
+
+    std::vector<uint32_t> Areg(32 * 4), Breg(32 * 2);
+    std::vector<float> Creg(32 * 4), Dreg(32 * 4, 0.0f);
+    for (int lane = 0; lane < 32; ++lane) {
+        const int group = lane >> 2, pair = lane & 3;
+        Areg[lane*4+0] = float_bits(A[group*K+pair]);
+        Areg[lane*4+1] = float_bits(A[(group+8)*K+pair]);
+        Areg[lane*4+2] = float_bits(A[group*K+pair+4]);
+        Areg[lane*4+3] = float_bits(A[(group+8)*K+pair+4]);
+        Breg[lane*2+0] = float_bits(B[pair*N+group]);
+        Breg[lane*2+1] = float_bits(B[(pair+4)*N+group]);
+        Creg[lane*4+0] = C[group*N+2*pair];
+        Creg[lane*4+1] = C[group*N+2*pair+1];
+        Creg[lane*4+2] = C[(group+8)*N+2*pair];
+        Creg[lane*4+3] = C[(group+8)*N+2*pair+1];
+    }
+
+    Tf32Job job{Areg.data(), Breg.data(), Creg.data(), Dreg.data()};
+    std::memset(g_mma_scratch, 0, sizeof(g_mma_scratch));
+    vgre_jit_block_dispatch(32, tf32_lane, &job);
+
+    std::vector<float> D(M*N);
+    for (int lane = 0; lane < 32; ++lane) {
+        const int group = lane >> 2, pair = lane & 3;
+        D[group*N+2*pair] = Dreg[lane*4];
+        D[group*N+2*pair+1] = Dreg[lane*4+1];
+        D[(group+8)*N+2*pair] = Dreg[lane*4+2];
+        D[(group+8)*N+2*pair+1] = Dreg[lane*4+3];
+    }
+
+    double maxErr = 0.0;
+    for (int m = 0; m < M; ++m)
+        for (int n = 0; n < N; ++n) {
+            double ref = C[m*N+n], absProducts = 0.0;
+            for (int k = 0; k < K; ++k) {
+                const double product = static_cast<double>(A[m*K+k]) * B[k*N+n];
+                ref += product;
+                absProducts += std::fabs(product);
+            }
+            const double err = std::fabs(static_cast<double>(D[m*N+n]) - ref);
+            maxErr = std::max(maxErr, err);
+            const double bound = 4.0 * K * std::numeric_limits<float>::epsilon() * absProducts + 2e-6;
+            if (err > bound) {
+                std::printf("  [FAIL] m16n8k8.tf32 at (%d,%d): got %.9g ref %.12g bound %.3g\n",
+                            m, n, D[m*N+n], ref, bound);
+                return false;
+            }
+        }
+    std::printf("  [info] m16n8k8.tf32 max abs error vs independent matrix reference = %.3g\n", maxErr);
+    return true;
+}
+
+static bool testTf32Conversions() {
+    using R = vgre_mma_detail::Tf32Rounding;
+    const auto cvt = [](float value, R mode, bool sat = false, bool relu = false,
+                        bool pzo = false) {
+        return vgre_mma_detail::cvt_f32_to_tf32_bits(value, mode, sat, relu, pzo);
+    };
+    const bool ok =
+        cvt(1.00048828125f, R::NearestEven) == 0x3f800000u &&
+        cvt(1.00146484375f, R::NearestEven) == 0x3f804000u &&
+        cvt(1.0009f, R::TowardZero) == 0x3f800000u &&
+        cvt(-1.0009f, R::TowardZero) == 0xbf800000u &&
+        cvt(1.00048828125f, R::NearestAway) == 0x3f802000u &&
+        cvt(std::numeric_limits<float>::max(), R::NearestEven, true) == 0x7f7fe000u &&
+        cvt(std::numeric_limits<float>::infinity(), R::NearestEven, true) == 0x7f7fe000u &&
+        cvt(-std::numeric_limits<float>::infinity(), R::NearestEven, false, true) == 0u &&
+        cvt(-std::numeric_limits<float>::infinity(), R::NearestEven, true, true) == 0u &&
+        cvt(-0.0f, R::NearestEven, false, false, true) == 0u &&
+        cvt(-1.0f, R::NearestEven, false, true) == 0u &&
+        cvt(std::numeric_limits<float>::quiet_NaN(), R::NearestEven, false, true) == 0x7fc00000u;
+    return ok;
 }
 
 // ── m16n8k32 s8·s8→s32 ───────────────────────────────────────────────────────
@@ -560,6 +704,10 @@ static void runTmaStore() {
 int main() {
     printf("=== Tensor-core mma.sync warp-collective correctness (Track 9) ===\n");
     check("m16n8k16 f16*f16->f32 matches A*B+C reference", runF16());
+    check("m16n8k16 bf16*bf16->f32 matches A*B+C reference", runBF16());
+    check("m16n8k8 tf32*tf32->f32 matches A*B+C reference", runTF32());
+    check("TF32 cvt rounding, saturation, ReLU, NaN, and PZO semantics",
+          testTf32Conversions());
     check("m16n8k32 s8*s8->s32 matches A*B+C reference (exact)", runS8());
     check("m8n8k32 s4/u4 and m8n8k128 b1 full two-warp matrix references",
           runM8IntegerMma());

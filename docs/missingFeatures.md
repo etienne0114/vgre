@@ -91,7 +91,8 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 | **T4** State-space models | — (complete) | single-state selective scan, depthwise conv1d, the Mamba-3 MIMO matrix-state scan, a full Mamba-1 model + safetensors loader (`mamba.h`/`mamba_loader.cpp`), **and a verified end-to-end run of a real checkpoint** — `tools/mamba_run` loads the open **`state-spaces/mamba-130m-hf`** (130M params, 24 layers) and its logits match an independent NumPy Mamba-1 forward at **cosine sim 1.0** (identical argmax, 10/10 top-10, max abs diff 2e-4) |
 
 ### 1.6 Math and tensor-core coverage
-- **Remaining:** add ISA-by-ISA differential coverage for tensor-core MMA shapes not yet exercised by the complete-fragment tests. The working-tree implementation covers FP8 `m16n8k32`, INT4 `m8n8k32`, binary `m8n8k128`, FP64 `m8n8k4`, and signed INT8 `m16n8k32`; Linux tests pass, but the new changes have not yet run in hosted Windows or macOS CI.
+- **Remaining:** run the expanded tensor-core regression tests in hosted CI on Linux, macOS, and Windows. The current working tree adds full-fragment references for FP16/BF16 `mma.sync.m16n8k16`, TF32 `mma.sync.m16n8k8` and its FP32 conversion modes, FP16/TF32 WGMMA, and every currently mapped tcgen05 dispatcher shape/type (BF16, FP16, TF32, and FP8). Existing complete-fragment tests cover FP8 `mma.sync.m16n8k32`, INT4 `m8n8k32`, binary `m8n8k128`, FP64 `m8n8k4`, and signed INT8 `m16n8k32`. These changes are local and are not part of the latest hosted run yet.
+- **Remaining:** broaden coverage beyond the explicitly mapped PTX shapes and formats. Unsupported MMA variants remain unsupported; the current tests establish correctness only for the translator entries listed in `src/compiler/ptx/ptx_translator_map.cpp` and `src/compiler/ptx/ptx_conversion.cpp`.
 
 ---
 

@@ -1100,10 +1100,11 @@ def page_advanced():
         code("VGRE_LOG_LEVEL=DEBUG vgre dashboard 2>&1 | grep -E \"AMX|AVX-512|SIMD\""),
         h2("Hopper PTX emulation"),
         table(["PTX instruction", "CPU emulation"], [
-            ["<code>wgmma.mma_async.*</code>", "Full M×N×K GEMM via <code>vgre_wgmma_*</code> (AVX-512 when N=256)"],
+            ["<code>wgmma.mma_async.*</code>", "Warp-group fragment GEMM for mapped BF16, FP16, and TF32 shapes; the legacy full-tile BF16 path also has AVX-512 acceleration"],
             ["<code>cp.async.bulk.tensor.*</code>", "Synchronous <code>memcpy</code>"],
             ["<code>wgmma.fence</code> / <code>wgmma.wait_group</code>", "<code>__atomic_thread_fence(SEQ_CST)</code>"],
-            ["<code>mma.sync.aligned.m16n8k16</code>", "<code>vgre_mma_m16n8k16_f32_f16</code> scalar tile GEMM"],
+            ["<code>mma.sync.aligned.*</code>", "Warp-collective fragment GEMM for mapped FP16, BF16, TF32, FP64, integer, and FP8 forms"],
+            ["<code>tcgen05.mma</code>", "Mapped GEMM dispatch accumulates into the CPU TMEM model; all mapped BF16, FP16, TF32, and FP8 shapes are reference-tested"],
         ]),
         h2("CUDA MPS (multi-process)"),
         code("export VGRE_MPS_PIPE=/tmp/vgre_mps.sock\n"

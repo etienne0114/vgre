@@ -125,6 +125,32 @@ int main() {
     check("cuModuleLoadData: mma.sync.aligned e5m2.e5m2.f32", r == CUDA_SUCCESS);
     if (mod) { cuModuleUnload(mod); mod = nullptr; }
 
+    // ── BF16 mma.sync m16n8k16 and TF32 conversion + m16n8k8 ───────────────
+    // These modules exercise the real PTX-to-C translation and helper signature
+    // compilation, including b32 TF32 values produced by cvt.rn.tf32.f32.
+    static const char kPtxBf16Tf32[] =
+        ".version 8.0\n.target sm_90\n.address_size 64\n"
+        ".visible .entry test_bf16_tf32(.param .u64 out_ptr) {\n"
+        " .reg .u64 %ptr; .reg .b32 %ba<4>, %bb<2>, %ta<4>, %tb<2>;\n"
+        " .reg .f32 %d<4>, %c<4>, %f<6>;\n"
+        " ld.param.u64 %ptr, [out_ptr];\n"
+        " mov.b32 %ba0, 0; mov.b32 %ba1, 0; mov.b32 %ba2, 0; mov.b32 %ba3, 0;\n"
+        " mov.b32 %bb0, 0; mov.b32 %bb1, 0;\n"
+        " mov.f32 %c0, 0.0; mov.f32 %c1, 0.0; mov.f32 %c2, 0.0; mov.f32 %c3, 0.0;\n"
+        " mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32\n"
+        "  {%d0,%d1,%d2,%d3}, {%ba0,%ba1,%ba2,%ba3}, {%bb0,%bb1}, {%c0,%c1,%c2,%c3};\n"
+        " mov.f32 %f0, 1.0; mov.f32 %f1, 2.0; mov.f32 %f2, 3.0;\n"
+        " mov.f32 %f3, 4.0; mov.f32 %f4, 5.0; mov.f32 %f5, 6.0;\n"
+        " cvt.rn.tf32.f32 %ta0, %f0; cvt.rn.tf32.f32 %ta1, %f1;\n"
+        " cvt.rn.tf32.f32 %ta2, %f2; cvt.rn.tf32.f32 %ta3, %f3;\n"
+        " cvt.rn.tf32.f32 %tb0, %f4; cvt.rn.tf32.f32 %tb1, %f5;\n"
+        " mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32\n"
+        "  {%d0,%d1,%d2,%d3}, {%ta0,%ta1,%ta2,%ta3}, {%tb0,%tb1}, {%c0,%c1,%c2,%c3};\n"
+        " st.global.f32 [%ptr], %d0; ret;\n}\n";
+    r = loadPtx(kPtxBf16Tf32, &mod);
+    check("cuModuleLoadData: BF16 MMA plus TF32 conversion and MMA", r == CUDA_SUCCESS);
+    if (mod) { cuModuleUnload(mod); mod = nullptr; }
+
     // ── 3. mma.sync.aligned FP8 mixed E4M3×E5M2→FP32 ────────────────────────
     static const char kPtxMmaMixed[] =
         ".version 8.0\n"

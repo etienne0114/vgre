@@ -121,6 +121,44 @@ int main() {
         check("mma.sync leaves no brace-grouped operands ({%)", c.find("{%") == std::string::npos);
     }
 
+    // The supported TF32 and BF16 variants must reach the shape-specific
+    // collective helpers, and FP32→TF32 conversion must preserve PTX rounding
+    // and modifier semantics in the generated expression.
+    {
+        const char* const bodies[] = {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};",
+            "cvt.rn.tf32.f32 %0, %1;",
+            "cvt.rz.tf32.f32 %0, %1;",
+            "cvt.rna.tf32.f32 %0, %1;",
+            "cvt.rn.relu.pzo.tf32.f32 %0, %1;",
+            "cvt.rna.satfinite.tf32.f32 %0, %1;",
+            "cvt.rn.satfinite.relu.tf32.f32 %0, %1;"
+        };
+        const char* const expected[] = {
+            "vgre_mma_m16n8k16_f32_bf16(",
+            "vgre_mma_m16n8k8_tf32(",
+            "Tf32Rounding::NearestEven,false,false,false",
+            "Tf32Rounding::TowardZero,false,false,false",
+            "Tf32Rounding::NearestAway,false,false,false",
+            "Tf32Rounding::NearestEven,false,true,true",
+            "Tf32Rounding::NearestAway,true,false,false",
+            "Tf32Rounding::NearestEven,true,true,false"
+        };
+        bool ok = true;
+        for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
+            std::string translated = PTXTranslator::translate(
+                std::string("asm volatile(\"") + bodies[i] + "\" : );");
+            bool caseOk = contains(translated, expected[i]);
+            if (i >= 2)
+                caseOk = caseOk && contains(translated, "cvt_f32_to_tf32_bits(");
+            if (!caseOk)
+                std::printf("  [detail] translation for '%s': %s\n", bodies[i], translated.c_str());
+            ok = ok && caseOk;
+        }
+        check("TF32/BF16 mma.sync and cvt variants map to real helpers", ok);
+    }
+
     // m8 tensor-core shapes use one A register and one B register per lane,
     // plus two accumulator registers. The translator must pass the six actual
     // PTX operands in order; widening these fragments into extra registers
@@ -164,6 +202,31 @@ int main() {
               contains(c, "vgre_wgmma_wg_bf16(_wgd,64,"));
         check("wgmma packs the 32 distributed accumulator registers",
               contains(c, "float _wgd[32]"));
+    }
+
+    {
+        const auto translatedWgmma = [](const char* instruction, int n) {
+            std::string regs = "{";
+            const int count = n / 2;
+            for (int i = 0; i < count; ++i) {
+                regs += "%" + std::to_string(i);
+                if (i + 1 < count) regs += ",";
+            }
+            regs += "}";
+            return PTXTranslator::translate("asm volatile(\"" + std::string(instruction) +
+                " " + regs + ", %" + std::to_string(count) + ", %" +
+                std::to_string(count + 1) + ";\" : );");
+        };
+        const std::string f16 = translatedWgmma(
+            "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16", 128);
+        const std::string tf32 = translatedWgmma(
+            "wgmma.mma_async.sync.aligned.m64n256k8.f32.tf32.tf32", 256);
+        check("wgmma FP16 n128 mapping validates and packs all 64 accumulator registers",
+              contains(f16, "vgre_wgmma_wg_f16(_wgd,128,") &&
+              contains(f16, "float _wgd[64]"));
+        check("wgmma TF32 n256 mapping validates and packs all 128 accumulator registers",
+              contains(tf32, "vgre_wgmma_wg_tf32(_wgd,256,") &&
+              contains(tf32, "float _wgd[128]"));
     }
 
     // (7) The dominant Hopper TMA load (cluster-scope global→shared with mbarrier

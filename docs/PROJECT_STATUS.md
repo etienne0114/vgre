@@ -11,12 +11,16 @@
 - **PyPI**: Latest published package is [0.1.4](https://pypi.org/project/vgre/0.1.4/), with Linux, macOS universal2, and Windows wheels.
 
 **Unreleased local math verification (2026-10-07):** INT8/BF16 GEMM edge cases and the
-PTX MMA fragment emulation were hardened. Linux `MatMulAMX` and `TensorCoreMMA` CTest
-cases pass; the portable scalar build also passes `MatMulAMX`. The PTX translator
-test passes 23/23 checks. The focused six-test regression set passes. The full local
-410-test CTest run was stopped at test 78 after `IdentityMetricsJwt` could not start
-its loopback HTTP server; tests after that point were not run. These working-tree
-changes have not yet run in hosted Windows or macOS CI. `VGRE_CACHE_DIR` now overrides
+PTX MMA fragment emulation were hardened. The current working tree adds complete-fragment
+FP16/BF16/TF32 `mma.sync` references, TF32 conversion tests, FP16/TF32 WGMMA references,
+all mapped tcgen05 BF16/FP16/TF32/FP8 shape/type dispatch checks, and a guard test for
+the FP16 WGMMA `m64n128k16` output bound. The five focused CTest cases pass locally:
+`TensorCoreMMA`, `PTXTranslate`, `PTXFp8Translation`, `WgmmaWarpGroup`, and
+`TensorMemoryTcgen05`. Linux `MatMulAMX` and the portable scalar `MatMulAMX` checks also
+passed in the prior local verification. These uncommitted math changes have not yet run
+in hosted CI. The full local 410-test CTest run was stopped at test 78 after
+`IdentityMetricsJwt` could not start its loopback HTTP server; tests after that point
+were not run. `VGRE_CACHE_DIR` now overrides
 the kernel AST cache directory on all platforms, and stale-cache eviction handles
 read-only directories without throwing; the CUDA Graph integration test passes against
 the default read-only cache path.
@@ -77,11 +81,11 @@ the default read-only cache path.
 > dot-product caveat is detailed below). This file now tracks the real
 > path to production rather than asserting it.
 
-> **2026-10-07 math correction:** The register-based `mma.sync` helpers for FP8
-> `m16n8k32`, INT4 `m8n8k32`, binary `m8n8k128`, and FP64 `m8n8k4` now reconstruct
-> complete per-warp tiles from the PTX fragments. Other tensor-core shapes still
-> need ISA-by-ISA differential coverage; do not treat the earlier flat-dot note as
-> a blanket description of every WMMA path.
+> **2026-10-07 math correction:** The register-based `mma.sync` helpers reconstruct
+> complete per-warp tiles from the PTX fragments. The current local regression set
+> also checks FP16/BF16/TF32 `mma.sync`, mapped WGMMA formats, and all mapped tcgen05
+> dispatch shapes against matrix references. This does not claim support for PTX
+> shapes or modifiers that are absent from the translator maps.
 
 VGRE (Virtual GPU Runtime Engine) is a high-fidelity CUDA emulation runtime designed to execute unmodified CUDA, cuBLAS, cuDNN, cuSPARSE, cuSolver, cuRAND, and NCCL workloads on standard x86-64 and ARM64 CPU architectures. It intercepts GPU API calls at load time and runs them on host hardware using an LLVM-18 JIT compilation pipeline and a thread-safe parallel execution model.
 

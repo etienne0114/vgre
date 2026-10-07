@@ -44,8 +44,44 @@ static std::string tcgen05_st_emit(const std::vector<std::string>& o, int n) {
     return out;
 }
 
+static std::string tf32_convert(const std::vector<std::string>& o,
+                                const char* rounding,
+                                bool satfinite = false,
+                                bool relu = false,
+                                bool positiveZeroOnly = false) {
+    if (o.size() < 2) throw std::runtime_error("cvt.tf32.f32 needs destination and source");
+    const char* mode = "NearestEven";
+    if (std::string(rounding) == "rna") mode = "NearestAway";
+    else if (std::string(rounding) == "rz") mode = "TowardZero";
+    return o[0] + " = vgre_mma_detail::cvt_f32_to_tf32_bits((float)(" + o[1] + "),"
+           "vgre_mma_detail::Tf32Rounding::" + mode + "," +
+           (satfinite ? "true" : "false") + "," +
+           (relu ? "true" : "false") + "," +
+           (positiveZeroOnly ? "true" : "false") + ");";
+}
+
 const TranslateMap& getConversionMap() {
     static const TranslateMap kMap = {
+        // FP32 → TF32 bit-format conversions. The output remains a b32
+        // register containing the rounded TF32 value used by mma.sync.
+        {"cvt.rn.tf32.f32", [](auto& o){ return tf32_convert(o, "rn"); }},
+        {"cvt.rz.tf32.f32", [](auto& o){ return tf32_convert(o, "rz"); }},
+        {"cvt.rna.tf32.f32", [](auto& o){ return tf32_convert(o, "rna"); }},
+        {"cvt.rn.satfinite.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", true); }},
+        {"cvt.rz.satfinite.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", true); }},
+        {"cvt.rna.satfinite.tf32.f32", [](auto& o){ return tf32_convert(o, "rna", true); }},
+        {"cvt.rn.relu.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", false, true); }},
+        {"cvt.rz.relu.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", false, true); }},
+        {"cvt.rn.satfinite.relu.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", true, true); }},
+        {"cvt.rz.satfinite.relu.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", true, true); }},
+        {"cvt.rn.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", false, false, true); }},
+        {"cvt.rz.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", false, false, true); }},
+        {"cvt.rn.satfinite.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", true, false, true); }},
+        {"cvt.rz.satfinite.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", true, false, true); }},
+        {"cvt.rn.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", false, true, true); }},
+        {"cvt.rz.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", false, true, true); }},
+        {"cvt.rn.satfinite.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rn", true, true, true); }},
+        {"cvt.rz.satfinite.relu.pzo.tf32.f32", [](auto& o){ return tf32_convert(o, "rz", true, true, true); }},
         // ── Missing cvt.* variants (float ↔ integer, signed/unsigned) ────────
         // f32 → s32
         {"cvt.rn.s32.f32", [](auto& o){ return o[0]+" = (int)("+o[1]+");"; }},

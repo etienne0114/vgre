@@ -355,6 +355,56 @@ inline float bf16b(uint16_t bits) {
 inline float tf32b(uint32_t bits) {
     uint32_t u = bits & 0xFFFFE000u; float f; memcpy(&f, &u, 4); return f;
 }
+enum class Tf32Rounding { NearestEven, NearestAway, TowardZero };
+
+// PTX cvt.{rn,rna,rz}.tf32.f32. TF32 keeps the FP32 exponent and the top ten
+// fraction bits. Operate on the IEEE representation so ties, subnormals, and
+// overflow are handled explicitly and identically on every host architecture.
+inline uint32_t cvt_f32_to_tf32_bits(float value, Tf32Rounding rounding,
+                                    bool satfinite = false, bool relu = false,
+                                    bool positiveZeroOnly = false) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    constexpr uint32_t kSign = 0x80000000u;
+    constexpr uint32_t kExponent = 0x7f800000u;
+    constexpr uint32_t kFraction = 0x007fffffu;
+    constexpr uint32_t kDiscarded = 0x00001fffu;
+    constexpr uint32_t kHalfway = 0x00001000u;
+    constexpr uint32_t kTf32Max = 0x7f7fe000u;
+
+    const uint32_t sign = bits & kSign;
+    const uint32_t magnitude = bits & ~kSign;
+    if ((magnitude & kExponent) == kExponent) {
+        if (magnitude & kFraction) {
+            // ReLU specifies a canonical NaN result; otherwise retain the high
+            // TF32 payload bits and quiet signaling NaNs.
+            if (relu) return 0x7fc00000u;
+            uint32_t result = magnitude & ~kDiscarded;
+            result |= 0x00400000u;
+            return sign | result;
+        }
+        if (relu && sign) return 0u;
+        if (satfinite) return sign | kTf32Max;
+        return bits;
+    }
+
+    if (relu && sign && magnitude != 0) return 0u;
+
+    uint32_t rounded = magnitude & ~kDiscarded;
+    const uint32_t remainder = magnitude & kDiscarded;
+    const bool odd = (rounded & 0x00002000u) != 0;
+    if (rounding == Tf32Rounding::NearestAway) {
+        if (remainder >= kHalfway) rounded += 0x00002000u;
+    } else if (rounding == Tf32Rounding::NearestEven) {
+        if (remainder > kHalfway || (remainder == kHalfway && odd))
+            rounded += 0x00002000u;
+    }
+
+    if (satfinite && rounded > kTf32Max) rounded = kTf32Max;
+    if (relu && sign && rounded != 0) return 0u;
+    const uint32_t resultSign = positiveZeroOnly && rounded == 0 ? 0u : sign;
+    return resultSign | rounded;
+}
 inline float bits_as_f32(uint32_t bits) { float f; memcpy(&f, &bits, 4); return f; }
 inline int   i8(uint32_t r, int i) { return static_cast<int>(static_cast<int8_t>((r >> (8 * i)) & 0xFFu)); }
 
@@ -919,7 +969,7 @@ inline void vgre_wgmma_m64n128k16_f16_f32(float* d, uint64_t descA, uint64_t des
 {
     const uint16_t* A = detail::wgmma_desc_ptr_f16(descA);
     const uint16_t* B = detail::wgmma_desc_ptr_f16(descB);
-    for (int m = 0; m < 128; ++m)
+    for (int m = 0; m < 64; ++m)
         for (int n = 0; n < 128; ++n) {
             float acc = d[m * 128 + n];
             for (int k = 0; k < 16; ++k)
@@ -1385,7 +1435,7 @@ inline void vgre_tcgen05_m128n256k16_bf16_f32(float* d, uint64_t descA, uint64_t
     vgre_wgmma_m64n256k16_bf16_f32(d, descA, descB);
     // Tile 1 (rows 64..127) — A pointer offset by 64×K elements
     const uint16_t* A1 = A + 64 * 16;
-    uint64_t descA1 = reinterpret_cast<uint64_t>(A1);
+    uint64_t descA1 = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(A1)) >> 4;
     vgre_wgmma_m64n256k16_bf16_f32(d + 64 * 256, descA1, descB);
 }
 
