@@ -3,6 +3,7 @@
 #include "cuda_driver_internal.h"
 #include "vgre/api/fatbinary_utils.h"
 #include "vgre/common/platform.h"
+#include "vgre/advanced/runtime_profiler.h"
 #include "../../compiler/sass/sass_decoder.h"
 #include <cstdio>
 #include <cstring>
@@ -158,6 +159,7 @@ CUresult cuLaunchKernel(CUfunction f,
   if (f == 0) return CUDA_ERROR_INVALID_VALUE;
   vgre::dim3 grid(gridDimX, gridDimY, gridDimZ);
   vgre::dim3 block(blockDimX, blockDimY, blockDimZ);
+  vgre::advanced::ScopedProfileApi profileApi(vgre::advanced::ProfileApi::CudaDriver);
   auto r = vgre::core::RuntimeEngine::instance().launchKernel(
       static_cast<vgre::KernelId>(f), grid, block, kernelParams, sharedMemBytes, hStream);
   return (r == vgre::VGREResult::SUCCESS) ? CUDA_SUCCESS : CUDA_ERROR_UNKNOWN;

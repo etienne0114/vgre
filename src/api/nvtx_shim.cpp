@@ -67,9 +67,6 @@ static void recordRangeStart(const std::string& label) {
     ev.kernelName  = "[NVTX] " + label;
     ev.durationMs  = 0.0;
     ev.timestamp   = std::chrono::steady_clock::now();
-    ev.timestamp_ms = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            ev.timestamp.time_since_epoch()).count());
     vgre::advanced::RuntimeProfiler::instance().recordEvent(ev);
 }
 
@@ -78,9 +75,6 @@ static void recordRangeEnd(const std::string& label, double durationMs) {
     ev.kernelName  = "[NVTX] " + label;
     ev.durationMs  = durationMs;
     ev.timestamp   = std::chrono::steady_clock::now();
-    ev.timestamp_ms = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            ev.timestamp.time_since_epoch()).count());
     vgre::advanced::RuntimeProfiler::instance().recordEvent(ev);
 }
 

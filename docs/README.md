@@ -35,7 +35,7 @@ graph TD
 *   **Key Contents**:
     *   Test suite statistics (full Linux suite passing).
     *   Core numerical verification guarantees.
-    *   **Actual, verified hardware limitations and gaps** (SASS binary limits, CUPTI hardware counter scaling, and physical GPUDirect RDMA proxies) with no historical clutter.
+    *   **Actual, verified hardware limitations and gaps** (SASS binary limits, unsupported physical GPU PMU metrics, and physical GPUDirect RDMA) with no historical clutter.
 *   **Read When**: You want to check what specific CUDA/library features are numerical-exact or where emulation boundary conditions reside.
 
 ### 2. 🚀 [Documentation site](https://vgre.vercel.app/) — the operator's guide
@@ -107,7 +107,8 @@ VGRE is designed as a cross-platform system, utilizing platform-native bindings 
 | **TPM 2.0 Storage** | `libtss2-esys` (auto) | TPM 2.0 (auto) | TPM 2.0 (auto) |
 | **GNOME Keyring** | `libsecret-1` (auto) | N/A | N/A |
 | **RDMA Transport** | `libibverbs` (auto) | N/A | N/A |
-| **Telemetry PMU** | `perf_event_open` | QueryThreadCycleTime | mach thread user-time (no NVIDIA PMU) |
+| **VGRE virtual profile counters** | Launches, duration, threads | Launches, duration, threads | Launches, duration, threads |
+| **Physical GPU PMU metrics** | Unsupported on CPU-backed device | Unsupported on CPU-backed device | Unsupported on CPU-backed device |
 
 ---
 

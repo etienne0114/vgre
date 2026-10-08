@@ -2,6 +2,7 @@
  * VGRE Integration Test — CUDA API attributes & mem info
  */
 #include "vgre/api/cuda_interceptor.h"
+#include "vgre/core/runtime_engine.h"
 
 #include <cassert>
 #include <iostream>
@@ -54,18 +55,67 @@ void test_cuda_api_attributes() {
   assert(err == cudaSuccess);
   assert(value > 0);
 
-  err = cuda.deviceGetAttribute(&value, 38, 0); // L2CacheSize
-  (void)err;
-  assert(err == cudaSuccess);
-  assert(value > 0);
+  value = 1234;
+  err = cuda.deviceGetAttribute(&value, 38, 0); // L2CacheSize is not modeled.
+  assert(err == cudaErrorNotSupported);
+  assert(value == 1234);
 
   err = cuda.deviceGetAttribute(&value, 41, 0); // UnifiedAddressing
   (void)err;
   assert(err == cudaSuccess);
 
-  err = cuda.deviceGetAttribute(&value, 51, 0); // PciDomainId
+  err = cuda.deviceGetAttribute(&value, 50, 0); // PciDomainId
   (void)err;
   assert(err == cudaSuccess);
+
+  // Regression coverage for CUDA 11 cudaDeviceAttr numeric values. These
+  // attributes were previously shifted, causing valid queries to report an
+  // unrelated property and unknown IDs to succeed with a fabricated zero.
+  vgre::DeviceProperties properties;
+  auto propertyResult = vgre::core::RuntimeEngine::instance().getDeviceProperties(0, properties);
+  assert(propertyResult == vgre::VGREResult::SUCCESS);
+  const auto expectAttribute = [&cuda, &value](int attr, int expected) {
+    const auto result = cuda.deviceGetAttribute(&value, attr, 0);
+    assert(result == cudaSuccess);
+    assert(value == expected);
+  };
+  expectAttribute(12, properties.maxRegsPerSM); // MaxRegistersPerBlock
+  const int textureAttributes[][2] = {
+      {45, 1 << 15}, {46, 1 << 15}, {47, 1 << 12}, {48, 1 << 12},
+      {49, 1 << 12}, {50, properties.pciDomainId}, {51, 256},
+      {52, 1 << 14}, {53, 1 << 14}, {54, 2046}, {55, 1 << 20},
+      {56, 1 << 15}, {57, 1 << 15}, {58, 1 << 12}, {59, 1 << 12},
+      {60, 1 << 12}, {61, 1 << 20}, {62, 2048}, {63, 1 << 15},
+      {64, 1 << 15}, {65, 2048}, {66, 1 << 14}, {67, 1 << 14},
+      {68, 2046}, {69, 1 << 27}, {70, 1 << 15}, {71, 1 << 15},
+      {72, 1 << 27}, {73, 1 << 15}, {74, 1 << 15}};
+  for (const auto &expected : textureAttributes)
+    expectAttribute(expected[0], expected[1]);
+
+  const int emulatedAttributes[][2] = {
+      {77, 1 << 20}, {78, 1}, {79, 1}, {80, 1},
+      {81, properties.maxSharedMemPerSM}, {82, properties.maxRegsPerSM},
+      {83, 1}, {84, 0}, {85, 0}, {86, 1}, {88, 0}, {89, 1}, {90, 1},
+      {91, 1}, {95, 1}, {96, 0},
+      {97, static_cast<int>(properties.sharedMemPerBlock)},
+      {98, 0}, {99, 1}, {100, 0}, {101, 0},
+      {106, properties.maxBlocksPerSM}, {111, 0}};
+  for (const auto &expected : emulatedAttributes)
+    expectAttribute(expected[0], expected[1]);
+
+  for (int unavailableAttr : {36, 37, 87}) {
+    value = 1234;
+    err = cuda.deviceGetAttribute(&value, unavailableAttr, 0);
+    assert(err == cudaErrorNotSupported);
+    assert(value == 1234);
+  }
+
+  for (int invalidAttr : {-1, 0, 44, 92, 102, 105, 107, 112}) {
+    value = 1234;
+    err = cuda.deviceGetAttribute(&value, invalidAttr, 0);
+    assert(err == cudaErrorInvalidValue);
+    assert(value == 1234);
+  }
 
   size_t freeBytes = 0;
   size_t totalBytes = 0;

@@ -119,14 +119,18 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
       uint32_t blocksTotal = op.gridDim.total();
       uint64_t flopsPerBlock = blocksTotal > 0 ? op.kernelArgs.flops / blocksTotal : 0;
       uint64_t bytesPerBlock = blocksTotal > 0 ? op.kernelArgs.memBytes / blocksTotal : 0;
+      bool kernelExecutionSucceeded = true;
 #ifndef VGRE_ENABLE_JIT
       // Zero-Burden build: graph kernel nodes have no JIT fn — run through the
       // from-scratch backend (whole-grid launch), addressed by kernel name.
       if (!op.kernelArgs.fn) {
-        RuntimeEngine::instance().launchBackendByName(
+        kernelExecutionSucceeded = RuntimeEngine::instance().launchBackendByName(
             op.kernelArgs.name, op.gridDim, op.blockDim,
             const_cast<void **>(op.kernelArgs.argPtrs.data()),
-            op.kernelArgs.sharedMemBytes);
+            op.kernelArgs.sharedMemBytes, false) == VGREResult::SUCCESS;
+        if (!kernelExecutionSucceeded)
+          VGRE_LOG_ERROR("RuntimeEngine", "Graph backend launch failed for kernel '" +
+                                             op.kernelArgs.name + "'");
       } else
 #endif
       exec->execute(op.kernelArgs.fn, op.gridDim, op.blockDim,
@@ -137,9 +141,25 @@ static void executeOpsInline(const std::vector<NativeGraphOperation> &ops,
       auto end = std::chrono::steady_clock::now();
       double ms =
           std::chrono::duration<double, std::milli>(end - start).count();
-      vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
-          op.kernelArgs.name, op.blockDim.total(), 8, ms,
-          op.kernelArgs.memBytes, op.kernelArgs.flops);
+      auto &profiler = vgre::advanced::RuntimeProfiler::instance();
+      if (kernelExecutionSucceeded && profiler.isEnabled()) {
+        vgre::advanced::ProfileEvent event;
+        event.kernelName = op.kernelArgs.name;
+        event.durationMs = ms;
+        event.memoryBytes = op.kernelArgs.memBytes;
+        event.flops = op.kernelArgs.flops;
+        event.gridDim = op.gridDim;
+        event.blockDim = op.blockDim;
+        event.staticSharedMemoryBytes = op.kernelArgs.sharedMemBytes;
+        event.threadsUsed = static_cast<int>(op.blockDim.total());
+        event.timestamp = end;
+        event.isKernelLaunch = true;
+        profiler.recordEvent(event);
+      }
+      if (kernelExecutionSucceeded)
+        vgre::advanced::AdaptiveExecutionEngine::instance().recordExecution(
+            op.kernelArgs.name, op.blockDim.total(), 8, ms,
+            op.kernelArgs.memBytes, op.kernelArgs.flops);
     } else if (op.type == GraphNodeType::MEMCPY) {
       if (op.kind == VGRE_MEMCPY_HOST_TO_DEVICE)
         mm->copyHostToDevice(op.dst, op.src, op.count);

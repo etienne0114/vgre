@@ -119,6 +119,11 @@ public:
   // kernel. Public so the static graph-op executor can reach it.
   VGREResult launchBackendByName(const std::string &name, const dim3 &gridDim,
                                  const dim3 &blockDim, void **args, size_t sharedMem);
+  // Graph execution owns its completion profile event; this overload prevents
+  // the backend from recording a duplicate event for the same launch.
+  VGREResult launchBackendByName(const std::string &name, const dim3 &gridDim,
+                                 const dim3 &blockDim, void **args,
+                                 size_t sharedMem, bool recordProfile);
 
   // Which execution tier holds a registered backend kernel (for tests/diagnostics):
   //   2  native x86-64 JIT   1  Tier-1 compiled   0  Tier-0 interpreter   -1 unknown.
@@ -415,7 +420,9 @@ private:
                                                    const std::string &source);
   VGREResult launchBackendKernel(const std::shared_ptr<BackendKernel> &bk,
                                  const dim3 &gridDim, const dim3 &blockDim,
-                                 void **args, size_t sharedMem);
+                                 void **args, size_t sharedMem,
+                                 const std::string &kernelName,
+                                 bool recordProfile);
 #endif
   std::unique_ptr<runtime::CPUParallelExecutor> executor_;
   std::unique_ptr<runtime::VectorEngine> vectorEngine_;

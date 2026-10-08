@@ -103,7 +103,16 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
         if (it != backendKernels_.end()) bk = it->second;
       }
     }
-    if (bk) return launchBackendKernel(bk, gridDim, blockDim, args, sharedMem);
+    if (bk) {
+      std::string backendKernelName;
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto nameIt = kernelIRCache_.find(id);
+        if (nameIt != kernelIRCache_.end()) backendKernelName = nameIt->second.name;
+      }
+      return launchBackendKernel(bk, gridDim, blockDim, args, sharedMem,
+                                 backendKernelName, true);
+    }
   }
 #endif
 
@@ -243,6 +252,7 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
   // We submit a coarse-grained task: one Scheduler worker thread will invoke
   // the CPUParallelExecutor, which parallelizes blocks via OpenMP.
   auto exec = executor_.get();
+  const auto profileApi = vgre::advanced::currentProfileApi();
   std::string kName = "unknown";
   std::vector<ArgType> argTypes;
   int streamPriority = 0;
@@ -295,7 +305,8 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
                                             argTypes, staticSharedMem, kName, gridOffset,
                                             estimatedInstructionCount, staticFlopCount,
                                             flopCountVerified,
-                                            rawMm, usesSyncthreads]() mutable {
+                                            rawMm, usesSyncthreads,
+                                            profileApi]() mutable {
     auto start = std::chrono::steady_clock::now();
     size_t totalSharedMem = sharedMem + staticSharedMem;
 
@@ -482,6 +493,10 @@ VGREResult RuntimeEngine::launchKernel(KernelId id, const dim3 &gridDim,
       ev.gflops = (ms > 0.0) ? (static_cast<double>(flops) / 1e9) / (ms / 1000.0) : 0.0;
       ev.gridDim = gridDim;
       ev.blockDim = blockDim;
+      ev.staticSharedMemoryBytes = staticSharedMem;
+      ev.dynamicSharedMemoryBytes = sharedMem;
+      ev.api = profileApi;
+      ev.isKernelLaunch = true;
       ev.threadsUsed = static_cast<int>(blockDim.total());
       ev.timestamp = end;
       // Phase 10: instruction sampler — populate from JIT static analysis

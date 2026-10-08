@@ -137,7 +137,7 @@ VGRE intercepts CUDA and OpenCL API calls and executes kernels on CPU using:
 
 ### Known Limitations ⚠️
 - 10–50× slower than real GPU for compute-bound kernels (CPU execution; AVX-512 auto-vectorisation + OpenMP + NUMA binding reduce the gap)
-- **Physical GPU counters unavailable**: profiling uses VGRE timeline/Chrome/OTLP and LLVM-IR instruction classification, not NVIDIA PMU/CUPTI counters.
+- **Physical GPU counters unavailable**: VGRE activity is software-runtime data. The VGRE CUPTI-shaped interface provides measured launch count, elapsed nanoseconds, and virtual-thread counters from runtime launch records. Physical GPU PMU metrics such as IPC, occupancy, DRAM traffic, and cache hit rates remain unsupported; VGRE does not substitute host counters or estimates.
 - **Sparse direct factorization with fill-in**: requires an external sparse solver backend; current sparse solver paths are CSR-to-dense or zero-fill incomplete factorizations.
 - **Optional transports**: RDMA and gRPC require explicit build flags and system libraries; TCP remains the default.
 - **Device-side cuRAND**: intentionally unsupported in the CPU runtime model.

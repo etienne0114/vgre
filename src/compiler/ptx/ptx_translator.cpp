@@ -110,7 +110,6 @@ static std::vector<AsmOperand> parseAsmOperands(const std::string& constraints) 
 static std::string substituteAsmOperands(const std::string& body,
                                          const std::string& constraints) {
     const auto operands = parseAsmOperands(constraints);
-    if (operands.empty()) return body;
     std::unordered_map<std::string, std::string> named;
     for (const auto& operand : operands)
         if (!operand.name.empty()) named[operand.name] = operand.expression;

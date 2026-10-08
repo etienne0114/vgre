@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 // Platform socket includes for exportOTLPToHTTP
 #if defined(_WIN32)
@@ -36,6 +37,8 @@ namespace vgre {
 namespace advanced {
 
 namespace {
+thread_local ProfileApi g_currentProfileApi = ProfileApi::Unknown;
+
 static std::string escapeJsonString(const std::string &s) {
   std::string out;
   out.reserve(s.size());
@@ -66,6 +69,19 @@ static std::string escapeJsonString(const std::string &s) {
 
 } // namespace
 
+ScopedProfileApi::ScopedProfileApi(ProfileApi api)
+    : previous_(g_currentProfileApi) {
+    g_currentProfileApi = api;
+}
+
+ScopedProfileApi::~ScopedProfileApi() {
+    g_currentProfileApi = previous_;
+}
+
+ProfileApi currentProfileApi() {
+    return g_currentProfileApi;
+}
+
 RuntimeProfiler::RuntimeProfiler() {
     VGRE_LOG_DEBUG("RuntimeProfiler", "Initialized (disabled by default)");
 }
@@ -88,18 +104,55 @@ bool RuntimeProfiler::isEnabled() const {
 void RuntimeProfiler::recordEvent(const ProfileEvent& event) {
     if (!enabled_.load(std::memory_order_relaxed)) return;
 
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     ProfileEvent ev = event;
+    if (ev.timestamp == std::chrono::steady_clock::time_point{}) {
+        ev.timestamp = std::chrono::steady_clock::now();
+    }
     if (ev.timestamp_ms == 0) {
         ev.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
-    events_.push_back(ev);
-    // Index into the timestamp-ordered timeline. The composite key keeps events in
-    // time order while staying unique when several share a millisecond.
-    const uint64_t key = (ev.timestamp_ms << 20) | (timelineSeq_++ & 0xFFFFFull);
-    timeline_.insert(key, events_.size() - 1);
-    updateStats(ev.kernelName, ev);
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        events_.push_back(ev);
+        // Index into the timestamp-ordered timeline. The composite key keeps events in
+        // time order while staying unique when several share a millisecond.
+        const uint64_t key = (ev.timestamp_ms << 20) | (timelineSeq_++ & 0xFFFFFull);
+        timeline_.insert(key, events_.size() - 1);
+        updateStats(ev.kernelName, ev);
+    }
+
+    try {
+        std::vector<EventListener> listeners;
+        {
+            std::lock_guard<std::mutex> lock(listenerMutex_);
+            listeners.reserve(listeners_.size());
+            for (const auto& entry : listeners_) listeners.push_back(entry.second);
+        }
+        for (const auto& listener : listeners) {
+            try { listener(ev); }
+            catch (...) {
+                VGRE_LOG_ERROR("RuntimeProfiler", "An event listener threw an exception");
+            }
+        }
+    } catch (...) {
+        VGRE_LOG_ERROR("RuntimeProfiler", "Failed to dispatch profiling event listeners");
+    }
+}
+
+RuntimeProfiler::EventListenerId RuntimeProfiler::addEventListener(
+    EventListener listener) {
+    if (!listener) return 0;
+    std::lock_guard<std::mutex> lock(listenerMutex_);
+    const EventListenerId id = nextListenerId_++;
+    listeners_.emplace(id, std::move(listener));
+    return id;
+}
+
+bool RuntimeProfiler::removeEventListener(EventListenerId listenerId) {
+    if (listenerId == 0) return false;
+    std::lock_guard<std::mutex> lock(listenerMutex_);
+    return listeners_.erase(listenerId) != 0;
 }
 
 std::vector<ProfileEvent> RuntimeProfiler::getEventsInWindow(uint64_t startMs,
@@ -168,7 +221,7 @@ void RuntimeProfiler::updateStats(const std::string& name,
                        event.gflops) / s.invocations;
     }
 
-    // Phase 10: instruction sampler aggregation
+    // Accumulate software instruction accounting separately from measured time.
     uint64_t instTotal = event.instructions.total();
     if (instTotal > 0) {
         s.totalInstructions += instTotal;
@@ -233,6 +286,17 @@ std::vector<ProfileEvent> RuntimeProfiler::getEventsByKernel(
 std::vector<ProfileEvent> RuntimeProfiler::getAllEvents() const {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     return events_;
+}
+
+uint64_t RuntimeProfiler::getEventGeneration() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return eventGeneration_;
+}
+
+std::pair<std::vector<ProfileEvent>, uint64_t>
+RuntimeProfiler::getEventSnapshot() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return {events_, eventGeneration_};
 }
 
 // ── JSON export ────────────────────────────────────────────────────────────
@@ -579,6 +643,7 @@ void RuntimeProfiler::clear() {
     instructionMixes_.clear();
     timeline_.clear();
     timelineSeq_ = 0;
+    ++eventGeneration_;
 }
 
 // ── Singleton ──────────────────────────────────────────────────────────────

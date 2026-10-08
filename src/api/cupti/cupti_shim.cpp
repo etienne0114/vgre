@@ -1,458 +1,373 @@
-// CUPTI shim — software-proxy implementation backed by RuntimeProfiler.
-//
-// Hardware PMU counters are read via platform-native APIs:
-//   Linux:   perf_event_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS)
-//   macOS:   mach_absolute_time() + QueryThreadCycleTime equivalent via
-//            thread_info(THREAD_BASIC_INFO) for user-time instruction estimate
-//   Windows: QueryThreadCycleTime() for actual TSC cycle deltas
-//
-// All platforms fall back to RuntimeProfiler instruction-mix proxies when
-// hardware counters are unavailable (paranoid>1, sandbox, missing privilege).
+// VGRE profiling implementation. Its virtual counters are derived from recorded
+// launch events; it never labels host estimates as physical GPU measurements.
 
 #include "vgre/api/cupti_shim.h"
-#include "vgre/common/library_loader.h"
 #include "vgre/advanced/runtime_profiler.h"
-#include "vgre/common/logger.h"
 
 #include <vector>
 #include <unordered_map>
 #include <mutex>
 #include <cstring>
 #include <chrono>
-#include <cmath>
 #include <string>
 #include <atomic>
 #include <algorithm>
+#include <condition_variable>
+#include <memory>
+#include <limits>
+#include <cmath>
+#include <utility>
+#include <new>
 
-#if defined(__linux__)
-#include <linux/perf_event.h>
-#include <sys/ioctl.h>
-#include <sys/syscall.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <dlfcn.h>
-#endif
-
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#include <mach/thread_info.h>
-#include <mach/mach_time.h>
-#include <dlfcn.h>
-#include <sys/stat.h>
-#include <IOKit/IOKitLib.h>             // io_iterator_t, IOServiceMatching, …
-#include <CoreFoundation/CoreFoundation.h>  // CFDataRef, CFRelease, …
-#endif
-
-#if defined(_WIN32)
-#include "vgre/common/os_backend.h"
-#endif
-
-// ── Native CUPTI passthrough (Track 2) ───────────────────────────────────────
-// Attempt to load the native CUPTI library at startup. When a real GPU and
-// driver are present, all CUPTI calls are forwarded to the hardware library
-// first; the software-proxy path is used only when hardware is unavailable.
-namespace {
-
-typedef CUptiResult (*fn_cuptiSubscribe_t)(CUpti_SubscriberHandle*, CUpti_CallbackFunc, void*);
-typedef CUptiResult (*fn_cuptiUnsubscribe_t)(CUpti_SubscriberHandle);
-typedef CUptiResult (*fn_cuptiEnableCallback_t)(uint32_t, CUpti_SubscriberHandle, CUpti_CallbackDomain, CUpti_CallbackId);
-typedef CUptiResult (*fn_cuptiActivityEnable_t)(CUpti_ActivityKind);
-typedef CUptiResult (*fn_cuptiActivityDisable_t)(CUpti_ActivityKind);
-typedef CUptiResult (*fn_cuptiActivityFlushAll_t)(uint32_t);
-typedef CUptiResult (*fn_cuptiGetResultString_t)(CUptiResult, const char**);
-
-struct NativeCupti {
-    vgre::common::LibraryLoader handle;
-    fn_cuptiSubscribe_t         subscribe          = nullptr;
-    fn_cuptiUnsubscribe_t       unsubscribe        = nullptr;
-    fn_cuptiEnableCallback_t    enableCallback     = nullptr;
-    fn_cuptiActivityEnable_t    activityEnable     = nullptr;
-    fn_cuptiActivityDisable_t   activityDisable    = nullptr;
-    fn_cuptiActivityFlushAll_t  activityFlushAll   = nullptr;
-    fn_cuptiGetResultString_t   getResultString    = nullptr;
-    bool                        active             = false;
-
-    static NativeCupti& instance() {
-        static NativeCupti inst = NativeCupti::init();
-        return inst;
-    }
-
-private:
-    static NativeCupti init() {
-        NativeCupti nc{};
-#if defined(_WIN32)
-        nc.handle = vgre::common::LibraryLoader::tryLoad({"cupti.dll"});
-#elif defined(__APPLE__)
-        nc.handle = vgre::common::LibraryLoader::tryLoad({"libcupti.dylib"});
-#else
-        nc.handle = vgre::common::LibraryLoader::tryLoad({"libcupti.so.12", "libcupti.so.11", "libcupti.so"});
-#endif
-        if (!nc.handle.isLoaded()) {
-            // Logger not yet accessible from static init — will use VGRE_LOG macros at call time
-            return nc;
-        }
-
-        nc.subscribe        = nc.handle.getFunc<fn_cuptiSubscribe_t>("cuptiSubscribe");
-        nc.unsubscribe      = nc.handle.getFunc<fn_cuptiUnsubscribe_t>("cuptiUnsubscribe");
-        nc.enableCallback   = nc.handle.getFunc<fn_cuptiEnableCallback_t>("cuptiEnableCallback");
-        nc.activityEnable   = nc.handle.getFunc<fn_cuptiActivityEnable_t>("cuptiActivityEnable");
-        nc.activityDisable  = nc.handle.getFunc<fn_cuptiActivityDisable_t>("cuptiActivityDisable");
-        nc.activityFlushAll = nc.handle.getFunc<fn_cuptiActivityFlushAll_t>("cuptiActivityFlushAll");
-        nc.getResultString  = nc.handle.getFunc<fn_cuptiGetResultString_t>("cuptiGetResultString");
-
-        // All core function pointers must resolve; otherwise the library is unusable.
-        if (nc.subscribe && nc.unsubscribe && nc.enableCallback &&
-            nc.activityEnable && nc.activityDisable && nc.activityFlushAll) {
-            // ── Physical GPU topology detection ───────────────────────────────
-            // libcupti.so may load without a physical GPU (driver stubs, container
-            // environments). Verify a real device exists before activating the
-            // hardware path. Strategy (Linux): check /dev/nvidia0; (Windows): check
-            // adapter count via SetupDi; (macOS): check Metal GPU count.
-            nc.active = detectPhysicalGPU();
-        }
-        return nc;
-    }
-
-    // Returns true iff at least one physical NVIDIA GPU device is accessible.
-    // Math: topology check = union(driver presence, device file presence, NVML probe).
-    // Complexity: O(1) — reads /dev/nvidia0 stat or queries a single IOCTL.
-    static bool detectPhysicalGPU() {
-#if defined(__linux__)
-        // Primary: /dev/nvidia0 exists and is a character device
-        struct stat st{};
-        if (::stat("/dev/nvidia0", &st) == 0 && S_ISCHR(st.st_mode)) return true;
-        // Secondary: try loading libnvidia-ml.so to confirm driver presence
-        vgre::common::LibraryLoader ml = vgre::common::LibraryLoader::tryLoad({"libnvidia-ml.so.1", "libnvidia-ml.so"});
-        if (ml.isLoaded()) return true;
-        return false;
-#elif defined(_WIN32)
-        // Check if nvidia display adapter exists via registry key
-        HKEY hk = nullptr;
-        bool found = (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-            "SYSTEM\\CurrentControlSet\\Services\\nvlddmkm", 0, KEY_READ, &hk) == ERROR_SUCCESS);
-        if (hk) RegCloseKey(hk);
-        return found;
-#elif defined(__APPLE__)
-        // macOS: check if Metal has a discrete GPU (PCIe class 0x03 = display)
-        io_iterator_t it = 0;
-        CFMutableDictionaryRef match = IOServiceMatching("IOPCIDevice");
-        bool found = false;
-        if (IOServiceGetMatchingServices(kIOMasterPortDefault, match, &it) == kIOReturnSuccess) {
-            io_service_t svc;
-            while ((svc = IOIteratorNext(it))) {
-                CFDataRef cls = (CFDataRef)IORegistryEntryCreateCFProperty(
-                    svc, CFSTR("class-code"), kCFAllocatorDefault, 0);
-                if (cls) {
-                    const uint8_t* b = CFDataGetBytePtr(cls);
-                    if (b && (b[3] == 0x03)) { found = true; } // display controller
-                    CFRelease(cls);
-                }
-                IOObjectRelease(svc);
-                if (found) break;
-            }
-            IOObjectRelease(it);
-        }
-        return found;
-#else
-        return false;
-#endif
-    }
-};
-#undef DLSYM
-
-} // anonymous namespace — NativeCupti
-
-// ── Hardware PMU sampler ──────────────────────────────────────────────────────
-// Thin RAII wrapper for per-thread hardware instruction/cycle counter.
-// Instances are thread_local; start/stop bracket the region to measure.
-namespace {
-
-struct HwPmuSampler {
-#if defined(__linux__)
-    int fd = -1;
-
-    HwPmuSampler() {
-        struct perf_event_attr attr{};
-        attr.type           = PERF_TYPE_HARDWARE;
-        attr.size           = sizeof(attr);
-        attr.config         = PERF_COUNT_HW_INSTRUCTIONS;
-        attr.disabled       = 1;
-        attr.exclude_kernel = 1;
-        attr.exclude_hv     = 1;
-        fd = static_cast<int>(syscall(SYS_perf_event_open, &attr,
-                                      0, -1, -1, 0));
-    }
-    ~HwPmuSampler() { if (fd >= 0) { ::close(fd); fd = -1; } }
-
-    bool valid() const { return fd >= 0; }
-    void start() {
-        if (fd < 0) return;
-        ioctl(fd, PERF_EVENT_IOC_RESET,  0);
-        ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-    }
-    uint64_t stop() {
-        if (fd < 0) return 0;
-        ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-        uint64_t n = 0;
-        if (::read(fd, &n, sizeof(n)) != (ssize_t)sizeof(n)) n = 0;
-        return n;
-    }
-
-#elif defined(__APPLE__)
-    // macOS: measure user-mode CPU time via mach thread_basic_info.
-    // thread_basic_info::user_time gives microseconds of CPU time for this thread.
-    // Not instruction counts, but proportional and hardware-derived.
-    uint64_t startNs = 0;
-    bool available = false;
-
-    HwPmuSampler() {
-        // Check if thread_info is accessible (always is on macOS user processes)
-        thread_basic_info_data_t info{};
-        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
-        available = (thread_info(mach_thread_self(), THREAD_BASIC_INFO,
-                                 reinterpret_cast<thread_info_t>(&info),
-                                 &count) == KERN_SUCCESS);
-    }
-    ~HwPmuSampler() = default;
-
-    bool valid() const { return available; }
-    void start() {
-        if (!available) return;
-        thread_basic_info_data_t info{};
-        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
-        if (thread_info(mach_thread_self(), THREAD_BASIC_INFO,
-                        reinterpret_cast<thread_info_t>(&info), &count) == KERN_SUCCESS) {
-            startNs = static_cast<uint64_t>(info.user_time.seconds) * 1000000000ULL
-                    + static_cast<uint64_t>(info.user_time.microseconds) * 1000ULL;
-        }
-    }
-    // Returns elapsed user-mode nanoseconds as a proxy for instruction count
-    // (CPU-time-proportional, not raw instructions, but hardware-measured).
-    uint64_t stop() {
-        if (!available) return 0;
-        thread_basic_info_data_t info{};
-        mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
-        if (thread_info(mach_thread_self(), THREAD_BASIC_INFO,
-                        reinterpret_cast<thread_info_t>(&info), &count) != KERN_SUCCESS)
-            return 0;
-        uint64_t nowNs = static_cast<uint64_t>(info.user_time.seconds) * 1000000000ULL
-                       + static_cast<uint64_t>(info.user_time.microseconds) * 1000ULL;
-        return (nowNs > startNs) ? (nowNs - startNs) : 0;
-    }
-
-#elif defined(_WIN32)
-    // Windows: QueryThreadCycleTime reads the actual CPU TSC for this thread.
-    uint64_t startCycles = 0;
-    bool available = false;
-
-    HwPmuSampler() {
-        ULONG64 dummy = 0;
-        available = (QueryThreadCycleTime(GetCurrentThread(), &dummy) != 0);
-    }
-    ~HwPmuSampler() = default;
-
-    bool valid() const { return available; }
-    void start() {
-        if (!available) return;
-        ULONG64 c = 0;
-        if (QueryThreadCycleTime(GetCurrentThread(), &c)) startCycles = c;
-    }
-    uint64_t stop() {
-        if (!available) return 0;
-        ULONG64 c = 0;
-        if (!QueryThreadCycleTime(GetCurrentThread(), &c)) return 0;
-        return (c > startCycles) ? (c - startCycles) : 0;
-    }
-
-#else
-    bool valid() const { return false; }
-    void start() {}
-    uint64_t stop() { return 0; }
-#endif
-
-    HwPmuSampler(const HwPmuSampler&) = delete;
-    HwPmuSampler& operator=(const HwPmuSampler&) = delete;
+struct CUpti_Subscriber_st {
+    CUpti_CallbackFunc callback = nullptr;
+    void* userdata = nullptr;
+    bool driverDomainEnabled = false;
+    bool runtimeDomainEnabled = false;
+    bool driverLaunchCallbackEnabled = false;
+    bool runtimeLaunchCallbackEnabled = false;
+    bool removing = false;
+    size_t callbacksInFlight = 0;
+    std::condition_variable callbacksFinished;
 };
 
-static thread_local HwPmuSampler* t_pmuSampler = nullptr;
-static HwPmuSampler& getThreadPmu() {
-    if (!t_pmuSampler) t_pmuSampler = new HwPmuSampler();
-    return *t_pmuSampler;
-}
-
-} // anonymous namespace — HwPmuSampler
+struct CUpti_EventGroup_st {};
 
 // ── Internal state ────────────────────────────────────────────────────────────
 
 namespace {
 
-struct Subscriber {
-    CUpti_CallbackFunc func     = nullptr;
-    void*              userdata = nullptr;
-    bool               active   = false;
-    std::vector<std::pair<CUpti_CallbackDomain, uint32_t>> enabled;
-};
-
-struct EventGroup {
-    std::vector<CUpti_EventID> events;
-    // Hardware PMU snapshot: captured on cuptiEventGroupDisable().
-    // Zero means no hardware read has completed yet for this group.
-    uint64_t hwInstrCount = 0;
-    bool     hwValid      = false;
-};
-
 struct ActivityRecord {
     CUpti_ActivityKernel5 kernel;
 };
 
-static std::mutex                                    g_mutex;
-static std::unordered_map<uintptr_t, Subscriber>    g_subscribers;
-static std::atomic<uintptr_t>                        g_nextSubId{1};
-static bool                                          g_kernelActivityEnabled = false;
+struct RecordCursor {
+    size_t offset = 0;
+    size_t validSize = 0;
+};
 
+static std::atomic<bool> g_kernelActivityEnabled{false};
+static std::mutex g_activityFlushMutex;
+static size_t g_activityFlushedEventCount = 0;
+static uint64_t g_activityGeneration = 0;
+static std::mutex g_recordCursorMutex;
+static std::unordered_map<const uint8_t*, RecordCursor> g_recordCursors;
+
+static std::mutex g_bufferCallbackMutex;
 static CUpti_BuffersCallbackRequestFunc  g_bufReq  = nullptr;
 static CUpti_BuffersCallbackCompleteFunc g_bufComp = nullptr;
 
 static std::vector<ActivityRecord>  g_pending;
 static std::mutex                   g_pendingMu;
 
-// Event group state: maps handle → EventGroup
-static std::mutex                                       g_egMutex;
-static std::unordered_map<uintptr_t, EventGroup>        g_eventGroups;
+static std::mutex g_profilerLeaseMutex;
+static size_t g_profilerLeaseCount = 0;
+static bool g_profilerWasEnabled = false;
+static std::mutex g_explicitProfilerInitMutex;
+static uint32_t g_explicitProfilerInitCount = 0;
+static std::atomic<bool> g_activityBufferCallbackInFlight{false};
 
-// ── Epoch for nanosecond timestamps ──────────────────────────────────────────
-static std::chrono::steady_clock::time_point g_epoch =
-    std::chrono::steady_clock::now();
+struct ActivityBufferCallbackScope {
+    ActivityBufferCallbackScope() {
+        g_activityBufferCallbackInFlight.store(true, std::memory_order_release);
+    }
+    ~ActivityBufferCallbackScope() {
+        g_activityBufferCallbackInFlight.store(false, std::memory_order_release);
+    }
+};
+
+struct EventGroupState {
+    std::vector<CUpti_EventID> eventIds;
+    bool enabled = false;
+    size_t startEventCount = 0;
+    uint64_t startGeneration = 0;
+    uint64_t values[3] = {0, 0, 0};
+};
+static std::mutex g_eventGroupMutex;
+static std::unordered_map<CUpti_EventGroupHandle, EventGroupState> g_eventGroups;
+
+static std::mutex g_subscriberMutex;
+static std::unordered_map<CUpti_SubscriberHandle,
+                          std::shared_ptr<CUpti_Subscriber_st>> g_subscribers;
+static vgre::advanced::RuntimeProfiler::EventListenerId g_callbackListenerId = 0;
+static thread_local bool g_insideCUPTICallback = false;
+
+static void acquireProfiler() {
+    std::lock_guard<std::mutex> lock(g_profilerLeaseMutex);
+    auto& profiler = vgre::advanced::RuntimeProfiler::instance();
+    if (g_profilerLeaseCount++ == 0) {
+        g_profilerWasEnabled = profiler.isEnabled();
+        if (!g_profilerWasEnabled) profiler.setEnabled(true);
+    }
+}
+
+static void releaseProfiler() {
+    std::lock_guard<std::mutex> lock(g_profilerLeaseMutex);
+    if (g_profilerLeaseCount == 0) return;
+    if (--g_profilerLeaseCount == 0 && !g_profilerWasEnabled)
+        vgre::advanced::RuntimeProfiler::instance().setEnabled(false);
+}
+
+static bool isVirtualEvent(CUpti_EventID event) {
+    return event == VGRE_CUPTI_EVENT_KERNEL_LAUNCHES ||
+           event == VGRE_CUPTI_EVENT_KERNEL_DURATION_NS ||
+           event == VGRE_CUPTI_EVENT_VIRTUAL_THREADS;
+}
+
+static size_t eventIndex(CUpti_EventID event) {
+    if (event == VGRE_CUPTI_EVENT_KERNEL_LAUNCHES) return 0;
+    if (event == VGRE_CUPTI_EVENT_KERNEL_DURATION_NS) return 1;
+    return 2;
+}
+
+static bool checkedAdd(uint64_t& target, uint64_t value) {
+    if (value > std::numeric_limits<uint64_t>::max() - target) return false;
+    target += value;
+    return true;
+}
+
+static bool virtualThreadCount(const vgre::advanced::ProfileEvent& event,
+                               uint64_t& count) {
+    const uint64_t dimensions[] = {event.gridDim.x, event.gridDim.y, event.gridDim.z,
+                                   event.blockDim.x, event.blockDim.y, event.blockDim.z};
+    count = 1;
+    for (uint64_t dimension : dimensions) {
+        if (dimension != 0 && count > std::numeric_limits<uint64_t>::max() / dimension)
+            return false;
+        count *= dimension;
+    }
+    return true;
+}
+
+static bool durationNs(const vgre::advanced::ProfileEvent& event, uint64_t& value) {
+    if (!std::isfinite(event.durationMs) || event.durationMs < 0.0) return false;
+    const long double ns = static_cast<long double>(event.durationMs) * 1000000.0L;
+    if (ns >= static_cast<long double>(std::numeric_limits<uint64_t>::max()))
+        return false;
+    value = static_cast<uint64_t>(ns);
+    return true;
+}
+
+static bool aggregateEvents(const std::vector<vgre::advanced::ProfileEvent>& events,
+                            size_t begin, uint64_t* values) {
+    if (begin > events.size()) begin = 0;
+    uint64_t aggregate[3] = {0, 0, 0};
+    for (size_t i = begin; i < events.size(); ++i) {
+        if (!events[i].isKernelLaunch) continue;
+        uint64_t threads = 0, duration = 0;
+        if (!virtualThreadCount(events[i], threads) || !durationNs(events[i], duration) ||
+            !checkedAdd(aggregate[0], 1) || !checkedAdd(aggregate[1], duration) ||
+            !checkedAdd(aggregate[2], threads))
+            return false;
+    }
+    std::copy(aggregate, aggregate + 3, values);
+    return true;
+}
+
+static bool supportedLaunchCallback(CUpti_CallbackDomain domain,
+                                    CUpti_CallbackId cbid) {
+    return (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
+            cbid == CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) ||
+           (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
+            cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000);
+}
+
+static void dispatchLaunchCallbacks(const vgre::advanced::ProfileEvent& event) {
+    if (!event.isKernelLaunch) return;
+    struct Call { std::shared_ptr<CUpti_Subscriber_st> subscriber;
+                  CUpti_CallbackDomain domain; CUpti_CallbackId cbid; };
+    std::vector<Call> calls;
+    CUpti_CallbackDomain domain;
+    CUpti_CallbackId cbid;
+    const char* functionName;
+    if (event.api == vgre::advanced::ProfileApi::CudaRuntime) {
+        domain = CUPTI_CB_DOMAIN_RUNTIME_API;
+        cbid = CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000;
+        functionName = "cudaLaunchKernel";
+    } else if (event.api == vgre::advanced::ProfileApi::CudaDriver) {
+        domain = CUPTI_CB_DOMAIN_DRIVER_API;
+        cbid = CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel;
+        functionName = "cuLaunchKernel";
+    } else {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_subscriberMutex);
+        calls.reserve(g_subscribers.size());
+        for (const auto& entry : g_subscribers) {
+            const auto& subscriber = entry.second;
+            if (subscriber->removing) continue;
+            const bool domainEnabled = domain == CUPTI_CB_DOMAIN_RUNTIME_API
+                ? subscriber->runtimeDomainEnabled : subscriber->driverDomainEnabled;
+            const bool callbackEnabled = domain == CUPTI_CB_DOMAIN_RUNTIME_API
+                ? subscriber->runtimeLaunchCallbackEnabled
+                : subscriber->driverLaunchCallbackEnabled;
+            if (domainEnabled || callbackEnabled) {
+                ++subscriber->callbacksInFlight;
+                calls.push_back({subscriber, domain, cbid});
+            }
+        }
+    }
+    for (const Call& call : calls) {
+        CUpti_CallbackData data{};
+        data.size = sizeof(data);
+        data.callbackSite = VGRE_CUPTI_API_COMPLETION;
+        data.functionName = functionName;
+        data.symbolName = event.kernelName.c_str();
+        // No API/activity correlation is tracked by the virtual runtime.
+        data.correlationId = 0;
+        const bool previousCallbackState = g_insideCUPTICallback;
+        g_insideCUPTICallback = true;
+        try {
+            call.subscriber->callback(call.subscriber->userdata,
+                                      call.domain, call.cbid, &data);
+        }
+        catch (...) { /* C callbacks must not unwind through the runtime. */ }
+        g_insideCUPTICallback = previousCallbackState;
+        {
+            std::lock_guard<std::mutex> lock(g_subscriberMutex);
+            --call.subscriber->callbacksInFlight;
+            call.subscriber->callbacksFinished.notify_all();
+        }
+    }
+}
+
+static void ensureCallbackListener() {
+    if (g_callbackListenerId != 0) return;
+    g_callbackListenerId = vgre::advanced::RuntimeProfiler::instance().addEventListener(
+        [](const vgre::advanced::ProfileEvent& event) {
+            dispatchLaunchCallbacks(event);
+        });
+}
+
+static uint64_t encodeSteadyTimestampNs(
+    std::chrono::steady_clock::time_point timestamp) {
+    const int64_t nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        timestamp.time_since_epoch()).count();
+    return static_cast<uint64_t>(nanoseconds) ^ (uint64_t{1} << 63);
+}
 
 static uint64_t nowNs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - g_epoch).count());
+    return encodeSteadyTimestampNs(std::chrono::steady_clock::now());
 }
 
 // ── Flush one batch of activity records to the registered buffer callbacks ───
-static void flushRecords() {
-    if (!g_bufReq || !g_bufComp) return;
-
+static CUptiResult flushRecords() {
+    CUpti_BuffersCallbackRequestFunc request = nullptr;
+    CUpti_BuffersCallbackCompleteFunc complete = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferCallbackMutex);
+        request = g_bufReq;
+        complete = g_bufComp;
+    }
     std::vector<ActivityRecord> snap;
     {
         std::lock_guard<std::mutex> lk(g_pendingMu);
-        snap.swap(g_pending);
+        try { snap = g_pending; }
+        catch (const std::bad_alloc&) { return CUPTI_ERROR_OUT_OF_MEMORY; }
     }
-    if (snap.empty()) return;
+    if (snap.empty()) return CUPTI_SUCCESS;
+    if (!request || !complete) return CUPTI_ERROR_NOT_INITIALIZED;
 
     uint8_t* buf  = nullptr;
     size_t   size = 0;
     size_t   maxN = 0;
-    g_bufReq(&buf, &size, &maxN);
-    if (!buf || size == 0) return;
-
-    size_t written = 0;
-    for (auto& rec : snap) {
-        if (written + sizeof(CUpti_ActivityKernel5) > size) break;
-        memcpy(buf + written, &rec.kernel, sizeof(CUpti_ActivityKernel5));
-        written += sizeof(CUpti_ActivityKernel5);
+    try {
+        ActivityBufferCallbackScope callbackScope;
+        request(&buf, &size, &maxN);
     }
-    g_bufComp(nullptr, 0, buf, size, written);
-}
+    catch (...) { return CUPTI_ERROR_UNKNOWN; }
+    if (!buf || size < sizeof(CUpti_ActivityKernel5))
+        return CUPTI_ERROR_PARAMETER_SIZE_NOT_SUFFICIENT;
 
-// ── Compute achieved occupancy from instruction mix ───────────────────────────
-// Rationale: ALU-heavy kernels hide latency well (high occupancy).
-// Memory-heavy kernels stall on cache misses (lower occupancy).
-// Formula: base=0.50, +0.38×alu_fraction, -0.18×mem_fraction, clamped [0.10, 0.95].
-// Time-weighted across all profiled kernels.
-static double computeAchievedOccupancy(
-    const std::vector<vgre::advanced::KernelStats>& allStats)
-{
-    double weightedOcc  = 0.0;
-    double totalTimeMs  = 0.0;
+    size_t recordLimit = size / sizeof(CUpti_ActivityKernel5);
+    if (maxN != 0) recordLimit = std::min(recordLimit, maxN);
+    const size_t recordsToWrite = std::min(recordLimit, snap.size());
+    const size_t written = recordsToWrite * sizeof(CUpti_ActivityKernel5);
+    for (size_t i = 0; i < recordsToWrite; ++i)
+        memcpy(buf + i * sizeof(CUpti_ActivityKernel5), &snap[i].kernel,
+               sizeof(CUpti_ActivityKernel5));
 
-    for (const auto& ks : allStats) {
-        uint64_t total = ks.instructionMix.total();
-        double occ;
-        if (total == 0 || ks.totalTimeMs <= 0.0) {
-            occ = 0.50;
-        } else {
-            double aluFrac =
-                static_cast<double>(ks.instructionMix.aluCount) / total;
-            double memFrac =
-                static_cast<double>(
-                    ks.instructionMix.loadCount + ks.instructionMix.storeCount)
-                / total;
-            // ALU-bound → good warp latency hiding → higher occupancy
-            // Memory-bound → cache stalls → lower achieved occupancy
-            occ = 0.50 + 0.38 * aluFrac - 0.18 * memFrac;
-            occ = std::max(0.10, std::min(0.95, occ));
-        }
-        weightedOcc  += occ * ks.totalTimeMs;
-        totalTimeMs  += ks.totalTimeMs;
+    {
+        std::lock_guard<std::mutex> lk(g_recordCursorMutex);
+        g_recordCursors.erase(buf);
     }
-
-    return (totalTimeMs > 0.0) ? weightedOcc / totalTimeMs : 0.0;
-}
-
-// ── Aggregate instruction-mix counters from all profiled kernels ──────────────
-static vgre::advanced::InstructionSample aggregateInstructionMix(
-    const std::vector<vgre::advanced::KernelStats>& allStats)
-{
-    vgre::advanced::InstructionSample agg{};
-    for (const auto& ks : allStats) {
-        agg.loadCount    += ks.instructionMix.loadCount;
-        agg.storeCount   += ks.instructionMix.storeCount;
-        agg.aluCount     += ks.instructionMix.aluCount;
-        agg.barrierCount += ks.instructionMix.barrierCount;
-        agg.branchCount  += ks.instructionMix.branchCount;
-        agg.otherCount   += ks.instructionMix.otherCount;
+    try {
+        ActivityBufferCallbackScope callbackScope;
+        complete(nullptr, 0, buf, size, written);
     }
-    return agg;
+    catch (...) { return CUPTI_ERROR_UNKNOWN; }
+    {
+        std::lock_guard<std::mutex> lk(g_pendingMu);
+        const size_t consumed = std::min(recordsToWrite, g_pending.size());
+        g_pending.erase(g_pending.begin(), g_pending.begin() + consumed);
+    }
+    return recordsToWrite == snap.size()
+        ? CUPTI_SUCCESS : CUPTI_ERROR_PARAMETER_SIZE_NOT_SUFFICIENT;
 }
 
 } // anonymous namespace
 
-// ── Helper: convert RuntimeProfiler stats to an activity record ──────────────
-static void pushKernelActivity(const vgre::advanced::KernelStats& ks) {
-    if (!g_kernelActivityEnabled) return;
+// ── Helper: convert one recorded CUDA launch to an activity record ───────────
+static CUptiResult pushKernelActivity(const vgre::advanced::ProfileEvent& event) {
+    if (!g_kernelActivityEnabled) return CUPTI_SUCCESS;
+    if (!event.isKernelLaunch) return CUPTI_SUCCESS;
+    if (event.gridDim.x == 0 || event.gridDim.y == 0 || event.gridDim.z == 0 ||
+        event.blockDim.x == 0 || event.blockDim.y == 0 || event.blockDim.z == 0)
+        return CUPTI_SUCCESS;
 
     ActivityRecord rec{};
     rec.kernel.kind          = CUPTI_ACTIVITY_KIND_KERNEL;
+    // VGRE's profiler does not currently retain hardware device/context/stream
+    // IDs or a CUDA correlation ID, so their documented zero values mean absent.
     rec.kernel.correlationId = 0;
     rec.kernel.deviceId      = 0;
     rec.kernel.contextId     = 0;
     rec.kernel.streamId      = 0;
-    rec.kernel.gridX         = 1;
-    rec.kernel.gridY         = 1;
-    rec.kernel.gridZ         = 1;
-    rec.kernel.blockX        = 1;
-    rec.kernel.blockY        = 1;
-    rec.kernel.blockZ        = 1;
+    rec.kernel.gridX         = event.gridDim.x;
+    rec.kernel.gridY         = event.gridDim.y;
+    rec.kernel.gridZ         = event.gridDim.z;
+    rec.kernel.blockX        = event.blockDim.x;
+    rec.kernel.blockY        = event.blockDim.y;
+    rec.kernel.blockZ        = event.blockDim.z;
+    if (event.staticSharedMemoryBytes >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+        event.dynamicSharedMemoryBytes >
+            static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+        return CUPTI_ERROR_INVALID_EVENT_VALUE;
+    rec.kernel.staticSharedMemory =
+        static_cast<int32_t>(event.staticSharedMemoryBytes);
+    rec.kernel.dynamicSharedMemory =
+        static_cast<int32_t>(event.dynamicSharedMemoryBytes);
 
-    uint64_t durationNs  = static_cast<uint64_t>(ks.avgTimeMs * 1e6);
-    rec.kernel.start     = nowNs();
-    rec.kernel.end       = rec.kernel.start + durationNs;
+    uint64_t eventDurationNs = 0;
+    if (!durationNs(event, eventDurationNs)) return CUPTI_ERROR_INVALID_EVENT_VALUE;
+    rec.kernel.end       = encodeSteadyTimestampNs(event.timestamp);
+    rec.kernel.start     = rec.kernel.end - eventDurationNs;
     rec.kernel.completed = rec.kernel.end;
-
-    uint64_t total = ks.instructionMix.total();
-    rec.kernel.registersPerThread = 32;
-    if (total > 0) {
-        rec.kernel.aluActivePct =
-            static_cast<float>(ks.instructionMix.aluCount)
-            / static_cast<float>(total) * 100.0f;
-        rec.kernel.srcAccessPct =
-            static_cast<float>(
-                ks.instructionMix.loadCount + ks.instructionMix.storeCount)
-            / static_cast<float>(total) * 100.0f;
-    }
+    // VGRE does not track hardware register usage or utilization percentages.
+    rec.kernel.registersPerThread = 0;
+    rec.kernel.aluActivePct = 0.0f;
+    rec.kernel.srcAccessPct = 0.0f;
 
     static std::unordered_map<std::string, std::string> nameStore;
     static std::mutex nameMu;
-    {
-        std::lock_guard<std::mutex> lk(nameMu);
-        auto it = nameStore.emplace(ks.kernelName, ks.kernelName).first;
-        rec.kernel.name = it->second.c_str();
+    try {
+        {
+            std::lock_guard<std::mutex> lk(nameMu);
+            auto it = nameStore.emplace(event.kernelName, event.kernelName).first;
+            rec.kernel.name = it->second.c_str();
+        }
+        std::lock_guard<std::mutex> lk(g_pendingMu);
+        g_pending.push_back(rec);
+    } catch (const std::bad_alloc&) {
+        return CUPTI_ERROR_OUT_OF_MEMORY;
     }
+    return CUPTI_SUCCESS;
+}
 
-    std::lock_guard<std::mutex> lk(g_pendingMu);
-    g_pending.push_back(rec);
+static bool validSubscriber(CUpti_SubscriberHandle subscriber) {
+    return subscriber && g_subscribers.find(subscriber) != g_subscribers.end();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -463,46 +378,71 @@ CUptiResult cuptiSubscribe(CUpti_SubscriberHandle* subscriber,
                            CUpti_CallbackFunc callback,
                            void* userdata) {
     if (!subscriber || !callback) return CUPTI_ERROR_INVALID_PARAMETER;
-    // Track 2: forward to native library first when available
-    auto& nc = NativeCupti::instance();
-    {
-        // Log once on first call (after Logger is initialized)
-        static bool s_logged = false;
-        if (!s_logged) {
-            s_logged = true;
-            if (nc.active)
-                VGRE_LOG_INFO("CUPTI", "CUPTI: native GPU library loaded — hardware telemetry active");
-            else
-                VGRE_LOG_INFO("CUPTI", "CUPTI: no native GPU library — using CPU PMU proxies");
+    *subscriber = nullptr;
+    std::shared_ptr<CUpti_Subscriber_st> state;
+    try {
+        state = std::make_shared<CUpti_Subscriber_st>();
+        state->callback = callback;
+        state->userdata = userdata;
+    } catch (const std::bad_alloc&) {
+        return CUPTI_ERROR_OUT_OF_MEMORY;
+    }
+    CUpti_SubscriberHandle handle = state.get();
+    bool firstSubscriber = false;
+    vgre::advanced::RuntimeProfiler::EventListenerId listenerToRemove = 0;
+    try {
+        std::lock_guard<std::mutex> lock(g_subscriberMutex);
+        firstSubscriber = g_subscribers.empty();
+        if (firstSubscriber) {
+            ensureCallbackListener();
+            if (g_callbackListenerId == 0) return CUPTI_ERROR_OUT_OF_MEMORY;
+            acquireProfiler();
         }
+        try {
+            g_subscribers.emplace(handle, state);
+        } catch (...) {
+            if (firstSubscriber) {
+                listenerToRemove = g_callbackListenerId;
+                g_callbackListenerId = 0;
+                releaseProfiler();
+            }
+            throw;
+        }
+    } catch (const std::bad_alloc&) {
+        if (listenerToRemove)
+            vgre::advanced::RuntimeProfiler::instance().removeEventListener(listenerToRemove);
+        return CUPTI_ERROR_OUT_OF_MEMORY;
     }
-    if (nc.active) {
-        CUptiResult r = nc.subscribe(subscriber, callback, userdata);
-        if (r == CUPTI_SUCCESS) return r;
-        // Fall through to software proxy on error
-    }
-    uintptr_t id = g_nextSubId.fetch_add(1);
-    Subscriber sub;
-    sub.func     = callback;
-    sub.userdata = userdata;
-    sub.active   = true;
-    {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        g_subscribers[id] = sub;
-    }
-    *subscriber = reinterpret_cast<CUpti_SubscriberHandle>(id);
+    *subscriber = handle;
     return CUPTI_SUCCESS;
 }
 
 CUptiResult cuptiUnsubscribe(CUpti_SubscriberHandle subscriber) {
-    // Track 2: forward to native library first when available
-    auto& nc = NativeCupti::instance();
-    if (nc.active) {
-        CUptiResult r = nc.unsubscribe(subscriber);
-        if (r == CUPTI_SUCCESS) return r;
+    // Dispatch reserves in-flight references for every subscriber before it
+    // invokes any callback. Waiting here can therefore deadlock when one
+    // callback synchronously unsubscribes itself or another subscriber.
+    if (g_insideCUPTICallback) return CUPTI_ERROR_INVALID_OPERATION;
+    bool lastSubscriber = false;
+    std::shared_ptr<CUpti_Subscriber_st> state;
+    {
+        std::unique_lock<std::mutex> lock(g_subscriberMutex);
+        auto it = g_subscribers.find(subscriber);
+        if (it == g_subscribers.end()) return CUPTI_ERROR_INVALID_HANDLE;
+        state = it->second;
+        state->removing = true;
+        g_subscribers.erase(subscriber);
+        lastSubscriber = g_subscribers.empty();
+        if (lastSubscriber) {
+            const auto listenerId = g_callbackListenerId;
+            g_callbackListenerId = 0;
+            if (listenerId)
+                vgre::advanced::RuntimeProfiler::instance().removeEventListener(listenerId);
+        }
+        state->callbacksFinished.wait(lock, [&] {
+            return state->callbacksInFlight == 0;
+        });
     }
-    std::lock_guard<std::mutex> lk(g_mutex);
-    g_subscribers.erase(reinterpret_cast<uintptr_t>(subscriber));
+    if (lastSubscriber) releaseProfiler();
     return CUPTI_SUCCESS;
 }
 
@@ -510,51 +450,61 @@ CUptiResult cuptiEnableCallback(uint32_t enable,
                                 CUpti_SubscriberHandle subscriber,
                                 CUpti_CallbackDomain domain,
                                 CUpti_CallbackId cbid) {
-    std::lock_guard<std::mutex> lk(g_mutex);
-    auto it = g_subscribers.find(reinterpret_cast<uintptr_t>(subscriber));
-    if (it == g_subscribers.end()) return CUPTI_ERROR_INVALID_PARAMETER;
-    auto& sub = it->second;
-    auto key = std::make_pair(domain, static_cast<uint32_t>(cbid));
-    if (enable) {
-        sub.enabled.push_back(key);
-    } else {
-        auto& v = sub.enabled;
-        v.erase(std::remove(v.begin(), v.end(), key), v.end());
-    }
+    if (enable > 1) return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lock(g_subscriberMutex);
+    if (!validSubscriber(subscriber)) return CUPTI_ERROR_INVALID_HANDLE;
+    if (!supportedLaunchCallback(domain, cbid)) return CUPTI_ERROR_NOT_SUPPORTED;
+    auto* state = g_subscribers[subscriber].get();
+    if (domain == CUPTI_CB_DOMAIN_RUNTIME_API)
+        state->runtimeLaunchCallbackEnabled = enable != 0;
+    else
+        state->driverLaunchCallbackEnabled = enable != 0;
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEnableDomain(uint32_t /*enable*/,
-                              CUpti_SubscriberHandle /*subscriber*/,
-                              CUpti_CallbackDomain /*domain*/) {
+CUptiResult cuptiEnableDomain(uint32_t enable,
+                              CUpti_SubscriberHandle subscriber,
+                              CUpti_CallbackDomain domain) {
+    if (enable > 1) return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lock(g_subscriberMutex);
+    if (!validSubscriber(subscriber)) return CUPTI_ERROR_INVALID_HANDLE;
+    if (domain != CUPTI_CB_DOMAIN_DRIVER_API && domain != CUPTI_CB_DOMAIN_RUNTIME_API)
+        return CUPTI_ERROR_NOT_SUPPORTED;
+    auto* state = g_subscribers[subscriber].get();
+    if (domain == CUPTI_CB_DOMAIN_RUNTIME_API)
+        state->runtimeDomainEnabled = enable != 0;
+    else
+        state->driverDomainEnabled = enable != 0;
     return CUPTI_SUCCESS;
 }
 
 CUptiResult cuptiActivityEnable(CUpti_ActivityKind kind) {
-    // Track 2: forward to native library AND enable PMU proxy in parallel.
-    // Unified normalisation: both paths produce data; toOTLPJSON() exports
-    // the PMU proxy path regardless of whether native CUPTI also runs.
-    // This ensures the same OTLP export format for all telemetry consumers.
-    auto& nc = NativeCupti::instance();
-    if (nc.active) {
-        nc.activityEnable(kind); // fire-and-forget; ignore return (may not support all kinds)
-        // Fall through to also enable the PMU proxy for unified OTLP output.
-    }
-    if (kind == CUPTI_ACTIVITY_KIND_KERNEL) {
-        g_kernelActivityEnabled = true;
-        vgre::advanced::RuntimeProfiler::instance().setEnabled(true);
+    if (kind != CUPTI_ACTIVITY_KIND_KERNEL) return CUPTI_ERROR_NOT_SUPPORTED;
+    if (g_activityBufferCallbackInFlight.load(std::memory_order_acquire))
+        return CUPTI_ERROR_INVALID_OPERATION;
+    std::lock_guard<std::mutex> flushLock(g_activityFlushMutex);
+    if (!g_kernelActivityEnabled.load(std::memory_order_acquire)) {
+        std::pair<std::vector<vgre::advanced::ProfileEvent>, uint64_t> snapshot;
+        try {
+            snapshot = vgre::advanced::RuntimeProfiler::instance().getEventSnapshot();
+        } catch (const std::bad_alloc&) {
+            return CUPTI_ERROR_OUT_OF_MEMORY;
+        }
+        g_activityFlushedEventCount = snapshot.first.size();
+        g_activityGeneration = snapshot.second;
+        g_kernelActivityEnabled.store(true, std::memory_order_release);
+        acquireProfiler();
     }
     return CUPTI_SUCCESS;
 }
 
 CUptiResult cuptiActivityDisable(CUpti_ActivityKind kind) {
-    // Track 2: forward to native library first when available
-    auto& nc = NativeCupti::instance();
-    if (nc.active) {
-        CUptiResult r = nc.activityDisable(kind);
-        if (r == CUPTI_SUCCESS) return r;
-    }
-    if (kind == CUPTI_ACTIVITY_KIND_KERNEL) g_kernelActivityEnabled = false;
+    if (kind != CUPTI_ACTIVITY_KIND_KERNEL) return CUPTI_ERROR_NOT_SUPPORTED;
+    if (g_activityBufferCallbackInFlight.load(std::memory_order_acquire))
+        return CUPTI_ERROR_INVALID_OPERATION;
+    std::lock_guard<std::mutex> flushLock(g_activityFlushMutex);
+    if (g_kernelActivityEnabled.exchange(false, std::memory_order_acq_rel))
+        releaseProfiler();
     return CUPTI_SUCCESS;
 }
 
@@ -563,40 +513,59 @@ CUptiResult cuptiActivityRegisterCallbacks(
     CUpti_BuffersCallbackCompleteFunc funcBufferCompleted) {
     if (!funcBufferRequested || !funcBufferCompleted)
         return CUPTI_ERROR_INVALID_PARAMETER;
-    g_bufReq  = funcBufferRequested;
-    g_bufComp = funcBufferCompleted;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferCallbackMutex);
+        g_bufReq  = funcBufferRequested;
+        g_bufComp = funcBufferCompleted;
+    }
     return CUPTI_SUCCESS;
 }
 
 CUptiResult cuptiActivityFlushAll(uint32_t flag) {
-    // Track 2: flush both native CUPTI AND PMU proxy for unified OTLP output.
-    // When native CUPTI is active, its flush populates hardware activity buffers.
-    // The PMU proxy flush ALSO runs to normalise both data streams into the
-    // same OTLP JSON format via RuntimeProfiler::toOTLPJSON().
-    // This is the "Unified Telemetry Collector" step from the implementation plan.
-    auto& nc = NativeCupti::instance();
-    if (nc.active) {
-        nc.activityFlushAll(flag); // flush native hardware buffers
-        // Fall through to also flush PMU proxy for unified OTLP export.
+    if (flag & ~CUPTI_ACTIVITY_FLAG_FLUSH_FORCED)
+        return CUPTI_ERROR_INVALID_PARAMETER;
+    if (g_activityBufferCallbackInFlight.load(std::memory_order_acquire))
+        return CUPTI_ERROR_INVALID_OPERATION;
+    std::lock_guard<std::mutex> flushLock(g_activityFlushMutex);
+    std::pair<std::vector<vgre::advanced::ProfileEvent>, uint64_t> snapshot;
+    try {
+        snapshot = vgre::advanced::RuntimeProfiler::instance().getEventSnapshot();
+    } catch (const std::bad_alloc&) {
+        return CUPTI_ERROR_OUT_OF_MEMORY;
     }
-    // PMU proxy flush: always run so toOTLPJSON() has current data.
-    auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
-    for (const auto& ks : allStats) pushKernelActivity(ks);
-    flushRecords();
-    return CUPTI_SUCCESS;
+    const auto& events = snapshot.first;
+    if (snapshot.second != g_activityGeneration ||
+        events.size() < g_activityFlushedEventCount) {
+        g_activityFlushedEventCount = 0;
+        g_activityGeneration = snapshot.second;
+    }
+    for (size_t i = g_activityFlushedEventCount; i < events.size(); ++i) {
+        const CUptiResult result = pushKernelActivity(events[i]);
+        if (result != CUPTI_SUCCESS) return result;
+        g_activityFlushedEventCount = i + 1;
+    }
+    return flushRecords();
 }
 
 CUptiResult cuptiActivityGetNextRecord(uint8_t* buffer,
                                        size_t validBufferSizeBytes,
                                        CUpti_Activity** record) {
     if (!buffer || !record) return CUPTI_ERROR_INVALID_PARAMETER;
-    static size_t s_offset = 0;
-    if (s_offset + sizeof(CUpti_ActivityKernel5) > validBufferSizeBytes) {
-        s_offset = 0;
-        return CUPTI_ERROR_QUEUE_EMPTY;
+    *record = nullptr;
+    std::lock_guard<std::mutex> lk(g_recordCursorMutex);
+    auto it = g_recordCursors.find(buffer);
+    if (it == g_recordCursors.end()) {
+        try { it = g_recordCursors.emplace(buffer, RecordCursor{}).first; }
+        catch (const std::bad_alloc&) { return CUPTI_ERROR_OUT_OF_MEMORY; }
     }
-    *record = reinterpret_cast<CUpti_Activity*>(buffer + s_offset);
-    s_offset += sizeof(CUpti_ActivityKernel5);
+    RecordCursor& cursor = it->second;
+    if (cursor.validSize != validBufferSizeBytes)
+        cursor = RecordCursor{0, validBufferSizeBytes};
+    if (cursor.offset > validBufferSizeBytes ||
+        sizeof(CUpti_ActivityKernel5) > validBufferSizeBytes - cursor.offset)
+        return CUPTI_ERROR_QUEUE_EMPTY;
+    *record = reinterpret_cast<CUpti_Activity*>(buffer + cursor.offset);
+    cursor.offset += sizeof(CUpti_ActivityKernel5);
     return CUPTI_SUCCESS;
 }
 
@@ -610,262 +579,271 @@ CUptiResult cuptiMetricGetIdFromName(CUdevice /*device*/,
                                      const char* metricName,
                                      CUpti_MetricID* metric) {
     if (!metricName || !metric) return CUPTI_ERROR_INVALID_PARAMETER;
-    static const struct { const char* name; CUpti_MetricID id; } kTable[] = {
-        { "ipc",                     CUPTI_METRIC_ID_IPC                    },
-        { "achieved_occupancy",      CUPTI_METRIC_ID_ACHIEVED_OCCUPANCY     },
-        { "flop_count_sp",           CUPTI_METRIC_ID_FLOP_COUNT_SP          },
-        { "dram_read_throughput",    CUPTI_METRIC_ID_DRAM_READ_THROUGHPUT   },
-        { "dram_write_throughput",   CUPTI_METRIC_ID_DRAM_WRITE_THROUGHPUT  },
-        { "l1_global_load_hit_rate", CUPTI_METRIC_ID_L1_GLOBAL_LOAD_HIT    },
-        { "branch_efficiency",       CUPTI_METRIC_ID_BRANCH_EFFICIENCY      },
-        { "kernel_duration",         CUPTI_METRIC_ID_KERNEL_DURATION_NS     },
-        { nullptr, 0 }
-    };
-    for (int i = 0; kTable[i].name; ++i) {
-        if (std::strcmp(kTable[i].name, metricName) == 0) {
-            *metric = kTable[i].id;
-            return CUPTI_SUCCESS;
-        }
-    }
-    return CUPTI_ERROR_INVALID_PARAMETER;
+    if (std::strcmp(metricName, "vgre_kernel_duration_ns") == 0 ||
+        std::strcmp(metricName, "kernel_duration_ns") == 0 ||
+        std::strcmp(metricName, "kernel_duration") == 0)
+        *metric = VGRE_CUPTI_METRIC_KERNEL_DURATION_NS;
+    else if (std::strcmp(metricName, "vgre_kernel_launches") == 0 ||
+             std::strcmp(metricName, "kernel_launches") == 0)
+        *metric = VGRE_CUPTI_METRIC_KERNEL_LAUNCHES;
+    else if (std::strcmp(metricName, "vgre_virtual_threads") == 0 ||
+             std::strcmp(metricName, "virtual_threads_launched") == 0)
+        *metric = VGRE_CUPTI_METRIC_VIRTUAL_THREADS;
+    else if (std::strcmp(metricName, "vgre_average_kernel_duration_ns") == 0 ||
+             std::strcmp(metricName, "average_kernel_duration_ns") == 0)
+        *metric = VGRE_CUPTI_METRIC_AVG_DURATION_NS;
+    else if (std::strcmp(metricName, "ipc") == 0 ||
+             std::strcmp(metricName, "occupancy") == 0 ||
+             std::strcmp(metricName, "achieved_occupancy") == 0 ||
+             std::strcmp(metricName, "flop_count") == 0 ||
+             std::strcmp(metricName, "flop_count_sp") == 0 ||
+             std::strcmp(metricName, "dram_read_bytes") == 0 ||
+             std::strcmp(metricName, "dram_read_throughput") == 0 ||
+             std::strcmp(metricName, "dram_write_bytes") == 0 ||
+             std::strcmp(metricName, "dram_write_throughput") == 0 ||
+             std::strcmp(metricName, "l1_hit_rate") == 0 ||
+             std::strcmp(metricName, "l1_global_load_hit") == 0 ||
+             std::strcmp(metricName, "l1_global_load_hit_rate") == 0 ||
+             std::strcmp(metricName, "branch_efficiency") == 0)
+        return CUPTI_ERROR_NOT_SUPPORTED;
+    else
+        return CUPTI_ERROR_INVALID_METRIC_NAME;
+    return CUPTI_SUCCESS;
 }
 
 CUptiResult cuptiMetricGetValue(CUdevice /*device*/,
                                 CUpti_MetricID metric,
-                                uint32_t /*numEventSpecs*/,
-                                void* /*eventSpecArray*/,
-                                uint32_t /*numEvents*/,
-                                CUpti_EventID* /*eventIdArray*/,
-                                uint64_t* /*eventValueArray*/,
-                                uint64_t /*timeDuration*/,
+                                uint32_t numEventSpecs,
+                                void* eventSpecArray,
+                                uint32_t numEvents,
+                                CUpti_EventID* eventIdArray,
+                                uint64_t* eventValueArray,
+                                uint64_t timeDuration,
                                 CUpti_MetricValue* metricValue) {
     if (!metricValue) return CUPTI_ERROR_INVALID_PARAMETER;
+    if (timeDuration != 0 || (numEventSpecs != 0 && !eventSpecArray) ||
+        (numEvents != 0 && (!eventIdArray || !eventValueArray)))
+        return CUPTI_ERROR_INVALID_PARAMETER;
+    if (metric >= VGRE_CUPTI_METRIC_IPC && metric <= VGRE_CUPTI_METRIC_BRANCH_EFFICIENCY)
+        return CUPTI_ERROR_NOT_SUPPORTED;
+    if (metric < VGRE_CUPTI_METRIC_KERNEL_DURATION_NS ||
+        metric > VGRE_CUPTI_METRIC_AVG_DURATION_NS)
+        return CUPTI_ERROR_INVALID_METRIC_ID;
 
-    auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
+    uint64_t values[3] = {0, 0, 0};
+    bool present[3] = {false, false, false};
+    for (uint32_t i = 0; i < numEvents; ++i) {
+        if (!isVirtualEvent(eventIdArray[i])) return CUPTI_ERROR_INVALID_EVENT_ID;
+        const size_t index = eventIndex(eventIdArray[i]);
+        if (present[index]) return CUPTI_ERROR_INVALID_EVENT_VALUE;
+        values[index] = eventValueArray[i];
+        present[index] = true;
+    }
+    const auto* specs = static_cast<const CUpti_EventID*>(eventSpecArray);
+    bool seenSpecs[3] = {false, false, false};
+    for (uint32_t i = 0; i < numEventSpecs; ++i) {
+        if (!isVirtualEvent(specs[i])) return CUPTI_ERROR_INVALID_EVENT_ID;
+        const size_t index = eventIndex(specs[i]);
+        if (seenSpecs[index] || !present[index])
+            return CUPTI_ERROR_INVALID_EVENT_VALUE;
+        seenSpecs[index] = true;
+    }
 
-    double   totalTimeMs       = 0.0;
-    double   totalGBps         = 0.0;
-    uint64_t totalFlops        = 0;
-    uint64_t totalInst         = 0;
-    uint64_t totalBranch       = 0;
-    uint64_t totalBranchTaken  = 0;
-    int      count             = 0;
-
-    for (const auto& ks : allStats) {
-        totalTimeMs        += ks.totalTimeMs;
-        totalGBps          += ks.avgThroughputGBps;
-        totalFlops         += static_cast<uint64_t>(
-                                  ks.avgGflops * 1e9 * ks.avgTimeMs / 1000.0);
-        totalInst          += ks.totalInstructions;
-        totalBranch        += ks.instructionMix.branchCount;
-        // Conservative: assume all branches are taken (no divergence data)
-        totalBranchTaken   += ks.instructionMix.branchCount;
-        ++count;
+    CUpti_EventID required[2]{};
+    size_t requiredCount = 1;
+    switch (metric) {
+    case VGRE_CUPTI_METRIC_KERNEL_DURATION_NS:
+        required[0] = VGRE_CUPTI_EVENT_KERNEL_DURATION_NS; break;
+    case VGRE_CUPTI_METRIC_KERNEL_LAUNCHES:
+        required[0] = VGRE_CUPTI_EVENT_KERNEL_LAUNCHES; break;
+    case VGRE_CUPTI_METRIC_VIRTUAL_THREADS:
+        required[0] = VGRE_CUPTI_EVENT_VIRTUAL_THREADS; break;
+    case VGRE_CUPTI_METRIC_AVG_DURATION_NS:
+        required[0] = VGRE_CUPTI_EVENT_KERNEL_DURATION_NS;
+        required[1] = VGRE_CUPTI_EVENT_KERNEL_LAUNCHES;
+        requiredCount = 2; break;
+    default: return CUPTI_ERROR_INVALID_METRIC_ID;
+    }
+    for (size_t i = 0; i < requiredCount; ++i)
+        if (!present[eventIndex(required[i])])
+            return CUPTI_ERROR_INVALID_EVENT_VALUE;
+    for (uint32_t i = 0; i < numEventSpecs; ++i) {
+        bool requiredSpec = false;
+        for (size_t j = 0; j < requiredCount; ++j)
+            requiredSpec = requiredSpec || specs[i] == required[j];
+        if (!requiredSpec) return CUPTI_ERROR_INVALID_EVENT_VALUE;
+    }
+    if (numEventSpecs != 0) {
+        for (size_t i = 0; i < requiredCount; ++i)
+            if (!seenSpecs[eventIndex(required[i])])
+                return CUPTI_ERROR_INVALID_EVENT_VALUE;
     }
 
     switch (metric) {
-    case CUPTI_METRIC_ID_IPC:
-        // instructions / (cycles ≈ totalTimeMs × assumed 1 GHz emulated clk)
+    case VGRE_CUPTI_METRIC_KERNEL_DURATION_NS:
+        metricValue->metricValueUint64 = values[eventIndex(VGRE_CUPTI_EVENT_KERNEL_DURATION_NS)]; break;
+    case VGRE_CUPTI_METRIC_KERNEL_LAUNCHES:
+        metricValue->metricValueUint64 = values[eventIndex(VGRE_CUPTI_EVENT_KERNEL_LAUNCHES)]; break;
+    case VGRE_CUPTI_METRIC_VIRTUAL_THREADS:
+        metricValue->metricValueUint64 = values[eventIndex(VGRE_CUPTI_EVENT_VIRTUAL_THREADS)]; break;
+    case VGRE_CUPTI_METRIC_AVG_DURATION_NS: {
+        const uint64_t launches = values[eventIndex(VGRE_CUPTI_EVENT_KERNEL_LAUNCHES)];
+        if (launches == 0) return CUPTI_ERROR_INVALID_EVENT_VALUE;
         metricValue->metricValueDouble =
-            (totalTimeMs > 0.0 && totalInst > 0)
-            ? static_cast<double>(totalInst) / (totalTimeMs * 1e6)
-            : 0.0;
-        break;
-
-    case CUPTI_METRIC_ID_ACHIEVED_OCCUPANCY:
-        // Derived from ALU vs memory instruction fraction (see computeAchievedOccupancy).
-        metricValue->metricValueDouble = computeAchievedOccupancy(allStats);
-        break;
-
-    case CUPTI_METRIC_ID_FLOP_COUNT_SP:
-        metricValue->metricValueUint64 = totalFlops;
-        break;
-
-    case CUPTI_METRIC_ID_DRAM_READ_THROUGHPUT:
-        metricValue->metricValueDouble =
-            (count > 0) ? totalGBps / count * 0.6 : 0.0;
-        break;
-
-    case CUPTI_METRIC_ID_DRAM_WRITE_THROUGHPUT:
-        metricValue->metricValueDouble =
-            (count > 0) ? totalGBps / count * 0.4 : 0.0;
-        break;
-
-    case CUPTI_METRIC_ID_L1_GLOBAL_LOAD_HIT: {
-        // Estimate from ALU:memory ratio: more ALU → better reuse → higher hit
-        auto agg   = aggregateInstructionMix(allStats);
-        uint64_t t = agg.total();
-        double hitRate = 60.0;  // conservative default
-        if (t > 0) {
-            double aluFrac = static_cast<double>(agg.aluCount) / t;
-            double memFrac = static_cast<double>(agg.loadCount + agg.storeCount) / t;
-            // More ALU relative to memory → temporal reuse → higher L1 hit rate
-            hitRate = 40.0 + 50.0 * aluFrac - 20.0 * memFrac;
-            hitRate = std::max(10.0, std::min(95.0, hitRate));
-        }
-        metricValue->metricValueDouble = hitRate;
+            static_cast<double>(values[eventIndex(VGRE_CUPTI_EVENT_KERNEL_DURATION_NS)]) /
+            static_cast<double>(launches);
         break;
     }
-
-    case CUPTI_METRIC_ID_BRANCH_EFFICIENCY:
-        // Ratio of non-divergent branches. Proxy: assume all branches taken.
-        metricValue->metricValueDouble =
-            (totalBranch > 0)
-            ? static_cast<double>(totalBranchTaken) / totalBranch * 100.0
-            : 100.0;
-        break;
-
-    case CUPTI_METRIC_ID_KERNEL_DURATION_NS:
-        metricValue->metricValueUint64 =
-            static_cast<uint64_t>(totalTimeMs * 1e6);
-        break;
-
-    default:
-        return CUPTI_ERROR_INVALID_PARAMETER;
+    default: return CUPTI_ERROR_INVALID_METRIC_ID;
     }
     return CUPTI_SUCCESS;
 }
 
-// ── Event group API ───────────────────────────────────────────────────────────
-// Hardware PMU registers are not accessible; we return software-proxy values
-// derived from the RuntimeProfiler instruction-mix counters so that profiling
-// tools receive non-zero, proportional counts rather than silence.
-
-CUptiResult cuptiEventGroupCreate(CUcontext /*ctx*/,
-                                  CUpti_EventGroupHandle* eg,
-                                  uint32_t /*flags*/) {
-    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-    auto* handle = new EventGroup();
-    {
-        std::lock_guard<std::mutex> lk(g_egMutex);
-        g_eventGroups[reinterpret_cast<uintptr_t>(handle)] = EventGroup{};
+// These counters describe the actual virtual work submitted to the runtime.
+CUptiResult cuptiEventGroupCreate(CUcontext ctx,
+                                  CUpti_EventGroupHandle* eventGroup,
+                                  uint32_t flags) {
+    if (!eventGroup) return CUPTI_ERROR_INVALID_PARAMETER;
+    *eventGroup = nullptr;
+    if (flags != 0) return CUPTI_ERROR_INVALID_PARAMETER;
+    if (ctx != nullptr) return CUPTI_ERROR_INVALID_CONTEXT;
+    auto* handle = new (std::nothrow) CUpti_EventGroup_st;
+    if (!handle) return CUPTI_ERROR_OUT_OF_MEMORY;
+    std::lock_guard<std::mutex> lock(g_eventGroupMutex);
+    try {
+        EventGroupState state;
+        g_eventGroups.emplace(handle, std::move(state));
+    } catch (const std::bad_alloc&) {
+        delete handle;
+        return CUPTI_ERROR_OUT_OF_MEMORY;
     }
-    *eg = reinterpret_cast<CUpti_EventGroupHandle>(handle);
+    *eventGroup = handle;
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupDestroy(CUpti_EventGroupHandle eg) {
-    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-    uintptr_t key = reinterpret_cast<uintptr_t>(eg);
-    {
-        std::lock_guard<std::mutex> lk(g_egMutex);
-        g_eventGroups.erase(key);
-    }
-    delete reinterpret_cast<EventGroup*>(eg);
+CUptiResult cuptiEventGroupDestroy(CUpti_EventGroupHandle eventGroup) {
+    if (!eventGroup) return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lock(g_eventGroupMutex);
+    auto it = g_eventGroups.find(eventGroup);
+    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_HANDLE;
+    if (it->second.enabled) return CUPTI_ERROR_INVALID_OPERATION;
+    g_eventGroups.erase(it);
+    delete eventGroup;
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupAddEvent(CUpti_EventGroupHandle eg,
+CUptiResult cuptiEventGroupAddEvent(CUpti_EventGroupHandle eventGroup,
                                     CUpti_EventID event) {
-    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-    std::lock_guard<std::mutex> lk(g_egMutex);
-    auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
-    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_PARAMETER;
-    it->second.events.push_back(event);
+    if (!eventGroup) return CUPTI_ERROR_INVALID_PARAMETER;
+    if (!isVirtualEvent(event)) return CUPTI_ERROR_INVALID_EVENT_ID;
+    std::lock_guard<std::mutex> lock(g_eventGroupMutex);
+    auto it = g_eventGroups.find(eventGroup);
+    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_HANDLE;
+    if (it->second.enabled) return CUPTI_ERROR_INVALID_OPERATION;
+    if (std::find(it->second.eventIds.begin(), it->second.eventIds.end(), event) !=
+        it->second.eventIds.end()) return CUPTI_ERROR_INVALID_EVENT_ID;
+    try { it->second.eventIds.push_back(event); }
+    catch (const std::bad_alloc&) { return CUPTI_ERROR_OUT_OF_MEMORY; }
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupEnable(CUpti_EventGroupHandle eg) {
-    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-    // Start the per-thread hardware PMU counter so we can snapshot it on disable.
-    HwPmuSampler& pmu = getThreadPmu();
-    if (pmu.valid()) pmu.start();
+CUptiResult cuptiEventGroupEnable(CUpti_EventGroupHandle eventGroup) {
+    if (!eventGroup) return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lock(g_eventGroupMutex);
+    auto it = g_eventGroups.find(eventGroup);
+    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_HANDLE;
+    EventGroupState& group = it->second;
+    if (group.enabled || group.eventIds.empty()) return CUPTI_ERROR_INVALID_OPERATION;
+    auto& profiler = vgre::advanced::RuntimeProfiler::instance();
+    std::pair<std::vector<vgre::advanced::ProfileEvent>, uint64_t> snapshot;
+    try { snapshot = profiler.getEventSnapshot(); }
+    catch (const std::bad_alloc&) { return CUPTI_ERROR_OUT_OF_MEMORY; }
+    group.startEventCount = snapshot.first.size();
+    group.startGeneration = snapshot.second;
+    group.enabled = true;
+    acquireProfiler();
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupDisable(CUpti_EventGroupHandle eg) {
-    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-    // Stop hardware counter and cache the reading in the event group.
-    HwPmuSampler& pmu = getThreadPmu();
-    uint64_t hwCount = pmu.valid() ? pmu.stop() : 0;
-    if (hwCount > 0) {
-        std::lock_guard<std::mutex> lk(g_egMutex);
-        auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
-        if (it != g_eventGroups.end()) {
-            it->second.hwInstrCount = hwCount;
-            it->second.hwValid      = true;
-        }
+CUptiResult cuptiEventGroupDisable(CUpti_EventGroupHandle eventGroup) {
+    if (!eventGroup) return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lock(g_eventGroupMutex);
+    auto it = g_eventGroups.find(eventGroup);
+    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_HANDLE;
+    EventGroupState& group = it->second;
+    if (!group.enabled) return CUPTI_ERROR_INVALID_OPERATION;
+    std::pair<std::vector<vgre::advanced::ProfileEvent>, uint64_t> snapshot;
+    try {
+        snapshot = vgre::advanced::RuntimeProfiler::instance().getEventSnapshot();
+    } catch (const std::bad_alloc&) {
+        return CUPTI_ERROR_OUT_OF_MEMORY;
     }
+    uint64_t values[3] = {0, 0, 0};
+    const size_t begin = snapshot.second == group.startGeneration
+        ? group.startEventCount : 0;
+    bool valid = aggregateEvents(snapshot.first, begin, values);
+    for (size_t i = 0; valid && i < 3; ++i)
+        valid = checkedAdd(values[i], group.values[i]);
+    group.enabled = false;
+    releaseProfiler();
+    if (!valid) return CUPTI_ERROR_INVALID_EVENT_VALUE;
+    std::copy(values, values + 3, group.values);
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiEventGroupReadAllEvents(CUpti_EventGroupHandle eg,
-                                         uint32_t /*flags*/,
-                                         size_t* sizeBytes,
-                                         uint64_t* buf,
-                                         size_t* idSizeBytes,
-                                         CUpti_EventID* idArray,
-                                         size_t* numRead) {
-    if (!eg) return CUPTI_ERROR_INVALID_PARAMETER;
-
-    std::vector<CUpti_EventID> events;
-    uint64_t hwTotal = 0;
-    bool hwValid = false;
-    {
-        std::lock_guard<std::mutex> lk(g_egMutex);
-        auto it = g_eventGroups.find(reinterpret_cast<uintptr_t>(eg));
-        if (it != g_eventGroups.end()) {
-            events   = it->second.events;
-            hwTotal  = it->second.hwInstrCount;
-            hwValid  = it->second.hwValid;
-        }
+CUptiResult cuptiEventGroupReadAllEvents(CUpti_EventGroupHandle eventGroup,
+                                         uint32_t flags,
+                                         size_t* eventValueBufferSizeBytes,
+                                         uint64_t* eventValueBuffer,
+                                         size_t* eventIdArraySizeBytes,
+                                         CUpti_EventID* eventIdArray,
+                                         size_t* numEventIdsRead) {
+    if (!eventGroup || !eventValueBufferSizeBytes || !eventIdArraySizeBytes ||
+        !numEventIdsRead || flags != 0)
+        return CUPTI_ERROR_INVALID_PARAMETER;
+    std::lock_guard<std::mutex> lock(g_eventGroupMutex);
+    auto it = g_eventGroups.find(eventGroup);
+    if (it == g_eventGroups.end()) return CUPTI_ERROR_INVALID_HANDLE;
+    EventGroupState& group = it->second;
+    if (group.enabled) return CUPTI_ERROR_INVALID_OPERATION;
+    const size_t requiredValues = group.eventIds.size() * sizeof(uint64_t);
+    const size_t requiredIds = group.eventIds.size() * sizeof(CUpti_EventID);
+    *numEventIdsRead = 0;
+    if (*eventValueBufferSizeBytes < requiredValues ||
+        *eventIdArraySizeBytes < requiredIds) {
+        *eventValueBufferSizeBytes = requiredValues;
+        *eventIdArraySizeBytes = requiredIds;
+        return CUPTI_ERROR_PARAMETER_SIZE_NOT_SUFFICIENT;
     }
-
-    size_t n = events.size();
-
-    // Prefer hardware PMU reading (from cuptiEventGroupDisable snapshot).
-    // If hardware is not available, fall back to instruction-mix software proxies.
-    uint64_t counterTable[7];
-    size_t tableSize;
-
-    if (hwValid && hwTotal > 0) {
-        // Distribute the hardware total across buckets using the instruction-mix
-        // fractions as weights, keeping them hardware-calibrated.
-        auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
-        auto agg = aggregateInstructionMix(allStats);
-        uint64_t softTotal = agg.total();
-        auto scale = [&](uint64_t softBucket) -> uint64_t {
-            if (softTotal == 0) return hwTotal / 7;
-            return static_cast<uint64_t>(
-                static_cast<double>(hwTotal) *
-                (static_cast<double>(softBucket) / static_cast<double>(softTotal)));
-        };
-        counterTable[0] = scale(agg.aluCount);
-        counterTable[1] = scale(agg.loadCount);
-        counterTable[2] = scale(agg.storeCount);
-        counterTable[3] = scale(agg.branchCount);
-        counterTable[4] = scale(agg.barrierCount);
-        counterTable[5] = scale(agg.otherCount);
-        counterTable[6] = hwTotal;
-        tableSize = 7;
-    } else {
-        // Software-proxy fallback: pure instruction-mix counters.
-        auto allStats = vgre::advanced::RuntimeProfiler::instance().getAllStats();
-        auto agg = aggregateInstructionMix(allStats);
-        uint64_t aggTotal = agg.total();
-        counterTable[0] = agg.aluCount;
-        counterTable[1] = agg.loadCount;
-        counterTable[2] = agg.storeCount;
-        counterTable[3] = agg.branchCount;
-        counterTable[4] = agg.barrierCount;
-        counterTable[5] = agg.otherCount;
-        counterTable[6] = aggTotal;
-        tableSize = 7;
+    if (requiredValues && (!eventValueBuffer || !eventIdArray))
+        return CUPTI_ERROR_INVALID_PARAMETER;
+    for (size_t i = 0; i < group.eventIds.size(); ++i) {
+        const CUpti_EventID id = group.eventIds[i];
+        eventIdArray[i] = id;
+        eventValueBuffer[i] = group.values[eventIndex(id)];
     }
-
-    if (sizeBytes)   *sizeBytes   = n * sizeof(uint64_t);
-    if (idSizeBytes) *idSizeBytes = n * sizeof(CUpti_EventID);
-    if (numRead)     *numRead     = n;
-
-    for (size_t i = 0; i < n; ++i) {
-        if (buf)     buf[i]     = (tableSize > 0) ? counterTable[i % tableSize] : 0;
-        if (idArray) idArray[i] = events[i];
-    }
-
+    *eventValueBufferSizeBytes = requiredValues;
+    *eventIdArraySizeBytes = requiredIds;
+    *numEventIdsRead = group.eventIds.size();
+    std::fill(group.values, group.values + 3, uint64_t{0});
     return CUPTI_SUCCESS;
 }
 
-CUptiResult cuptiProfilerInitialize(void)   { return CUPTI_SUCCESS; }
-CUptiResult cuptiProfilerDeInitialize(void) { return CUPTI_SUCCESS; }
+CUptiResult cuptiProfilerInitialize(void) {
+    std::lock_guard<std::mutex> lock(g_explicitProfilerInitMutex);
+    if (g_explicitProfilerInitCount == std::numeric_limits<uint32_t>::max())
+        return CUPTI_ERROR_OUT_OF_MEMORY;
+    if (g_explicitProfilerInitCount == 0) acquireProfiler();
+    ++g_explicitProfilerInitCount;
+    return CUPTI_SUCCESS;
+}
+
+CUptiResult cuptiProfilerDeInitialize(void) {
+    std::lock_guard<std::mutex> lock(g_explicitProfilerInitMutex);
+    if (g_explicitProfilerInitCount == 0) return CUPTI_ERROR_NOT_INITIALIZED;
+    --g_explicitProfilerInitCount;
+    if (g_explicitProfilerInitCount == 0) releaseProfiler();
+    return CUPTI_SUCCESS;
+}
 
 } // extern "C"

@@ -1,8 +1,8 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-10-07
+**Last Updated**: 2026-10-08
 
-**Latest hosted verification**: ✅ [GitHub Actions run 37652962427](https://github.com/etienne0114/vgre/actions/runs/37652962427) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully.
+**Latest all-green hosted verification**: ✅ [GitHub Actions run 37652962427](https://github.com/etienne0114/vgre/actions/runs/37652962427) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully. The newer run 37678191879 is recorded below and failed at `PTXTranslate` on macOS and Windows.
 
 - **Linux**: ✅ Full `ctest` suite passed in the latest hosted Linux x86-64 job.
 - **Linux, LLVM-free**: ✅ The dedicated `linux-x86_64-llvm-free` job passed with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
@@ -89,15 +89,50 @@ whose derivative cannot be recovered from the API's saved output. Local
 constraints now bind numbered and named operands into translated C++, and the parser
 consumes balanced nested constraint expressions. Predicated PTX and malformed
 operand lists now fail explicitly instead of becoming comments or partial generated
-code. `PTXTranslate` passes locally; hosted CI remains pending.
+code. `PTXTranslate` passes locally. Hosted run [37678191879](https://github.com/etienne0114/vgre/actions/runs/37678191879)
+failed this test on macOS ARM64 and Windows x86-64 at the expected-rejection check:
+the test caught `std::runtime_error` across a shared-library boundary, which is
+not portable across platform C++ runtimes. The test now catches the exception at
+that narrowly scoped rejection assertion; hosted verification is pending.
+
+**Current CUDA device-attribute follow-on (workspace):** Device attribute IDs now
+match the CUDA Runtime 11.0 enum through the implemented attributes, including the
+previously shifted texture, memory, and cooperative-launch ranges. Reserved enum
+gaps and unknown IDs return `cudaErrorInvalidValue`. Memory clock, dedicated memory-bus width,
+GPU L2 size, and measured FP32/FP64 throughput ratio return
+`cudaErrorNotSupported`; the CPU-backed virtual device does not collect or model
+those physical GPU metrics. `CUDAAPIAttributesIntegration` passes locally across
+the corrected mappings and invalid IDs; hosted CI remains pending.
+
+**Current CUPTI virtual profiling follow-on (workspace):** The VGRE-owned,
+non-NVIDIA-ABI interface now collects launch count, measured duration in
+nanoseconds, and virtual thread counts from individual `RuntimeProfiler`
+records. Event groups validate handles, states, event IDs, and output capacities;
+successful reads reset the collected interval. Non-kernel timeline events such
+as NVTX markers are excluded from counters, activity, and launch callbacks.
+Virtual metrics calculate from caller-provided event values. Runtime/driver
+launch callbacks receive completed, API-tagged kernel launches, and activity
+flush preserves individual dimensions and measured duration. `CuptiHwCounters`
+now runs real driver and runtime-interceptor launches, checks their output, and
+verifies counters, callbacks, and activity records. The full local CTest suites
+pass in both configurations: 410/410 normal and 390/390 LLVM-free. Physical GPU
+PMU metrics, registers, utilization, and GPU context/device identifiers remain
+unavailable and are not inferred from CPU estimates. Hosted verification is
+pending.
 
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
-**Production Readiness**: core emulation is stable and verified on Linux; macOS ARM64 and Windows x86-64 are both CI-green (full `ctest` suite) — all three platforms now pass in CI.
+**Production Readiness**: prior hosted runs passed the Linux, macOS ARM64, and Windows x86-64 matrices. The latest run listed below has a macOS/Windows `PTXTranslate` failure; the local correction is not yet hosted-verified.
 
 > **Historical CI status (2026-09):** CI was restored on the public repository.
 > At that point some OS lanes were informational; since then the workflow was
 > updated so Linux, macOS, and Windows are required, and all four latest matrix
 > jobs (including Linux LLVM-free) passed run 37042616142.
+
+> **Latest hosted run (2026-10-07):** [run 37678191879](https://github.com/etienne0114/vgre/actions/runs/37678191879)
+> at `218d348` passed Linux x86-64 and Linux LLVM-free, but failed `PTXTranslate`
+> on macOS ARM64 and Windows x86-64. The local test now handles its expected
+> operand-rejection exception portably; these unpushed changes still need hosted
+> verification.
 
 > **LLVM is now optional (delivered):** kernel execution no longer requires LLVM —
 > a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter,
@@ -185,9 +220,10 @@ passed the full suite plus Python integration and native SSA checks.
 Keychain via `SecItemAdd`/`SecItemCopyMatching`, thermal via IOKit SMC,
 external semaphores via `dispatch_semaphore`, cluster TCP via BSD sockets.
 
-**Documented macOS approximations** (see `missingFeatures.md`): NUMA pinning
-(Mach hints vs Linux affinity), no Metal Performance Shaders backend, no NVIDIA
-PMU/CUPTI counters without physical GPU hardware.
+**Documented macOS limitations** (see `missingFeatures.md`): NUMA pinning
+(Mach hints vs Linux affinity), no Metal Performance Shaders backend, and the
+VGRE virtual launch counters are supported; physical GPU event counters and PMU
+metrics remain unavailable on the CPU-backed virtual device.
 
 ### 1.3 Windows — CI-green
 
@@ -201,8 +237,9 @@ loading under Python 3.8+, and cp1252 console encoding of non-ASCII test output.
 - **Mostly real compute, with documented exceptions**: nearly every path runs real
   CPU math (AVX/ARM64 SIMD + OpenBLAS/LAPACK). Known software approximations include
   Flash Attention K/V recomputation and the NCCL barrier-per-round ring; other
-  tensor-core shapes still need ISA-by-ISA audit. Hardware-boundary proxies include
-  CUPTI PMU counters.
+  tensor-core shapes still need ISA-by-ISA audit. VGRE virtual CUPTI events cover
+  launch count, elapsed time, and launched threads; physical GPU metrics remain
+  unavailable on the CPU-backed device.
 - **Teardown stability**: thread lifecycles, socket listeners, and memory heaps are
   managed deterministically; the JIT-worker static-destruction crash is fixed.
 - **Known test caveat**: under `ctest -j`, heavy clang/JIT tests can intermittently

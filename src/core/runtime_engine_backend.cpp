@@ -10,6 +10,7 @@
 #ifndef VGRE_ENABLE_JIT
 
 #include "vgre/core/runtime_engine.h"
+#include "vgre/advanced/runtime_profiler.h"
 #include <algorithm>  // std::sort/min_element/find_if/... (don't rely on transitive includes)
 
 #include "vgre/common/logger.h"
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <chrono>
 
 namespace vgre {
 namespace core {
@@ -130,40 +132,62 @@ RuntimeEngine::makeBackendKernel(const std::string &name, const std::string &sou
 
 VGREResult RuntimeEngine::launchBackendKernel(const std::shared_ptr<BackendKernel> &bk,
                                               const dim3 &gridDim, const dim3 &blockDim,
-                                              void **args, size_t sharedMem) {
+                                              void **args, size_t sharedMem,
+                                              const std::string &kernelName,
+                                              bool recordProfile) {
+    const auto start = std::chrono::steady_clock::now();
+    VGREResult result = VGREResult::ERR_NOT_SUPPORTED;
     if (bk->ssa) {
         fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
         fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
-        return bk->ssa->launch(g, b, args, bk->numArgs, sharedMem)
-                   ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
-    }
-    if (bk->native) {
+        result = bk->ssa->launch(g, b, args, bk->numArgs, sharedMem)
+                     ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+    } else if (bk->native) {
         fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
         fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
-        return bk->native->launch(g, b, args, bk->numArgs)
-                   ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
-    }
-    if (bk->compiled) {
+        result = bk->native->launch(g, b, args, bk->numArgs)
+                     ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+    } else if (bk->compiled) {
         fe::Extent g{gridDim.x, gridDim.y, gridDim.z};
         fe::Extent b{blockDim.x, blockDim.y, blockDim.z};
-        return bk->compiled->launch(g, b, args, bk->numArgs)
-                   ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
-    }
-    if (bk->prepared) {
+        result = bk->compiled->launch(g, b, args, bk->numArgs)
+                     ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+    } else if (bk->prepared) {
         be::ExecutionBackend *b = interpBackend();
-        if (!b) return VGREResult::ERR_NOT_SUPPORTED;
-        be::LaunchConfig cfg;
-        cfg.gridDim[0] = gridDim.x; cfg.gridDim[1] = gridDim.y; cfg.gridDim[2] = gridDim.z;
-        cfg.blockDim[0] = blockDim.x; cfg.blockDim[1] = blockDim.y; cfg.blockDim[2] = blockDim.z;
-        cfg.sharedBytes = sharedMem;
-        return b->launch(*bk->prepared, cfg, args, bk->numArgs)
-                   ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+        if (b) {
+            be::LaunchConfig cfg;
+            cfg.gridDim[0] = gridDim.x; cfg.gridDim[1] = gridDim.y; cfg.gridDim[2] = gridDim.z;
+            cfg.blockDim[0] = blockDim.x; cfg.blockDim[1] = blockDim.y; cfg.blockDim[2] = blockDim.z;
+            cfg.sharedBytes = sharedMem;
+            result = b->launch(*bk->prepared, cfg, args, bk->numArgs)
+                         ? VGREResult::SUCCESS : VGREResult::ERR_LAUNCH_FAILURE;
+        }
     }
-    return VGREResult::ERR_NOT_SUPPORTED;
+    const auto end = std::chrono::steady_clock::now();
+    auto& profiler = vgre::advanced::RuntimeProfiler::instance();
+    if (result == VGREResult::SUCCESS && recordProfile && profiler.isEnabled()) {
+        vgre::advanced::ProfileEvent event;
+        event.kernelName = kernelName;
+        event.durationMs = std::chrono::duration<double, std::milli>(end - start).count();
+        event.gridDim = gridDim;
+        event.blockDim = blockDim;
+        event.dynamicSharedMemoryBytes = sharedMem;
+        event.timestamp = end;
+        event.api = vgre::advanced::currentProfileApi();
+        event.isKernelLaunch = true;
+        profiler.recordEvent(event);
+    }
+    return result;
 }
 
 VGREResult RuntimeEngine::launchBackendByName(const std::string &name, const dim3 &gridDim,
                                               const dim3 &blockDim, void **args, size_t sharedMem) {
+    return launchBackendByName(name, gridDim, blockDim, args, sharedMem, true);
+}
+
+VGREResult RuntimeEngine::launchBackendByName(const std::string &name, const dim3 &gridDim,
+                                              const dim3 &blockDim, void **args,
+                                              size_t sharedMem, bool recordProfile) {
     std::shared_ptr<BackendKernel> bk;
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -174,7 +198,8 @@ VGREResult RuntimeEngine::launchBackendByName(const std::string &name, const dim
         }
     }
     if (!bk) return VGREResult::ERR_INVALID_KERNEL;
-    return launchBackendKernel(bk, gridDim, blockDim, args, sharedMem);
+    return launchBackendKernel(bk, gridDim, blockDim, args, sharedMem, name,
+                               recordProfile);
 }
 
 int RuntimeEngine::backendKernelTierByName(const std::string &name) {

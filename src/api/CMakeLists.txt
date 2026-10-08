@@ -89,18 +89,6 @@ if(SQLITE3_LIBRARY)
     target_compile_definitions(vgre_api PRIVATE VGRE_HAS_SQLITE)
 endif()
 
-# macOS: cupti_shim.cpp probes IOKit/CoreFoundation for a physical GPU. Attach the
-# frameworks as a PUBLIC usage requirement so every consumer of these objects —
-# the vgre/vgre_cudart shared libs AND test executables that link the vgre_api
-# objects directly — resolves _IOServiceMatching/_CFRelease/etc.
-if(APPLE)
-    find_library(_vgre_api_iokit IOKit)
-    find_library(_vgre_api_cf CoreFoundation)
-    if(_vgre_api_iokit AND _vgre_api_cf)
-        target_link_libraries(vgre_api PUBLIC ${_vgre_api_iokit} ${_vgre_api_cf})
-    endif()
-endif()
-
 # clang-cl only (see the note in src/core/CMakeLists): its __AVX__-gated
 # <immintrin.h> needs /arch:AVX(2) to declare __m256/__m256i for the AVX/AVX2
 # intrinsics in cublas_level1/3 and nccl_core. GCC/Clang must NOT get these flags

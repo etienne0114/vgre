@@ -26,42 +26,62 @@ static bool contains(const std::string &h, const std::string &n) {
     return h.find(n) != std::string::npos;
 }
 
+static std::string constrainedAsm(const std::string& body, size_t outputCount,
+                                 size_t operandCount,
+                                 const char* outputConstraint = "=r",
+                                 const char* inputConstraint = "r") {
+    std::string source = "asm volatile(\"" + body + "\" : ";
+    for (size_t i = 0; i < outputCount; ++i) {
+        if (i) source += ", ";
+        source += "\"" + std::string(outputConstraint) + "\"(operand" +
+                  std::to_string(i) + ")";
+    }
+    source += " : ";
+    for (size_t i = outputCount; i < operandCount; ++i) {
+        if (i != outputCount) source += ", ";
+        source += "\"" + std::string(inputConstraint) + "\"(operand" +
+                  std::to_string(i) + ")";
+    }
+    source += ");";
+    return source;
+}
+
 int main() {
     printf("=== PTX Inline-Asm Translation (Track 12) ===\n");
 
     // Packed FP8 conversion follows PTX's lane ordering: d[7:0] receives the
     // second source operand b, while d[15:8] receives the first source a.
     {
-        const std::string e4 = PTXTranslator::translate(
-            "asm volatile(\"cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;\");");
-        const size_t e4Low = e4.find("vgre_f32_to_fp8e4m3_satfinite((float)(%1),false,false)");
-        const size_t e4High = e4.find("vgre_f32_to_fp8e4m3_satfinite((float)(%2),false,false)");
+        const std::string e4 = PTXTranslator::translate(constrainedAsm(
+            "cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;", 1, 3, "=r", "f"));
+        const size_t e4Low = e4.find("vgre_f32_to_fp8e4m3_satfinite((float)((operand1)),false,false)");
+        const size_t e4High = e4.find("vgre_f32_to_fp8e4m3_satfinite((float)((operand2)),false,false)");
         const size_t e4Shift = e4.find("<<8");
         check("packed E4M3 stores PTX source b in the low byte and source a high",
               e4Low != std::string::npos && e4High != std::string::npos &&
               e4Low < e4High && e4High < e4Shift);
 
-        const std::string e5 = PTXTranslator::translate(
-            "asm volatile(\"cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;\");");
-        const size_t e5Low = e5.find("vgre_f32_to_fp8e5m2_satfinite((float)(%1),false,false)");
-        const size_t e5High = e5.find("vgre_f32_to_fp8e5m2_satfinite((float)(%2),false,false)");
+        const std::string e5 = PTXTranslator::translate(constrainedAsm(
+            "cvt.rn.satfinite.e5m2x2.f32 %0, %1, %2;", 1, 3, "=r", "f"));
+        const size_t e5Low = e5.find("vgre_f32_to_fp8e5m2_satfinite((float)((operand1)),false,false)");
+        const size_t e5High = e5.find("vgre_f32_to_fp8e5m2_satfinite((float)((operand2)),false,false)");
         const size_t e5Shift = e5.find("<<8");
         check("packed E5M2 uses finite saturation and preserves PTX source order",
               e5Low != std::string::npos && e5High != std::string::npos &&
               e5Low < e5High && e5High < e5Shift);
 
-        const std::string rz = PTXTranslator::translate(
-            "asm volatile(\"cvt.rz.satfinite.e4m3x2.f32 %0, %1, %2;\");");
+        const std::string rz = PTXTranslator::translate(constrainedAsm(
+            "cvt.rz.satfinite.e4m3x2.f32 %0, %1, %2;", 1, 3, "=r", "f"));
         check("packed FP8 round-toward-zero selects truncating conversion",
-              contains(rz, "vgre_f32_to_fp8e4m3_satfinite((float)(%1),true,false)"));
-        const std::string relu = PTXTranslator::translate(
-            "asm volatile(\"cvt.rn.relu.satfinite.e5m2x2.f32 %0, %1, %2;\");");
+              contains(rz, "vgre_f32_to_fp8e4m3_satfinite((float)((operand1)),true,false)"));
+        const std::string relu = PTXTranslator::translate(constrainedAsm(
+            "cvt.rn.relu.satfinite.e5m2x2.f32 %0, %1, %2;", 1, 3, "=r", "f"));
         check("packed FP8 ReLU selects the NaN-preserving ReLU conversion",
-              contains(relu, "vgre_f32_to_fp8e5m2_satfinite((float)(%1),false,true)"));
-        const std::string rzRelu = PTXTranslator::translate(
-            "asm volatile(\"cvt.rz.relu.satfinite.e4m3x2.f32 %0, %1, %2;\");");
+              contains(relu, "vgre_f32_to_fp8e5m2_satfinite((float)((operand1)),false,true)"));
+        const std::string rzRelu = PTXTranslator::translate(constrainedAsm(
+            "cvt.rz.relu.satfinite.e4m3x2.f32 %0, %1, %2;", 1, 3, "=r", "f"));
         check("packed FP8 supports combined round-toward-zero and ReLU",
-              contains(rzRelu, "vgre_f32_to_fp8e4m3_satfinite((float)(%1),true,true)"));
+              contains(rzRelu, "vgre_f32_to_fp8e4m3_satfinite((float)((operand1)),true,true)"));
     }
 
     // (1) Memory addressing: load with a byte offset.
@@ -97,20 +117,32 @@ int main() {
               contains(translated, "(result) = (lhs + offset) + (rhs);") &&
               translated.find('%') == std::string::npos);
 
+        // Catch across the shared-library boundary without depending on a
+        // platform's C++ runtime-specific exception type/RTTI identity.
         bool rejectsMissingOperand = false;
         try {
             (void)PTXTranslator::translate(
                 "asm(\"add.s32 %0, %1, %2;\" : \"=r\"(result) : \"r\"(lhs));");
-        } catch (const std::runtime_error&) {
+        } catch (...) {
             rejectsMissingOperand = true;
         }
         check("inline PTX with an unmatched operand index fails explicitly",
               rejectsMissingOperand);
 
+        bool rejectsUnconstrainedOperand = false;
+        try {
+            (void)PTXTranslator::translate("asm(\"mov.u32 %0, %1;\");");
+        } catch (...) {
+            rejectsUnconstrainedOperand = true;
+        }
+        check("inline PTX never leaks unbound percent operands into generated code",
+              rejectsUnconstrainedOperand);
+
         bool rejectsPredicate = false;
         try {
-            (void)PTXTranslator::translate("asm(\"@p add.s32 %0, %1, %2;\");");
-        } catch (const std::runtime_error&) {
+            (void)PTXTranslator::translate(constrainedAsm(
+                "@p add.s32 %0, %1, %2;", 1, 3));
+        } catch (...) {
             rejectsPredicate = true;
         }
         check("predicated PTX is rejected instead of dropped", rejectsPredicate);
@@ -219,8 +251,9 @@ int main() {
         };
         bool ok = true;
         for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
-            std::string translated = PTXTranslator::translate(
-                std::string("asm volatile(\"") + bodies[i] + "\" : );");
+            const bool tensorCore = i < 2;
+            std::string translated = PTXTranslator::translate(constrainedAsm(
+                bodies[i], tensorCore ? 4 : 1, tensorCore ? 14 : 2, "=f", "f"));
             bool caseOk = contains(translated, expected[i]);
             if (i >= 2)
                 caseOk = caseOk && contains(translated, "cvt_f32_to_tf32_bits(");
@@ -251,11 +284,12 @@ int main() {
         bool ok = true;
         for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); ++i) {
             std::string translated = PTXTranslator::translate(
-                std::string("asm volatile(\"") + bodies[i] + "\" : );");
+                constrainedAsm(bodies[i], 2, 6, i == 4 ? "=d" : "=r",
+                               i == 4 ? "d" : "r"));
             ok = ok && contains(translated, helpers[i]);
             for (int reg = 0; reg < 6; ++reg)
-                ok = ok && contains(translated, "%" + std::to_string(reg));
-            ok = ok && translated.find("%6") == std::string::npos;
+                ok = ok && contains(translated, "operand" + std::to_string(reg));
+            ok = ok && translated.find('%') == std::string::npos;
         }
         check("m8 integer and f64 mma.sync mappings preserve the six PTX fragment operands", ok);
     }
@@ -267,9 +301,9 @@ int main() {
         std::string regs = "{";
         for (int i = 0; i < 32; ++i) { regs += "%" + std::to_string(i); if (i < 31) regs += ","; }
         regs += "}";
-        std::string src = "asm volatile("
-            "\"wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 " + regs + ", %32, %33;\" : );";
-        std::string c = PTXTranslator::translate(src);
+        std::string body = "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 " +
+                           regs + ", %32, %33;";
+        std::string c = PTXTranslator::translate(constrainedAsm(body, 32, 34, "=f", "l"));
         check("wgmma brace-group → warp-group collective helper",
               contains(c, "vgre_wgmma_wg_bf16(_wgd,64,"));
         check("wgmma packs the 32 distributed accumulator registers",
@@ -285,9 +319,10 @@ int main() {
                 if (i + 1 < count) regs += ",";
             }
             regs += "}";
-            return PTXTranslator::translate("asm volatile(\"" + std::string(instruction) +
-                " " + regs + ", %" + std::to_string(count) + ", %" +
-                std::to_string(count + 1) + ";\" : );");
+            const std::string body = std::string(instruction) + " " + regs + ", %" +
+                std::to_string(count) + ", %" + std::to_string(count + 1) + ";";
+            return PTXTranslator::translate(constrainedAsm(
+                body, static_cast<size_t>(count), static_cast<size_t>(count + 2), "=f", "l"));
         };
         const std::string f16 = translatedWgmma(
             "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16", 128);
@@ -306,14 +341,15 @@ int main() {
     //     "not supported". o[1] = "tensorMap, {coords}" is parsed into the map +
     //     coordinates.
     {
-        std::string src = "asm volatile("
-            "\"cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
-            "[%0], [%1, {%2, %3}], [%4];\" : );";
-        std::string c = PTXTranslator::translate(src);
+        const std::string body =
+            "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
+            "[%0], [%1, {%2, %3}], [%4];";
+        std::string c = PTXTranslator::translate(constrainedAsm(body, 0, 5, "=r", "l"));
         check("TMA cluster load → real vgre_tma_load_2d_dispatch",
               contains(c, "vgre_tma_load_2d_dispatch("));
         check("TMA load parses the tensor-map and {coords}",
-              contains(c, "VgreTMADescriptor") && contains(c, "%2") && contains(c, "%3"));
+              contains(c, "VgreTMADescriptor") && contains(c, "operand2") &&
+              contains(c, "operand3") && c.find('%') == std::string::npos);
     }
 
     // (8) The Hopper TMA STORE (shared→global) cp.async.bulk.tensor.2d
@@ -323,15 +359,16 @@ int main() {
     //     turning every TMA store into a load.) Real PTX bundles the target as
     //     [tensorMap, {coords}] and the source as the second operand.
     {
-        std::string src = "asm volatile("
-            "\"cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
-            "[%0, {%1, %2}], [%3];\" : );";
-        std::string c = PTXTranslator::translate(src);
+        const std::string body =
+            "cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
+            "[%0, {%1, %2}], [%3];";
+        std::string c = PTXTranslator::translate(constrainedAsm(body, 0, 4, "=r", "l"));
         check("TMA store → vgre_tma_store_2d_b (a store, not a load)",
               contains(c, "vgre_tma_store_2d_b(") && !contains(c, "vgre_tma_load"));
         check("TMA store passes descriptor first then source SMEM",
-              contains(c, "VgreTMADescriptor") && contains(c, "%0") &&
-              contains(c, "%3") && contains(c, "%1") && contains(c, "%2"));
+              contains(c, "VgreTMADescriptor") && contains(c, "operand0") &&
+              contains(c, "operand3") && contains(c, "operand1") &&
+              contains(c, "operand2") && c.find('%') == std::string::npos);
     }
 
     // (9) Hopper thread-block cluster (P3-6): barrier.cluster.wait must lower to

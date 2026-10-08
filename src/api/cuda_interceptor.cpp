@@ -8,6 +8,7 @@
 #include "vgre/core/scheduler.h"
 #include "vgre/core/texture_manager.h"
 #include "vgre/core/virtual_gpu_device.h"
+#include "vgre/advanced/runtime_profiler.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -526,6 +527,7 @@ cudaError_t CUDAInterceptor::launchKernel(const std::string &name,
       return err;
   }
 
+  vgre::advanced::ScopedProfileApi profileApi(vgre::advanced::ProfileApi::CudaRuntime);
   auto r = core::RuntimeEngine::instance().launchKernel(
       name, source, gridDim, blockDim, args, sharedMem, stream);
   g_lastError = convertResult(r);
@@ -545,6 +547,7 @@ cudaError_t CUDAInterceptor::launchCooperativeKernel(const std::string &name,
       return err;
   }
 
+  vgre::advanced::ScopedProfileApi profileApi(vgre::advanced::ProfileApi::CudaRuntime);
   auto r = core::RuntimeEngine::instance().launchCooperativeKernel(
       name, source, gridDim, blockDim, args, sharedMem, stream);
   g_lastError = convertResult(r);
