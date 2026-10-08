@@ -206,6 +206,97 @@ static size_t findAsmCallEnd(const std::string& source, size_t from) {
     throw std::runtime_error("unterminated inline PTX asm expression");
 }
 
+static const std::regex& inlineAsmRegex() {
+    // Keep this regex alive until process exit: PTX translation can run on JIT
+    // workers while static objects are being destroyed on the main thread.
+    static const std::regex* expression = new std::regex(
+        "\\b(?:__asm__|asm)\\s*(?:(?:volatile|__volatile__)\\s*)?\\(\\s*((?:\"(?:[^\"\\\\]|\\\\.)*\"\\s*)+)",
+        std::regex::ECMAScript);
+    return *expression;
+}
+
+static bool validateAsmOperandBindings(const std::string& body,
+                                       const std::string& constraints,
+                                       std::string& error) {
+    const auto operands = parseAsmOperands(constraints);
+    std::unordered_map<std::string, std::string> named;
+    for (const auto& operand : operands)
+        if (!operand.name.empty()) named[operand.name] = operand.expression;
+
+    for (size_t i = 0; i < body.size();) {
+        if (body[i] != '%' || i + 1 >= body.size()) {
+            ++i;
+            continue;
+        }
+        if (body[i + 1] == '[') {
+            const size_t close = body.find(']', i + 2);
+            if (close != std::string::npos) {
+                const std::string name = body.substr(i + 2, close - i - 2);
+                if (named.find(name) == named.end()) {
+                    error = "unknown named inline PTX operand %" + name;
+                    return false;
+                }
+                i = close + 1;
+                continue;
+            }
+        }
+        if (!std::isdigit(static_cast<unsigned char>(body[i + 1]))) {
+            ++i;
+            continue;
+        }
+
+        size_t end = i + 1;
+        size_t index = 0;
+        while (end < body.size() &&
+               std::isdigit(static_cast<unsigned char>(body[end]))) {
+            const size_t digit = static_cast<size_t>(body[end] - '0');
+            if (index > (std::numeric_limits<size_t>::max() - digit) / 10) {
+                error = "inline PTX operand index overflow";
+                return false;
+            }
+            index = index * 10 + digit;
+            ++end;
+        }
+        if (index >= operands.size()) {
+            error = "inline PTX operand %" + std::to_string(index) +
+                    " has no matching constraint expression";
+            return false;
+        }
+        i = end;
+    }
+
+    std::istringstream lines(body);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string trimmed = trim(line);
+        if (!trimmed.empty() && trimmed.front() == '@') {
+            error = "predicated inline PTX is not supported: " + trimmed;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool validateInlineAsmStatusInput(const std::string& source,
+                                         std::string& error) {
+    size_t searchPos = 0;
+    while (searchPos < source.size()) {
+        std::smatch match;
+        const std::string remaining = source.substr(searchPos);
+        if (!std::regex_search(remaining, match, inlineAsmRegex())) break;
+
+        const size_t afterLiterals = searchPos +
+            static_cast<size_t>(match.position() + match.length());
+        const size_t callEnd = findAsmCallEnd(source, afterLiterals);
+        const std::string body = decodeAsmStringSequence(match[1].str());
+        const std::string constraints = source.substr(afterLiterals,
+                                                       callEnd - afterLiterals);
+        if (!validateAsmOperandBindings(body, constraints, error)) return false;
+        searchPos = callEnd + 1;
+    }
+    return true;
+}
+
 } // namespace
 
 std::string PTXTranslator::translateInstruction(
@@ -274,16 +365,6 @@ std::string PTXTranslator::translate(const std::string& source) {
     // Match the complete adjacent string-literal sequence. The closing asm
     // parenthesis is parsed separately because constraint expressions contain
     // their own nested parentheses.
-    // Leaky static (never destroyed): the JIT background worker may run this
-    // translation while the process is exiting and main-thread __cxa_atexit
-    // handlers are destroying static locals.  A by-value static std::regex would
-    // be freed out from under the worker (use-after-free / data race) and
-    // corrupt the generated wrapper, which then crashes deep in LLVM codegen.
-    // Heap-allocating once with no destructor eliminates that teardown race.
-    static const std::regex *kAsmRe = new std::regex(
-        "\\b(?:__asm__|asm)\\s*(?:(?:volatile|__volatile__)\\s*)?\\(\\s*((?:\"(?:[^\"\\\\]|\\\\.)*\"\\s*)+)",
-        std::regex::ECMAScript);
-
     std::string out;
     out.reserve(source.size());
     size_t pos = 0;
@@ -291,7 +372,7 @@ std::string PTXTranslator::translate(const std::string& source) {
     while (searchPos < source.size()) {
         std::smatch match;
         const std::string remaining = source.substr(searchPos);
-        if (!std::regex_search(remaining, match, *kAsmRe)) break;
+        if (!std::regex_search(remaining, match, inlineAsmRegex())) break;
         const size_t start = searchPos + static_cast<size_t>(match.position());
         const size_t afterLiterals = searchPos +
             static_cast<size_t>(match.position() + match.length());
@@ -324,6 +405,9 @@ bool PTXTranslator::tryTranslate(const std::string& source,
     translated.clear();
     error.clear();
     try {
+        // Report expected source-validation failures directly as status errors.
+        // translate() retains its exception-based API for existing callers.
+        if (!validateInlineAsmStatusInput(source, error)) return false;
         std::string result = translate(source);
         translated.swap(result);
         return true;

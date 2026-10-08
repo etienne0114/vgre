@@ -116,9 +116,18 @@ int main() {
               contains(translated, "(result) = (lhs + offset) + (rhs);") &&
               translated.find('%') == std::string::npos);
 
-        // Use the status API so exceptions are caught inside the library on
-        // every platform's shared-library boundary.
+        // Exercise both successful translation and expected validation errors
+        // through the status API so callers can handle them without exceptions.
         std::string translatedError, error;
+        const bool translatedValid = PTXTranslator::tryTranslate(
+            "asm(\"add.s32 %[sum], %[left], %[right];\" "
+            ": [sum] \"=r\"(result) : [left] \"r\"(lhs + offset), "
+            "[right] \"r\"(rhs));",
+            translatedError, error);
+        check("status API translates valid inline PTX and clears the error",
+              translatedValid && error.empty() &&
+              contains(translatedError, "(result) = (lhs + offset) + (rhs);"));
+
         const bool translatedMissingOperand = PTXTranslator::tryTranslate(
             "asm(\"add.s32 %0, %1, %2;\" : \"=r\"(result) : \"r\"(lhs));",
             translatedError, error);
