@@ -206,13 +206,116 @@ static size_t findAsmCallEnd(const std::string& source, size_t from) {
     throw std::runtime_error("unterminated inline PTX asm expression");
 }
 
-static const std::regex& inlineAsmRegex() {
-    // Keep this regex alive until process exit: PTX translation can run on JIT
-    // workers while static objects are being destroyed on the main thread.
-    static const std::regex* expression = new std::regex(
-        "\\b(?:__asm__|asm)\\s*(?:(?:volatile|__volatile__)\\s*)?\\(\\s*((?:\"(?:[^\"\\\\]|\\\\.)*\"\\s*)+)",
-        std::regex::ECMAScript);
-    return *expression;
+struct InlineAsmBlock {
+    size_t start = 0;
+    size_t afterLiterals = 0;
+    std::string body;
+};
+
+static bool isIdentifierChar(char ch) {
+    const unsigned char value = static_cast<unsigned char>(ch);
+    return std::isalnum(value) != 0 || ch == '_';
+}
+
+static bool tokenAt(const std::string& source, size_t position,
+                    const char* token, size_t length) {
+    if (position > source.size() || length > source.size() - position ||
+        source.compare(position, length, token, length) != 0)
+        return false;
+    if (position > 0 && isIdentifierChar(source[position - 1])) return false;
+    return position + length == source.size() ||
+           !isIdentifierChar(source[position + length]);
+}
+
+static void skipWhitespace(const std::string& source, size_t& position) {
+    while (position < source.size() &&
+           std::isspace(static_cast<unsigned char>(source[position])))
+        ++position;
+}
+
+static bool skipQuotedSourceString(const std::string& source, size_t& position) {
+    if (position >= source.size() ||
+        (source[position] != '"' && source[position] != '\''))
+        return false;
+    const char quote = source[position++];
+    while (position < source.size()) {
+        const char ch = source[position++];
+        if (ch == '\\') {
+            if (position == source.size()) return false;
+            ++position;
+        } else if (ch == quote) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool parseAsmCallAt(const std::string& source, size_t start,
+                           size_t tokenLength, InlineAsmBlock& result) {
+    size_t position = start + tokenLength;
+    skipWhitespace(source, position);
+
+    if (tokenAt(source, position, "volatile", 8)) {
+        position += 8;
+        skipWhitespace(source, position);
+    } else if (tokenAt(source, position, "__volatile__", 12)) {
+        position += 12;
+        skipWhitespace(source, position);
+    }
+
+    if (position >= source.size() || source[position] != '(') return false;
+    ++position;
+    skipWhitespace(source, position);
+    const size_t sequenceStart = position;
+    bool foundLiteral = false;
+    while (position < source.size() && source[position] == '"') {
+        foundLiteral = true;
+        if (!skipQuotedSourceString(source, position)) return false;
+        skipWhitespace(source, position);
+    }
+    if (!foundLiteral) return false;
+
+    result.start = start;
+    result.afterLiterals = position;
+    result.body = decodeAsmStringSequence(
+        source.substr(sequenceStart, position - sequenceStart));
+    return true;
+}
+
+// A deterministic scanner avoids implementation-specific std::regex resource
+// limits on large inline-asm bodies such as 128-register WGMMA accumulators.
+// It also avoids interpreting asm-like text inside comments and C++ literals.
+static bool findNextInlineAsm(const std::string& source, size_t from,
+                              InlineAsmBlock& result) {
+    size_t position = from;
+    while (position < source.size()) {
+        if (source[position] == '/' && position + 1 < source.size()) {
+            if (source[position + 1] == '/') {
+                position += 2;
+                while (position < source.size() && source[position] != '\n')
+                    ++position;
+                continue;
+            }
+            if (source[position + 1] == '*') {
+                const size_t commentEnd = source.find("*/", position + 2);
+                if (commentEnd == std::string::npos) return false;
+                position = commentEnd + 2;
+                continue;
+            }
+        }
+        if (source[position] == '"' || source[position] == '\'') {
+            if (!skipQuotedSourceString(source, position)) return false;
+            continue;
+        }
+        if (tokenAt(source, position, "__asm__", 7) &&
+            parseAsmCallAt(source, position, 7, result))
+            return true;
+        if (tokenAt(source, position, "asm", 3) &&
+            parseAsmCallAt(source, position, 3, result))
+            return true;
+        ++position;
+    }
+    return false;
 }
 
 static bool validateAsmOperandBindings(const std::string& body,
@@ -280,18 +383,12 @@ static bool validateAsmOperandBindings(const std::string& body,
 static bool validateInlineAsmStatusInput(const std::string& source,
                                          std::string& error) {
     size_t searchPos = 0;
-    while (searchPos < source.size()) {
-        std::smatch match;
-        const std::string remaining = source.substr(searchPos);
-        if (!std::regex_search(remaining, match, inlineAsmRegex())) break;
-
-        const size_t afterLiterals = searchPos +
-            static_cast<size_t>(match.position() + match.length());
-        const size_t callEnd = findAsmCallEnd(source, afterLiterals);
-        const std::string body = decodeAsmStringSequence(match[1].str());
-        const std::string constraints = source.substr(afterLiterals,
-                                                       callEnd - afterLiterals);
-        if (!validateAsmOperandBindings(body, constraints, error)) return false;
+    InlineAsmBlock block;
+    while (findNextInlineAsm(source, searchPos, block)) {
+        const size_t callEnd = findAsmCallEnd(source, block.afterLiterals);
+        const std::string constraints = source.substr(block.afterLiterals,
+                                                       callEnd - block.afterLiterals);
+        if (!validateAsmOperandBindings(block.body, constraints, error)) return false;
         searchPos = callEnd + 1;
     }
     return true;
@@ -362,29 +459,20 @@ std::string PTXTranslator::translateBlock(
 }
 
 std::string PTXTranslator::translate(const std::string& source) {
-    // Match the complete adjacent string-literal sequence. The closing asm
-    // parenthesis is parsed separately because constraint expressions contain
-    // their own nested parentheses.
     std::string out;
     out.reserve(source.size());
     size_t pos = 0;
     size_t searchPos = 0;
-    while (searchPos < source.size()) {
-        std::smatch match;
-        const std::string remaining = source.substr(searchPos);
-        if (!std::regex_search(remaining, match, inlineAsmRegex())) break;
-        const size_t start = searchPos + static_cast<size_t>(match.position());
-        const size_t afterLiterals = searchPos +
-            static_cast<size_t>(match.position() + match.length());
-        const size_t callEnd = findAsmCallEnd(source, afterLiterals);
-        const std::string body = decodeAsmStringSequence(match[1].str());
-        const std::string constraints = source.substr(afterLiterals,
-                                                       callEnd - afterLiterals);
-        out += source.substr(pos, start - pos);
+    InlineAsmBlock block;
+    while (findNextInlineAsm(source, searchPos, block)) {
+        const size_t callEnd = findAsmCallEnd(source, block.afterLiterals);
+        const std::string constraints = source.substr(block.afterLiterals,
+                                                       callEnd - block.afterLiterals);
+        out += source.substr(pos, block.start - pos);
 
         out += "/* PTX begin */\n";
         out += "{\n";
-        out += translateBlock(body, constraints, "");
+        out += translateBlock(block.body, constraints, "");
         out += "}\n";
         out += "/* PTX end */";
 
