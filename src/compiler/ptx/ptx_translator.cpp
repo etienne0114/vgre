@@ -318,5 +318,22 @@ std::string PTXTranslator::translate(const std::string& source) {
     return out;
 }
 
+bool PTXTranslator::tryTranslate(const std::string& source,
+                                 std::string& translated,
+                                 std::string& error) {
+    translated.clear();
+    error.clear();
+    try {
+        std::string result = translate(source);
+        translated.swap(result);
+        return true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+    } catch (...) {
+        error = "unknown PTX translation failure";
+    }
+    return false;
+}
+
 } // namespace compiler
 } // namespace vgre

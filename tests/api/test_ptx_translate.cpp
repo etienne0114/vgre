@@ -10,7 +10,6 @@
 
 #include <cstdio>
 #include <cstdint>
-#include <stdexcept>
 #include <string>
 
 using vgre::compiler::PTXTranslator;
@@ -117,35 +116,27 @@ int main() {
               contains(translated, "(result) = (lhs + offset) + (rhs);") &&
               translated.find('%') == std::string::npos);
 
-        // Catch across the shared-library boundary without depending on a
-        // platform's C++ runtime-specific exception type/RTTI identity.
-        bool rejectsMissingOperand = false;
-        try {
-            (void)PTXTranslator::translate(
-                "asm(\"add.s32 %0, %1, %2;\" : \"=r\"(result) : \"r\"(lhs));");
-        } catch (...) {
-            rejectsMissingOperand = true;
-        }
+        // Use the status API so exceptions are caught inside the library on
+        // every platform's shared-library boundary.
+        std::string translatedError, error;
+        const bool translatedMissingOperand = PTXTranslator::tryTranslate(
+            "asm(\"add.s32 %0, %1, %2;\" : \"=r\"(result) : \"r\"(lhs));",
+            translatedError, error);
         check("inline PTX with an unmatched operand index fails explicitly",
-              rejectsMissingOperand);
+              !translatedMissingOperand &&
+              contains(error, "has no matching constraint expression"));
 
-        bool rejectsUnconstrainedOperand = false;
-        try {
-            (void)PTXTranslator::translate("asm(\"mov.u32 %0, %1;\");");
-        } catch (...) {
-            rejectsUnconstrainedOperand = true;
-        }
+        const bool translatedUnconstrainedOperand = PTXTranslator::tryTranslate(
+            "asm(\"mov.u32 %0, %1;\");", translatedError, error);
         check("inline PTX never leaks unbound percent operands into generated code",
-              rejectsUnconstrainedOperand);
+              !translatedUnconstrainedOperand &&
+              contains(error, "has no matching constraint expression"));
 
-        bool rejectsPredicate = false;
-        try {
-            (void)PTXTranslator::translate(constrainedAsm(
-                "@p add.s32 %0, %1, %2;", 1, 3));
-        } catch (...) {
-            rejectsPredicate = true;
-        }
-        check("predicated PTX is rejected instead of dropped", rejectsPredicate);
+        const bool translatedPredicate = PTXTranslator::tryTranslate(
+            constrainedAsm("@p add.s32 %0, %1, %2;", 1, 3),
+            translatedError, error);
+        check("predicated PTX is rejected instead of dropped",
+              !translatedPredicate && contains(error, "predicated inline PTX"));
     }
 
     // (3) Carry-chain numerical correctness. Emulate a 64-bit add as two 32-bit

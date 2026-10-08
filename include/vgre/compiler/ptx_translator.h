@@ -15,6 +15,12 @@ public:
     // Replace inline PTX in-place. Returns the transformed source.
     static std::string translate(const std::string& source);
 
+    // Status-returning alternative for callers crossing shared-library
+    // boundaries. On failure, `translated` is empty and `error` explains why.
+    static bool tryTranslate(const std::string& source,
+                             std::string& translated,
+                             std::string& error);
+
 private:
     static std::string translateBlock(const std::string& ptxBody,
                                       const std::string& constraints,
