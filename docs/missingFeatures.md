@@ -16,7 +16,7 @@ passed all four hosted jobs: Linux x86-64, Linux LLVM-free, macOS ARM64, and Win
 The Windows suite passed all 403 CTest cases. PyPI was verified at **v0.1.4** for Linux, macOS universal2, and Windows. The [v0.1.4 release workflow](https://github.com/etienne0114/vgre/actions/runs/37045306062)
 built and smoke-tested each wheel, then published the GitHub Release and PyPI package.
 
-**Latest scheduler baseline:** commit `f5324a75` passed all four hosted CI jobs in [run 38567359184](https://github.com/etienne0114/vgre/actions/runs/38567359184). Safe-point request cancellation is the current follow-on and still needs hosted verification.
+**Latest scheduler verification:** commit `1d709841` passed all four hosted CI jobs in [run 38574242213](https://github.com/etienne0114/vgre/actions/runs/38574242213), including safe-point request cancellation.
 
 ---
 
@@ -105,9 +105,8 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   a loaded transformer, prompt token arrays, sampling policy, or generated token stream. A serving
   adapter must own those inputs and model state, implement the executor, coordinate cancellation
   at scheduler safe points, apply sampling, and expose results to clients. The cache and scheduler
-  remain model-agnostic. The scheduler baseline passed hosted Linux, LLVM-free Linux, macOS ARM64,
-  and Windows CI on commit `f5324a75` in run `38567359184`. The safe-point cancellation follow-on
-  passes focused normal and portable local builds; hosted verification is pending. End-to-end
+  remain model-agnostic. The scheduler and safe-point cancellation passed hosted Linux, LLVM-free
+  Linux, macOS ARM64, and Windows CI on commit `1d709841` in run `38574242213`. End-to-end
   transformer serving remains outside this cache/scheduler layer.
 
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
