@@ -12,8 +12,9 @@
 
 #include <cstddef>   // size_t (not transitively guaranteed on older libstdc++)
 #include <cstdint>
-#include <deque>
 #include <functional>
+#include <list>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -138,7 +139,8 @@ enum class SchedulerError {
     EXECUTOR_FAILURE,
     INVALID_KV_OUTPUT,
     CACHE_APPEND_FAILURE,
-    CACHE_RESERVATION_FAILURE
+    CACHE_RESERVATION_FAILURE,
+    REENTRANT_STEP
 };
 
 class ContinuousBatchScheduler {
@@ -165,6 +167,14 @@ public:
     // duplicate active IDs throw std::invalid_argument.
     void addRequest(SeqId id, int promptLen, int maxNewTokens);
 
+    // Cancel a waiting or running request at a scheduler safe point (between
+    // step() calls). Waiting removal updates the capacity index in O(log B)
+    // and the request-ID index in O(log W); running removal releases its
+    // reserved KV blocks and compacts the active vector in O(R). Returns false
+    // for an unknown/terminal ID or while step() is executing. The scheduler is
+    // not thread-safe; callers must serialize add/cancel/step operations.
+    bool cancelRequest(SeqId id);
+
     // Run one scheduling step:
     //   1. retire finished running requests (reclaim their KV blocks),
     //   2. admit the oldest waiting request that fits the available KV blocks
@@ -183,11 +193,18 @@ public:
     int runningCount()  const { return static_cast<int>(running_.size()); }
     int waitingCount()  const { return static_cast<int>(waitingCount_); }
     int finishedCount() const { return finished_; }
+    int cancelledCount() const { return cancelled_; }
 
 private:
     struct QueuedRequest {
         Request request;
         uint64_t order;
+    };
+    using WaitingQueue = std::list<QueuedRequest>;
+    struct WaitingLocation {
+        size_t bucket;
+        WaitingQueue::iterator position;
+        bool zeroTokenRequest;
     };
 
     int blocksFor(int tokens) const;        // ceil(tokens / blockSize)
@@ -208,7 +225,8 @@ private:
     // Requests are grouped by their full-cache block requirement. The segment
     // tree stores the oldest order in each subtree, so a prefix query finds the
     // oldest request that fits in O(log B), where B is the cache block count.
-    std::vector<std::unique_ptr<std::deque<QueuedRequest>>> waitingByBlocks_;
+    std::vector<std::unique_ptr<WaitingQueue>> waitingByBlocks_;
+    std::map<SeqId, WaitingLocation> waitingLocations_;
     std::vector<size_t> waitingTree_;
     size_t waitingTreeBase_ = 0;
     size_t waitingCount_ = 0;
@@ -216,7 +234,9 @@ private:
     uint64_t nextWaitingOrder_ = 0;
     std::vector<Request> running_;
     std::unordered_set<SeqId> activeRequestIds_;
+    bool inStep_ = false;
     int finished_ = 0;
+    int cancelled_ = 0;
 };
 
 } // namespace core

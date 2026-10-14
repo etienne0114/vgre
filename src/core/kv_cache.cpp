@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -347,6 +348,37 @@ void ContinuousBatchScheduler::setTokenExecutor(TokenExecutor executor) {
     tokenExecutor_ = std::move(executor);
 }
 
+bool ContinuousBatchScheduler::cancelRequest(SeqId id) {
+    if (inStep_)
+        return false;
+
+    const auto waiting = waitingLocations_.find(id);
+    if (waiting != waitingLocations_.end()) {
+        const size_t bucket = waiting->second.bucket;
+        const bool zeroTokenRequest = waiting->second.zeroTokenRequest;
+        waitingByBlocks_[bucket]->erase(waiting->second.position);
+        waitingLocations_.erase(waiting);
+        activeRequestIds_.erase(id);
+        --waitingCount_;
+        if (zeroTokenRequest)
+            --zeroTokenWaitingCount_;
+        ++cancelled_;
+        updateWaitingBucket(bucket);
+        return true;
+    }
+
+    const auto running = std::find_if(running_.begin(), running_.end(),
+        [id](const Request& request) { return request.id == id; });
+    if (running == running_.end() || running->generated >= running->maxNewTokens)
+        return false;
+
+    kv_.freeSequence(id);
+    activeRequestIds_.erase(id);
+    running_.erase(running);
+    ++cancelled_;
+    return true;
+}
+
 void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTokens) {
     if (promptLen < 0 || maxNewTokens < 0)
         throw std::invalid_argument("request token counts cannot be negative");
@@ -364,14 +396,25 @@ void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTok
     r.id = id; r.promptLen = promptLen; r.maxNewTokens = maxNewTokens;
     r.state = Request::WAITING;
     const size_t requiredBlocks = static_cast<size_t>(blocksFor(promptLen + maxNewTokens));
+    const bool zeroTokenRequest = promptLen == 0 && maxNewTokens == 0;
+    WaitingQueue::iterator position{};
+    bool queueNodeInserted = false;
     try {
         if (nextWaitingOrder_ == std::numeric_limits<uint64_t>::max())
             throw std::length_error("scheduler request ordering counter exhausted");
-        std::unique_ptr<std::deque<QueuedRequest>>& queue = waitingByBlocks_[requiredBlocks];
-        if (!queue)
-            queue.reset(new std::deque<QueuedRequest>());
-        queue->push_back(QueuedRequest{r, nextWaitingOrder_});
+        if (!waitingByBlocks_[requiredBlocks])
+            waitingByBlocks_[requiredBlocks].reset(new WaitingQueue());
+        WaitingQueue& activeQueue = *waitingByBlocks_[requiredBlocks];
+        activeQueue.push_back(QueuedRequest{r, nextWaitingOrder_});
+        position = std::prev(activeQueue.end());
+        queueNodeInserted = true;
+        const auto location = waitingLocations_.emplace(
+            id, WaitingLocation{requiredBlocks, position, zeroTokenRequest});
+        if (!location.second)
+            throw std::logic_error("scheduler waiting lookup already contains request ID");
     } catch (...) {
+        if (queueNodeInserted)
+            waitingByBlocks_[requiredBlocks]->erase(position);
         if (waitingByBlocks_[requiredBlocks] && waitingByBlocks_[requiredBlocks]->empty())
             waitingByBlocks_[requiredBlocks].reset();
         activeRequestIds_.erase(id);
@@ -379,7 +422,7 @@ void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTok
     }
     ++nextWaitingOrder_;
     ++waitingCount_;
-    if (promptLen == 0 && maxNewTokens == 0)
+    if (zeroTokenRequest)
         ++zeroTokenWaitingCount_;
     updateWaitingBucket(requiredBlocks);
 }
@@ -483,6 +526,17 @@ bool ContinuousBatchScheduler::executeAndAppend(const Request& request,
 int ContinuousBatchScheduler::step() {
     lastError_ = SchedulerError::NONE;
     lastErrorMessage_.clear();
+    if (inStep_) {
+        lastError_ = SchedulerError::REENTRANT_STEP;
+        lastErrorMessage_ = "continuous-batching scheduler step is not reentrant";
+        return -1;
+    }
+    inStep_ = true;
+    struct StepGuard {
+        bool& inStep;
+        ~StepGuard() { inStep = false; }
+    } stepGuard{inStep_};
+
     const uint64_t admissionOrderLimit = nextWaitingOrder_;
     if (!tokenExecutor_) {
         for (const Request& r : running_)
@@ -573,9 +627,10 @@ int ContinuousBatchScheduler::step() {
             throw;
         }
 
-        std::deque<QueuedRequest>& queue = *waitingByBlocks_[bucket];
+        WaitingQueue& queue = *waitingByBlocks_[bucket];
         const bool zeroTokenRequest = request.promptLen == 0 && request.maxNewTokens == 0;
         queue.pop_front();
+        waitingLocations_.erase(request.id);
         --waitingCount_;
         if (zeroTokenRequest)
             --zeroTokenWaitingCount_;

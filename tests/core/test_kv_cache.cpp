@@ -241,6 +241,64 @@ int main() {
               pool.freeBlocks() == 1);
     }
 
+    // Queued cancellation removes exactly one bucket node and refreshes the
+    // segment tree; later eligible requests keep their submission order.
+    {
+        KVCacheManager pool(6, 1, 1, 1);
+        ContinuousBatchScheduler sched(pool, 3);
+        std::vector<SeqId> prefillOrder;
+        sched.setTokenExecutor([&](const Request& request, ScheduledTokenPhase phase,
+                                   int position, std::vector<float>& keys,
+                                   std::vector<float>& values) {
+            if (phase == ScheduledTokenPhase::PREFILL && position == 0)
+                prefillOrder.push_back(request.id);
+            std::fill(keys.begin(), keys.end(), static_cast<float>(request.id));
+            std::fill(values.begin(), values.end(), -static_cast<float>(request.id));
+        });
+        sched.addRequest(101, 6, 0);
+        sched.addRequest(102, 2, 0);
+        sched.addRequest(103, 1, 0);
+        sched.addRequest(104, 0, 0);
+        const bool cancelledOldest = sched.cancelRequest(101);
+        const bool cancelledZeroToken = sched.cancelRequest(104);
+        const int admitted = sched.step();
+        check("queued cancellation removes requests and repairs capacity index",
+              cancelledOldest && cancelledZeroToken && !sched.cancelRequest(999) &&
+              admitted == 2 && prefillOrder == std::vector<SeqId>({102, 103}) &&
+              sched.waitingCount() == 0 && sched.cancelledCount() == 2 &&
+              !sched.cancelRequest(102) &&
+              !pool.hasSequence(101) && !pool.hasSequence(104));
+        sched.step();
+        check("queued cancellations preserve pool capacity and completion counts",
+              sched.allDone() && sched.finishedCount() == 2 &&
+              sched.cancelledCount() == 2 && pool.freeBlocks() == 6);
+    }
+
+    // Running cancellation is accepted only at a safe point between steps and
+    // releases the entire reservation, including unused future decode capacity.
+    {
+        KVCacheManager pool(4, 2, 1, 1);
+        ContinuousBatchScheduler sched(pool, 1);
+        bool reentrantCancellationRejected = true;
+        sched.setTokenExecutor([&](const Request& request, ScheduledTokenPhase,
+                                   int, std::vector<float>& keys,
+                                   std::vector<float>& values) {
+            reentrantCancellationRejected = reentrantCancellationRejected &&
+                !sched.cancelRequest(request.id);
+            std::fill(keys.begin(), keys.end(), 3.0f);
+            std::fill(values.begin(), values.end(), 4.0f);
+        });
+        sched.addRequest(105, 3, 5);
+        const int running = sched.step();
+        const bool released = pool.seqLen(105) == 4 && pool.freeBlocks() == 0 &&
+                              sched.cancelRequest(105);
+        check("running cancellation is deferred to the safe point and frees reservation",
+              running == 1 && reentrantCancellationRejected && released &&
+              sched.allDone() && sched.runningCount() == 0 &&
+              sched.finishedCount() == 0 && sched.cancelledCount() == 1 &&
+              pool.freeBlocks() == 4 && !sched.cancelRequest(105));
+    }
+
     // ── Quantized KV-cache (int8 / int4) on the paged pools ──────────────────
     // The serving path stores K/V as symmetric-absmax int8 or packed int4 with a
     // per-head scale, cutting KV footprint ~3.8×/~7× while staying close to fp32.

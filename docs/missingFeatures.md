@@ -16,7 +16,7 @@ passed all four hosted jobs: Linux x86-64, Linux LLVM-free, macOS ARM64, and Win
 The Windows suite passed all 403 CTest cases. PyPI was verified at **v0.1.4** for Linux, macOS universal2, and Windows. The [v0.1.4 release workflow](https://github.com/etienne0114/vgre/actions/runs/37045306062)
 built and smoke-tested each wheel, then published the GitHub Release and PyPI package.
 
-**Current workspace follow-on:** KV-cache safety and continuous-batching allocation changes are in progress; verify the affected serving paths on Linux, macOS, and Windows before release.
+**Latest scheduler baseline:** commit `f5324a75` passed all four hosted CI jobs in [run 38567359184](https://github.com/etienne0114/vgre/actions/runs/38567359184). Safe-point request cancellation is the current follow-on and still needs hosted verification.
 
 ---
 
@@ -93,16 +93,22 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   waiting queue for retry. The scheduler no longer manufactures zero K/V. It rejects requests
   whose maximum cannot fit the pool and reserves the configured capacity before prefill, avoiding
   mid-request cache exhaustion. The waiting queue is indexed by required KV blocks with per-bucket
-  FIFO order and a prefix-min segment tree. Enqueue/index updates and oldest-fitting admission are
-  O(log B) for B cache blocks, avoiding a full scan/compaction of W waiters on each step; index and
-  queue storage are O(B+W). Processing active requests remains O(R) per step for R running requests.
+  FIFO order and a prefix-min segment tree. Capacity-index updates and oldest-fitting queries are
+  O(log B) for B cache blocks, avoiding a full scan/compaction of W waiters on each step. The
+  balanced request-ID index adds O(log W) enqueue/removal bookkeeping, so complete enqueue/admission
+  operations are O(log B + log W); index and queue storage are O(B+W). Processing active requests
+  remains O(R) per step for R running requests. `cancelRequest` removes a waiting request at a safe
+  point in O(log B + log W), or releases a running request's full KV reservation and removes it from
+  the O(R) active vector. Cancellation returns false for unknown/terminal IDs and during `step()`;
+  scheduler operations must be serialized by callers.
 - **Remaining for production serving:** the library still does not bind this scheduler directly to
   a loaded transformer, prompt token arrays, sampling policy, or generated token stream. A serving
-  adapter must own those inputs and model state, implement the executor, handle cancellation and
-  sampling, and expose results to clients. The cache and scheduler remain model-agnostic. The
-  prior scheduler implementation passed hosted Linux, LLVM-free Linux, macOS ARM64, and Windows CI
-  on commit `83d49f5c`; the queue-index update is verified in focused local builds and awaits hosted
-  CI. End-to-end transformer serving remains outside this cache/scheduler layer.
+  adapter must own those inputs and model state, implement the executor, coordinate cancellation
+  at scheduler safe points, apply sampling, and expose results to clients. The cache and scheduler
+  remain model-agnostic. The scheduler baseline passed hosted Linux, LLVM-free Linux, macOS ARM64,
+  and Windows CI on commit `f5324a75` in run `38567359184`. The safe-point cancellation follow-on
+  passes focused normal and portable local builds; hosted verification is pending. End-to-end
+  transformer serving remains outside this cache/scheduler layer.
 
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |
