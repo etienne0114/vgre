@@ -6,9 +6,11 @@
 
 #include "vgre/core/kv_cache.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 using namespace vgre::core;
@@ -106,6 +108,25 @@ int main() {
     kv.freeSequence(seq);
     check("freeSequence returns all 3 blocks", kv.freeBlocks() == before + 3);
 
+    // Reserving the maximum sequence length is atomic and does not fabricate
+    // logical tokens. Appends consume the reserved blocks as normal.
+    {
+        KVCacheManager reserved(2, 4, 1, 2);
+        const int free0 = reserved.freeBlocks();
+        check("sequence capacity reservation succeeds", reserved.reserveSequenceCapacity(8, 5));
+        check("reservation allocates blocks but leaves length at zero",
+              reserved.freeBlocks() == free0 - 2 && reserved.seqLen(8) == 0);
+        check("capacity reservation rejects an impossible request atomically",
+              !reserved.reserveSequenceCapacity(9, 9) && reserved.freeBlocks() == free0 - 2);
+        std::vector<float> key{1.0f, 2.0f}, value{3.0f, 4.0f};
+        bool appended = true;
+        for (int i = 0; i < 5; ++i)
+            appended = reserved.appendToken(8, key.data(), value.data()) && appended;
+        check("appends consume pre-reserved blocks", appended && reserved.seqLen(8) == 5);
+        reserved.freeSequence(8);
+        check("freeSequence releases unused reserved capacity", reserved.freeBlocks() == free0);
+    }
+
     // ── Pool exhaustion is reported, not crashed ─────────────────────────────
     KVCacheManager tiny(2, 4, 1, 4);  // 2 blocks of 4 tokens = 8 tokens max
     std::vector<float> z(4, 0.0f);
@@ -116,11 +137,29 @@ int main() {
 
     // ── Continuous-batching scheduler (Track 22) ─────────────────────────────
     {
+        KVCacheManager smallPool(2, 4, 1, 2);
+        ContinuousBatchScheduler sched(smallPool, 2);
+        bool rejected = false;
+        try { sched.addRequest(99, 1, 8); }
+        catch (const std::length_error&) { rejected = true; }
+        check("scheduler rejects a request that can never fit the KV pool",
+              rejected && sched.waitingCount() == 0 && smallPool.freeBlocks() == 2);
+    }
+
+    {
         // Small pool so capacity is the binding constraint; maxBatch=2 so the 4
         // requests cannot all run at once — they must be batched continuously.
         KVCacheManager pool(8, 4, 1, 4);            // 8 blocks
         const int total0 = pool.freeBlocks();
         ContinuousBatchScheduler sched(pool, /*maxBatch=*/2);
+        sched.setTokenExecutor([](const Request& request, ScheduledTokenPhase phase,
+                                  int position, std::vector<float>& keys,
+                                  std::vector<float>& values) {
+            const float base = static_cast<float>(request.id) + position +
+                (phase == ScheduledTokenPhase::PREFILL ? 1.0f : 2.0f);
+            std::fill(keys.begin(), keys.end(), base);
+            std::fill(values.begin(), values.end(), -base);
+        });
 
         sched.addRequest(/*id=*/1, /*promptLen=*/3, /*maxNew=*/2);
         sched.addRequest(2, 2, 3);
@@ -223,11 +262,104 @@ int main() {
         KVCacheManager qpool(8, 4, 1, 4, KVDType::I8);
         const int q0 = qpool.freeBlocks();
         ContinuousBatchScheduler qsched(qpool, 2);
+        qsched.setTokenExecutor([](const Request& request, ScheduledTokenPhase phase,
+                                   int position, std::vector<float>& keys,
+                                   std::vector<float>& values) {
+            const float base = static_cast<float>(request.id + position +
+                (phase == ScheduledTokenPhase::PREFILL ? 1 : 2));
+            std::fill(keys.begin(), keys.end(), base);
+            std::fill(values.begin(), values.end(), -base);
+        });
         qsched.addRequest(1, 3, 2); qsched.addRequest(2, 2, 3); qsched.addRequest(3, 4, 1);
         int qsteps = 0;
         while (!qsched.allDone() && qsteps < 1000) { qsched.step(); ++qsteps; }
         check("scheduler drains over an int8 pool", qsched.allDone() && qsched.finishedCount() == 3);
         check("int8 pool fully reclaimed", qpool.freeBlocks() == q0);
+    }
+
+    // The scheduler uses model-produced K/V, rejects absent/incomplete
+    // executors, and preserves the request so a failed prefill can be retried.
+    {
+        KVCacheManager pool(4, 4, 1, 2);
+        ContinuousBatchScheduler sched(pool, 1);
+        sched.addRequest(55, 2, 1);
+        bool missingExecutorRejected = false;
+        try { sched.step(); }
+        catch (const std::logic_error&) { missingExecutorRejected = true; }
+        check("scheduler refuses token work without a model executor",
+              missingExecutorRejected && pool.freeBlocks() == 4);
+
+        sched.setTokenExecutor([](const Request&, ScheduledTokenPhase, int,
+                                  std::vector<float>&, std::vector<float>&) {
+            // Deliberately leave the NaN-initialized output untouched.
+        });
+        bool incompleteOutputRejected = false;
+        try { sched.step(); }
+        catch (const std::runtime_error&) { incompleteOutputRejected = true; }
+        check("scheduler rejects unset K/V output and rolls prefill back",
+              incompleteOutputRejected && pool.freeBlocks() == 4 && pool.seqLen(55) == 0);
+
+        int prefillCalls = 0, decodeCalls = 0;
+        sched.setTokenExecutor([&](const Request&, ScheduledTokenPhase phase, int position,
+                                   std::vector<float>& keys, std::vector<float>& values) {
+            if (phase == ScheduledTokenPhase::PREFILL) {
+                ++prefillCalls;
+                std::fill(keys.begin(), keys.end(), 10.0f + position);
+                std::fill(values.begin(), values.end(), 20.0f + position);
+            } else {
+                ++decodeCalls;
+                std::fill(keys.begin(), keys.end(), 30.0f + position);
+                std::fill(values.begin(), values.end(), 40.0f + position);
+            }
+        });
+        sched.step();
+        const auto& blocks = pool.blockTable(55);
+        float firstKey[2] = {}, firstValue[2] = {}, decodeKey[2] = {}, decodeValue[2] = {};
+        pool.readKey(blocks[0], 0, 0, firstKey);
+        pool.readVal(blocks[0], 0, 0, firstValue);
+        pool.readKey(blocks[0], 2, 0, decodeKey);
+        pool.readVal(blocks[0], 2, 0, decodeValue);
+        check("scheduler appends model-produced prompt and decode K/V",
+              prefillCalls == 2 && decodeCalls == 1 && pool.seqLen(55) == 3 &&
+              firstKey[0] == 10.0f && firstValue[0] == 20.0f &&
+              decodeKey[0] == 32.0f && decodeValue[0] == 42.0f);
+        sched.step();
+        check("successful request releases its reserved KV blocks",
+              sched.allDone() && pool.freeBlocks() == 4);
+    }
+
+    // A model failure during a later request's prefill must not corrupt the
+    // in-place waiting queue or release already-running requests' reservations.
+    {
+        KVCacheManager pool(8, 4, 1, 2);
+        ContinuousBatchScheduler sched(pool, 2);
+        sched.setTokenExecutor([](const Request& request, ScheduledTokenPhase phase,
+                                  int position, std::vector<float>& keys,
+                                  std::vector<float>& values) {
+            if (request.id == 2 && phase == ScheduledTokenPhase::PREFILL)
+                throw std::runtime_error("model prefill failed");
+            std::fill(keys.begin(), keys.end(), static_cast<float>(request.id + position));
+            std::fill(values.begin(), values.end(), static_cast<float>(request.id - position));
+        });
+        sched.addRequest(1, 1, 1);
+        sched.addRequest(2, 2, 1);
+        sched.addRequest(3, 1, 1);
+        bool propagated = false;
+        try { sched.step(); }
+        catch (const std::runtime_error&) { propagated = true; }
+        check("failed prefill propagates without corrupting scheduler queues",
+              propagated && sched.runningCount() == 1 && sched.waitingCount() == 2 &&
+              pool.seqLen(1) == 1 && !pool.hasSequence(2));
+        sched.setTokenExecutor([](const Request& request, ScheduledTokenPhase,
+                                  int position, std::vector<float>& keys,
+                                  std::vector<float>& values) {
+            std::fill(keys.begin(), keys.end(), static_cast<float>(request.id + position));
+            std::fill(values.begin(), values.end(), static_cast<float>(request.id - position));
+        });
+        int steps = 0;
+        while (!sched.allDone() && steps++ < 10) sched.step();
+        check("remaining requests drain after a model callback failure",
+              sched.allDone() && sched.finishedCount() == 3 && pool.freeBlocks() == 8);
     }
 
     printf("\n%d / %d passed\n", g_pass, g_total);

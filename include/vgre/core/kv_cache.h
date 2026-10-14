@@ -12,6 +12,7 @@
 
 #include <cstddef>   // size_t (not transitively guaranteed on older libstdc++)
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -38,6 +39,7 @@ public:
                    KVDType dtype = KVDType::F32);
 
     int blockSize() const { return blockSize_; }
+    int totalBlocks() const { return static_cast<int>(blockState_.size()); }
     int numHeads()  const { return numHeads_; }
     int headDim()   const { return headDim_; }
     int freeBlocks() const { return static_cast<int>(freeList_.size()); }
@@ -58,7 +60,14 @@ public:
     // In a quantized mode the K/V are quantized per head on the way in.
     bool appendToken(SeqId seq, const float* kAllHeads, const float* vAllHeads);
 
+    // Reserve enough physical blocks for `tokenCapacity` tokens without
+    // changing the logical sequence length. Existing tokens and reservations
+    // are retained. Returns false without reserving anything when the pool
+    // cannot satisfy the full additional capacity.
+    bool reserveSequenceCapacity(SeqId seq, int tokenCapacity);
+
     int seqLen(SeqId seq) const;
+    bool hasSequence(SeqId seq) const;
     const std::vector<int>& blockTable(SeqId seq) const;
 
     // Read pointers into the pool for (physical block, slot, head). Valid only in
@@ -106,11 +115,11 @@ void pagedAttention(const float* q, int head, SeqId seq,
                     int causalUpTo = -1);
 
 // ── Continuous-batching request scheduler (Track 22) ─────────────────────────
-// vLLM-style in-flight batching over the paged KV-cache: requests of different
-// lengths are admitted into a running batch as capacity frees up, advanced one
-// token per scheduler step, and retired (their KV blocks reclaimed) the moment
-// they finish — without waiting for the whole batch. New requests submitted
-// mid-flight join at the next step.
+// In-flight batching over the paged KV-cache: requests of different lengths
+// are admitted as capacity frees up, run through the caller's model executor,
+// and retired as soon as they finish. New requests submitted mid-flight join
+// at the next step. The scheduler manages lifecycle and cache capacity; it
+// does not invent token contents or perform model inference itself.
 struct Request {
     SeqId id = 0;
     int promptLen = 0;       // tokens prefilled on admission
@@ -119,19 +128,38 @@ struct Request {
     enum State { WAITING, RUNNING, FINISHED } state = WAITING;
 };
 
+enum class ScheduledTokenPhase { PREFILL, DECODE };
+
 class ContinuousBatchScheduler {
 public:
+    // The caller runs the model for one position and fills K/V for every head
+    // (head-major, numHeads*headDim floats each). Request IDs identify the
+    // caller's token/model state. `position` is the absolute sequence position.
+    // An executor exception aborts the current step without appending that
+    // token; callbacks should be safe to retry at the same request/position.
+    using TokenExecutor = std::function<void(const Request&, ScheduledTokenPhase,
+                                             int position,
+                                             std::vector<float>& keys,
+                                             std::vector<float>& values)>;
+
     ContinuousBatchScheduler(KVCacheManager& kv, int maxBatch);
 
-    // Submit a request (queued WAITING). Token *content* is abstracted: the
-    // scheduler models lifecycle + KV growth, appending zeroed K/V per token.
-    // Negative lengths and duplicate active IDs throw std::invalid_argument.
+    // A scheduler must have a real executor before stepping requests that
+    // contain prompt or generated tokens. Passing an empty function clears it.
+    void setTokenExecutor(TokenExecutor executor);
+
+    // Submit a request (queued WAITING). The caller's executor resolves prompt
+    // tokens and model state from the request ID. Negative lengths and
+    // duplicate active IDs throw std::invalid_argument.
     void addRequest(SeqId id, int promptLen, int maxNewTokens);
 
     // Run one scheduling step:
     //   1. retire finished running requests (reclaim their KV blocks),
-    //   2. admit waiting requests while batch slots AND KV blocks allow (prefill),
-    //   3. advance each running request by one decode token (append to its KV).
+    //   2. admit waiting requests while batch slots and full-request KV
+    //      capacity allow, then execute prompt prefill,
+    //   3. execute one decode position for every running request.
+    // Throws std::logic_error if token work is requested without an executor.
+    // Model executor errors propagate; no KV is appended for a failed token.
     // Returns the number of requests still running after the step.
     int step();
 
@@ -142,10 +170,14 @@ public:
 
 private:
     int blocksFor(int tokens) const;        // ceil(tokens / blockSize)
-    bool appendOneToken(SeqId id);          // append a zeroed K/V token to a seq
+    void executeAndAppend(const Request& request, ScheduledTokenPhase phase,
+                          int position);
 
     KVCacheManager& kv_;
     int maxBatch_;
+    TokenExecutor tokenExecutor_;
+    std::vector<float> keyScratch_;
+    std::vector<float> valueScratch_;
     std::vector<Request> waiting_;
     std::vector<Request> running_;
     std::unordered_set<SeqId> activeRequestIds_;

@@ -85,11 +85,17 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   the generation path. `pagedAttention` dequantizes on read; the continuous-batching scheduler
   runs unchanged over a quantized pool. Measured **3.8× (int8) / 7.1× (int4)** KV-memory reduction
   at headDim=64, bit-close to fp32 — `test_kv_cache.cpp`.)*
-- **Remaining for production serving:** `ContinuousBatchScheduler` currently models request
-  lifecycle and appends zero-valued K/V; it does not call a model for prompt prefill or token
-  decode. Connect it to real generation callbacks and token state before presenting it as
-  model-backed continuous batching. The current workspace follow-on hardens the underlying
-  KV allocator and reduces scheduler compaction allocations; platform verification is pending.
+- **Current implementation boundary:** `ContinuousBatchScheduler` now requires a caller-supplied
+  token executor for non-empty requests. The executor receives request ID/state, prefill or decode
+  phase, and absolute position, and must return finite K/V for every head. Missing or incomplete
+  output fails explicitly; the scheduler no longer manufactures zero K/V. It rejects requests whose
+  maximum cannot fit the pool and reserves the configured capacity before prefill, avoiding
+  mid-request cache exhaustion.
+- **Remaining for production serving:** the library still does not bind this scheduler directly to
+  a loaded transformer, prompt token arrays, sampling policy, or generated token stream. A serving
+  adapter must own those inputs and model state, implement the executor, handle cancellation and
+  sampling, and expose results to clients. The cache and scheduler remain model-agnostic. The
+  current implementation and tests need hosted Linux, macOS, and Windows verification.
 
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |

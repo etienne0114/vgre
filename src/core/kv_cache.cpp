@@ -112,6 +112,35 @@ int KVCacheManager::allocateBlock() {
     return b;
 }
 
+bool KVCacheManager::reserveSequenceCapacity(SeqId seq, int tokenCapacity) {
+    if (tokenCapacity < 0) return false;
+    const size_t requiredBlocks = static_cast<size_t>(tokenCapacity / blockSize_) +
+        (tokenCapacity % blockSize_ != 0 ? 1u : 0u);
+    auto it = seqs_.find(seq);
+    if (it == seqs_.end()) {
+        if (requiredBlocks > freeList_.size()) return false;
+        Seq fresh;
+        fresh.blockTable.reserve(requiredBlocks);
+        it = seqs_.emplace(seq, std::move(fresh)).first;
+    }
+    Seq& s = it->second;
+    if (tokenCapacity < s.length) return false;
+    if (requiredBlocks <= s.blockTable.size()) return true;
+    const size_t additional = requiredBlocks - s.blockTable.size();
+    if (additional > freeList_.size()) return false;
+
+    // Complete any allocation that can throw before removing blocks from the
+    // free list. Pushing ints is then non-throwing because capacity is reserved.
+    s.blockTable.reserve(requiredBlocks);
+    for (size_t i = 0; i < additional; ++i) {
+        const int block = freeList_.back();
+        freeList_.pop_back();
+        s.blockTable.push_back(block);
+        blockState_[static_cast<size_t>(block)] = kBlockSequence;
+    }
+    return true;
+}
+
 void KVCacheManager::freeBlock(int physBlock) {
     releaseBlock(physBlock, false);
 }
@@ -210,7 +239,8 @@ bool KVCacheManager::appendToken(SeqId seq, const float* kAllHeads, const float*
     Seq& s = seqs_[seq];
     if (s.length == std::numeric_limits<int>::max()) return false;
     const int slot = s.length % blockSize_;
-    if (slot == 0) {                       // crossing into a new logical block
+    const size_t logicalBlock = static_cast<size_t>(s.length / blockSize_);
+    if (logicalBlock >= s.blockTable.size()) {  // crossing into an unreserved block
         // Reserve table storage before taking a physical block so allocation
         // failure cannot leak a block from the pool.
         s.blockTable.reserve(s.blockTable.size() + 1);
@@ -219,7 +249,7 @@ bool KVCacheManager::appendToken(SeqId seq, const float* kAllHeads, const float*
         s.blockTable.push_back(b);
         blockState_[static_cast<size_t>(b)] = kBlockSequence;
     }
-    const int physBlock = s.blockTable.back();
+    const int physBlock = s.blockTable[logicalBlock];
     writeToken(physBlock, slot, kAllHeads, vAllHeads);
     ++s.length;
     return true;
@@ -228,6 +258,10 @@ bool KVCacheManager::appendToken(SeqId seq, const float* kAllHeads, const float*
 int KVCacheManager::seqLen(SeqId seq) const {
     auto it = seqs_.find(seq);
     return it == seqs_.end() ? 0 : it->second.length;
+}
+
+bool KVCacheManager::hasSequence(SeqId seq) const {
+    return seqs_.find(seq) != seqs_.end();
 }
 
 const std::vector<int>& KVCacheManager::blockTable(SeqId seq) const {
@@ -292,11 +326,19 @@ void pagedAttention(const float* q, int head, SeqId seq,
 ContinuousBatchScheduler::ContinuousBatchScheduler(KVCacheManager& kv, int maxBatch)
     : kv_(kv), maxBatch_(maxBatch < 1 ? 1 : maxBatch) {}
 
+void ContinuousBatchScheduler::setTokenExecutor(TokenExecutor executor) {
+    tokenExecutor_ = std::move(executor);
+}
+
 void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTokens) {
     if (promptLen < 0 || maxNewTokens < 0)
         throw std::invalid_argument("request token counts cannot be negative");
     if (maxNewTokens > std::numeric_limits<int>::max() - promptLen)
         throw std::length_error("request prompt and generation length exceed sequence indexing range");
+    if (blocksFor(promptLen + maxNewTokens) > kv_.totalBlocks())
+        throw std::length_error("request's maximum KV capacity exceeds the cache pool");
+    if (kv_.hasSequence(id))
+        throw std::invalid_argument("request ID already owns a KV-cache sequence");
     if (!activeRequestIds_.insert(id).second)
         throw std::invalid_argument("request ID is already waiting or running");
     Request r;
@@ -315,17 +357,38 @@ int ContinuousBatchScheduler::blocksFor(int tokens) const {
     return tokens / bs + (tokens % bs != 0 ? 1 : 0);
 }
 
-bool ContinuousBatchScheduler::appendOneToken(SeqId id) {
-    // Token content is abstracted: append a zeroed K/V token (real serving would
-    // append the layer's K/V). Returns false if the pool is exhausted.
-    static thread_local std::vector<float> zero;
+void ContinuousBatchScheduler::executeAndAppend(const Request& request,
+                                                 ScheduledTokenPhase phase,
+                                                 int position) {
+    if (!tokenExecutor_)
+        throw std::logic_error("continuous batching requires a model token executor");
+
     const size_t stride = static_cast<size_t>(kv_.numHeads()) *
                           static_cast<size_t>(kv_.headDim());
-    if (zero.size() < stride) zero.assign(stride, 0.0f);
-    return kv_.appendToken(id, zero.data(), zero.data());
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    keyScratch_.assign(stride, invalid);
+    valueScratch_.assign(stride, invalid);
+    tokenExecutor_(request, phase, position, keyScratch_, valueScratch_);
+    if (keyScratch_.size() != stride || valueScratch_.size() != stride)
+        throw std::runtime_error("model token executor returned an invalid K/V shape");
+    for (size_t i = 0; i < stride; ++i) {
+        if (!std::isfinite(keyScratch_[i]) || !std::isfinite(valueScratch_[i]))
+            throw std::runtime_error("model token executor left K/V unset or non-finite");
+    }
+    if (!kv_.appendToken(request.id, keyScratch_.data(), valueScratch_.data()))
+        throw std::runtime_error("reserved KV capacity could not append a computed token");
 }
 
 int ContinuousBatchScheduler::step() {
+    if (!tokenExecutor_) {
+        for (const Request& r : running_)
+            if (r.generated < r.maxNewTokens)
+                throw std::logic_error("continuous batching requires a model token executor");
+        for (const Request& r : waiting_)
+            if (r.promptLen > 0 || r.maxNewTokens > 0)
+                throw std::logic_error("continuous batching requires a model token executor");
+    }
+
     // 1. Retire finished running requests; reclaim their KV blocks.
     size_t live = 0;
     const size_t runningAtStart = running_.size();
@@ -343,46 +406,59 @@ int ContinuousBatchScheduler::step() {
     }
     running_.resize(live);
 
-    // 2. Admit waiting requests while batch slots AND KV blocks allow. Prefill
-    //    the prompt (block reservation needs ceil((promptLen+maxNew)/blockSize)
-    //    in the worst case, but we admit on the prompt cost and let decode grow).
+    // 2. Admit only when the whole requested sequence fits. Reserving the
+    //    configured maximum up front prevents a live request from holding a
+    //    partial cache forever while waiting for blocks needed to finish.
     size_t stillWaiting = 0;
     const size_t waitingAtStart = waiting_.size();
     for (size_t i = 0; i < waitingAtStart; ++i) {
         Request& r = waiting_[i];
-        if (static_cast<int>(running_.size()) < maxBatch_ &&
-            kv_.freeBlocks() >= blocksFor(r.promptLen > 0 ? r.promptLen : 1)) {
-            // Ensure a later allocation failure cannot leave a prefetched KV
-            // sequence without a scheduler entry.
-            if (running_.size() == running_.capacity()) {
+        try {
+            const int tokenCapacity = r.promptLen + r.maxNewTokens;
+            const bool hasBatchSlot = static_cast<int>(running_.size()) < maxBatch_;
+            if (hasBatchSlot && running_.size() == running_.capacity()) {
+                // Grow scheduler storage before taking cache blocks.
                 const size_t capacity = running_.capacity();
                 const size_t limit = static_cast<size_t>(maxBatch_);
                 const size_t next = capacity == 0 ? 1
                     : (capacity > limit / 2 ? limit : capacity * 2);
                 running_.reserve(next);
             }
-            bool ok = true;
-            for (int t = 0; t < r.promptLen && ok; ++t) ok = appendOneToken(r.id);
-            if (ok) {
+            const int requiredBlocks = blocksFor(tokenCapacity);
+            if (hasBatchSlot && kv_.freeBlocks() >= requiredBlocks &&
+                kv_.reserveSequenceCapacity(r.id, tokenCapacity)) {
+                for (int t = 0; t < r.promptLen; ++t)
+                    executeAndAppend(r, ScheduledTokenPhase::PREFILL, t);
                 r.state = Request::RUNNING;
                 running_.push_back(r);
             } else {
-                kv_.freeSequence(r.id); // roll back, retry later
                 if (stillWaiting != i) waiting_[stillWaiting] = std::move(r);
                 ++stillWaiting;
             }
-        } else {
-            if (stillWaiting != i) waiting_[stillWaiting] = std::move(r);
-            ++stillWaiting;
+        } catch (...) {
+            kv_.freeSequence(r.id);
+            // Earlier non-admitted requests may have been compacted in place.
+            // Restore this request and every not-yet-processed one so the
+            // scheduler remains consistent if the model executor throws.
+            size_t restoredWaiting = stillWaiting;
+            for (size_t j = i; j < waitingAtStart; ++j) {
+                if (restoredWaiting != j)
+                    waiting_[restoredWaiting] = std::move(waiting_[j]);
+                ++restoredWaiting;
+            }
+            waiting_.resize(restoredWaiting);
+            throw;
         }
     }
     waiting_.resize(stillWaiting);
 
     // 3. Advance each running request by one decode token.
     for (auto& r : running_) {
-        if (appendOneToken(r.id)) ++r.generated;
-        // If the pool is momentarily exhausted the request simply does not
-        // advance this step; it will progress once a finished request frees space.
+        if (r.generated < r.maxNewTokens) {
+            const int position = r.promptLen + r.generated;
+            executeAndAppend(r, ScheduledTokenPhase::DECODE, position);
+            ++r.generated;
+        }
     }
     return static_cast<int>(running_.size());
 }

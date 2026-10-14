@@ -4,7 +4,7 @@
 
 **Latest all-green hosted verification before the current workspace changes**: ✅ [GitHub Actions run 37819051104](https://github.com/etienne0114/vgre/actions/runs/37819051104) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Windows passed all 403 CTest cases, including `PTXTranslate`, plus Python integration. The related [publish workflow](https://github.com/etienne0114/vgre/actions/runs/37819050610) also succeeded.
 
-**Current workspace follow-on (2026-10-14)**: KV-cache allocation now validates dimensions and checked capacities, prevents duplicate or premature block release, and bounds-checks read access. Continuous-batch compaction reuses its vectors, request ID checks use an expected O(1) set lookup, and ceil-division avoids signed overflow. Hosted verification for these current changes is pending.
+**Current workspace follow-on (2026-10-14)**: KV-cache allocation validates dimensions and checked capacities, prevents duplicate or premature block release, and bounds-checks reads. The scheduler now requires a model token executor, rejects missing or incomplete K/V output instead of appending fabricated zeros, and reserves each request's full configured cache capacity before prefill. Compaction reuses vectors and request ID checks use an expected O(1) set lookup. `KVCachePaged` passes in normal and portable/LLVM-free builds. A broader local CTest run stopped after 45/410 cases: socket-dependent tests could not create listeners in the restricted workspace, and PyTorch could not write its extension cache. Hosted verification for this follow-on is pending.
 
 - **Linux**: ✅ Full `ctest` suite passed in the latest hosted Linux x86-64 job.
 - **Linux, LLVM-free**: ✅ The dedicated `linux-x86_64-llvm-free` job passed with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
@@ -123,7 +123,7 @@ unavailable and are not inferred from CPU estimates. Hosted verification is
 pending.
 
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
-**Production Readiness**: the latest hosted Linux, Linux LLVM-free, macOS ARM64, and Windows matrix passed on commit `6f86c638`. The current KV-cache and continuous-batching workspace follow-on still needs platform verification.
+**Production Readiness**: the latest hosted Linux, Linux LLVM-free, macOS ARM64, and Windows matrix passed on commit `6f86c638`. KV-cache hardening and the model-executor scheduler follow-on have focused normal and portable Linux tests; the follow-on still needs hosted platform verification. The scheduler remains model-agnostic until a serving adapter supplies prompt state, sampling, and generated-token results.
 
 > **Historical CI status (2026-09):** CI was restored on the public repository.
 > At that point some OS lanes were informational; since then the workflow was
