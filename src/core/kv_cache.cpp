@@ -1,6 +1,7 @@
 #include "vgre/core/kv_cache.h"
 #include "vgre/core/kv_quant.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -325,7 +326,22 @@ void pagedAttention(const float* q, int head, SeqId seq,
 // ── Continuous-batching scheduler ────────────────────────────────────────────
 
 ContinuousBatchScheduler::ContinuousBatchScheduler(KVCacheManager& kv, int maxBatch)
-    : kv_(kv), maxBatch_(maxBatch < 1 ? 1 : maxBatch) {}
+    : kv_(kv), maxBatch_(maxBatch < 1 ? 1 : maxBatch) {
+    const size_t bucketCount = static_cast<size_t>(kv_.totalBlocks()) + 1;
+    waitingByBlocks_.resize(bucketCount);
+
+    size_t leafCount = 1;
+    while (leafCount < bucketCount) {
+        if (leafCount > std::numeric_limits<size_t>::max() / 2)
+            throw std::length_error("scheduler waiting index size overflow");
+        leafCount *= 2;
+    }
+    if (leafCount > waitingTree_.max_size() / 2)
+        throw std::length_error("scheduler waiting index exceeds vector capacity");
+    waitingTreeBase_ = leafCount;
+    // A bucket index outside [0, bucketCount) means the subtree has no waiter.
+    waitingTree_.assign(leafCount * 2, bucketCount);
+}
 
 void ContinuousBatchScheduler::setTokenExecutor(TokenExecutor executor) {
     tokenExecutor_ = std::move(executor);
@@ -338,6 +354,8 @@ void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTok
         throw std::length_error("request prompt and generation length exceed sequence indexing range");
     if (blocksFor(promptLen + maxNewTokens) > kv_.totalBlocks())
         throw std::length_error("request's maximum KV capacity exceeds the cache pool");
+    if (waitingCount_ >= static_cast<size_t>(std::numeric_limits<int>::max()))
+        throw std::length_error("scheduler waiting request count exceeds its public count range");
     if (kv_.hasSequence(id))
         throw std::invalid_argument("request ID already owns a KV-cache sequence");
     if (!activeRequestIds_.insert(id).second)
@@ -345,17 +363,76 @@ void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTok
     Request r;
     r.id = id; r.promptLen = promptLen; r.maxNewTokens = maxNewTokens;
     r.state = Request::WAITING;
+    const size_t requiredBlocks = static_cast<size_t>(blocksFor(promptLen + maxNewTokens));
     try {
-        waiting_.push_back(r);
+        if (nextWaitingOrder_ == std::numeric_limits<uint64_t>::max())
+            throw std::length_error("scheduler request ordering counter exhausted");
+        std::unique_ptr<std::deque<QueuedRequest>>& queue = waitingByBlocks_[requiredBlocks];
+        if (!queue)
+            queue.reset(new std::deque<QueuedRequest>());
+        queue->push_back(QueuedRequest{r, nextWaitingOrder_});
     } catch (...) {
+        if (waitingByBlocks_[requiredBlocks] && waitingByBlocks_[requiredBlocks]->empty())
+            waitingByBlocks_[requiredBlocks].reset();
         activeRequestIds_.erase(id);
         throw;
     }
+    ++nextWaitingOrder_;
+    ++waitingCount_;
+    if (promptLen == 0 && maxNewTokens == 0)
+        ++zeroTokenWaitingCount_;
+    updateWaitingBucket(requiredBlocks);
 }
 
 int ContinuousBatchScheduler::blocksFor(int tokens) const {
     const int bs = kv_.blockSize();
     return tokens / bs + (tokens % bs != 0 ? 1 : 0);
+}
+
+size_t ContinuousBatchScheduler::olderWaitingBucket(size_t lhs, size_t rhs) const {
+    const size_t noBucket = waitingByBlocks_.size();
+    if (lhs >= noBucket) return rhs;
+    if (rhs >= noBucket) return lhs;
+    return waitingByBlocks_[lhs]->front().order <= waitingByBlocks_[rhs]->front().order
+        ? lhs : rhs;
+}
+
+void ContinuousBatchScheduler::updateWaitingBucket(size_t bucket) {
+    size_t node = waitingTreeBase_ + bucket;
+    if (waitingByBlocks_[bucket] && waitingByBlocks_[bucket]->empty())
+        waitingByBlocks_[bucket].reset();
+    waitingTree_[node] = waitingByBlocks_[bucket] ? bucket : waitingByBlocks_.size();
+    while (node > 1) {
+        node /= 2;
+        waitingTree_[node] = olderWaitingBucket(waitingTree_[node * 2],
+                                                waitingTree_[node * 2 + 1]);
+    }
+}
+
+size_t ContinuousBatchScheduler::oldestEligibleWaitingBucket(int availableBlocks,
+                                                              uint64_t beforeOrder) const {
+    const size_t noBucket = waitingByBlocks_.size();
+    if (waitingCount_ == 0 || availableBlocks < 0)
+        return noBucket;
+    const size_t lastEligible = std::min(static_cast<size_t>(availableBlocks),
+                                         noBucket - 1);
+    size_t left = waitingTreeBase_;
+    size_t right = waitingTreeBase_ + lastEligible + 1;
+    size_t oldestLeft = noBucket;
+    size_t oldestRight = noBucket;
+    while (left < right) {
+        if (left & 1u)
+            oldestLeft = olderWaitingBucket(oldestLeft, waitingTree_[left++]);
+        if (right & 1u)
+            oldestRight = olderWaitingBucket(waitingTree_[--right], oldestRight);
+        left /= 2;
+        right /= 2;
+    }
+    const size_t oldest = olderWaitingBucket(oldestLeft, oldestRight);
+    if (oldest < noBucket &&
+        waitingByBlocks_[oldest]->front().order >= beforeOrder)
+        return noBucket;
+    return oldest;
 }
 
 bool ContinuousBatchScheduler::executeAndAppend(const Request& request,
@@ -406,6 +483,7 @@ bool ContinuousBatchScheduler::executeAndAppend(const Request& request,
 int ContinuousBatchScheduler::step() {
     lastError_ = SchedulerError::NONE;
     lastErrorMessage_.clear();
+    const uint64_t admissionOrderLimit = nextWaitingOrder_;
     if (!tokenExecutor_) {
         for (const Request& r : running_)
             if (r.generated < r.maxNewTokens) {
@@ -413,12 +491,11 @@ int ContinuousBatchScheduler::step() {
                 lastErrorMessage_ = "continuous batching requires a model token executor";
                 return -1;
             }
-        for (const Request& r : waiting_)
-            if (r.promptLen > 0 || r.maxNewTokens > 0) {
-                lastError_ = SchedulerError::MISSING_EXECUTOR;
-                lastErrorMessage_ = "continuous batching requires a model token executor";
-                return -1;
-            }
+        if (waitingCount_ > zeroTokenWaitingCount_) {
+            lastError_ = SchedulerError::MISSING_EXECUTOR;
+            lastErrorMessage_ = "continuous batching requires a model token executor";
+            return -1;
+        }
     }
 
     // 1. Retire finished running requests; reclaim their KV blocks.
@@ -438,64 +515,74 @@ int ContinuousBatchScheduler::step() {
     }
     running_.resize(live);
 
-    // 2. Admit only when the whole requested sequence fits. Reserving the
-    //    configured maximum up front prevents a live request from holding a
-    //    partial cache forever while waiting for blocks needed to finish.
-    size_t stillWaiting = 0;
-    const size_t waitingAtStart = waiting_.size();
-    for (size_t i = 0; i < waitingAtStart; ++i) {
-        Request& r = waiting_[i];
+    // 2. The prefix-min tree selects the oldest request whose full configured
+    //    capacity fits. Skipped requests stay in their size buckets, so an
+    //    oversized head item cannot block smaller work and the waiting queue
+    //    is never scanned or compacted. Each admission/query updates O(log B)
+    //    index nodes for B physical cache blocks.
+    while (static_cast<int>(running_.size()) < maxBatch_) {
+        const size_t bucket = oldestEligibleWaitingBucket(kv_.freeBlocks(),
+                                                          admissionOrderLimit);
+        if (bucket == waitingByBlocks_.size())
+            break;
+
+        // Work from a local snapshot: the executor may enqueue another request,
+        // which can reallocate unrelated storage but cannot invalidate this one.
+        Request request = waitingByBlocks_[bucket]->front().request;
+        const int tokenCapacity = request.promptLen + request.maxNewTokens;
+        if (running_.size() == running_.capacity()) {
+            // Grow scheduler storage before taking cache blocks or invoking model code.
+            const size_t capacity = running_.capacity();
+            const size_t limit = static_cast<size_t>(maxBatch_);
+            const size_t next = capacity == 0 ? 1
+                : (capacity > limit / 2 ? limit : capacity * 2);
+            running_.reserve(next);
+        }
+
+        if (kv_.hasSequence(request.id)) {
+            lastError_ = SchedulerError::CACHE_RESERVATION_FAILURE;
+            lastErrorMessage_ = "waiting request ID acquired a KV sequence outside this scheduler";
+            return -1;
+        }
+        bool reserved = false;
         try {
-            const int tokenCapacity = r.promptLen + r.maxNewTokens;
-            const bool hasBatchSlot = static_cast<int>(running_.size()) < maxBatch_;
-            if (hasBatchSlot && running_.size() == running_.capacity()) {
-                // Grow scheduler storage before taking cache blocks.
-                const size_t capacity = running_.capacity();
-                const size_t limit = static_cast<size_t>(maxBatch_);
-                const size_t next = capacity == 0 ? 1
-                    : (capacity > limit / 2 ? limit : capacity * 2);
-                running_.reserve(next);
-            }
-            const int requiredBlocks = blocksFor(tokenCapacity);
-            if (hasBatchSlot && kv_.freeBlocks() >= requiredBlocks &&
-                kv_.reserveSequenceCapacity(r.id, tokenCapacity)) {
-                for (int t = 0; t < r.promptLen; ++t) {
-                    if (!executeAndAppend(r, ScheduledTokenPhase::PREFILL, t)) {
-                        kv_.freeSequence(r.id);
-                        // Earlier non-admitted requests may have been compacted
-                        // in place. Preserve this request and every item after it.
-                        size_t restoredWaiting = stillWaiting;
-                        for (size_t j = i; j < waitingAtStart; ++j) {
-                            if (restoredWaiting != j)
-                                waiting_[restoredWaiting] = std::move(waiting_[j]);
-                            ++restoredWaiting;
-                        }
-                        waiting_.resize(restoredWaiting);
-                        return -1;
-                    }
-                }
-                r.state = Request::RUNNING;
-                running_.push_back(r);
-            } else {
-                if (stillWaiting != i) waiting_[stillWaiting] = std::move(r);
-                ++stillWaiting;
-            }
+            reserved = kv_.reserveSequenceCapacity(request.id, tokenCapacity);
         } catch (...) {
-            kv_.freeSequence(r.id);
-            // Earlier non-admitted requests may have been compacted in place.
-            // Restore this request and every not-yet-processed one so the
-            // scheduler remains consistent if the model executor throws.
-            size_t restoredWaiting = stillWaiting;
-            for (size_t j = i; j < waitingAtStart; ++j) {
-                if (restoredWaiting != j)
-                    waiting_[restoredWaiting] = std::move(waiting_[j]);
-                ++restoredWaiting;
-            }
-            waiting_.resize(restoredWaiting);
+            // reserveSequenceCapacity can install an empty sequence record
+            // before a later vector allocation throws.
+            kv_.freeSequence(request.id);
             throw;
         }
+        if (!reserved) {
+            lastError_ = SchedulerError::CACHE_RESERVATION_FAILURE;
+            lastErrorMessage_ = "eligible request could not reserve its KV capacity";
+            return -1;
+        }
+
+        try {
+            for (int t = 0; t < request.promptLen; ++t) {
+                if (!executeAndAppend(request, ScheduledTokenPhase::PREFILL, t)) {
+                    kv_.freeSequence(request.id);
+                    return -1;
+                }
+            }
+        } catch (...) {
+            // Allocation failures during scratch-buffer growth must not leak
+            // the reservation; the request remains at the head of its bucket.
+            kv_.freeSequence(request.id);
+            throw;
+        }
+
+        std::deque<QueuedRequest>& queue = *waitingByBlocks_[bucket];
+        const bool zeroTokenRequest = request.promptLen == 0 && request.maxNewTokens == 0;
+        queue.pop_front();
+        --waitingCount_;
+        if (zeroTokenRequest)
+            --zeroTokenWaitingCount_;
+        updateWaitingBucket(bucket);
+        request.state = Request::RUNNING;
+        running_.push_back(std::move(request));
     }
-    waiting_.resize(stillWaiting);
 
     // 3. Advance each running request by one decode token.
     for (auto& r : running_) {

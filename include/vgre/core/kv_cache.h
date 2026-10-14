@@ -12,7 +12,9 @@
 
 #include <cstddef>   // size_t (not transitively guaranteed on older libstdc++)
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -135,7 +137,8 @@ enum class SchedulerError {
     MISSING_EXECUTOR,
     EXECUTOR_FAILURE,
     INVALID_KV_OUTPUT,
-    CACHE_APPEND_FAILURE
+    CACHE_APPEND_FAILURE,
+    CACHE_RESERVATION_FAILURE
 };
 
 class ContinuousBatchScheduler {
@@ -164,8 +167,8 @@ public:
 
     // Run one scheduling step:
     //   1. retire finished running requests (reclaim their KV blocks),
-    //   2. admit waiting requests while batch slots and full-request KV
-    //      capacity allow, then execute prompt prefill,
+    //   2. admit the oldest waiting request that fits the available KV blocks
+    //      while batch slots remain, then execute prompt prefill,
     //   3. execute one decode position for every running request.
     // Returns the number of requests still running after the step, or -1 when
     // token execution failed. lastError()/lastErrorMessage() describe that
@@ -176,13 +179,22 @@ public:
     SchedulerError lastError() const { return lastError_; }
     const std::string& lastErrorMessage() const { return lastErrorMessage_; }
 
-    bool allDone() const { return waiting_.empty() && running_.empty(); }
+    bool allDone() const { return waitingCount_ == 0 && running_.empty(); }
     int runningCount()  const { return static_cast<int>(running_.size()); }
-    int waitingCount()  const { return static_cast<int>(waiting_.size()); }
+    int waitingCount()  const { return static_cast<int>(waitingCount_); }
     int finishedCount() const { return finished_; }
 
 private:
+    struct QueuedRequest {
+        Request request;
+        uint64_t order;
+    };
+
     int blocksFor(int tokens) const;        // ceil(tokens / blockSize)
+    size_t olderWaitingBucket(size_t lhs, size_t rhs) const;
+    void updateWaitingBucket(size_t bucket);
+    size_t oldestEligibleWaitingBucket(int availableBlocks,
+                                       uint64_t beforeOrder) const;
     bool executeAndAppend(const Request& request, ScheduledTokenPhase phase,
                           int position);
 
@@ -193,7 +205,15 @@ private:
     std::vector<float> valueScratch_;
     SchedulerError lastError_ = SchedulerError::NONE;
     std::string lastErrorMessage_;
-    std::vector<Request> waiting_;
+    // Requests are grouped by their full-cache block requirement. The segment
+    // tree stores the oldest order in each subtree, so a prefix query finds the
+    // oldest request that fits in O(log B), where B is the cache block count.
+    std::vector<std::unique_ptr<std::deque<QueuedRequest>>> waitingByBlocks_;
+    std::vector<size_t> waitingTree_;
+    size_t waitingTreeBase_ = 0;
+    size_t waitingCount_ = 0;
+    size_t zeroTokenWaitingCount_ = 0;
+    uint64_t nextWaitingOrder_ = 0;
     std::vector<Request> running_;
     std::unordered_set<SeqId> activeRequestIds_;
     int finished_ = 0;

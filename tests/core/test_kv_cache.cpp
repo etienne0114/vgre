@@ -183,6 +183,53 @@ int main() {
         check("KV pool fully reclaimed after all retire", pool.freeBlocks() == total0);
     }
 
+    // The waiting index skips requests that do not fit, while retaining FIFO
+    // order across all eligible capacity buckets.
+    {
+        KVCacheManager pool(6, 1, 1, 1);
+        const int rawBlock = pool.allocateBlock();
+        ContinuousBatchScheduler sched(pool, /*maxBatch=*/3);
+        std::vector<SeqId> prefillOrder;
+        bool enqueuedMidStep = false;
+        sched.setTokenExecutor([&](const Request& request, ScheduledTokenPhase phase,
+                                   int position, std::vector<float>& keys,
+                                   std::vector<float>& values) {
+            if (phase == ScheduledTokenPhase::PREFILL && position == 0) {
+                prefillOrder.push_back(request.id);
+                if (request.id == 2 && !enqueuedMidStep) {
+                    enqueuedMidStep = true;
+                    sched.addRequest(4, 1, 0);
+                }
+            }
+            std::fill(keys.begin(), keys.end(), static_cast<float>(request.id));
+            std::fill(values.begin(), values.end(), -static_cast<float>(request.id));
+        });
+        sched.addRequest(1, 6, 0);  // oldest request needs all six blocks
+        sched.addRequest(2, 1, 0);  // fits first in the five-block remainder
+        sched.addRequest(3, 2, 0);  // fits second; tests order across size buckets
+        const int firstWave = sched.step();
+        check("scheduler admits oldest eligible requests around an oversized waiter",
+              rawBlock >= 0 && firstWave == 2 && prefillOrder.size() == 2 &&
+              prefillOrder[0] == 2 && prefillOrder[1] == 3 &&
+              enqueuedMidStep && sched.waitingCount() == 2 &&
+              !pool.hasSequence(1) && !pool.hasSequence(4) &&
+              pool.seqLen(2) == 1 && pool.seqLen(3) == 2);
+
+        pool.freeBlock(rawBlock);
+        const int secondWave = sched.step();
+        check("older large request is admitted once its full capacity becomes free",
+              secondWave == 1 && prefillOrder.size() == 3 && prefillOrder[2] == 1 &&
+              sched.waitingCount() == 1 && pool.seqLen(1) == 6 &&
+              !pool.hasSequence(4));
+        const int thirdWave = sched.step();
+        check("request enqueued during prefill joins at the next scheduler step",
+              thirdWave == 1 && prefillOrder.size() == 4 && prefillOrder[3] == 4 &&
+              sched.waitingCount() == 0 && pool.seqLen(4) == 1);
+        sched.step();
+        check("capacity-indexed waiting queue drains and reclaims all blocks",
+              sched.allDone() && sched.finishedCount() == 4 && pool.freeBlocks() == 6);
+    }
+
     // ── Quantized KV-cache (int8 / int4) on the paged pools ──────────────────
     // The serving path stores K/V as symmetric-absmax int8 or packed int4 with a
     // per-head scale, cutting KV footprint ~3.8×/~7× while staying close to fp32.
@@ -330,8 +377,34 @@ int main() {
               sched.allDone() && pool.freeBlocks() == 4);
     }
 
-    // A model failure during a later request's prefill must not corrupt the
-    // in-place waiting queue or release already-running requests' reservations.
+    // A shared cache manager can be used by other components. If an external
+    // caller claims a queued ID's sequence before admission, the scheduler must
+    // report the ownership conflict and leave that external reservation intact.
+    {
+        KVCacheManager pool(2, 1, 1, 1);
+        ContinuousBatchScheduler sched(pool, 1);
+        sched.setTokenExecutor([](const Request&, ScheduledTokenPhase, int,
+                                  std::vector<float>& keys, std::vector<float>& values) {
+            std::fill(keys.begin(), keys.end(), 1.0f);
+            std::fill(values.begin(), values.end(), 2.0f);
+        });
+        sched.addRequest(88, 1, 0);
+        const bool externalReservation = pool.reserveSequenceCapacity(88, 1);
+        const int conflictedStep = sched.step();
+        check("scheduler reports external KV sequence ownership conflict",
+              externalReservation && conflictedStep == -1 &&
+              sched.lastError() == SchedulerError::CACHE_RESERVATION_FAILURE &&
+              sched.waitingCount() == 1 && pool.hasSequence(88) &&
+              pool.freeBlocks() == 1);
+        pool.freeSequence(88);
+        const int retryStep = sched.step();
+        sched.step();
+        check("queued request retries after external KV reservation is released",
+              retryStep == 1 && sched.allDone() && pool.freeBlocks() == 2);
+    }
+
+    // A model failure during a later request's prefill must leave bucket order
+    // intact and keep already-running requests' reservations.
     {
         KVCacheManager pool(8, 4, 1, 2);
         ContinuousBatchScheduler sched(pool, 2);
