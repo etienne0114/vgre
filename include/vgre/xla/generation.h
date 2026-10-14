@@ -27,16 +27,22 @@ struct SamplingConfig {
     uint64_t seed = 0;            // RNG seed for stochastic sampling
 };
 
-// Index of the maximum logit (ties → lowest index). Greedy decoding.
+// Index of the maximum logit (ties → lowest index). Greedy decoding. Empty
+// inputs and NaN/all-negative-infinity logits throw; positive-infinity ties
+// select the lowest matching index.
 int argmax(const std::vector<float>& logits);
 
 // Numerically stable softmax (max-subtracted) over `logits` into `probs`.
+// Positive-infinity maxima share probability uniformly; NaN or all-negative-
+// infinity logits throw because they do not define a valid distribution.
 void softmax(const std::vector<float>& logits, std::vector<float>& probs,
              float temperature = 1.0f);
 
 // Sample one token id from `logits` under `cfg`, advancing `rng`. temperature<=0
 // (or top_k==1) is deterministic argmax. Otherwise applies temperature, then
 // top-k, then top-p, then samples from the renormalized categorical.
+// Invalid sampler settings or logits without a valid candidate throw rather
+// than silently selecting token 0.
 int sampleToken(const std::vector<float>& logits, const SamplingConfig& cfg,
                 std::mt19937_64& rng);
 
@@ -49,6 +55,7 @@ struct GenerationResult {
 // the token at position `pos` (the model's forward pass, KV-cache update inside).
 // Starts from `startToken` at position `promptLen`; generates up to
 // `maxNewTokens`, stopping early on `eosToken` (< 0 disables EOS).
+// Invalid lengths, an empty callback, or invalid sampling settings throw.
 GenerationResult generate(
     const std::function<std::vector<float>(int prevToken, int pos)>& step,
     int startToken, int promptLen, int maxNewTokens, int eosToken,

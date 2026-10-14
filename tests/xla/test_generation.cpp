@@ -8,6 +8,9 @@
 
 #include <cmath>
 #include <cstdio>
+#include <exception>
+#include <functional>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -23,6 +26,12 @@ static int g_fail = 0;
     } while (0)
 
 int main() {
+    const auto throws = [](const std::function<void()>& fn) {
+        try { fn(); }
+        catch (const std::exception&) { return true; }
+        return false;
+    };
+
     // ── 1. argmax + softmax ────────────────────────────────────────────────
     {
         CHECK(argmax({1.0f, 3.0f, 2.0f}) == 1, "argmax");
@@ -30,10 +39,21 @@ int main() {
         std::vector<float> p;
         softmax({std::log(3.0f), std::log(1.0f)}, p);  // → {0.75, 0.25}
         CHECK(std::fabs(p[0] - 0.75f) < 1e-5f && std::fabs(p[1] - 0.25f) < 1e-5f, "softmax");
+
+        const float inf = std::numeric_limits<float>::infinity();
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        softmax({inf, 0.0f, inf}, p);
+        CHECK(p.size() == 3 && p[0] == 0.5f && p[1] == 0.0f && p[2] == 0.5f,
+              "positive-infinity maxima share probability");
+        CHECK(argmax({-inf, inf, inf}) == 1, "positive-infinity argmax tie is stable");
+        CHECK(throws([] { (void)argmax({}); }), "empty argmax reports invalid input");
+        CHECK(throws([&] { softmax({nan, inf}, p); }), "NaN logits report invalid distribution");
+        CHECK(throws([&] { softmax({-inf, -inf}, p); }), "all-negative-infinity logits report invalid distribution");
     }
 
     // ── 2. sampler modes ────────────────────────────────────────────────────
     {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
         std::mt19937_64 rng(1);
         SamplingConfig greedy; greedy.temperature = 0.0f;
         CHECK(sampleToken({1, 9, 3}, greedy, rng) == 1, "temperature<=0 → argmax");
@@ -66,6 +86,23 @@ int main() {
         bool nucleus = true;
         for (int i = 0; i < 5000; ++i) { int t = sampleToken(logits, pp, r4); nucleus &= (t == 0 || t == 1); }
         CHECK(nucleus, "top_p nucleus excludes the tail");
+
+        CHECK(throws([&] { (void)sampleToken({}, t1, r4); }),
+              "empty logits do not fabricate token zero");
+        CHECK(throws([&] { (void)sampleToken({nan, 0.0f}, t1, r4); }),
+              "NaN logits fail stochastic sampling");
+        SamplingConfig bad = t1;
+        bad.top_k = -1;
+        CHECK(throws([&] { (void)sampleToken({0.0f}, bad, r4); }),
+              "negative top_k is rejected");
+        bad = t1;
+        bad.top_p = 1.1f;
+        CHECK(throws([&] { (void)sampleToken({0.0f}, bad, r4); }),
+              "top_p above one is rejected");
+        bad = t1;
+        bad.temperature = std::numeric_limits<float>::quiet_NaN();
+        CHECK(throws([&] { (void)sampleToken({0.0f}, bad, r4); }),
+              "NaN temperature is rejected");
     }
 
     // ── 3. generation loop: deterministic step, EOS + length stop ───────────
@@ -87,6 +124,10 @@ int main() {
 
         auto r3 = generate(step, 0, 0, /*maxNew=*/3, /*eos=*/-1, greedy);
         CHECK(r3.tokens.size() == 3 && !r3.hitEos, "stops at maxNewTokens");
+        CHECK(throws([&] { (void)generate({}, 0, 0, 1, -1, greedy); }),
+              "empty generation callback is rejected");
+        CHECK(throws([&] { (void)generate(step, 0, -1, 1, -1, greedy); }),
+              "negative prompt length is rejected");
     }
 
     // ── 4. step driven by a real HloModule (engine generates) ───────────────
