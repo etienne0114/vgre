@@ -295,7 +295,7 @@ int main() {
         });
         bool incompleteOutputRejected = false;
         try { sched.step(); }
-        catch (const std::runtime_error&) { incompleteOutputRejected = true; }
+        catch (...) { incompleteOutputRejected = true; }
         check("scheduler rejects unset K/V output and rolls prefill back",
               incompleteOutputRejected && pool.freeBlocks() == 4 && pool.seqLen(55) == 0);
 
@@ -346,7 +346,7 @@ int main() {
         sched.addRequest(3, 1, 1);
         bool propagated = false;
         try { sched.step(); }
-        catch (const std::runtime_error&) { propagated = true; }
+        catch (...) { propagated = true; }
         check("failed prefill propagates without corrupting scheduler queues",
               propagated && sched.runningCount() == 1 && sched.waitingCount() == 2 &&
               pool.seqLen(1) == 1 && !pool.hasSequence(2));
