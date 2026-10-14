@@ -78,6 +78,20 @@ int main() {
         }
         CHECK(only_top2, "top_k=2 excludes low-prob tokens");
 
+        // top-p is computed over the top-k-renormalized distribution. After
+        // top_k=2, token 0 has mass 0.4/(0.4+0.3) ~= 0.571; p=0.55 keeps it
+        // alone. Using the original full-vocabulary mass would incorrectly
+        // retain token 1 as well.
+        SamplingConfig combined; combined.top_k = 2; combined.top_p = 0.55f;
+        combined.temperature = 1.0f;
+        std::mt19937_64 rcombined(17);
+        const std::vector<float> mixed_logits = {
+            std::log(0.4f), std::log(0.3f), std::log(0.2f), std::log(0.1f)};
+        bool top_k_then_top_p = true;
+        for (int i = 0; i < 256; ++i)
+            top_k_then_top_p &= sampleToken(mixed_logits, combined, rcombined) == 0;
+        CHECK(top_k_then_top_p, "top_p threshold uses the top_k-renormalized mass");
+
         // top_p=0.85 over softmax{0.7,0.2,0.07,0.03} keeps {0,1} (cum 0.9).
         SamplingConfig pp; pp.top_p = 0.85f; pp.temperature = 1.0f;
         std::vector<float> logits(4);

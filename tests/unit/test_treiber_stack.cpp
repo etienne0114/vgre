@@ -1,4 +1,4 @@
-// QUEUE-58: Treiber lock-free stack unit tests.
+// QUEUE-58: Treiber stack unit tests with concurrent safe reclamation.
 //
 // Verifies:
 //   1. Single-threaded LIFO order: push 5 items, pop all 5 in LIFO order.
@@ -19,6 +19,14 @@
 #include <vector>
 
 using vgre::core::TreiberStack;
+
+struct NonDefaultValue {
+    explicit NonDefaultValue(int v) : value(v) {}
+    NonDefaultValue() = delete;
+    NonDefaultValue(NonDefaultValue&&) = default;
+    NonDefaultValue& operator=(NonDefaultValue&&) = default;
+    int value;
+};
 
 static void check(bool cond, const char* msg) {
     if (!cond) {
@@ -54,6 +62,14 @@ static void test_empty_pop() {
     bool ok = s.pop(v);
     check(!ok, "pop on empty stack should return false");
     check(v == -1, "pop on empty stack should not modify out parameter");
+}
+
+static void test_non_default_constructible_values() {
+    TreiberStack<NonDefaultValue> s;
+    s.push(NonDefaultValue{42});
+    NonDefaultValue out{0};
+    check(s.pop(out), "non-default-constructible value should pop");
+    check(out.value == 42, "non-default-constructible value is preserved");
 }
 
 // ─── Test 3: Concurrent push/pop — zero loss, zero duplicate ──────────────────
@@ -130,6 +146,7 @@ static void test_concurrent() {
 int main() {
     test_lifo_order();
     test_empty_pop();
+    test_non_default_constructible_values();
     test_concurrent();
 
     std::fprintf(stdout, "PASS: all TreiberStack tests passed (QUEUE-58)\n");

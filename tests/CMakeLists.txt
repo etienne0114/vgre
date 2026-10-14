@@ -2228,7 +2228,7 @@ target_include_directories(test_fib_heap PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME FibHeap COMMAND test_fib_heap)
 set_tests_properties(FibHeap PROPERTIES TIMEOUT 30)
 
-# QUEUE-58: Treiber lock-free stack — LIFO, empty-pop, 8-thread concurrency.
+# QUEUE-58: Treiber stack — LIFO, empty-pop, reclamation, and 8-thread concurrency.
 add_executable(test_treiber_stack unit/test_treiber_stack.cpp)
 target_include_directories(test_treiber_stack PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME TreiberStack COMMAND test_treiber_stack)

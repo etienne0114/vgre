@@ -101,24 +101,36 @@ int sampleToken(const std::vector<float>& logits, const SamplingConfig& cfg, std
     // Order tokens by descending probability (needed for both top-k and top-p).
     std::vector<int> order(V);
     std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(),
-              [&](int a, int b) {
-                  if (probs[a] != probs[b]) return probs[a] > probs[b];
-                  return a < b;
-              });
-
     // top-k: keep the k highest.
     int keep = V;
     if (cfg.top_k > 0) keep = std::min(keep, cfg.top_k);
 
-    // top-p (nucleus): smallest prefix whose cumulative prob >= top_p.
+    const auto higher_probability = [&](int a, int b) {
+        if (probs[a] != probs[b]) return probs[a] > probs[b];
+        return a < b;
+    };
+    // top-p only needs a sorted prefix. Avoid sorting the entire vocabulary
+    // when top-k is small, reducing selection work from O(V log V) to
+    // O(V log k) for the common bounded-candidate case.
+    if (keep < V)
+        std::partial_sort(order.begin(), order.begin() + keep, order.end(), higher_probability);
+    else
+        std::sort(order.begin(), order.end(), higher_probability);
+
+    // top-p (nucleus) operates on the distribution restricted by top-k. Its
+    // threshold is therefore a fraction of the retained top-k mass, as if
+    // those candidates were renormalized before nucleus filtering.
     if (cfg.top_p < 1.0f) {
+        double top_k_sum = 0.0;
+        for (int i = 0; i < keep; ++i)
+            top_k_sum += probs[order[i]];
+
         double cum = 0.0;
         int p_keep = 0;
         for (int i = 0; i < keep; ++i) {
             cum += probs[order[i]];
             ++p_keep;
-            if (cum >= (double)cfg.top_p) break;
+            if (cum >= static_cast<double>(cfg.top_p) * top_k_sum) break;
         }
         keep = std::max(1, p_keep);
     }
