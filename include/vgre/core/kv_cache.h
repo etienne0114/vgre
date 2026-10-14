@@ -13,6 +13,7 @@
 #include <cstddef>   // size_t (not transitively guaranteed on older libstdc++)
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace vgre {
@@ -31,6 +32,8 @@ class KVCacheManager {
 public:
     // Pool of numBlocks blocks; each block holds blockSize tokens, each token
     // carrying numHeads × headDim K and V elements (fp32, or quantized per `dtype`).
+    // Invalid dimensions and capacities that overflow the supported indexing
+    // range throw std::invalid_argument or std::length_error.
     KVCacheManager(int numBlocks, int blockSize, int numHeads, int headDim,
                    KVDType dtype = KVDType::F32);
 
@@ -44,7 +47,8 @@ public:
     size_t bytesPerToken() const;
 
     // Allocate / release a physical block from the pool. allocateBlock returns
-    // -1 when the pool is exhausted.
+    // -1 when the pool is exhausted. Invalid, duplicate, and sequence-owned
+    // releases are ignored; sequence-owned blocks are released by freeSequence.
     int  allocateBlock();
     void freeBlock(int physBlock);
 
@@ -58,7 +62,8 @@ public:
     const std::vector<int>& blockTable(SeqId seq) const;
 
     // Read pointers into the pool for (physical block, slot, head). Valid only in
-    // fp32 mode; nullptr in a quantized mode (use readKey / readVal instead).
+    // fp32 mode; nullptr in a quantized mode or for invalid indices (use
+    // readKey / readVal instead).
     const float* keyPtr(int physBlock, int slot, int head) const;
     const float* valPtr(int physBlock, int slot, int head) const;
 
@@ -75,11 +80,12 @@ private:
 
     // Quantize (or copy) one token's K and V (all heads) into physical (block, slot).
     void writeToken(int physBlock, int slot, const float* kAllHeads, const float* vAllHeads);
+    void releaseBlock(int physBlock, bool sequenceRelease);
 
     int blockSize_, numHeads_, headDim_;
     KVDType dtype_;
-    int tokenStride_;   // elements per token (numHeads*headDim)
-    int blockStride_;   // elements per block (blockSize*tokenStride)
+    size_t tokenStride_;   // elements per token (numHeads*headDim)
+    size_t blockStride_;   // elements per block (blockSize*tokenStride)
     int packDim_;       // int4 bytes per head (headDim/2)
     // Exactly one representation is allocated (chosen by dtype_).
     std::vector<float>   kPool_,  vPool_;    // F32
@@ -87,6 +93,7 @@ private:
     std::vector<uint8_t> kPool4_, vPool4_;   // I4 packed codes (2/byte)
     std::vector<float>   kScale_, vScale_;   // per-(block,slot,head) scale (I8/I4)
     std::vector<int>   freeList_;
+    std::vector<uint8_t> blockState_;         // free/raw/sequence; O(1) release validation
     std::unordered_map<SeqId, Seq> seqs_;
 };
 
@@ -118,6 +125,7 @@ public:
 
     // Submit a request (queued WAITING). Token *content* is abstracted: the
     // scheduler models lifecycle + KV growth, appending zeroed K/V per token.
+    // Negative lengths and duplicate active IDs throw std::invalid_argument.
     void addRequest(SeqId id, int promptLen, int maxNewTokens);
 
     // Run one scheduling step:
@@ -140,6 +148,7 @@ private:
     int maxBatch_;
     std::vector<Request> waiting_;
     std::vector<Request> running_;
+    std::unordered_set<SeqId> activeRequestIds_;
     int finished_ = 0;
 };
 

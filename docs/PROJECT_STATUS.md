@@ -1,8 +1,10 @@
 # VGRE Project Status & Gap Analysis
 
-**Last Updated**: 2026-10-08
+**Last Updated**: 2026-10-14
 
-**Latest all-green hosted verification**: ✅ [GitHub Actions run 37652962427](https://github.com/etienne0114/vgre/actions/runs/37652962427) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Each OS job completed successfully. The newer run 37678191879 is recorded below and failed at `PTXTranslate` on macOS and Windows.
+**Latest all-green hosted verification before the current workspace changes**: ✅ [GitHub Actions run 37819051104](https://github.com/etienne0114/vgre/actions/runs/37819051104) passed Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64. Windows passed all 403 CTest cases, including `PTXTranslate`, plus Python integration. The related [publish workflow](https://github.com/etienne0114/vgre/actions/runs/37819050610) also succeeded.
+
+**Current workspace follow-on (2026-10-14)**: KV-cache allocation now validates dimensions and checked capacities, prevents duplicate or premature block release, and bounds-checks read access. Continuous-batch compaction reuses its vectors, request ID checks use an expected O(1) set lookup, and ceil-division avoids signed overflow. Hosted verification for these current changes is pending.
 
 - **Linux**: ✅ Full `ctest` suite passed in the latest hosted Linux x86-64 job.
 - **Linux, LLVM-free**: ✅ The dedicated `linux-x86_64-llvm-free` job passed with `VGRE_ENABLE_JIT=OFF` and `VGRE_ENABLE_OPENMP=OFF`.
@@ -85,15 +87,15 @@ whose derivative cannot be recovered from the API's saved output. Local
 `ExactGELUActivation`, `CUDNNActivationBackward`, `CudnnBackendV8`, and
 `CudnnNormalization` tests pass; hosted CI remains pending.
 
-**Current PTX translator follow-on (workspace):** Inline assembly output/input
-constraints now bind numbered and named operands into translated C++, and the parser
-consumes balanced nested constraint expressions. Predicated PTX and malformed
-operand lists now fail explicitly instead of becoming comments or partial generated
-code. `PTXTranslate` passes locally. Hosted run [37678191879](https://github.com/etienne0114/vgre/actions/runs/37678191879)
-failed this test on macOS ARM64 and Windows x86-64 at the expected-rejection check:
-the test caught `std::runtime_error` across a shared-library boundary, which is
-not portable across platform C++ runtimes. The test now catches the exception at
-that narrowly scoped rejection assertion; hosted verification is pending.
+**PTX translator follow-on (verified):** Inline assembly constraints bind numbered
+and named operands into translated C++, balanced nested constraint expressions are
+parsed, and predicated or malformed operands fail explicitly. A deterministic
+scanner replaced `std::regex`, which exhausted MSVC regex resources on large WGMMA
+inputs. The initial cross-runtime exception assertion failure in run
+[37678191879](https://github.com/etienne0114/vgre/actions/runs/37678191879) and the
+subsequent Windows regex resource failure were resolved; run
+[37819051104](https://github.com/etienne0114/vgre/actions/runs/37819051104) passed
+the full Windows suite and all other platform jobs.
 
 **Current CUDA device-attribute follow-on (workspace):** Device attribute IDs now
 match the CUDA Runtime 11.0 enum through the implemented attributes, including the
@@ -121,18 +123,18 @@ unavailable and are not inferred from CPU estimates. Hosted verification is
 pending.
 
 **Public demo**: 🌐 free CPU demo live at **https://vgrengine.streamlit.app** (Streamlit Community Cloud — HF now requires PRO for server-side Spaces)  
-**Production Readiness**: prior hosted runs passed the Linux, macOS ARM64, and Windows x86-64 matrices. The latest run listed below has a macOS/Windows `PTXTranslate` failure; the local correction is not yet hosted-verified.
+**Production Readiness**: the latest hosted Linux, Linux LLVM-free, macOS ARM64, and Windows matrix passed on commit `6f86c638`. The current KV-cache and continuous-batching workspace follow-on still needs platform verification.
 
 > **Historical CI status (2026-09):** CI was restored on the public repository.
 > At that point some OS lanes were informational; since then the workflow was
 > updated so Linux, macOS, and Windows are required, and all four latest matrix
 > jobs (including Linux LLVM-free) passed run 37042616142.
 
-> **Latest hosted run (2026-10-07):** [run 37678191879](https://github.com/etienne0114/vgre/actions/runs/37678191879)
+> **Historical hosted run (2026-10-07; resolved):** [run 37678191879](https://github.com/etienne0114/vgre/actions/runs/37678191879)
 > at `218d348` passed Linux x86-64 and Linux LLVM-free, but failed `PTXTranslate`
 > on macOS ARM64 and Windows x86-64. The local test now handles its expected
-> operand-rejection exception portably; these unpushed changes still need hosted
-> verification.
+> operand-rejection exception portably. A later Windows regex resource failure was
+> fixed by replacing regex scanning; all four platform jobs passed in run 37819051104.
 
 > **LLVM is now optional (delivered):** kernel execution no longer requires LLVM —
 > a from-scratch CUDA-C front-end feeds a four-tier CPU backend (PTX interpreter,

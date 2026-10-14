@@ -3,45 +3,104 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace vgre {
 namespace core {
 
+namespace {
+
+constexpr uint8_t kBlockFree = 0;
+constexpr uint8_t kBlockRaw = 1;
+constexpr uint8_t kBlockSequence = 2;
+
+int requirePositiveDimension(int value, const char* name) {
+    if (value <= 0)
+        throw std::invalid_argument(std::string("KV cache ") + name + " must be positive");
+    return value;
+}
+
+size_t checkedProduct(size_t a, size_t b, const char* what) {
+    if (b != 0 && a > std::numeric_limits<size_t>::max() / b)
+        throw std::length_error(std::string("KV cache size overflow while computing ") + what);
+    return a * b;
+}
+
+size_t checkedSum(size_t a, size_t b, const char* what) {
+    if (a > std::numeric_limits<size_t>::max() - b)
+        throw std::length_error(std::string("KV cache size overflow while computing ") + what);
+    return a + b;
+}
+
+}  // namespace
+
 KVCacheManager::KVCacheManager(int numBlocks, int blockSize, int numHeads, int headDim,
                                KVDType dtype)
-    : blockSize_(blockSize), numHeads_(numHeads), headDim_(headDim),
+    : blockSize_(requirePositiveDimension(blockSize, "block size")),
+      numHeads_(requirePositiveDimension(numHeads, "head count")),
+      headDim_(requirePositiveDimension(headDim, "head dimension")),
       dtype_(dtype),
-      tokenStride_(numHeads * headDim),
-      blockStride_(blockSize * numHeads * headDim),
+      tokenStride_(checkedProduct(static_cast<size_t>(numHeads_),
+                                  static_cast<size_t>(headDim_), "token stride")),
+      blockStride_(checkedProduct(static_cast<size_t>(blockSize_), tokenStride_,
+                                  "block stride")),
       packDim_(headDim / 2) {
+    if (numBlocks < 0)
+        throw std::invalid_argument("KV cache block count cannot be negative");
+    if (dtype_ != KVDType::F32 && dtype_ != KVDType::I8 && dtype_ != KVDType::I4)
+        throw std::invalid_argument("KV cache data type is invalid");
+
     // int4 needs an even headDim (2 codes/byte, head-aligned); otherwise use int8.
     if (dtype_ == KVDType::I4 && (headDim & 1)) dtype_ = KVDType::I8;
     const size_t nBlk = static_cast<size_t>(numBlocks);
-    const size_t nSlotHead = nBlk * blockSize_ * numHeads_;   // one scale per (block,slot,head)
+    const size_t nTokens = checkedProduct(nBlk, static_cast<size_t>(blockSize_),
+                                          "token capacity");
+    const size_t nSlotHead = checkedProduct(nTokens, static_cast<size_t>(numHeads_),
+                                             "per-head scales");
+    const size_t nElements = checkedProduct(nBlk, blockStride_, "K/V element count");
     if (dtype_ == KVDType::I8) {
-        kPool8_.assign(nBlk * blockStride_, 0);
-        vPool8_.assign(nBlk * blockStride_, 0);
+        kPool8_.assign(nElements, 0);
+        vPool8_.assign(nElements, 0);
         kScale_.assign(nSlotHead, 0.0f);
         vScale_.assign(nSlotHead, 0.0f);
     } else if (dtype_ == KVDType::I4) {
-        kPool4_.assign(nBlk * blockSize_ * numHeads_ * packDim_, 0);
-        vPool4_.assign(nBlk * blockSize_ * numHeads_ * packDim_, 0);
+        const size_t nPacked = checkedProduct(nSlotHead, static_cast<size_t>(packDim_),
+                                              "packed int4 element count");
+        kPool4_.assign(nPacked, 0);
+        vPool4_.assign(nPacked, 0);
         kScale_.assign(nSlotHead, 0.0f);
         vScale_.assign(nSlotHead, 0.0f);
     } else {
-        kPool_.assign(nBlk * blockStride_, 0.0f);
-        vPool_.assign(nBlk * blockStride_, 0.0f);
+        kPool_.assign(nElements, 0.0f);
+        vPool_.assign(nElements, 0.0f);
     }
-    freeList_.reserve(numBlocks);
+    freeList_.reserve(nBlk);
+    blockState_.assign(nBlk, kBlockFree);
     for (int i = numBlocks - 1; i >= 0; --i) freeList_.push_back(i);  // pop from back = ascending
 }
 
 size_t KVCacheManager::bytesPerToken() const {
-    const size_t scaleBytes = static_cast<size_t>(numHeads_) * sizeof(float);   // per head, K and V each
+    const size_t scaleBytes = checkedProduct(static_cast<size_t>(numHeads_), sizeof(float),
+                                             "per-head scale bytes");
     switch (dtype_) {
-        case KVDType::I8: return 2 * (static_cast<size_t>(tokenStride_) * sizeof(int8_t)  + scaleBytes);
-        case KVDType::I4: return 2 * (static_cast<size_t>(numHeads_) * packDim_          + scaleBytes);
-        default:          return 2 * (static_cast<size_t>(tokenStride_) * sizeof(float));
+        case KVDType::I8:
+            return checkedProduct(2, checkedSum(checkedProduct(tokenStride_, sizeof(int8_t),
+                                                               "int8 bytes per token"),
+                                                scaleBytes, "int8 bytes per token"),
+                                  "int8 bytes per token");
+        case KVDType::I4:
+            return checkedProduct(2, checkedSum(checkedProduct(static_cast<size_t>(numHeads_),
+                                                               static_cast<size_t>(packDim_),
+                                                               "int4 bytes per token"),
+                                                scaleBytes, "int4 bytes per token"),
+                                  "int4 bytes per token");
+        default:
+            return checkedProduct(2, checkedProduct(tokenStride_, sizeof(float),
+                                                     "fp32 bytes per token"),
+                                  "fp32 bytes per token");
     }
 }
 
@@ -49,20 +108,38 @@ int KVCacheManager::allocateBlock() {
     if (freeList_.empty()) return -1;
     int b = freeList_.back();
     freeList_.pop_back();
+    blockState_[static_cast<size_t>(b)] = kBlockRaw;
     return b;
 }
 
 void KVCacheManager::freeBlock(int physBlock) {
-    if (physBlock >= 0) freeList_.push_back(physBlock);
+    releaseBlock(physBlock, false);
+}
+
+void KVCacheManager::releaseBlock(int physBlock, bool sequenceRelease) {
+    if (physBlock < 0 || static_cast<size_t>(physBlock) >= blockState_.size()) return;
+    const size_t block = static_cast<size_t>(physBlock);
+    const uint8_t expected = sequenceRelease ? kBlockSequence : kBlockRaw;
+    if (blockState_[block] != expected) return;
+    blockState_[block] = kBlockFree;
+    freeList_.push_back(physBlock);
 }
 
 const float* KVCacheManager::keyPtr(int physBlock, int slot, int head) const {
-    if (dtype_ != KVDType::F32) return nullptr;   // quantized: no fp32 to point at — use readKey
+    if (dtype_ != KVDType::F32 || physBlock < 0 ||
+        static_cast<size_t>(physBlock) >= blockState_.size() ||
+        blockState_[static_cast<size_t>(physBlock)] == kBlockFree ||
+        slot < 0 || slot >= blockSize_ || head < 0 || head >= numHeads_)
+        return nullptr;   // quantized or invalid: use readKey / check indices
     return &kPool_[(static_cast<size_t>(physBlock) * blockSize_ + slot) * tokenStride_ +
                    static_cast<size_t>(head) * headDim_];
 }
 const float* KVCacheManager::valPtr(int physBlock, int slot, int head) const {
-    if (dtype_ != KVDType::F32) return nullptr;
+    if (dtype_ != KVDType::F32 || physBlock < 0 ||
+        static_cast<size_t>(physBlock) >= blockState_.size() ||
+        blockState_[static_cast<size_t>(physBlock)] == kBlockFree ||
+        slot < 0 || slot >= blockSize_ || head < 0 || head >= numHeads_)
+        return nullptr;
     return &vPool_[(static_cast<size_t>(physBlock) * blockSize_ + slot) * tokenStride_ +
                    static_cast<size_t>(head) * headDim_];
 }
@@ -88,12 +165,18 @@ void readSlice(KVDType dt, const std::vector<float>& f32,
 }  // namespace
 
 void KVCacheManager::readKey(int physBlock, int slot, int head, float* out) const {
+    if (!out || physBlock < 0 || static_cast<size_t>(physBlock) >= blockState_.size() ||
+        blockState_[static_cast<size_t>(physBlock)] == kBlockFree ||
+        slot < 0 || slot >= blockSize_ || head < 0 || head >= numHeads_) return;
     const size_t st = static_cast<size_t>(physBlock) * blockSize_ + slot;
     readSlice(dtype_, kPool_, kPool8_, kPool4_, kScale_,
               st * numHeads_ + head, st * tokenStride_ + static_cast<size_t>(head) * headDim_,
               (st * numHeads_ + head) * packDim_, headDim_, out);
 }
 void KVCacheManager::readVal(int physBlock, int slot, int head, float* out) const {
+    if (!out || physBlock < 0 || static_cast<size_t>(physBlock) >= blockState_.size() ||
+        blockState_[static_cast<size_t>(physBlock)] == kBlockFree ||
+        slot < 0 || slot >= blockSize_ || head < 0 || head >= numHeads_) return;
     const size_t st = static_cast<size_t>(physBlock) * blockSize_ + slot;
     readSlice(dtype_, vPool_, vPool8_, vPool4_, vScale_,
               st * numHeads_ + head, st * tokenStride_ + static_cast<size_t>(head) * headDim_,
@@ -123,12 +206,18 @@ void KVCacheManager::writeToken(int physBlock, int slot, const float* kAllHeads,
 }
 
 bool KVCacheManager::appendToken(SeqId seq, const float* kAllHeads, const float* vAllHeads) {
+    if (!kAllHeads || !vAllHeads) return false;
     Seq& s = seqs_[seq];
+    if (s.length == std::numeric_limits<int>::max()) return false;
     const int slot = s.length % blockSize_;
     if (slot == 0) {                       // crossing into a new logical block
+        // Reserve table storage before taking a physical block so allocation
+        // failure cannot leak a block from the pool.
+        s.blockTable.reserve(s.blockTable.size() + 1);
         int b = allocateBlock();
         if (b < 0) return false;           // pool exhausted
         s.blockTable.push_back(b);
+        blockState_[static_cast<size_t>(b)] = kBlockSequence;
     }
     const int physBlock = s.blockTable.back();
     writeToken(physBlock, slot, kAllHeads, vAllHeads);
@@ -150,7 +239,7 @@ const std::vector<int>& KVCacheManager::blockTable(SeqId seq) const {
 void KVCacheManager::freeSequence(SeqId seq) {
     auto it = seqs_.find(seq);
     if (it == seqs_.end()) return;
-    for (int b : it->second.blockTable) freeBlock(b);
+    for (int b : it->second.blockTable) releaseBlock(b, true);
     seqs_.erase(it);
 }
 
@@ -204,62 +293,90 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(KVCacheManager& kv, int maxBa
     : kv_(kv), maxBatch_(maxBatch < 1 ? 1 : maxBatch) {}
 
 void ContinuousBatchScheduler::addRequest(SeqId id, int promptLen, int maxNewTokens) {
+    if (promptLen < 0 || maxNewTokens < 0)
+        throw std::invalid_argument("request token counts cannot be negative");
+    if (maxNewTokens > std::numeric_limits<int>::max() - promptLen)
+        throw std::length_error("request prompt and generation length exceed sequence indexing range");
+    if (!activeRequestIds_.insert(id).second)
+        throw std::invalid_argument("request ID is already waiting or running");
     Request r;
     r.id = id; r.promptLen = promptLen; r.maxNewTokens = maxNewTokens;
     r.state = Request::WAITING;
-    waiting_.push_back(r);
+    try {
+        waiting_.push_back(r);
+    } catch (...) {
+        activeRequestIds_.erase(id);
+        throw;
+    }
 }
 
 int ContinuousBatchScheduler::blocksFor(int tokens) const {
     const int bs = kv_.blockSize();
-    return (tokens + bs - 1) / bs;
+    return tokens / bs + (tokens % bs != 0 ? 1 : 0);
 }
 
 bool ContinuousBatchScheduler::appendOneToken(SeqId id) {
     // Token content is abstracted: append a zeroed K/V token (real serving would
     // append the layer's K/V). Returns false if the pool is exhausted.
     static thread_local std::vector<float> zero;
-    const int stride = kv_.numHeads() * kv_.headDim();
-    if (static_cast<int>(zero.size()) < stride) zero.assign(stride, 0.0f);
+    const size_t stride = static_cast<size_t>(kv_.numHeads()) *
+                          static_cast<size_t>(kv_.headDim());
+    if (zero.size() < stride) zero.assign(stride, 0.0f);
     return kv_.appendToken(id, zero.data(), zero.data());
 }
 
 int ContinuousBatchScheduler::step() {
     // 1. Retire finished running requests; reclaim their KV blocks.
-    {
-        std::vector<Request> stillRunning;
-        stillRunning.reserve(running_.size());
-        for (auto& r : running_) {
-            if (r.generated >= r.maxNewTokens) {
-                r.state = Request::FINISHED;
-                kv_.freeSequence(r.id);   // return blocks to the pool
-                ++finished_;
-            } else {
-                stillRunning.push_back(r);
-            }
+    size_t live = 0;
+    const size_t runningAtStart = running_.size();
+    for (size_t i = 0; i < runningAtStart; ++i) {
+        Request& r = running_[i];
+        if (r.generated >= r.maxNewTokens) {
+            r.state = Request::FINISHED;
+            kv_.freeSequence(r.id);   // return blocks to the pool
+            activeRequestIds_.erase(r.id);
+            ++finished_;
+        } else {
+            if (live != i) running_[live] = std::move(r);
+            ++live;
         }
-        running_.swap(stillRunning);
     }
+    running_.resize(live);
 
     // 2. Admit waiting requests while batch slots AND KV blocks allow. Prefill
     //    the prompt (block reservation needs ceil((promptLen+maxNew)/blockSize)
     //    in the worst case, but we admit on the prompt cost and let decode grow).
-    {
-        std::vector<Request> stillWaiting;
-        for (auto& r : waiting_) {
-            if (static_cast<int>(running_.size()) < maxBatch_ &&
-                kv_.freeBlocks() >= blocksFor(r.promptLen > 0 ? r.promptLen : 1)) {
-                // Prefill the prompt tokens into the KV cache.
-                bool ok = true;
-                for (int t = 0; t < r.promptLen && ok; ++t) ok = appendOneToken(r.id);
-                if (ok) { r.state = Request::RUNNING; running_.push_back(r); }
-                else    { kv_.freeSequence(r.id); stillWaiting.push_back(r); } // roll back, retry later
-            } else {
-                stillWaiting.push_back(r);
+    size_t stillWaiting = 0;
+    const size_t waitingAtStart = waiting_.size();
+    for (size_t i = 0; i < waitingAtStart; ++i) {
+        Request& r = waiting_[i];
+        if (static_cast<int>(running_.size()) < maxBatch_ &&
+            kv_.freeBlocks() >= blocksFor(r.promptLen > 0 ? r.promptLen : 1)) {
+            // Ensure a later allocation failure cannot leave a prefetched KV
+            // sequence without a scheduler entry.
+            if (running_.size() == running_.capacity()) {
+                const size_t capacity = running_.capacity();
+                const size_t limit = static_cast<size_t>(maxBatch_);
+                const size_t next = capacity == 0 ? 1
+                    : (capacity > limit / 2 ? limit : capacity * 2);
+                running_.reserve(next);
             }
+            bool ok = true;
+            for (int t = 0; t < r.promptLen && ok; ++t) ok = appendOneToken(r.id);
+            if (ok) {
+                r.state = Request::RUNNING;
+                running_.push_back(r);
+            } else {
+                kv_.freeSequence(r.id); // roll back, retry later
+                if (stillWaiting != i) waiting_[stillWaiting] = std::move(r);
+                ++stillWaiting;
+            }
+        } else {
+            if (stillWaiting != i) waiting_[stillWaiting] = std::move(r);
+            ++stillWaiting;
         }
-        waiting_.swap(stillWaiting);
     }
+    waiting_.resize(stillWaiting);
 
     // 3. Advance each running request by one decode token.
     for (auto& r : running_) {

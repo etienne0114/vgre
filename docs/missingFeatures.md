@@ -1,6 +1,6 @@
 # VGRE — Missing Features & Next-Release Roadmap
 
-**Last Updated**: 2026-10-07
+**Last Updated**: 2026-10-14
 
 This file lists **only what is not yet done** — the targets for the next release and the
 items blocked on external hardware, accounts, or content. It is deliberately short.
@@ -11,10 +11,12 @@ Everything already delivered is documented elsewhere (do not duplicate it here):
 - **Capabilities, test metrics, platform/CI status**: [`PROJECT_STATUS.md`](PROJECT_STATUS.md)
 - **ML tracks (T1–T6)** — build steps + success criteria: [`implementationPlan.md`](implementationPlan.md)
 
-**Current baseline (2026-10-07):** [GitHub Actions run 37652962427](https://github.com/etienne0114/vgre/actions/runs/37652962427)
+**CI baseline before the current workspace changes (2026-10-08):** [GitHub Actions run 37819051104](https://github.com/etienne0114/vgre/actions/runs/37819051104)
 passed all four hosted jobs: Linux x86-64, Linux LLVM-free, macOS ARM64, and Windows x86-64.
-PyPI serves **v0.1.4** for Linux, macOS universal2, and Windows. The [v0.1.4 release workflow](https://github.com/etienne0114/vgre/actions/runs/37045306062)
+The Windows suite passed all 403 CTest cases. PyPI was verified at **v0.1.4** for Linux, macOS universal2, and Windows. The [v0.1.4 release workflow](https://github.com/etienne0114/vgre/actions/runs/37045306062)
 built and smoke-tested each wheel, then published the GitHub Release and PyPI package.
+
+**Current workspace follow-on:** KV-cache safety and continuous-batching allocation changes are in progress; verify the affected serving paths on Linux, macOS, and Windows before release.
 
 ---
 
@@ -83,6 +85,11 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   the generation path. `pagedAttention` dequantizes on read; the continuous-batching scheduler
   runs unchanged over a quantized pool. Measured **3.8× (int8) / 7.1× (int4)** KV-memory reduction
   at headDim=64, bit-close to fp32 — `test_kv_cache.cpp`.)*
+- **Remaining for production serving:** `ContinuousBatchScheduler` currently models request
+  lifecycle and appends zero-valued K/V; it does not call a model for prompt prefill or token
+  decode. Connect it to real generation callbacks and token state before presenting it as
+  model-backed continuous batching. The current workspace follow-on hardens the underlying
+  KV allocator and reduces scheduler compaction allocations; platform verification is pending.
 
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |
