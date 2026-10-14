@@ -97,7 +97,8 @@ already run on some tier and are bit-exact — what's left is a native path, a l
   a loaded transformer, prompt token arrays, sampling policy, or generated token stream. A serving
   adapter must own those inputs and model state, implement the executor, handle cancellation and
   sampling, and expose results to clients. The cache and scheduler remain model-agnostic. The
-  current implementation and tests need hosted Linux, macOS, and Windows verification.
+  scheduler implementation passed hosted Linux, LLVM-free Linux, macOS ARM64, and Windows CI on
+  commit `83d49f5c`; end-to-end transformer serving remains outside this cache/scheduler layer.
 
 ### 1.5 ML track breadth (correctness delivered; breadth/perf left)
 | Track | Left | Nature |
