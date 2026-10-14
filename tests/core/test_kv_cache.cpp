@@ -230,6 +230,17 @@ int main() {
               sched.allDone() && sched.finishedCount() == 4 && pool.freeBlocks() == 6);
     }
 
+    {
+        KVCacheManager pool(1, 1, 1, 1);
+        ContinuousBatchScheduler sched(pool, 1);
+        sched.addRequest(90, 0, 0);
+        const int admitted = sched.step();
+        sched.step();
+        check("zero-token request uses the zero-capacity bucket without an executor",
+              admitted == 1 && sched.allDone() && sched.finishedCount() == 1 &&
+              pool.freeBlocks() == 1);
+    }
+
     // ── Quantized KV-cache (int8 / int4) on the paged pools ──────────────────
     // The serving path stores K/V as symmetric-absmax int8 or packed int4 with a
     // per-head scale, cutting KV footprint ~3.8×/~7× while staying close to fp32.
