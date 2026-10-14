@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <vector>
 
 using namespace vgre::xla;
@@ -29,6 +30,36 @@ int main() {
     cfg.d_ff = 128; cfg.max_seq = 24;
     GPT gpt(cfg, /*seed=*/7);
     std::printf("small model params = %lld\n", (long long)gpt.num_parameters());
+
+    const auto rejects = [](const auto& fn) {
+        try { fn(); }
+        catch (const std::exception&) { return true; }
+        return false;
+    };
+    if (rejects([&] { (void)gpt.forward({}); }))
+        std::printf("[PASS] empty model input rejected\n");
+    else { std::printf("[FAIL] empty model input accepted\n"); ++g_fail; }
+    if (rejects([&] { (void)gpt.forward({-1}); }) &&
+        rejects([&] { (void)gpt.forward({cfg.vocab}); }))
+        std::printf("[PASS] out-of-vocabulary model inputs rejected\n");
+    else { std::printf("[FAIL] out-of-vocabulary model input accepted\n"); ++g_fail; }
+    if (rejects([&] { (void)gpt.forward(std::vector<int>(cfg.max_seq + 1, 0)); }))
+        std::printf("[PASS] overlong model input rejected\n");
+    else { std::printf("[FAIL] overlong model input accepted\n"); ++g_fail; }
+    if (rejects([&] { (void)gpt.generate_cached({0}, -1); }) &&
+        rejects([&] { (void)gpt.generate_cached(std::vector<int>(cfg.max_seq + 1, 0), 1); }) &&
+        rejects([&] { (void)gpt.generate_cached({cfg.vocab}, 1); }))
+        std::printf("[PASS] invalid cached-generation bounds rejected\n");
+    else { std::printf("[FAIL] invalid cached-generation bounds accepted\n"); ++g_fail; }
+    GPT::SampleConfig invalidSampling;
+    invalidSampling.top_p = 1.1f;
+    if (rejects([&] { (void)gpt.generate_cached({0}, 1, invalidSampling); }))
+        std::printf("[PASS] invalid sampler configuration rejected\n");
+    else { std::printf("[FAIL] invalid sampler configuration accepted\n"); ++g_fail; }
+    const std::vector<int> fullPrompt(cfg.max_seq, 0);
+    if (gpt.generate_cached(fullPrompt, 1) == fullPrompt)
+        std::printf("[PASS] generation stops safely at max_seq\n");
+    else { std::printf("[FAIL] max_seq generation cap\n"); ++g_fail; }
 
     const int T = 20;
     std::vector<int> seq(T + 1);

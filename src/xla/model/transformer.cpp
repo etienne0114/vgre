@@ -46,10 +46,20 @@ Var initOnes(int64_t d, std::vector<Var>& sink) {
 }  // namespace
 
 GPT::GPT(const Config& cfg, uint32_t seed) : cfg_(cfg) {
+    if (cfg_.vocab <= 0 || cfg_.n_layer <= 0 || cfg_.d_model <= 0 ||
+        cfg_.n_head <= 0 || cfg_.max_seq <= 0)
+        throw std::invalid_argument("GPT dimensions and vocabulary must be positive");
     if (cfg_.d_model % cfg_.n_head != 0)
-        throw std::runtime_error("GPT: d_model must be divisible by n_head");
+        throw std::invalid_argument("GPT: d_model must be divisible by n_head");
     if (cfg_.head_dim() % 2 != 0)
-        throw std::runtime_error("GPT: head_dim must be even (RoPE)");
+        throw std::invalid_argument("GPT: head_dim must be even (RoPE)");
+    if (cfg_.n_kv_head < 0 || cfg_.kv_heads() > cfg_.n_head ||
+        cfg_.n_head % cfg_.kv_heads() != 0)
+        throw std::invalid_argument("GPT: n_kv_head must divide n_head and not exceed it");
+    if (!std::isfinite(cfg_.rope_base) || cfg_.rope_base <= 0.0f ||
+        !std::isfinite(cfg_.norm_eps) || cfg_.norm_eps <= 0.0f ||
+        !std::isfinite(cfg_.dropout) || cfg_.dropout < 0.0f || cfg_.dropout >= 1.0f)
+        throw std::invalid_argument("GPT RoPE, normalization, and dropout settings are invalid");
 
     std::mt19937 rng(seed);
     const int D = cfg_.d_model, V = cfg_.vocab, F = cfg_.ff();
@@ -99,8 +109,13 @@ void GPT::set_rope_norm(float rope_base, float norm_eps) {
 Var GPT::forward(const std::vector<int>& ids) {
     if (fp32_dropped_)
         throw std::runtime_error("GPT::forward: model is serve-only (fp32 weights dropped)");
+    if (ids.empty())
+        throw std::invalid_argument("GPT::forward: sequence must contain at least one token");
     if ((int)ids.size() > cfg_.max_seq)
-        throw std::runtime_error("GPT::forward: sequence longer than max_seq");
+        throw std::length_error("GPT::forward: sequence longer than max_seq");
+    for (int token : ids)
+        if (token < 0 || token >= cfg_.vocab)
+            throw std::out_of_range("GPT::forward: token ID is outside the model vocabulary");
     const int H = cfg_.n_head;
 
     Var x = embedding(tok_emb_, ids);                  // [T, D]
@@ -268,12 +283,21 @@ inline void gemm_int8_rows(const float* X, int P, const int8_t* W8, const float*
 int sampleToken(std::vector<float>& logits, const std::vector<int>& history,
                 const GPT::SampleConfig& sc, std::mt19937& rng) {
     const int V = (int)logits.size();
+    if (V == 0)
+        throw std::invalid_argument("cannot sample from an empty vocabulary");
+    for (float logit : logits)
+        if (!std::isfinite(logit))
+            throw std::domain_error("model produced a non-finite token logit");
+
     // Repetition penalty: push down logits of already-emitted tokens.
     if (sc.repetition_penalty != 1.0f)
         for (int t : history)
             if (t >= 0 && t < V)
                 logits[t] = (logits[t] > 0.0f) ? logits[t] / sc.repetition_penalty
                                                : logits[t] * sc.repetition_penalty;
+    for (float logit : logits)
+        if (!std::isfinite(logit))
+            throw std::domain_error("repetition penalty produced a non-finite token logit");
 
     const bool greedy = (sc.temperature <= 0.0f) && (sc.top_k <= 0) && (sc.top_p >= 1.0f);
     if (greedy) {
@@ -312,10 +336,43 @@ int sampleToken(std::vector<float>& logits, const std::vector<int>& history,
     for (size_t i = 0; i < p.size(); ++i) { acc += p[i]; if (r <= acc) return idx[i]; }
     return idx.back();
 }
+
+void validateGenerationInputs(const Config& cfg, const std::vector<int>& prompt,
+                              int n_new, const GPT::SampleConfig& sampling,
+                              int spec_draft_k) {
+    if (n_new < 0)
+        throw std::invalid_argument("new-token limit cannot be negative");
+    if (spec_draft_k < 0)
+        throw std::invalid_argument("speculative draft size cannot be negative");
+    if (prompt.size() > static_cast<size_t>(cfg.max_seq))
+        throw std::length_error("prompt exceeds the model's maximum sequence length");
+    for (int token : prompt)
+        if (token < 0 || token >= cfg.vocab)
+            throw std::out_of_range("prompt token ID is outside the model vocabulary");
+
+    if (!std::isfinite(sampling.temperature))
+        throw std::invalid_argument("sampling temperature must be finite");
+    if (sampling.top_k < 0)
+        throw std::invalid_argument("top_k cannot be negative");
+    if (!std::isfinite(sampling.top_p) || sampling.top_p < 0.0f || sampling.top_p > 1.0f)
+        throw std::invalid_argument("top_p must be finite and in [0, 1]");
+    if (!std::isfinite(sampling.repetition_penalty) || sampling.repetition_penalty <= 0.0f)
+        throw std::invalid_argument("repetition penalty must be finite and positive");
+    if (sampling.early_exit_draft < 0 ||
+        (sampling.early_exit_draft > 0 && sampling.early_exit_draft >= cfg.n_layer))
+        throw std::invalid_argument("early-exit draft layers must be zero or less than n_layer");
+    if (sampling.early_exit_draft > 0 && spec_draft_k == 0)
+        throw std::invalid_argument("early-exit drafting requires a positive speculative draft size");
+}
 }  // namespace
 
 std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
                                       const SampleConfig& sc, int specDraftK) {
+    validateGenerationInputs(cfg_, prompt, n_new, sc, specDraftK);
+    if (prompt.empty() || n_new == 0 ||
+        prompt.size() == static_cast<size_t>(cfg_.max_seq))
+        return prompt;
+
     const int D = cfg_.d_model, H = cfg_.n_head, Dh = cfg_.head_dim();
     const int F = cfg_.ff(), V = cfg_.vocab, L = cfg_.n_layer;
     // Grouped-query attention: K/V have KVH heads (KVD wide); query head hd reads
@@ -646,7 +703,6 @@ std::vector<int> GPT::generate_cached(std::vector<int> prompt, int n_new,
         }
     };
 
-    if (prompt.empty()) return prompt;
     int pos = 0;
     const bool canBatch = batched_prefill_ && !kv4 && !kv8 &&
                           prompt.size() > 1 && (int64_t)prompt.size() <= cfg_.max_seq;
@@ -926,6 +982,19 @@ void TokenStream::sample(int T, std::mt19937& rng,
 std::vector<int> generate(GPT& model, std::vector<int> prompt, int n_new,
                           float temperature, uint32_t seed) {
     const Config& cfg = model.config();
+    if (n_new < 0)
+        throw std::invalid_argument("new-token limit cannot be negative");
+    if (!std::isfinite(temperature))
+        throw std::invalid_argument("sampling temperature must be finite");
+    if (prompt.size() > static_cast<size_t>(cfg.max_seq))
+        throw std::length_error("prompt exceeds the model's maximum sequence length");
+    for (int token : prompt)
+        if (token < 0 || token >= cfg.vocab)
+            throw std::out_of_range("prompt token ID is outside the model vocabulary");
+    if (prompt.empty() || n_new == 0 ||
+        prompt.size() == static_cast<size_t>(cfg.max_seq))
+        return prompt;
+
     std::mt19937 rng(seed);
     for (int step = 0; step < n_new && (int)prompt.size() < cfg.max_seq; ++step) {
         Var logits = model.forward(prompt);            // [T, V]
@@ -935,10 +1004,20 @@ std::vector<int> generate(GPT& model, std::vector<int> prompt, int n_new,
         int next;
         if (temperature <= 0.0f) {
             next = 0;
-            for (int j = 1; j < V; ++j) if (last[j] > last[next]) next = j;
+            for (int j = 0; j < V; ++j) {
+                if (!std::isfinite(last[j]))
+                    throw std::domain_error("model produced a non-finite token logit");
+                if (j > 0 && last[j] > last[next]) next = j;
+            }
         } else {
             float mx = last[0];
-            for (int j = 1; j < V; ++j) mx = std::max(mx, last[j]);
+            if (!std::isfinite(mx))
+                throw std::domain_error("model produced a non-finite token logit");
+            for (int j = 1; j < V; ++j) {
+                if (!std::isfinite(last[j]))
+                    throw std::domain_error("model produced a non-finite token logit");
+                mx = std::max(mx, last[j]);
+            }
             std::vector<float> p(V);
             float sum = 0.0f;
             for (int j = 0; j < V; ++j) { p[j] = std::exp((last[j] - mx) / temperature); sum += p[j]; }

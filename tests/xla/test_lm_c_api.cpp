@@ -57,6 +57,27 @@ int main() {
     CHECK(same, "batched prefill on/off give identical greedy output");
     vgre_lm_set_batched_prefill(m, 1);
 
+    std::vector<int> invalidOut(160, -1);
+    std::vector<int> tooLong(129, 0);
+    CHECK(vgre_lm_generate(m, tooLong.data(), (int)tooLong.size(), 1,
+                           0.0f, 0, 1.0f, 1.0f, 0,
+                           invalidOut.data(), (int)invalidOut.size()) == -1,
+          "C ABI rejects prompts longer than max_seq");
+    std::vector<int> invalidToken = prompt;
+    invalidToken[0] = 64;
+    CHECK(vgre_lm_generate(m, invalidToken.data(), (int)invalidToken.size(), 1,
+                           0.0f, 0, 1.0f, 1.0f, 0,
+                           invalidOut.data(), (int)invalidOut.size()) == -1,
+          "C ABI rejects token IDs outside the model vocabulary");
+    CHECK(vgre_lm_generate(m, prompt.data(), (int)prompt.size(), -1,
+                           0.0f, 0, 1.0f, 1.0f, 0,
+                           invalidOut.data(), (int)invalidOut.size()) == -1,
+          "C ABI rejects a negative generation limit");
+    CHECK(vgre_lm_generate(m, prompt.data(), (int)prompt.size(), 1,
+                           0.0f, -1, 1.0f, 1.0f, 0,
+                           invalidOut.data(), (int)invalidOut.size()) == -1,
+          "C ABI rejects invalid sampler settings");
+
     vgre_lm_free(m);
     if (g_fail == 0) std::printf("PASS: vgre_lm C ABI — speculative lossless + batched-prefill toggle\n");
     return g_fail ? 1 : 0;
