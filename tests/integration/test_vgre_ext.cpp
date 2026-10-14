@@ -88,14 +88,28 @@ int main() {
         check("moe_forward produces finite routed output", fin);
     }
 
-    // Speculative decode returns an accept count in [0,K].
+    // Speculative decode consumes K draft rows and K+1 target rows, and emits
+    // at least one token (a rejection replacement) and at most K+1 tokens
+    // (all K proposals plus the target bonus token).
     {
         const int K=5, V=16; std::vector<int> out(K+1);
-        std::vector<float> p(V), q(V); float sp=0, sq=0;
-        for (int i=0;i<V;++i){ p[i]=std::fabs(ud(rng))+0.01f; q[i]=std::fabs(ud(rng))+0.01f; sp+=p[i]; sq+=q[i]; }
-        for (int i=0;i<V;++i){ p[i]/=sp; q[i]/=sq; }
+        std::vector<float> p((K+1)*V), q(K*V);
+        for (int row=0; row<=K; ++row) {
+            float sum=0.0f;
+            for (int i=0;i<V;++i) { p[row*V+i]=std::fabs(ud(rng))+0.01f; sum+=p[row*V+i]; }
+            for (int i=0;i<V;++i) p[row*V+i]/=sum;
+        }
+        for (int row=0; row<K; ++row) {
+            float sum=0.0f;
+            for (int i=0;i<V;++i) { q[row*V+i]=std::fabs(ud(rng))+0.01f; sum+=q[row*V+i]; }
+            for (int i=0;i<V;++i) q[row*V+i]/=sum;
+        }
         int n = speculative_decode(out.data(), p.data(), q.data(), K, V, 123);
-        check("speculative_decode accept count in [0,K]", n >= 0 && n <= K);
+        bool validTokens = true;
+        for (int i=0; i<n && i<static_cast<int>(out.size()); ++i)
+            validTokens = validTokens && out[i] >= 0 && out[i] < V;
+        check("speculative_decode emits 1..K+1 valid tokens",
+              n >= 1 && n <= K+1 && validTokens);
     }
 
     // Structured-mask attention: runs and is finite (causal).

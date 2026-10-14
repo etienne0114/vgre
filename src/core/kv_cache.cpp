@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -357,36 +358,67 @@ int ContinuousBatchScheduler::blocksFor(int tokens) const {
     return tokens / bs + (tokens % bs != 0 ? 1 : 0);
 }
 
-void ContinuousBatchScheduler::executeAndAppend(const Request& request,
+bool ContinuousBatchScheduler::executeAndAppend(const Request& request,
                                                  ScheduledTokenPhase phase,
                                                  int position) {
-    if (!tokenExecutor_)
-        throw std::logic_error("continuous batching requires a model token executor");
+    if (!tokenExecutor_) {
+        lastError_ = SchedulerError::MISSING_EXECUTOR;
+        lastErrorMessage_ = "continuous batching requires a model token executor";
+        return false;
+    }
 
     const size_t stride = static_cast<size_t>(kv_.numHeads()) *
                           static_cast<size_t>(kv_.headDim());
     const float invalid = std::numeric_limits<float>::quiet_NaN();
     keyScratch_.assign(stride, invalid);
     valueScratch_.assign(stride, invalid);
-    tokenExecutor_(request, phase, position, keyScratch_, valueScratch_);
-    if (keyScratch_.size() != stride || valueScratch_.size() != stride)
-        throw std::runtime_error("model token executor returned an invalid K/V shape");
-    for (size_t i = 0; i < stride; ++i) {
-        if (!std::isfinite(keyScratch_[i]) || !std::isfinite(valueScratch_[i]))
-            throw std::runtime_error("model token executor left K/V unset or non-finite");
+    try {
+        tokenExecutor_(request, phase, position, keyScratch_, valueScratch_);
+    } catch (const std::exception& error) {
+        lastError_ = SchedulerError::EXECUTOR_FAILURE;
+        lastErrorMessage_ = error.what();
+        return false;
+    } catch (...) {
+        lastError_ = SchedulerError::EXECUTOR_FAILURE;
+        lastErrorMessage_ = "model token executor threw a non-standard exception";
+        return false;
     }
-    if (!kv_.appendToken(request.id, keyScratch_.data(), valueScratch_.data()))
-        throw std::runtime_error("reserved KV capacity could not append a computed token");
+    if (keyScratch_.size() != stride || valueScratch_.size() != stride) {
+        lastError_ = SchedulerError::INVALID_KV_OUTPUT;
+        lastErrorMessage_ = "model token executor returned an invalid K/V shape";
+        return false;
+    }
+    for (size_t i = 0; i < stride; ++i) {
+        if (!std::isfinite(keyScratch_[i]) || !std::isfinite(valueScratch_[i])) {
+            lastError_ = SchedulerError::INVALID_KV_OUTPUT;
+            lastErrorMessage_ = "model token executor left K/V unset or non-finite";
+            return false;
+        }
+    }
+    if (!kv_.appendToken(request.id, keyScratch_.data(), valueScratch_.data())) {
+        lastError_ = SchedulerError::CACHE_APPEND_FAILURE;
+        lastErrorMessage_ = "reserved KV capacity could not append a computed token";
+        return false;
+    }
+    return true;
 }
 
 int ContinuousBatchScheduler::step() {
+    lastError_ = SchedulerError::NONE;
+    lastErrorMessage_.clear();
     if (!tokenExecutor_) {
         for (const Request& r : running_)
-            if (r.generated < r.maxNewTokens)
-                throw std::logic_error("continuous batching requires a model token executor");
+            if (r.generated < r.maxNewTokens) {
+                lastError_ = SchedulerError::MISSING_EXECUTOR;
+                lastErrorMessage_ = "continuous batching requires a model token executor";
+                return -1;
+            }
         for (const Request& r : waiting_)
-            if (r.promptLen > 0 || r.maxNewTokens > 0)
-                throw std::logic_error("continuous batching requires a model token executor");
+            if (r.promptLen > 0 || r.maxNewTokens > 0) {
+                lastError_ = SchedulerError::MISSING_EXECUTOR;
+                lastErrorMessage_ = "continuous batching requires a model token executor";
+                return -1;
+            }
     }
 
     // 1. Retire finished running requests; reclaim their KV blocks.
@@ -427,8 +459,21 @@ int ContinuousBatchScheduler::step() {
             const int requiredBlocks = blocksFor(tokenCapacity);
             if (hasBatchSlot && kv_.freeBlocks() >= requiredBlocks &&
                 kv_.reserveSequenceCapacity(r.id, tokenCapacity)) {
-                for (int t = 0; t < r.promptLen; ++t)
-                    executeAndAppend(r, ScheduledTokenPhase::PREFILL, t);
+                for (int t = 0; t < r.promptLen; ++t) {
+                    if (!executeAndAppend(r, ScheduledTokenPhase::PREFILL, t)) {
+                        kv_.freeSequence(r.id);
+                        // Earlier non-admitted requests may have been compacted
+                        // in place. Preserve this request and every item after it.
+                        size_t restoredWaiting = stillWaiting;
+                        for (size_t j = i; j < waitingAtStart; ++j) {
+                            if (restoredWaiting != j)
+                                waiting_[restoredWaiting] = std::move(waiting_[j]);
+                            ++restoredWaiting;
+                        }
+                        waiting_.resize(restoredWaiting);
+                        return -1;
+                    }
+                }
                 r.state = Request::RUNNING;
                 running_.push_back(r);
             } else {
@@ -456,7 +501,8 @@ int ContinuousBatchScheduler::step() {
     for (auto& r : running_) {
         if (r.generated < r.maxNewTokens) {
             const int position = r.promptLen + r.generated;
-            executeAndAppend(r, ScheduledTokenPhase::DECODE, position);
+            if (!executeAndAppend(r, ScheduledTokenPhase::DECODE, position))
+                return -1;
             ++r.generated;
         }
     }

@@ -13,6 +13,7 @@
 #include <cstddef>   // size_t (not transitively guaranteed on older libstdc++)
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -129,14 +130,22 @@ struct Request {
 };
 
 enum class ScheduledTokenPhase { PREFILL, DECODE };
+enum class SchedulerError {
+    NONE,
+    MISSING_EXECUTOR,
+    EXECUTOR_FAILURE,
+    INVALID_KV_OUTPUT,
+    CACHE_APPEND_FAILURE
+};
 
 class ContinuousBatchScheduler {
 public:
     // The caller runs the model for one position and fills K/V for every head
     // (head-major, numHeads*headDim floats each). Request IDs identify the
     // caller's token/model state. `position` is the absolute sequence position.
-    // An executor exception aborts the current step without appending that
-    // token; callbacks should be safe to retry at the same request/position.
+    // Executor failures are caught at the shared-library boundary and reported
+    // by step()/lastError(); callbacks should be safe to retry at the same
+    // request/position.
     using TokenExecutor = std::function<void(const Request&, ScheduledTokenPhase,
                                              int position,
                                              std::vector<float>& keys,
@@ -158,10 +167,14 @@ public:
     //   2. admit waiting requests while batch slots and full-request KV
     //      capacity allow, then execute prompt prefill,
     //   3. execute one decode position for every running request.
-    // Throws std::logic_error if token work is requested without an executor.
-    // Model executor errors propagate; no KV is appended for a failed token.
-    // Returns the number of requests still running after the step.
+    // Returns the number of requests still running after the step, or -1 when
+    // token execution failed. lastError()/lastErrorMessage() describe that
+    // failure; failed tokens do not append K/V. Callback exceptions are caught
+    // here so C++ runtime exception types do not cross a shared-library ABI.
     int step();
+
+    SchedulerError lastError() const { return lastError_; }
+    const std::string& lastErrorMessage() const { return lastErrorMessage_; }
 
     bool allDone() const { return waiting_.empty() && running_.empty(); }
     int runningCount()  const { return static_cast<int>(running_.size()); }
@@ -170,7 +183,7 @@ public:
 
 private:
     int blocksFor(int tokens) const;        // ceil(tokens / blockSize)
-    void executeAndAppend(const Request& request, ScheduledTokenPhase phase,
+    bool executeAndAppend(const Request& request, ScheduledTokenPhase phase,
                           int position);
 
     KVCacheManager& kv_;
@@ -178,6 +191,8 @@ private:
     TokenExecutor tokenExecutor_;
     std::vector<float> keyScratch_;
     std::vector<float> valueScratch_;
+    SchedulerError lastError_ = SchedulerError::NONE;
+    std::string lastErrorMessage_;
     std::vector<Request> waiting_;
     std::vector<Request> running_;
     std::unordered_set<SeqId> activeRequestIds_;

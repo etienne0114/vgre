@@ -88,8 +88,10 @@ already run on some tier and are bit-exact — what's left is a native path, a l
 - **Current implementation boundary:** `ContinuousBatchScheduler` now requires a caller-supplied
   token executor for non-empty requests. The executor receives request ID/state, prefill or decode
   phase, and absolute position, and must return finite K/V for every head. Missing or incomplete
-  output fails explicitly; the scheduler no longer manufactures zero K/V. It rejects requests whose
-  maximum cannot fit the pool and reserves the configured capacity before prefill, avoiding
+  output fails explicitly through `SchedulerError` plus `lastErrorMessage()`; callback exceptions
+  are caught inside the library boundary, and failed prefill is rolled back and retained in the
+  waiting queue for retry. The scheduler no longer manufactures zero K/V. It rejects requests
+  whose maximum cannot fit the pool and reserves the configured capacity before prefill, avoiding
   mid-request cache exhaustion.
 - **Remaining for production serving:** the library still does not bind this scheduler directly to
   a loaded transformer, prompt token arrays, sampling policy, or generated token stream. A serving

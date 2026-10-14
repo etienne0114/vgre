@@ -277,27 +277,29 @@ int main() {
         check("int8 pool fully reclaimed", qpool.freeBlocks() == q0);
     }
 
-    // The scheduler uses model-produced K/V, rejects absent/incomplete
-    // executors, and preserves the request so a failed prefill can be retried.
+    // The scheduler uses model-produced K/V, reports absent/incomplete
+    // executors without crossing a shared-library exception boundary, and
+    // preserves the request so a failed prefill can be retried.
     {
         KVCacheManager pool(4, 4, 1, 2);
         ContinuousBatchScheduler sched(pool, 1);
         sched.addRequest(55, 2, 1);
-        bool missingExecutorRejected = false;
-        try { sched.step(); }
-        catch (const std::logic_error&) { missingExecutorRejected = true; }
+        const int missingExecutorResult = sched.step();
         check("scheduler refuses token work without a model executor",
-              missingExecutorRejected && pool.freeBlocks() == 4);
+              missingExecutorResult == -1 &&
+              sched.lastError() == SchedulerError::MISSING_EXECUTOR &&
+              !sched.lastErrorMessage().empty() && pool.freeBlocks() == 4);
 
         sched.setTokenExecutor([](const Request&, ScheduledTokenPhase, int,
                                   std::vector<float>&, std::vector<float>&) {
             // Deliberately leave the NaN-initialized output untouched.
         });
-        bool incompleteOutputRejected = false;
-        try { sched.step(); }
-        catch (...) { incompleteOutputRejected = true; }
+        const int incompleteOutputResult = sched.step();
         check("scheduler rejects unset K/V output and rolls prefill back",
-              incompleteOutputRejected && pool.freeBlocks() == 4 && pool.seqLen(55) == 0);
+              incompleteOutputResult == -1 &&
+              sched.lastError() == SchedulerError::INVALID_KV_OUTPUT &&
+              !sched.lastErrorMessage().empty() && pool.freeBlocks() == 4 &&
+              pool.seqLen(55) == 0 && sched.waitingCount() == 1);
 
         int prefillCalls = 0, decodeCalls = 0;
         sched.setTokenExecutor([&](const Request&, ScheduledTokenPhase phase, int position,
@@ -344,11 +346,12 @@ int main() {
         sched.addRequest(1, 1, 1);
         sched.addRequest(2, 2, 1);
         sched.addRequest(3, 1, 1);
-        bool propagated = false;
-        try { sched.step(); }
-        catch (...) { propagated = true; }
-        check("failed prefill propagates without corrupting scheduler queues",
-              propagated && sched.runningCount() == 1 && sched.waitingCount() == 2 &&
+        const int failedPrefillResult = sched.step();
+        check("failed prefill reports an error without corrupting scheduler queues",
+              failedPrefillResult == -1 &&
+              sched.lastError() == SchedulerError::EXECUTOR_FAILURE &&
+              sched.lastErrorMessage() == "model prefill failed" &&
+              sched.runningCount() == 1 && sched.waitingCount() == 2 &&
               pool.seqLen(1) == 1 && !pool.hasSequence(2));
         sched.setTokenExecutor([](const Request& request, ScheduledTokenPhase,
                                   int position, std::vector<float>& keys,

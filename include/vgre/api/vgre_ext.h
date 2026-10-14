@@ -38,7 +38,9 @@ void ssm_selective_scan(float* y, const float* Abar, const float* Bx, const floa
 void moe_forward(float* Y, const float* X, const float* logits, const float* We,
                  int T, int E, int k, int D, int H);
 
-// ── Speculative decoding (P3-8): returns the number of accepted draft tokens. ──
+// ── Speculative decoding (P3-8): target rows are [(K+1),V], draft rows [K,V].
+//    `out` must hold K+1 token IDs. Returns emitted token count [1,K+1],
+//    including the rejection replacement or bonus token when applicable. ───────
 int  speculative_decode(int* out, const float* targetProb, const float* draftProb,
                         int K, int V, uint64_t seed);
 
